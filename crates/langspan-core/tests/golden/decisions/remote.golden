@@ -1,0 +1,302 @@
+## register-app
+{
+  "events": [
+    {
+      "type": "workspace_registered",
+      "workspace": {
+        "workspace_id": "app",
+        "root": "/work/app"
+      }
+    }
+  ],
+  "outcome": {
+    "type": "workspace",
+    "workspace": {
+      "workspace_id": "app",
+      "root": "/work/app"
+    }
+  }
+}
+## session-alice
+{
+  "events": [
+    {
+      "type": "session_registered",
+      "session": {
+        "session_id": "claude-code.alice",
+        "workspace_id": "app",
+        "generation": 1
+      }
+    }
+  ],
+  "outcome": {
+    "type": "session",
+    "session": {
+      "session_id": "claude-code.alice",
+      "workspace_id": "app",
+      "generation": 1
+    }
+  }
+}
+## intent-alice
+{
+  "events": [
+    {
+      "type": "intent_set",
+      "intent": {
+        "session_id": "claude-code.alice",
+        "workspace_id": "app",
+        "paths": [
+          "src/api.rs"
+        ],
+        "summary": "Rework the session handler",
+        "generation": 1
+      }
+    }
+  ],
+  "outcome": {
+    "type": "intent",
+    "intent": {
+      "session_id": "claude-code.alice",
+      "workspace_id": "app",
+      "paths": [
+        "src/api.rs"
+      ],
+      "summary": "Rework the session handler",
+      "generation": 1
+    }
+  }
+}
+## outbox-before-enable
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "remote_not_enabled",
+    "message": "This workspace does not publish; enable it with `langspan remote enable`"
+  }
+}
+## enable-app
+{
+  "events": [
+    {
+      "type": "remote_enabled",
+      "link": {
+        "workspace_id": "app",
+        "remote": "origin",
+        "participant": "a11ce000000000000000000000000001",
+        "name": "Alice",
+        "share_task": true,
+        "sequence": 0,
+        "signature": "",
+        "enabled": true,
+        "withdrawn": false
+      }
+    }
+  ],
+  "outcome": {
+    "type": "remote_link",
+    "link": {
+      "workspace_id": "app",
+      "remote": "origin",
+      "participant": "a11ce000000000000000000000000001",
+      "name": "Alice",
+      "share_task": true,
+      "sequence": 0,
+      "signature": "",
+      "enabled": true,
+      "withdrawn": false
+    }
+  }
+}
+## enable-unknown-workspace
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "workspace_not_found",
+    "message": "Register the workspace before enabling publication"
+  }
+}
+## outbox-app
+{
+  "events": [],
+  "outcome": {
+    "type": "remote_outbox",
+    "publication": {
+      "participant": "a11ce000000000000000000000000001",
+      "name": "Alice",
+      "sequence": 1,
+      "work": []
+    },
+    "signature": "cbf29ce484222325",
+    "changed": true
+  }
+}
+## published-app
+{
+  "events": [
+    {
+      "type": "remote_published",
+      "workspace_id": "app",
+      "sequence": 1,
+      "signature": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+      "payload": null,
+      "published_at_ms": null
+    }
+  ],
+  "outcome": {
+    "type": "remote_link",
+    "link": {
+      "workspace_id": "app",
+      "remote": "origin",
+      "participant": "a11ce000000000000000000000000001",
+      "name": "Alice",
+      "share_task": true,
+      "sequence": 1,
+      "signature": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+      "enabled": true,
+      "withdrawn": false
+    }
+  }
+}
+## published-unknown-workspace
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "remote_not_enabled",
+    "message": "This workspace has never published"
+  }
+}
+## sent-app
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "storage_operation",
+    "message": "Event history, status pages, change projections, sent messages and index queries are answered by the daemon's stores"
+  }
+}
+## observe-bob
+{
+  "events": [
+    {
+      "type": "remote_observed",
+      "peer": {
+        "workspace_id": "app",
+        "publication": {
+          "participant": "b0b00000000000000000000000000002",
+          "name": "Bob",
+          "sequence": 4,
+          "work": [
+            {
+              "host": "codex",
+              "session": "codex.bob",
+              "branch_ref": "refs/heads/login",
+              "summary": "Rename the login form",
+              "editing": [
+                "src/ui.rs"
+              ],
+              "recent": [
+                "src/api.rs"
+              ]
+            }
+          ]
+        },
+        "received_ms": 3000,
+        "generation": 1
+      }
+    }
+  ],
+  "outcome": {
+    "type": "remote_observed",
+    "participant": "b0b00000000000000000000000000002",
+    "accepted": true
+  }
+}
+## observe-bob-older-sequence
+{
+  "events": [],
+  "outcome": {
+    "type": "remote_observed",
+    "participant": "b0b00000000000000000000000000002",
+    "accepted": false
+  }
+}
+## observe-unknown-workspace
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "remote_not_enabled",
+    "message": "This workspace does not publish; enable it with `langspan remote enable`"
+  }
+}
+## forget-bob
+{
+  "events": [
+    {
+      "type": "remote_forgotten",
+      "workspace_id": "app",
+      "participant": "b0b00000000000000000000000000002"
+    }
+  ],
+  "outcome": {
+    "type": "remote_observed",
+    "participant": "b0b00000000000000000000000000002",
+    "accepted": true
+  }
+}
+## forget-unknown-participant
+{
+  "events": [],
+  "outcome": {
+    "type": "remote_observed",
+    "participant": "ca401000000000000000000000000003",
+    "accepted": false
+  }
+}
+## disable-app
+{
+  "events": [
+    {
+      "type": "remote_disabled",
+      "workspace_id": "app"
+    }
+  ],
+  "outcome": {
+    "type": "remote_disabled",
+    "workspace_id": "app"
+  }
+}
+## disable-unknown-workspace
+{
+  "events": [],
+  "outcome": {
+    "type": "remote_disabled",
+    "workspace_id": "nowhere"
+  }
+}
+## withdrawn-app
+{
+  "events": [
+    {
+      "type": "remote_withdrawn",
+      "workspace_id": "app"
+    }
+  ],
+  "outcome": {
+    "type": "remote_disabled",
+    "workspace_id": "app"
+  }
+}
+## withdrawn-unknown-workspace
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "remote_not_enabled",
+    "message": "This workspace has never published"
+  }
+}

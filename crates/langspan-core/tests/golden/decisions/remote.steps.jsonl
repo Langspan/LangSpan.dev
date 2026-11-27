@@ -1,0 +1,19 @@
+{"name":"register-app","now_ms":1000,"command":{"op":"workspace_register","workspace_id":"app","root":"/work/app"}}
+{"name":"session-alice","now_ms":1100,"command":{"op":"session_register","session_id":"claude-code.alice","workspace_id":"app"}}
+{"name":"intent-alice","now_ms":1200,"command":{"op":"intent_set","session_id":"claude-code.alice","paths":["src/api.rs"],"summary":"Rework the session handler"}}
+{"name":"outbox-before-enable","now_ms":1300,"command":{"op":"remote_outbox","workspace_id":"app"}}
+{"name":"enable-app","now_ms":2000,"command":{"op":"remote_enable","workspace_id":"app","remote":"origin","participant":"a11ce000000000000000000000000001","name":"Alice","share_task":true}}
+{"name":"enable-unknown-workspace","now_ms":2100,"command":{"op":"remote_enable","workspace_id":"nowhere","remote":"origin","participant":"a11ce000000000000000000000000001","name":"Alice","share_task":true}}
+{"name":"outbox-app","now_ms":2200,"command":{"op":"remote_outbox","workspace_id":"app"}}
+{"name":"published-app","now_ms":2300,"command":{"op":"remote_published","workspace_id":"app","sequence":1,"signature":"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"}}
+{"name":"published-unknown-workspace","now_ms":2400,"command":{"op":"remote_published","workspace_id":"nowhere","sequence":1,"signature":"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"}}
+{"name":"sent-app","now_ms":2500,"command":{"op":"remote_sent","workspace_id":"app","limit":10}}
+{"name":"observe-bob","now_ms":3000,"command":{"op":"observe_remote","workspace_id":"app","publication":{"participant":"b0b00000000000000000000000000002","name":"Bob","sequence":4,"work":[{"host":"codex","session":"codex.bob","branch_ref":"refs/heads/login","summary":"Rename the login form","editing":["src/ui.rs"],"recent":["src/api.rs"]}]}}}
+{"name":"observe-bob-older-sequence","now_ms":3100,"command":{"op":"observe_remote","workspace_id":"app","publication":{"participant":"b0b00000000000000000000000000002","name":"Bob","sequence":3,"work":[]}}}
+{"name":"observe-unknown-workspace","now_ms":3200,"command":{"op":"observe_remote","workspace_id":"nowhere","publication":{"participant":"b0b00000000000000000000000000002","name":"Bob","sequence":5,"work":[]}}}
+{"name":"forget-bob","now_ms":4000,"command":{"op":"forget_remote","workspace_id":"app","participant":"b0b00000000000000000000000000002"}}
+{"name":"forget-unknown-participant","now_ms":4100,"command":{"op":"forget_remote","workspace_id":"app","participant":"ca401000000000000000000000000003"}}
+{"name":"disable-app","now_ms":5000,"command":{"op":"remote_disable","workspace_id":"app"}}
+{"name":"disable-unknown-workspace","now_ms":5100,"command":{"op":"remote_disable","workspace_id":"nowhere"}}
+{"name":"withdrawn-app","now_ms":5200,"command":{"op":"remote_withdrawn","workspace_id":"app"}}
+{"name":"withdrawn-unknown-workspace","now_ms":5300,"command":{"op":"remote_withdrawn","workspace_id":"nowhere"}}

@@ -1,0 +1,672 @@
+## register-app
+{
+  "events": [
+    {
+      "type": "workspace_registered",
+      "workspace": {
+        "workspace_id": "app",
+        "root": "/work/app"
+      }
+    }
+  ],
+  "outcome": {
+    "type": "workspace",
+    "workspace": {
+      "workspace_id": "app",
+      "root": "/work/app"
+    }
+  }
+}
+## register-app-again
+{
+  "events": [],
+  "outcome": {
+    "type": "workspace",
+    "workspace": {
+      "workspace_id": "app",
+      "root": "/work/app"
+    }
+  }
+}
+## register-relative-root
+{
+  "events": [
+    {
+      "type": "workspace_registered",
+      "workspace": {
+        "workspace_id": "bad",
+        "root": "work/bad"
+      }
+    }
+  ],
+  "outcome": {
+    "type": "workspace",
+    "workspace": {
+      "workspace_id": "bad",
+      "root": "work/bad"
+    }
+  }
+}
+## register-root-taken
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "workspace_conflict",
+    "message": "This root overlaps another workspace without a verified distinct worktree boundary; reuse its registered ID"
+  }
+}
+## register-api-verified
+{
+  "events": [
+    {
+      "type": "workspace_registered",
+      "workspace": {
+        "workspace_id": "api",
+        "root": "/work/api",
+        "verified_overlaps": [
+          "app"
+        ]
+      }
+    }
+  ],
+  "outcome": {
+    "type": "workspace",
+    "workspace": {
+      "workspace_id": "api",
+      "root": "/work/api",
+      "verified_overlaps": [
+        "app"
+      ]
+    }
+  }
+}
+## register-verified-unknown-link
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "invalid_workspace_verification",
+    "message": "A verified overlap must name an already registered workspace"
+  }
+}
+## list-workspaces
+{
+  "events": [],
+  "outcome": {
+    "type": "workspaces",
+    "workspaces": [
+      {
+        "workspace_id": "api",
+        "root": "/work/api",
+        "root_exists": false,
+        "sessions_current": 0,
+        "notes": 0,
+        "messages_pending": 0,
+        "checks": 0,
+        "auto_check": false,
+        "remote_sharing": false
+      },
+      {
+        "workspace_id": "app",
+        "root": "/work/app",
+        "root_exists": false,
+        "sessions_current": 0,
+        "notes": 0,
+        "messages_pending": 0,
+        "checks": 0,
+        "auto_check": false,
+        "remote_sharing": false
+      },
+      {
+        "workspace_id": "bad",
+        "root": "work/bad",
+        "root_exists": false,
+        "sessions_current": 0,
+        "notes": 0,
+        "messages_pending": 0,
+        "checks": 0,
+        "auto_check": false,
+        "remote_sharing": false
+      }
+    ]
+  }
+}
+## list-workspaces-after-app
+{
+  "events": [],
+  "outcome": {
+    "type": "workspaces",
+    "workspaces": [
+      {
+        "workspace_id": "bad",
+        "root": "work/bad",
+        "root_exists": false,
+        "sessions_current": 0,
+        "notes": 0,
+        "messages_pending": 0,
+        "checks": 0,
+        "auto_check": false,
+        "remote_sharing": false
+      }
+    ]
+  }
+}
+## session-alice
+{
+  "events": [
+    {
+      "type": "session_registered",
+      "session": {
+        "session_id": "claude-code.alice",
+        "workspace_id": "app",
+        "generation": 1
+      }
+    }
+  ],
+  "outcome": {
+    "type": "session",
+    "session": {
+      "session_id": "claude-code.alice",
+      "workspace_id": "app",
+      "generation": 1
+    }
+  }
+}
+## session-bob
+{
+  "events": [
+    {
+      "type": "session_registered",
+      "session": {
+        "session_id": "codex.bob",
+        "workspace_id": "app",
+        "generation": 1
+      }
+    }
+  ],
+  "outcome": {
+    "type": "session",
+    "session": {
+      "session_id": "codex.bob",
+      "workspace_id": "app",
+      "generation": 1
+    }
+  }
+}
+## session-helper
+{
+  "events": [
+    {
+      "type": "session_registered",
+      "session": {
+        "session_id": "claude-code.helper",
+        "workspace_id": "app",
+        "generation": 1,
+        "parent": "claude-code.alice",
+        "headless": true
+      }
+    }
+  ],
+  "outcome": {
+    "type": "session",
+    "session": {
+      "session_id": "claude-code.helper",
+      "workspace_id": "app",
+      "generation": 1,
+      "parent": "claude-code.alice",
+      "headless": true
+    }
+  }
+}
+## session-unknown-workspace
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "workspace_not_found",
+    "message": "Workspace is not registered; register it before attaching a session"
+  }
+}
+## session-bad-id
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "invalid_id",
+    "message": "session ID must contain 1 to 128 ASCII letters, digits, dots, underscores or hyphens"
+  }
+}
+## liveness-alice
+{
+  "events": [
+    {
+      "type": "session_liveness_observed",
+      "liveness": {
+        "session_id": "claude-code.alice",
+        "process": {
+          "pid": 41,
+          "start_token": "boot-41"
+        },
+        "status": "alive",
+        "observed_at_ms": 3000,
+        "generation": 1
+      }
+    }
+  ],
+  "outcome": {
+    "type": "session_liveness",
+    "liveness": {
+      "session_id": "claude-code.alice",
+      "process": {
+        "pid": 41,
+        "start_token": "boot-41"
+      },
+      "status": "alive",
+      "observed_at_ms": 3000,
+      "generation": 1
+    }
+  }
+}
+## liveness-unknown-session
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "session_not_found",
+    "message": "Session is not registered; attach it to a workspace first"
+  }
+}
+## seen-alice
+{
+  "events": [
+    {
+      "type": "session_seen",
+      "session_id": "claude-code.alice",
+      "at_ms": 3200,
+      "generation": 1
+    }
+  ],
+  "outcome": {
+    "type": "session_seen",
+    "session_id": "claude-code.alice",
+    "last_hook_ms": 3200
+  }
+}
+## seen-unknown-session
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "session_not_found",
+    "message": "Session is not registered; attach it to a workspace first"
+  }
+}
+## context-alice
+{
+  "events": [
+    {
+      "type": "context_added",
+      "session_id": "claude-code.alice",
+      "bytes": 2048,
+      "turn": false,
+      "generation": 1
+    }
+  ],
+  "outcome": {
+    "type": "context_recorded",
+    "session_id": "claude-code.alice",
+    "context": {
+      "turns": 0,
+      "bytes": 2048,
+      "largest_turn_bytes": 2048,
+      "turn_bytes": 2048
+    }
+  }
+}
+## context-unknown-session
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "session_not_found",
+    "message": "Session is not registered; attach it to a workspace first"
+  }
+}
+## prompt-alice
+{
+  "events": [
+    {
+      "type": "session_prompted",
+      "session_id": "claude-code.alice",
+      "summary": "Rework the session handler",
+      "at_ms": 4000,
+      "generation": 1
+    }
+  ],
+  "outcome": {
+    "type": "session_prompted",
+    "session_id": "claude-code.alice"
+  }
+}
+## prompt-unknown-session
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "session_not_found",
+    "message": "Session is not registered; attach it to a workspace first"
+  }
+}
+## prompt-targets-alice
+{
+  "events": [
+    {
+      "type": "prompt_targets_set",
+      "session_id": "claude-code.alice",
+      "paths": [
+        "src/api.rs"
+      ],
+      "at_ms": 4200,
+      "generation": 1
+    }
+  ],
+  "outcome": {
+    "type": "prompt_targets",
+    "session_id": "claude-code.alice",
+    "paths": [
+      "src/api.rs"
+    ]
+  }
+}
+## prompt-targets-escaping-path
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "invalid_path",
+    "message": "Each file key must be a relative path of at most 512 bytes without empty, dot or parent components, backslashes or NUL"
+  }
+}
+## presence-bob-searches
+{
+  "events": [
+    {
+      "type": "presence_observed",
+      "session_id": "codex.bob",
+      "kind": "search",
+      "paths": [
+        "src/api.rs"
+      ],
+      "at_ms": 4350,
+      "generation": 1
+    }
+  ],
+  "outcome": {
+    "type": "presence_observed",
+    "session_id": "codex.bob",
+    "paths": 1
+  }
+}
+## presence-bob-reads
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "invalid_presence",
+    "message": "A read is recorded as an observed source version, not as presence"
+  }
+}
+## presence-unknown-session
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "session_not_found",
+    "message": "Session is not registered; attach it to a workspace first"
+  }
+}
+## set-presence-alice
+{
+  "events": [
+    {
+      "type": "presence_set",
+      "session_id": "claude-code.alice",
+      "setting": {
+        "shown": true,
+        "window_ms": 60000
+      }
+    }
+  ],
+  "outcome": {
+    "type": "presence",
+    "session_id": "claude-code.alice",
+    "setting": {
+      "shown": true,
+      "window_ms": 60000
+    }
+  }
+}
+## set-presence-unknown-session
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "session_not_found",
+    "message": "Session is not registered; attach it to a workspace first"
+  }
+}
+## stop-bob
+{
+  "events": [
+    {
+      "type": "session_stopped",
+      "session_id": "codex.bob",
+      "released": [],
+      "failure": null,
+      "at_ms": 5000,
+      "generation": 1
+    }
+  ],
+  "outcome": {
+    "type": "session_stopped",
+    "session_id": "codex.bob",
+    "released": []
+  }
+}
+## stop-unknown-session
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "session_not_found",
+    "message": "Session is not registered; attach it to a workspace first"
+  }
+}
+## end-bob
+{
+  "events": [
+    {
+      "type": "session_ended",
+      "session_id": "codex.bob"
+    }
+  ],
+  "outcome": {
+    "type": "session_ended",
+    "session_id": "codex.bob"
+  }
+}
+## end-bob-again
+{
+  "events": [],
+  "outcome": {
+    "type": "session_ended",
+    "session_id": "codex.bob"
+  }
+}
+## adopt-from-bob
+{
+  "events": [
+    {
+      "type": "session_adopted",
+      "adoption": {
+        "from": "codex.bob",
+        "session_id": "claude-code.alice",
+        "workspace_id": "app",
+        "at_ms": 5400,
+        "generation": 1
+      }
+    }
+  ],
+  "outcome": {
+    "type": "adopted",
+    "adoption": {
+      "from": "codex.bob",
+      "session_id": "claude-code.alice",
+      "workspace_id": "app",
+      "at_ms": 5400,
+      "generation": 1
+    },
+    "root": "/work/app",
+    "recorded": true
+  }
+}
+## adopt-from-unknown
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "session_not_found",
+    "message": "Session is not registered; attach it to a workspace first"
+  }
+}
+## move-app
+{
+  "events": [
+    {
+      "type": "workspace_moved",
+      "workspace": {
+        "workspace_id": "app",
+        "root": "/work/app-moved"
+      },
+      "from_root": "/work/app"
+    }
+  ],
+  "outcome": {
+    "type": "workspace_moved",
+    "workspace": {
+      "workspace_id": "app",
+      "root": "/work/app-moved"
+    },
+    "from_root": "/work/app",
+    "kept": {
+      "notes": 0,
+      "messages_pending": 0,
+      "checks": 0,
+      "landings": 0
+    }
+  }
+}
+## move-unknown-workspace
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "workspace_not_found",
+    "message": "No workspace is registered under this ID; `langspan workspace list` shows them"
+  }
+}
+## move-api-verified
+{
+  "events": [
+    {
+      "type": "workspace_moved",
+      "workspace": {
+        "workspace_id": "api",
+        "root": "/work/api-moved",
+        "verified_overlaps": [
+          "app"
+        ]
+      },
+      "from_root": "/work/api"
+    }
+  ],
+  "outcome": {
+    "type": "workspace_moved",
+    "workspace": {
+      "workspace_id": "api",
+      "root": "/work/api-moved",
+      "verified_overlaps": [
+        "app"
+      ]
+    },
+    "from_root": "/work/api",
+    "kept": {
+      "notes": 0,
+      "messages_pending": 0,
+      "checks": 0,
+      "landings": 0
+    }
+  }
+}
+## move-verified-onto-taken-root
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "workspace_conflict",
+    "message": "This root overlaps another workspace without a verified distinct worktree boundary; reuse its registered ID"
+  }
+}
+## remove-app-dry-run
+{
+  "events": [],
+  "outcome": {
+    "type": "workspace_removal",
+    "workspace_id": "app",
+    "applied": false,
+    "ending": {
+      "sessions": [
+        "claude-code.alice",
+        "claude-code.helper"
+      ],
+      "intents": 0,
+      "notes": 0,
+      "messages_pending": 0,
+      "auto_check": null
+    }
+  }
+}
+## remove-app
+{
+  "events": [
+    {
+      "type": "workspace_removed",
+      "workspace_id": "app"
+    }
+  ],
+  "outcome": {
+    "type": "workspace_removal",
+    "workspace_id": "app",
+    "applied": true,
+    "ending": {
+      "sessions": [
+        "claude-code.alice",
+        "claude-code.helper"
+      ],
+      "intents": 0,
+      "notes": 0,
+      "messages_pending": 0,
+      "auto_check": null
+    }
+  }
+}
+## remove-unknown-workspace
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "workspace_not_found",
+    "message": "No workspace is registered under this ID; `langspan workspace list` shows them"
+  }
+}

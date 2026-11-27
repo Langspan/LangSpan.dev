@@ -1,0 +1,16 @@
+{"name":"register-app","now_ms":1000,"command":{"op":"workspace_register","workspace_id":"app","root":"/work/app"}}
+{"name":"session-alice","now_ms":1100,"command":{"op":"session_register","session_id":"claude-code.alice","workspace_id":"app"}}
+{"name":"admit-alice","now_ms":1200,"command":{"op":"admit","session_id":"claude-code.alice","paths":["src/api.rs"],"ttl_ms":60000}}
+{"name":"status","now_ms":2000,"command":{"op":"status"}}
+{"name":"dashboard","now_ms":2100,"command":{"op":"dashboard"}}
+{"name":"status-line","now_ms":2200,"command":{"op":"status_line","root":"/work/app","from_ms":0}}
+{"name":"status-line-unregistered-root","now_ms":2300,"command":{"op":"status_line","root":"/work/elsewhere","from_ms":0}}
+{"name":"status-records","now_ms":3000,"command":{"op":"status_records"}}
+{"name":"version","now_ms":3010,"command":{"op":"version"}}
+{"name":"events","now_ms":3020,"command":{"op":"events","after":0,"limit":10}}
+{"name":"changes","now_ms":3030,"command":{"op":"changes","workspace_id":"app","after":0,"limit":10}}
+{"name":"compact","now_ms":3040,"command":{"op":"compact","keep_days":30}}
+{"name":"today","now_ms":3050,"command":{"op":"today","from_ms":0}}
+{"name":"report","now_ms":3060,"command":{"op":"report","workspace_id":"app","from_ms":0}}
+{"name":"count","now_ms":3070,"command":{"op":"count","days":[1,7]}}
+{"name":"history","now_ms":3080,"command":{"op":"history","workspace_id":"app","name":"refresh","limit":5}}

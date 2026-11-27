@@ -1,0 +1,380 @@
+## register-app
+{
+  "events": [
+    {
+      "type": "workspace_registered",
+      "workspace": {
+        "workspace_id": "app",
+        "root": "/work/app"
+      }
+    }
+  ],
+  "outcome": {
+    "type": "workspace",
+    "workspace": {
+      "workspace_id": "app",
+      "root": "/work/app"
+    }
+  }
+}
+## session-alice
+{
+  "events": [
+    {
+      "type": "session_registered",
+      "session": {
+        "session_id": "claude-code.alice",
+        "workspace_id": "app",
+        "generation": 1
+      }
+    }
+  ],
+  "outcome": {
+    "type": "session",
+    "session": {
+      "session_id": "claude-code.alice",
+      "workspace_id": "app",
+      "generation": 1
+    }
+  }
+}
+## admit-alice
+{
+  "events": [
+    {
+      "type": "lease_granted",
+      "lease": {
+        "lease_id": "admit-alice",
+        "session_id": "claude-code.alice",
+        "workspace_id": "app",
+        "paths": [
+          "src/api.rs"
+        ],
+        "generation": 1,
+        "expires_at_ms": 61200,
+        "status": "active"
+      }
+    }
+  ],
+  "outcome": {
+    "type": "admitted",
+    "lease": {
+      "lease_id": "admit-alice",
+      "session_id": "claude-code.alice",
+      "workspace_id": "app",
+      "paths": [
+        "src/api.rs"
+      ],
+      "generation": 1,
+      "expires_at_ms": 61200,
+      "status": "active"
+    }
+  }
+}
+## workspace-git-app
+{
+  "events": [
+    {
+      "type": "workspace_git_observed",
+      "git": {
+        "workspace_id": "app",
+        "repository_id": "repository-1",
+        "branch_ref": "refs/heads/main"
+      }
+    }
+  ],
+  "outcome": {
+    "type": "workspace_git",
+    "git": {
+      "workspace_id": "app",
+      "repository_id": "repository-1",
+      "branch_ref": "refs/heads/main"
+    }
+  }
+}
+## workspace-git-unknown-workspace
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "workspace_not_found",
+    "message": "Register the workspace before recording its repository"
+  }
+}
+## branch-app
+{
+  "events": [
+    {
+      "type": "branch_observed",
+      "observation": {
+        "observation_id": "branch-app",
+        "workspace_id": "app",
+        "branch_ref": "refs/heads/main",
+        "head_oid": "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+        "tree_oid": "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+        "observed_at_ms": 2200,
+        "generation": 1
+      }
+    }
+  ],
+  "outcome": {
+    "type": "branch_observed",
+    "observation": {
+      "observation_id": "branch-app",
+      "workspace_id": "app",
+      "branch_ref": "refs/heads/main",
+      "head_oid": "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+      "tree_oid": "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+      "observed_at_ms": 2200,
+      "generation": 1
+    }
+  }
+}
+## branch-app-moved
+{
+  "events": [
+    {
+      "type": "branch_observed",
+      "observation": {
+        "observation_id": "branch-app-moved",
+        "workspace_id": "app",
+        "branch_ref": "refs/heads/main",
+        "head_oid": "1111111111111111111111111111111111111111",
+        "tree_oid": "2222222222222222222222222222222222222222",
+        "observed_at_ms": 2300,
+        "generation": 1
+      }
+    }
+  ],
+  "outcome": {
+    "type": "branch_observed",
+    "observation": {
+      "observation_id": "branch-app-moved",
+      "workspace_id": "app",
+      "branch_ref": "refs/heads/main",
+      "head_oid": "1111111111111111111111111111111111111111",
+      "tree_oid": "2222222222222222222222222222222222222222",
+      "observed_at_ms": 2300,
+      "generation": 1
+    }
+  }
+}
+## branch-bad-oid
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "invalid_git_oid",
+    "message": "Observed Git object IDs must contain 40 or 64 hexadecimal characters"
+  }
+}
+## disk-app
+{
+  "events": [
+    {
+      "type": "disk_observed",
+      "observation": {
+        "observation_id": "disk-app",
+        "workspace_id": "app",
+        "path": "src/api.rs",
+        "before": {
+          "type": "missing"
+        },
+        "after": {
+          "type": "present",
+          "digest": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+        },
+        "related_operation_ids": [],
+        "observed_at_ms": 3000,
+        "generation": 1
+      }
+    }
+  ],
+  "outcome": {
+    "type": "disk_observed",
+    "observation": {
+      "observation_id": "disk-app",
+      "workspace_id": "app",
+      "path": "src/api.rs",
+      "before": {
+        "type": "missing"
+      },
+      "after": {
+        "type": "present",
+        "digest": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+      },
+      "related_operation_ids": [],
+      "observed_at_ms": 3000,
+      "generation": 1
+    }
+  }
+}
+## disk-unknown-workspace
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "workspace_not_found",
+    "message": "Observation workspace is not registered; register it before recording facts"
+  }
+}
+## disk-escaping-path
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "invalid_path",
+    "message": "Each file key must be a relative path of at most 512 bytes without empty, dot or parent components, backslashes or NUL"
+  }
+}
+## scan-app-failed
+{
+  "events": [
+    {
+      "type": "scan_failed",
+      "failure": {
+        "workspace_id": "app",
+        "detail": "timeout",
+        "at_ms": 4000,
+        "generation": 1
+      }
+    }
+  ],
+  "outcome": {
+    "type": "scan_observed",
+    "workspace_id": "app",
+    "failed": true
+  }
+}
+## scan-app
+{
+  "events": [
+    {
+      "type": "scan_recovered",
+      "workspace_id": "app"
+    }
+  ],
+  "outcome": {
+    "type": "scan_observed",
+    "workspace_id": "app",
+    "failed": false
+  }
+}
+## scan-unknown-workspace
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "workspace_not_found",
+    "message": "Workspace is not registered; register it first"
+  }
+}
+## uncoordinated-app
+{
+  "events": [],
+  "outcome": {
+    "type": "uncoordinated_observed",
+    "sessions": [],
+    "paths": []
+  }
+}
+## uncoordinated-unknown-workspace
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "workspace_not_found",
+    "message": "Workspace is not registered; register it first"
+  }
+}
+## checkout-app
+{
+  "events": [
+    {
+      "type": "checkout_changed",
+      "change": {
+        "change_id": "checkout-app",
+        "workspace_id": "app",
+        "from_branch": "refs/heads/main",
+        "to_branch": "refs/heads/feature",
+        "from_head": "1111111111111111111111111111111111111111",
+        "to_head": "3333333333333333333333333333333333333333",
+        "files": 4,
+        "at_ms": 6000,
+        "generation": 1
+      }
+    }
+  ],
+  "outcome": {
+    "type": "checkout_observed",
+    "change": {
+      "change_id": "checkout-app",
+      "workspace_id": "app",
+      "from_branch": "refs/heads/main",
+      "to_branch": "refs/heads/feature",
+      "from_head": "1111111111111111111111111111111111111111",
+      "to_head": "3333333333333333333333333333333333333333",
+      "files": 4,
+      "at_ms": 6000,
+      "generation": 1
+    }
+  }
+}
+## checkout-bad-branch
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "invalid_branch_ref",
+    "message": "A checkout branch is a nonempty refs/heads/ name, at most 512 bytes without control characters"
+  }
+}
+## checkout-unknown-workspace
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "workspace_not_found",
+    "message": "Observation workspace is not registered; register it before recording facts"
+  }
+}
+## checkout-run-alice
+{
+  "events": [
+    {
+      "type": "checkout_run_observed",
+      "run": {
+        "run_id": "checkout-run-alice",
+        "workspace_id": "app",
+        "session_id": "claude-code.alice",
+        "to_branch": "refs/heads/feature",
+        "to_head": "3333333333333333333333333333333333333333",
+        "started_ms": 50,
+        "finished_ms": 6200,
+        "generation": 1
+      }
+    }
+  ],
+  "outcome": {
+    "type": "checkout_run_observed",
+    "run": {
+      "run_id": "checkout-run-alice",
+      "workspace_id": "app",
+      "session_id": "claude-code.alice",
+      "to_branch": "refs/heads/feature",
+      "to_head": "3333333333333333333333333333333333333333",
+      "started_ms": 50,
+      "finished_ms": 6200,
+      "generation": 1
+    }
+  }
+}
+## checkout-run-unknown-session
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "unknown_session",
+    "message": "A checkout run names a registered session; register it first"
+  }
+}

@@ -13,6 +13,7 @@ Run from the repository root with the pinned Rust toolchain, a C compiler for bu
 - Dependency policy (RustSec advisories, licences, bans, sources; `deny.toml`): `cargo deny --locked check` (install: `cargo install --locked cargo-deny --version 0.22.1`)
 - Unused dependencies: `cargo machete` (install: `cargo install --locked cargo-machete --version 0.10.1`)
 - CI installs both from their upstream release binaries instead, each checked against a pinned SHA-256, and builds cargo-nextest at its pinned version: `bash scripts/install-ci-tools.sh DIR` (Linux x86_64 and macOS arm64). A version bump changes the script and the three install lines above together (and `nextest-version` in `.config/nextest.toml` for nextest).
+- Architecture ratchets (file size, function length, module dependencies, public surface): `python3 -I -B scripts/ratchets.py --check .`, run by `tests/ratchets.rs` in the suite ([ratchets](development-process.md#ratchets))
 - Workflow audit: `zizmor .` (install: `brew install zizmor` or `pipx install zizmor==1.33.1`); CI runs it in the `Workflows` job
 - Full local check: `sh scripts/check.sh`. Cheapest first: format, dependency policy, unused dependencies, lint, tests (`scripts/test-foreign-home.sh`: the whole suite with `HOME` at a read-only home holding a LangSpan install for another state directory, and `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GEMINI_CLI_HOME` unset, so a test that reads the machine's own home or host configuration fails), then the two-developer demonstration (`scripts/demo-two-developers.sh`) on the debug binary, then the release build and the demonstration again on it. `LANGSPAN_CHECK_RELEASE=false` skips the release half.
 
@@ -28,7 +29,7 @@ The integration suite uses temporary files, real SQLite, Unix sockets and child 
 
 ## Design
 - DRY: each rule, formula and format has one owner in the code. KISS. YAGNI: no abstraction before its second use, and no option nobody asked for.
-- Ports and adapters. A pure core (no I/O, no clock, no randomness, all injected) sits behind ports. Adapters handle the OS, files, git, the database, the network and external CLIs. Dependencies point inward, enforced by a test or lint rule, not by convention.
+- Ports and adapters. A pure core (no I/O, no clock, no randomness, all injected) sits behind ports. Adapters handle the OS, files, git, the database, the network and external CLIs. Dependencies point inward. A test enforces this for `langspan-core` (`crates/langspan-core/tests/architecture.rs`). In the `langspan` crate the [ratchets](development-process.md#ratchets) only stop new cycles, and new outward edges between modules that have a `// layer:` marker; the existing cycles are recorded debt.
 - One contract. Every interface (CLI, MCP, hooks, any UI) calls the same application operations. Wire formats are versioned schemas with golden test vectors, and a breaking change bumps the version.
 - State has a single writer. Concurrency goes through messages to that owner, not shared locks. Every state change is an appended event, and current state is derived from the events.
 - Time is explicit. Use a monotonic clock for deadlines and durations, the wall clock for ages shown to people, and never compare wall clocks across machines to order events.

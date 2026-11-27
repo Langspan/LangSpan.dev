@@ -91,6 +91,69 @@ fn mutation_requires_an_explicit_request_identity_before_connecting() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("--request-id"));
 }
 
+/// The stderr of `langspan ARGS`, with no coordinator to reach: each case
+/// below stops on its options before it would connect.
+fn refusal(args: &[&str]) -> String {
+    let state = std::env::temp_dir().join(format!("lsf-none-{}", std::process::id()));
+    let output = Command::new(env!("CARGO_BIN_EXE_langspan"))
+        .env("LANGSPAN_AUTOSTART", "off")
+        .env("LANGSPAN_STATE_DIR", &state)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "`langspan {args:?}` succeeded");
+    assert!(!state.exists(), "`langspan {args:?}` made {state:?}");
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+const UNKNOWN: &str = "unknown or incomplete command; run `langspan --help`";
+
+/// Issue #297: which command words take `--apply`, `--symbol` and `--tag`,
+/// at the edges of each command's form: an unknown host, words after `--`.
+#[test]
+fn apply_symbol_and_tag_are_valid_only_for_the_command_forms_that_read_them() {
+    let apply = "--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`";
+    let symbol = "option --symbol is not valid for this command";
+    let tag = "option --tag is not valid for this command";
+    let cases: &[(&[&str], &str)] = &[
+        (&["status", "--apply"], apply),
+        (&["install", "x", "--apply"], apply),
+        (&["hooks", "install", "no-such-host", "--apply"], apply),
+        (&["land", "--apply", "--", "w"], apply),
+        (&["guidance", "--apply", "--", "install"], apply),
+        (&["compact", "x", "--apply"], apply),
+        (&["workspace", "remove", "w", "x", "--apply"], apply),
+        // Past the `--apply` check, each stops where its form says.
+        (
+            &["workspace", "remove", "--apply", "--", "-w"],
+            "mutation requires --request-id ID",
+        ),
+        (&["compact", "--apply", "--", "x"], UNKNOWN),
+        (
+            &["graph", "import", "w", "--apply"],
+            "--in FILE is required",
+        ),
+        (&["status", "--symbol", "a"], symbol),
+        (&["check-write", "--symbol", "a", "--symbol", "b"], UNKNOWN),
+        (
+            &["remember", "--symbol", "a", "--symbol", "b"],
+            "a note is anchored to one definition: give --symbol once",
+        ),
+        (&["--symbol", "a", "--", "remember"], UNKNOWN),
+        (&["today", "--tag", "a"], tag),
+        (&["remember", "--tag", "a", "--tag", "b"], UNKNOWN),
+        (
+            &["recap", "--tag", "a", "--tag", "b"],
+            "recap filters by one tag: give --tag once",
+        ),
+        (&["recap", "--tag", "a"], UNKNOWN),
+    ];
+    for (args, expected) in cases {
+        let stderr = refusal(args);
+        assert!(stderr.contains(expected), "{args:?}: {stderr}");
+    }
+}
+
 /// Issue #129: Codex trusts project hooks at the exact path it was started
 /// in, so a session resumed under another path for the same directory runs
 /// none of them. The install names the resolved root to start Codex in.

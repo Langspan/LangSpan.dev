@@ -1,0 +1,29 @@
+{"name":"register-app","now_ms":1000,"command":{"op":"workspace_register","workspace_id":"app","root":"/work/app"}}
+{"name":"session-alice","now_ms":1100,"command":{"op":"session_register","session_id":"claude-code.alice","workspace_id":"app"}}
+{"name":"session-bob","now_ms":1200,"command":{"op":"session_register","session_id":"codex.bob","workspace_id":"app"}}
+{"name":"check-passed","now_ms":2000,"command":{"op":"record_check","workspace_id":"app","name":"unit","command":"cargo test","tree_oid":"4b825dc642cb6eb9a060e54bf8d69288fbee4904","head_oid":"1111111111111111111111111111111111111111","inputs":["5555555555555555555555555555555555555555"],"result":{"type":"passed"},"duration_ms":5000}}
+{"name":"check-failed","now_ms":2100,"command":{"op":"record_check","workspace_id":"app","name":"unit","command":"cargo test","tree_oid":"2222222222222222222222222222222222222222","head_oid":"1111111111111111111111111111111111111111","inputs":["5555555555555555555555555555555555555555"],"result":{"type":"failed","exit_code":101},"duration_ms":5000}}
+{"name":"check-unknown-workspace","now_ms":2200,"command":{"op":"record_check","workspace_id":"nowhere","name":"unit","command":"cargo test","tree_oid":"4b825dc642cb6eb9a060e54bf8d69288fbee4904","head_oid":"1111111111111111111111111111111111111111","inputs":[],"result":{"type":"passed"},"duration_ms":5000}}
+{"name":"check-status-app","now_ms":2300,"command":{"op":"check_status","workspace_id":"app","tree_oid":"4b825dc642cb6eb9a060e54bf8d69288fbee4904"}}
+{"name":"check-status-unknown-workspace","now_ms":2400,"command":{"op":"check_status","workspace_id":"nowhere","tree_oid":"4b825dc642cb6eb9a060e54bf8d69288fbee4904"}}
+{"name":"flaky-tests-app","now_ms":2500,"command":{"op":"flaky_tests","workspace_id":"app"}}
+{"name":"flaky-tests-unknown-workspace","now_ms":2600,"command":{"op":"flaky_tests","workspace_id":"nowhere"}}
+{"name":"forget-flaky-test","now_ms":2700,"command":{"op":"forget_flaky_test","workspace_id":"app","test":"api::refresh"}}
+{"name":"forget-flaky-test-unknown-workspace","now_ms":2800,"command":{"op":"forget_flaky_test","workspace_id":"nowhere","test":"api::refresh"}}
+{"name":"auto-check-enable","now_ms":3000,"command":{"op":"auto_check_enable","workspace_id":"app","name":"unit","argv":["cargo","test"],"timeout_s":600}}
+{"name":"auto-check-enable-empty-argv","now_ms":3100,"command":{"op":"auto_check_enable","workspace_id":"app","name":"unit","argv":[],"timeout_s":600}}
+{"name":"auto-check-disable","now_ms":3200,"command":{"op":"auto_check_disable","workspace_id":"app"}}
+{"name":"auto-check-disable-unknown-workspace","now_ms":3300,"command":{"op":"auto_check_disable","workspace_id":"nowhere"}}
+{"name":"landing-readiness","now_ms":4000,"command":{"op":"landing_readiness","workspace_id":"app","name":"unit","tree_oid":"4b825dc642cb6eb9a060e54bf8d69288fbee4904"}}
+{"name":"landing-readiness-unknown-workspace","now_ms":4100,"command":{"op":"landing_readiness","workspace_id":"nowhere","name":"unit","tree_oid":"4b825dc642cb6eb9a060e54bf8d69288fbee4904"}}
+{"name":"record-landing","now_ms":4200,"command":{"op":"record_landing","workspace_id":"app","onto":"main","commit_oid":"3333333333333333333333333333333333333333","tree_oid":"4b825dc642cb6eb9a060e54bf8d69288fbee4904","inputs":["5555555555555555555555555555555555555555"],"check_id":"check-passed"}}
+{"name":"record-landing-unknown-check","now_ms":4300,"command":{"op":"record_landing","workspace_id":"app","onto":"main","commit_oid":"3333333333333333333333333333333333333333","tree_oid":"4b825dc642cb6eb9a060e54bf8d69288fbee4904","inputs":["5555555555555555555555555555555555555555"],"check_id":"no-such-check"}}
+{"name":"take-turn-alice","now_ms":5000,"command":{"op":"take_turn","workspace_id":"app","onto":"main","session_id":"claude-code.alice","ttl_ms":60000}}
+{"name":"take-turn-bob-queued","now_ms":5100,"command":{"op":"take_turn","workspace_id":"app","onto":"main","session_id":"codex.bob","ttl_ms":60000}}
+{"name":"take-turn-unknown-session","now_ms":5200,"command":{"op":"take_turn","workspace_id":"app","onto":"main","session_id":"codex.nobody","ttl_ms":60000}}
+{"name":"turn-queue","now_ms":5300,"command":{"op":"turn_queue","workspace_id":"app","onto":"main"}}
+{"name":"turn-queue-unknown-workspace","now_ms":5400,"command":{"op":"turn_queue","workspace_id":"nowhere","onto":"main"}}
+{"name":"release-turn-alice","now_ms":6000,"command":{"op":"release_turn","workspace_id":"app","onto":"main","turn_id":"take-turn-alice","attempts":[{"target_oid":"1111111111111111111111111111111111111111","commit_oid":"3333333333333333333333333333333333333333","result":{"type":"landed"}}]}}
+{"name":"release-unknown-turn","now_ms":6100,"command":{"op":"release_turn","workspace_id":"app","onto":"main","turn_id":"no-such-turn","attempts":[]}}
+{"name":"leave-queue-bob","now_ms":6200,"command":{"op":"leave_turn_queue","workspace_id":"app","onto":"main","ticket":"take-turn-bob-queued","reason":"cancelled"}}
+{"name":"leave-queue-unknown-ticket","now_ms":6300,"command":{"op":"leave_turn_queue","workspace_id":"app","onto":"main","ticket":"no-such-ticket","reason":"cancelled"}}
