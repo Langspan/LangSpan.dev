@@ -43,6 +43,7 @@ order:
 | `refusal_outcomes` | a report's `refusal_outcomes` (roadmap H9) | 5 |
 | `renames` | the rename fields of interface changes, history entries and in-flight symbols, and private interface changes (roadmap D7) | 4 |
 | `symbol_findings` | a check record's `symbol_findings`, and `record_check`'s (issue #265) | 6 |
+| `tolerant_responses` | none: says the client ignores fields it does not know in a response's objects that are not stored ([ADR 0015](0015-version-tolerance.md), issue #332) | none |
 | `trails` | a briefing's `trail` and a recap's `trails` (roadmap C9) | 4 |
 | `withheld_events` | an event page's `withheld`, the count of events left out (issue #331) | none |
 

@@ -107,10 +107,9 @@ mod unix {
                 )
             })?;
         let mut value: serde_json::Value = serde_json::from_slice(&frame)?;
-        // How many events a page left out (`withheld_events`): only a later
-        // daemon, with event types this build has no variant for, sends it.
-        // The page holds what this build reads.
-        value.as_object_mut().map(|f| f.shift_remove("withheld"));
+        // A response's fields this build does not know, such as how many
+        // events a later daemon left out (`withheld`), are ignored as it is
+        // read (`tolerant_responses`).
         let granted = match value
             .as_object_mut()
             .and_then(|f| f.shift_remove("capabilities"))

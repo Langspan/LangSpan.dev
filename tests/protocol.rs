@@ -190,7 +190,11 @@ fn v3_briefing_request_and_response_match_the_committed_golden_vectors() {
     assert_eq!(encode(&response).unwrap(), wire);
     let unknown = String::from_utf8_lossy(wire)
         .replace(r#""changed":true"#, r#""changed":true,"allow":true"#);
-    assert!(serde_json::from_str::<Response>(&unknown).is_err());
+    // Ignored, not obeyed (issue #332).
+    assert_eq!(
+        serde_json::from_str::<Response>(&unknown).unwrap(),
+        response
+    );
 }
 
 /// What changed recently (roadmap C3): optional fields, so the earlier
@@ -314,7 +318,11 @@ fn v3_code_context_request_and_response_match_the_committed_golden_vectors() {
     assert_eq!(encode(&response).unwrap(), wire);
     let unknown = String::from_utf8_lossy(wire)
         .replace(r#""truncated":false"#, r#""truncated":false,"prompt":"x""#);
-    assert!(serde_json::from_str::<Response>(&unknown).is_err());
+    // Ignored, not obeyed (issue #332).
+    assert_eq!(
+        serde_json::from_str::<Response>(&unknown).unwrap(),
+        response
+    );
 }
 
 #[test]
@@ -379,7 +387,11 @@ fn v3_compaction_request_and_reports_match_the_committed_golden_vectors() {
     assert_eq!(encode(&response).unwrap(), wire);
     let unknown =
         String::from_utf8_lossy(wire).replace(r#""receipts":61204"#, r#""receipts":61204,"x":1"#);
-    assert!(serde_json::from_str::<Response>(&unknown).is_err());
+    // Ignored (issue #332).
+    assert_eq!(
+        serde_json::from_str::<Response>(&unknown).unwrap(),
+        response
+    );
 
     let wire = include_bytes!("../fixtures/remote-sent-since-response-v3.json");
     let response: Response = serde_json::from_slice(wire).unwrap();
@@ -425,8 +437,12 @@ fn v3_blind_spots_request_and_response_match_the_committed_golden_vectors() {
     assert_eq!((coverage.blind_in_scope, *truncated), (3, false));
     assert!(scan_failure.is_none(), "absent when no scan failed");
     assert_eq!(encode(&response).unwrap(), wire);
+    // A field of a later build is ignored (issue #332).
     let unknown = String::from_utf8_lossy(wire).replace(r#""files":10"#, r#""files":10,"x":1"#);
-    assert!(serde_json::from_str::<Response>(&unknown).is_err());
+    assert_eq!(
+        serde_json::from_str::<Response>(&unknown).unwrap(),
+        response
+    );
     // Coverage without `blind_in_scope` is what earlier builds send: zero.
     let earlier =
         String::from_utf8_lossy(include_bytes!("../fixtures/graph-context-response-v3.json"))
@@ -518,7 +534,11 @@ fn v4_path_and_map_requests_and_responses_match_the_committed_golden_vectors() {
     assert_eq!(encode(&response).unwrap(), wire);
     let unknown =
         String::from_utf8_lossy(wire).replace(r#""edge":"defines""#, r#""edge":"defines","x":1"#);
-    assert!(serde_json::from_str::<Response>(&unknown).is_err());
+    // Ignored (issue #332).
+    assert_eq!(
+        serde_json::from_str::<Response>(&unknown).unwrap(),
+        response
+    );
 
     let wire = include_bytes!("../fixtures/graph-map-request-v4.json");
     let request: Request = serde_json::from_slice(wire).unwrap();
@@ -677,7 +697,11 @@ fn v3_symbol_detail_request_and_response_match_the_committed_golden_vectors() {
     assert_eq!(symbol.last_check.as_ref().unwrap().result, "passed");
     assert_eq!(encode(&response).unwrap(), wire);
     let unknown = String::from_utf8_lossy(wire).replace(r#""count":1,"#, r#""count":1,"x":1,"#);
-    assert!(serde_json::from_str::<Response>(&unknown).is_err());
+    // Ignored (issue #332).
+    assert_eq!(
+        serde_json::from_str::<Response>(&unknown).unwrap(),
+        response
+    );
 }
 
 #[test]
@@ -2696,4 +2720,79 @@ fn the_reply_says_how_many_events_it_left_out() {
         serde_json::from_slice(&encode_with(Capabilities::ALL, Some(&all), &response).unwrap())
             .unwrap();
     assert!(page.get("withheld").is_none(), "nothing left out");
+}
+
+/// Issue #332: the current client reads a response tolerantly. Every
+/// response vector, with a field this build does not know added to the
+/// frame and to its outcome, reads as it did without it; so does one
+/// added to an object only responses carry. Requests and events stay
+/// strict.
+#[test]
+fn the_client_ignores_response_fields_it_does_not_know() {
+    use serde_json::{Value, json};
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+    let mut read = 0;
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        if !(name.contains("-outcome-v") || name.contains("-response-v")) {
+            continue;
+        }
+        let wire: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let known: Response = serde_json::from_value(wire.clone()).unwrap();
+        let mut later = wire;
+        later["from_a_later_build"] = json!({"nested": [1]});
+        later["outcome"]["from_a_later_build"] = json!(true);
+        let response: Response = serde_json::from_value(later).expect(&name);
+        assert_eq!(response, known, "{name}");
+        read += 1;
+    }
+    assert!(read > 100, "{read} response vectors");
+
+    // Objects only responses carry: a briefing, a peer's work, a recent
+    // path, a scan summary.
+    let mut briefing: Value =
+        serde_json::from_slice(include_bytes!("../fixtures/briefing-outcome-v10.json")).unwrap();
+    briefing["outcome"]["briefing"]["later"] = json!(1);
+    briefing["outcome"]["briefing"]["peers"][0]["later"] = json!(1);
+    briefing["outcome"]["briefing"]["peers"][0]["recent"][0]["later"] = json!(1);
+    serde_json::from_value::<Response>(briefing).unwrap();
+    let mut changes: Value =
+        serde_json::from_slice(include_bytes!("../fixtures/changes-outcome-v10.json")).unwrap();
+    changes["outcome"]["scan"]["later"] = json!(1);
+    serde_json::from_value::<Response>(changes).unwrap();
+
+    // Requests and events, which the daemon and its store read, do not.
+    let mut request: Value =
+        serde_json::from_slice(include_bytes!("../fixtures/changes-command-v10.json")).unwrap();
+    request["command"]["later"] = json!(1);
+    assert!(serde_json::from_value::<Request>(request).is_err());
+    let event: Value = serde_json::from_slice(include_bytes!(
+        "../fixtures/workspace-registered-event-v10.json"
+    ))
+    .unwrap();
+    for at in ["/later", "/workspace/later"] {
+        let mut extra = event.clone();
+        let (parent, key) = at.rsplit_once('/').unwrap();
+        extra.pointer_mut(parent).unwrap()[key] = json!(1);
+        assert!(
+            serde_json::from_value::<langspan_core::Event>(extra).is_err(),
+            "{at}"
+        );
+    }
+}
+
+/// Issue #332: versions 3 to 10 are frozen. Their shapes are kept by the
+/// capability table, never by a function per version, and no such
+/// function is added again.
+#[test]
+fn no_version_gets_a_shape_function_of_its_own() {
+    let source = include_str!("../src/protocol.rs");
+    let shaped = source.lines().filter(|line| {
+        line.split("fn protocol_").nth(1).is_some_and(|rest| {
+            let digits = rest.chars().take_while(char::is_ascii_digit).count();
+            digits > 0 && rest[digits..].starts_with("_shape")
+        })
+    });
+    assert_eq!(shaped.count(), 0);
 }

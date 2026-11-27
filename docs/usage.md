@@ -3095,6 +3095,11 @@ frame's `withheld`; an earlier release cannot read that count and is not
 told. Such a page may hold fewer events than asked for, or none while later
 events remain: upgrade the client to read them all.
 
+A client of this build ignores a field it does not know in a response and in
+the objects only responses carry, so a later daemon can add one there without
+a new version ([ADR 0015](adr/0015-version-tolerance.md)). Requests and
+events stay strict.
+
 ### Mixed versions after an upgrade
 
 LangSpan never downloads or replaces its own binary and makes no update

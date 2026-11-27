@@ -312,7 +312,6 @@ pub struct KnownVersion {
 
 /// A file whose version on disk differs from the one the session last read.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct StaleFile {
     pub path: String,
     pub read: FileState,
@@ -324,7 +323,6 @@ pub struct StaleFile {
 
 /// A file the asking session read that a peer has since reported editing.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct StaleRead {
     pub path: String,
     pub session_id: String,
@@ -468,7 +466,6 @@ pub struct BranchObservation {
 /// Bounded metadata for the store's most recent completed workspace scan. A
 /// missing summary means no baseline, distinct from a scan with zero files.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct ScanSummary {
     pub workspace_id: String,
     pub observed_at_ms: u64,
@@ -642,7 +639,6 @@ pub const MAX_OUTLINED: usize = 64;
 /// One definition in a file's outline (roadmap A11): what the source index
 /// holds, without its signature or any other text of the file.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct OutlineEntry {
     pub name: String,
     pub kind: String,
@@ -675,7 +671,6 @@ pub struct LookedPath {
 
 /// One path a peer was looking at, as a briefing shows it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct PresencePath {
     pub path: String,
     pub kind: PresenceKind,
@@ -892,7 +887,6 @@ pub const BRIEF_PATHS: usize = 8;
 pub const BRIEF_HORIZON_MS: u64 = 30 * 60 * 1000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct RecentPath {
     pub path: String,
     pub age_ms: u64,
@@ -900,7 +894,6 @@ pub struct RecentPath {
 
 /// One other session's relevant work, as shown to the asking session.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct PeerWork {
     pub session_id: String,
     pub workspace_id: String,
@@ -997,7 +990,6 @@ pub const PUBLICATION_BYTES: usize = 16 * 1024;
 
 /// One publication that left this machine, as recorded when it was pushed.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct SentPublication {
     /// Position in the local event log.
     pub seq: u64,
@@ -1017,7 +1009,6 @@ pub const MAX_RETENTION_DAYS: u32 = 3650;
 /// One compaction of the event log (ADR 0025, J7). Times are wall-clock
 /// Unix milliseconds.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct CompactionReport {
     /// False for a dry run, which deleted nothing.
     pub applied: bool,
@@ -1081,7 +1072,6 @@ pub struct RemotePeer {
 
 /// A teammate's session on another machine, as shown to the asking session.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct RemotePeerWork {
     pub name: String,
     pub work: RemoteWork,
@@ -1263,7 +1253,6 @@ pub enum Applicability {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct CheckView {
     pub record: CheckRecord,
     pub applicability: Applicability,
@@ -1478,7 +1467,6 @@ pub struct TurnWaiter {
 
 /// A landing in line for the push turn, as reported to callers.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct QueuedLanding {
     pub ticket: String,
     pub session_id: Option<String>,
@@ -1568,7 +1556,6 @@ pub struct LandingAttempt {
 /// detail (`GraphSymbol { detail: true }`); otherwise the record is the one
 /// every earlier version sent.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct SymbolRef {
     pub path: String,
     pub name: String,
@@ -1621,7 +1608,6 @@ pub const MAX_SYMBOL_NOTES: usize = 4;
 /// One name called within a definition: how often, and the line of the
 /// first call. A name, not a resolved target.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct CallCount {
     pub name: String,
     pub count: u32,
@@ -1631,7 +1617,6 @@ pub struct CallCount {
 /// Call sites of a name, found by name only. `sites` are `path:line`, in
 /// path and line order, at most `MAX_CALLER_SITES`; `count` is all of them.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct Callers {
     pub count: u32,
     pub sites: Vec<String>,
@@ -1639,7 +1624,6 @@ pub struct Callers {
 
 /// A remembered note, quoted for a symbol lookup.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct SymbolNote {
     pub id: String,
     pub text: String,
@@ -1648,7 +1632,6 @@ pub struct SymbolNote {
 /// A check record named by a symbol lookup: its name, `passed` or
 /// `failed`, and the tree it ran on.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct LastCheck {
     pub name: String,
     pub result: String,
@@ -1657,7 +1640,6 @@ pub struct LastCheck {
 
 /// A place a name is mentioned. Not a resolved use: any symbol of that name.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct NameRef {
     pub path: String,
     pub name: String,
@@ -1672,7 +1654,6 @@ pub const MAX_IMPACT_DEPTH: u32 = 3;
 /// mention a name the previous level's files export. Found by name, not
 /// resolved, so each level compounds the false positives of the one before.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct ImpactLevel {
     /// From 1: level 1 mentions an export of the queried file.
     pub level: u32,
@@ -1683,7 +1664,6 @@ pub struct ImpactLevel {
 
 /// A file reached at its first level, and how.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct ImpactFile {
     pub path: String,
     /// The exported name of `from` that this file mentions.
@@ -1710,7 +1690,6 @@ pub const MAX_MAP_EDGES: usize = 256;
 /// call in it that the next step's definition answers to, or, for the last
 /// step, the definition alone.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct PathStep {
     pub path: String,
     /// The call's line, or for the last step the definition's first line.
@@ -1733,7 +1712,6 @@ pub struct PathStep {
 
 /// One chain of calls from `graph path`'s first name to its second.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct SymbolPath {
     pub steps: Vec<PathStep>,
     /// Any step is `ambiguous`.
@@ -1743,7 +1721,6 @@ pub struct SymbolPath {
 /// One area of a `graph map` (roadmap D3): the files whose module path
 /// starts with `path`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct MapArea {
     pub path: String,
     pub files: u32,
@@ -1755,7 +1732,6 @@ pub struct MapArea {
 
 /// Edges of one kind from one `graph map` area to another, counted.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct MapEdge {
     pub from: String,
     pub to: String,
@@ -1769,7 +1745,6 @@ pub struct MapEdge {
 /// How much of a workspace the index covers, so a short answer is not read
 /// as a complete one.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct GraphCoverage {
     /// Files in the last complete scan in a supported language.
     pub indexable_files: u32,
@@ -1793,7 +1768,6 @@ pub struct GraphCoverage {
 
 /// A file indexed with a syntax error or a bound reached.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct PartialFile {
     pub path: String,
     /// Wall-clock milliseconds since which its indexed versions have been
@@ -1803,7 +1777,6 @@ pub struct PartialFile {
 
 /// Other source files the index has no grammar for, by extension.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct LanguageCount {
     pub extension: String,
     pub files: u32,
@@ -1811,7 +1784,6 @@ pub struct LanguageCount {
 
 /// Full counts of each blind-spot list, however many paths are returned.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct BlindTotals {
     pub partial: u32,
     pub never_clean: u32,
@@ -1823,7 +1795,6 @@ pub struct BlindTotals {
 /// Where the index is blind, by reason. A file can be in more than one
 /// list (a partial file can also be waiting for its newer version).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct BlindSpots {
     /// Indexed with a syntax error or a bound reached.
     pub partial: Vec<PartialFile>,
@@ -1907,7 +1878,6 @@ pub struct InterfaceChange {
 /// from `path` and `after_name` came, linked by `evidence` (absent for a
 /// rename recorded before it was kept).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct Rename {
     pub name: String,
     pub after_name: String,
@@ -1995,7 +1965,6 @@ pub struct CallSite {
 /// argument count does not fit the new signature, or the function it names
 /// was renamed or removed. A name match, not a resolved call.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct CallBreak {
     pub notice_id: String,
     pub call: CallSite,
@@ -2090,7 +2059,6 @@ pub struct WorktreeFile {
 
 /// An interface change that touches the asking session's own files.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct InterfaceImpact {
     pub path: String,
     pub by_session: Option<String>,
@@ -2140,7 +2108,6 @@ pub struct InflightSymbol {
 
 /// An in-flight symbol as a briefing or `graph inflight` tells it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct InflightNotice {
     pub path: String,
     /// The worktree's root.
@@ -2357,7 +2324,6 @@ pub struct Adoption {
 /// checkout and that nobody has adopted: the briefing suggests `langspan
 /// adopt` (issue #161). Its task line is data from that session.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct LeftWork {
     pub session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2388,7 +2354,6 @@ pub struct RetractedMessage {
 /// line a briefing cut. The text and paths are data from the sender, never
 /// instructions.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct ShownMessage {
     pub message_id: String,
     /// The sending session; `None` for the owner.
@@ -2456,7 +2421,6 @@ pub enum RecipientState {
 
 /// One recipient of a message and whether it was given it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct RecipientStatus {
     pub session_id: String,
     pub status: RecipientState,
@@ -2478,7 +2442,6 @@ pub const DELIVERED_MEANS: &str =
 /// Who was given a sent message: what `messages status` answers its sender
 /// (roadmap E12). Read-only: asking records nothing.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct MessageStatus {
     pub message_id: String,
     /// The sending session; `None` for the owner.
@@ -2716,7 +2679,6 @@ pub struct ScanFailure {
 
 /// One session in a recap: what it is and what it last did.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct RecapSession {
     pub session_id: String,
     /// Registered since the daemon last started.
@@ -2739,7 +2701,6 @@ pub struct RecapSession {
 /// A bounded account of one workspace: who is here, what changed, what is
 /// remembered, what evidence exists and what LangSpan cannot currently see.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct Recap {
     pub workspace_id: String,
     pub root: String,
@@ -2818,7 +2779,6 @@ pub const CONTEXT_FILES: u32 = 5;
 /// One name asked about in a code-context query, with where it is defined
 /// and which files mention it. A name match, not a resolved symbol.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct NameContext {
     pub name: String,
     pub definitions: Vec<SymbolRef>,
@@ -2853,7 +2813,6 @@ pub const REMOTE_WORK: usize = 8;
 pub const REMOTE_HORIZON_MS: u64 = 10 * 60 * 1000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct Briefing {
     pub session_id: String,
     /// False when the same peers and paths were already delivered.
@@ -3183,7 +3142,6 @@ pub struct UncoordinatedChange {
 /// An uncoordinated change as one session's briefing carries it: the files
 /// still at a version no session has reported.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct UncoordinatedNotice {
     pub sessions: Vec<String>,
     pub paths: Vec<String>,
@@ -3192,7 +3150,6 @@ pub struct UncoordinatedNotice {
 
 /// A checkout change as one session's briefing carries it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct CheckoutNotice {
     pub from_branch: Option<String>,
     pub to_branch: Option<String>,
@@ -5648,7 +5605,7 @@ impl<'de> Deserialize<'de> for Command {
 // boxing `Status`'s state would only add an allocation to every status read.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum Outcome {
     Workspace {
         workspace: Workspace,

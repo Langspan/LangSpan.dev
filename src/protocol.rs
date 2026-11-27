@@ -49,6 +49,7 @@ pub const CAPABILITIES: &[(&str, Option<u16>)] = &[
     ("refusal_outcomes", Some(PROTOCOL_VERSION_5)),
     ("renames", Some(PROTOCOL_VERSION_4)),
     ("symbol_findings", Some(PROTOCOL_VERSION_6)),
+    ("tolerant_responses", None),
     ("trails", Some(PROTOCOL_VERSION_4)),
     ("withheld_events", None),
 ];
@@ -641,8 +642,9 @@ impl Request {
 /// An answer. On the wire, the answer to a request that named a
 /// capability the daemon does not know also carries `capabilities`, the
 /// names granted (`encode_with`); the client reads it before the response.
+/// A client ignores the fields it does not know in a response, its outcome
+/// and the objects only responses carry (`tolerant_responses`, ADR 0015).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct Response {
     pub version: u16,
     pub request_id: String,
