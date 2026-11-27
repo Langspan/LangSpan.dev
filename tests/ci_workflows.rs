@@ -206,6 +206,8 @@ fn code_split_into_new_core_daemon_or_hook_modules_runs_the_dry_runs() {
         "src/text/redact.rs",
         "src/briefing.rs",
         "src/briefing/render.rs",
+        // The workflow that runs them.
+        ".github/workflows/bench.yml",
     ] {
         let repo = Repo::new();
         repo.commit("README.md");
@@ -289,7 +291,7 @@ fn the_full_lane_builds_once_per_platform_and_tests_the_archive_in_every_shard()
             // shard can't leave a test in none.
             "          LANGSPAN_TEST_PARTITION: time:${{ matrix.shard }}/${{ strategy.job-total }}\n"
                 .into(),
-            format!("          LANGSPAN_BENCH_DRY_RUNS: ${{{{ needs.{build}.outputs.dry_runs }}}}\n"),
+            "          LANGSPAN_BENCH_DRY_RUNS: skip\n".into(),
             format!("          name: junit-{platform}-${{{{ matrix.shard }}}}\n"),
         ] {
             assert!(shards.contains(&line), "{tests} lacks {line}");
@@ -309,6 +311,74 @@ fn the_full_lane_builds_once_per_platform_and_tests_the_archive_in_every_shard()
             "{tests} uses the build cache"
         );
     }
+}
+
+/// The benchmark dry runs take 92 to 132 s each, so the required checks
+/// never run them: every job of check.yml skips them, and bench.yml runs
+/// them instead.
+#[test]
+fn check_yml_never_runs_the_benchmark_dry_runs() {
+    let text = workflow("check.yml");
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains("LANGSPAN_BENCH_DRY_RUNS:"))
+        .collect();
+    // Both build jobs and both shard jobs.
+    assert_eq!(lines.len(), 4, "{lines:?}");
+    for line in lines {
+        assert_eq!(line.trim(), "LANGSPAN_BENCH_DRY_RUNS: skip");
+    }
+    assert!(
+        !text.contains("outputs.dry_runs"),
+        "check.yml reads dry_runs"
+    );
+}
+
+/// bench.yml runs the dry runs for a pull request or push to main that
+/// touches what they drive (scripts/ci-changes.sh decides), every night and
+/// on demand, on Linux and macOS, and never in the merge queue.
+#[test]
+fn bench_yml_runs_the_dry_runs_off_the_merge_queue() {
+    let text = workflow("bench.yml");
+    let on = text
+        .split("\non:\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\npermissions:").next())
+        .expect("bench.yml has a top-level `on:` block");
+    for event in [
+        "  pull_request:",
+        "  push:",
+        "  schedule:",
+        "  workflow_dispatch:",
+    ] {
+        assert!(on.lines().any(|l| l == event), "bench.yml lacks {event}");
+    }
+    assert!(on.contains("    branches: [main]\n"), "{on}");
+    assert!(!on.contains("merge_group"), "the merge queue waits on it");
+    assert!(text.contains("\npermissions: {}\n"));
+    let runs = job(&text, "dry-runs");
+    for line in [
+        "        run: bash scripts/ci-changes.sh\n",
+        "      contents: read\n",
+        "        platform: [linux, macos]\n",
+        "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || steps.changes.outputs.dry_runs == 'run'",
+        "cargo nextest run --locked --profile ci --test benchmark_harness -E 'test(/^dry_run_/)'",
+    ] {
+        assert!(runs.contains(line), "dry-runs lacks {line}");
+    }
+    assert!(!runs.contains("LANGSPAN_BENCH_DRY_RUNS"), "{runs}");
+    assert!(
+        !runs.contains("actions/cache/save"),
+        "only main's check.yml saves"
+    );
+    let report = job(&text, "nightly-report");
+    assert!(report.contains("\n    needs: [dry-runs]\n"), "{report}");
+    assert!(report.contains("github.event_name == 'schedule' && failure()"));
+    assert!(report.contains("      issues: write\n"));
+    assert!(
+        !report.contains("actions/checkout"),
+        "the issue writer runs repository code"
+    );
 }
 
 #[test]
