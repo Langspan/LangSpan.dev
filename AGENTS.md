@@ -6,7 +6,7 @@ The product name is **LangSpan** and the CLI is **`langspan`**.
 
 ## Before any change
 
-- Read and follow [docs/engineering.md](docs/engineering.md): commands, workflow, design, security, testing and Git rules for every agent and person here.
+- Read and follow [docs/engineering.md](docs/engineering.md) and [docs/engineering-standard.md](docs/engineering-standard.md): commands, workflow, design principles and the check behind each, security, testing and Git rules for every agent and person here.
 - Write docs, comments, CLI messages, commits and pull request text to [docs/writing-style.md](docs/writing-style.md). Keep public claims within [docs/positioning.md](docs/positioning.md).
 
 ## What to work on

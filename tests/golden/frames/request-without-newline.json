@@ -1,0 +1,1 @@
+{"version":10,"request_id":"","replayed":false,"generation":0,"lease_valid":null,"outcome":{"type":"error","code":"invalid_frame","message":"expected newline-terminated JSON <=64 KiB"}}

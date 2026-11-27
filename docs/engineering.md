@@ -31,6 +31,7 @@ The integration suite uses temporary files, real SQLite, Unix sockets and child 
 - After a correction from the owner, add the pattern to `docs/lessons.md` so it doesn't repeat.
 
 ## Design
+The [engineering standard](engineering-standard.md) says what each principle means here, names the check that enforces it, and lists what must not be split.
 - DRY: each rule, formula and format has one owner in the code. KISS. YAGNI: no abstraction before its second use, and no option nobody asked for.
 - Ports and adapters. A pure core (no I/O, no clock, no randomness, all injected) sits behind ports. Adapters handle the OS, files, git, the database, the network and external CLIs. Dependencies point inward. A test enforces this for `langspan-core` (`crates/langspan-core/tests/architecture.rs`). In the `langspan` crate the [ratchets](development-process.md#ratchets) only stop new cycles, and new outward edges between modules that have a `// layer:` marker; the existing cycles are recorded debt.
 - One contract. Every interface (CLI, MCP, hooks, any UI) calls the same application operations. Wire formats are versioned schemas with golden test vectors, and a breaking change bumps the version.
