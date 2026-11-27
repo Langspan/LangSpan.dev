@@ -83,8 +83,13 @@ While the Linux check on `main` fails, merge only the fix for that failure.
 ### Which tests run when
 
 The Rust checks ([`check.yml`](../.github/workflows/check.yml)) run
-`scripts/check.sh` on Linux, then on macOS. What they run depends on the
-event:
+`scripts/check.sh` on Linux and macOS at the same time. The tests run under
+cargo-nextest, locally and in CI: `cargo nextest run --workspace --locked`
+runs them in parallel with the settings in
+[`.config/nextest.toml`](../.config/nextest.toml), and
+`cargo test --doc --workspace --locked` runs the doc tests. A test still
+running after 3 minutes is killed and fails, and so is one that leaves a
+child process holding its output. What the checks run depends on the event:
 
 - **A pull request** runs the whole suite, except for the benchmark
   harness's dry runs (the `dry_run_*` tests in `tests/benchmark_harness.rs`).
@@ -93,8 +98,9 @@ event:
   briefing code they drive (`src/daemon.rs`, `src/hook.rs`, `src/hook/`,
   `src/claude_code.rs`, `src/recent.rs`, `crates/langspan-core/src/lib.rs`),
   or what builds and runs the suite (`Cargo.toml`, `Cargo.lock`,
-  `rust-toolchain.toml`, `check.yml`, `scripts/check.sh`,
-  `scripts/test-foreign-home.sh`). The dry runs took about 11 minutes of
+  `rust-toolchain.toml`, `.config/nextest.toml`, `check.yml`,
+  `scripts/check.sh`, `scripts/test-foreign-home.sh`,
+  `scripts/ci-changes.sh`). The dry runs took about 11 minutes of
   an 18-minute macOS job. A pull request that changes only Markdown builds
   nothing.
 - **A merge-queue commit** follows the pull request's rules, judged on
@@ -110,11 +116,20 @@ event:
 
 When a dry run is skipped, the test log shows
 `skipped: no benchmark or briefing change`. A local `sh scripts/check.sh`
-runs every test unless `LANGSPAN_BENCH_DRY_RUNS=skip` is set. The workflow
-owns the path list; change the list there and here together.
+runs every test unless `LANGSPAN_BENCH_DRY_RUNS=skip` is set.
+[`scripts/ci-changes.sh`](../scripts/ci-changes.sh) owns the path list;
+change the list there and here together.
 
-If a test fails only sometimes, open an issue and land a deterministic fix
-the same day. Never rerun the job and move on.
+A failing test isn't retried on a pull request, so a flaky test shows
+there. In the merge queue and on `main` it gets two more tries, so one
+flaky test doesn't eject a healthy pull request; a test that fails every
+try still fails the check. Each job's summary names the tests that passed
+only on retry, and on `main` they are added to the issue "Flaky tests seen
+on main". Every job keeps its JUnit report as an artifact for 14 days.
+
+A test seen flaky, in that issue, a summary or anywhere else, gets an issue
+and a deterministic fix the same day. Never rerun the job and move on, and
+never weaken an assertion to make it pass.
 
 ## Releases
 

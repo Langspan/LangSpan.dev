@@ -6,16 +6,21 @@
 # foreign install and fails, and one that writes there fails too. The host
 # location variables are unset, so they cannot point past it.
 #
-# Arguments are passed to `cargo test`. The toolchain and the cargo cache
-# keep their own locations, resolved before HOME moves.
+# The tests run under cargo-nextest (.config/nextest.toml; NEXTEST_PROFILE
+# and NEXTEST_RETRIES choose the profile and retries), then the doc tests
+# under `cargo test --doc`, which nextest does not run. Arguments are passed
+# to `cargo nextest run`. The toolchain and the cargo cache keep their own
+# locations, resolved before HOME moves. nextest's per-user configuration
+# is not read, so the run is the same on every machine.
 set -eu
 : "${CARGO_HOME:=${HOME}/.cargo}"
 : "${RUSTUP_HOME:=${HOME}/.rustup}"
 export CARGO_HOME RUSTUP_HOME
+export NEXTEST_USER_CONFIG_FILE=none
 
 # Build what the suite runs first, target/debug/langspan included: that same
 # build installs the foreign home, and the run below builds nothing more.
-cargo test --workspace --locked --no-run "$@"
+cargo nextest run --workspace --locked --no-run "$@"
 
 home=$(mktemp -d "${TMPDIR:-/tmp}/langspan-foreign-home.XXXXXX")
 cleanup() {
@@ -29,7 +34,11 @@ trap 'exit 1' INT TERM
   --skill --apply >/dev/null
 chmod -R a-w "$home"
 
-env -u CLAUDE_CONFIG_DIR -u CODEX_HOME -u GEMINI_CLI_HOME \
-  -u LANGSPAN_STATE_DIR -u XDG_STATE_HOME -u XDG_CONFIG_HOME \
-  -u CLAUDE_PROJECT_DIR \
-  HOME="$home" cargo test --workspace --locked "$@"
+foreign() {
+  env -u CLAUDE_CONFIG_DIR -u CODEX_HOME -u GEMINI_CLI_HOME \
+    -u LANGSPAN_STATE_DIR -u XDG_STATE_HOME -u XDG_CONFIG_HOME \
+    -u CLAUDE_PROJECT_DIR \
+    HOME="$home" "$@"
+}
+foreign cargo nextest run --workspace --locked "$@"
+foreign cargo test --doc --workspace --locked

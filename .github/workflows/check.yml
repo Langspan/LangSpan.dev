@@ -27,6 +27,13 @@ env:
   # demonstration on the debug binary only; main and manual runs also build
   # the release binary and run it again on that.
   LANGSPAN_CHECK_RELEASE: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
+  # cargo-nextest (.config/nextest.toml): the `ci` profile writes
+  # target/nextest/ci/junit.xml. No retry on a pull request, so a flaky
+  # test shows there; two in the merge queue and on main, so one flaky test
+  # doesn't eject a healthy pull request. A test that passed only on retry
+  # is named in the job summary, and on main in an issue (flaky-report).
+  NEXTEST_PROFILE: ci
+  NEXTEST_RETRIES: ${{ github.event_name == 'pull_request' && '0' || '2' }}
 # A newer push to a pull request cancels its older run. Runs on main are
 # never cancelled, so every commit on main keeps its own result; the nightly
 # run has a group of its own, so it never replaces a push's pending run.
@@ -42,8 +49,7 @@ jobs:
     permissions:
       contents: read
     outputs:
-      code: ${{ steps.changes.outputs.code }}
-      dry_runs: ${{ steps.changes.outputs.dry_runs }}
+      flaky: ${{ steps.flaky.outputs.flaky }}
     steps:
       # Two commits deep: a pull request's run checks out the merge commit,
       # whose first parent is the base, so the change is HEAD^1..HEAD with
@@ -54,23 +60,8 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: ${{ github.event_name != 'merge_group' && 2 || 0 }}
-      # A pull request or merge-queue commit that changes only Markdown
-      # builds nothing: no test or build step reads a .md file. Other files
-      # under docs/ count as code, since a test replays a recorded host
-      # session kept in docs/evidence/.
-      # The jobs still run and pass, so a required check is never left
-      # waiting, as it would be with a workflow-level paths filter. Pushes
-      # to main, manual runs and the nightly run always check.
-      #
-      # The benchmark harness's dry runs (tests/benchmark_harness.rs) took
-      # about 11 minutes of macOS's 18 (issue #286). They run only when the
-      # change touches a path in BENCH_PATHS: the harness, the briefing,
-      # hook and daemon code it drives, and what builds or runs the suite.
-      # A pull request is HEAD^1..HEAD. A merge-queue commit is its group's
-      # base..head, so the pull requests queued ahead count too. A push to
-      # main is HEAD^1..HEAD when it adds one commit (a squash merge), and
-      # otherwise runs them. Manual and nightly runs always run them.
-      # Anything unsure runs them.
+      # Whether the change is code at all, and whether the benchmark dry
+      # runs are needed: the script says why.
       - name: Decide what the change touches
         id: changes
         env:
@@ -78,47 +69,7 @@ jobs:
           BEFORE: ${{ github.event.before }}
           BASE_SHA: ${{ github.event.merge_group.base_sha }}
           HEAD_SHA: ${{ github.event.merge_group.head_sha }}
-          BENCH_PATHS: >-
-            ^benchmarks/
-            |^tests/benchmark_harness\.rs$
-            |^src/(daemon|hook|claude_code|recent)\.rs$
-            |^src/hook/
-            |^crates/langspan-core/src/lib\.rs$
-            |^(Cargo\.toml|Cargo\.lock|rust-toolchain\.toml)$
-            |^\.github/workflows/check\.yml$
-            |^scripts/(check|test-foreign-home)\.sh$
-        run: |
-          # A failed git command stops the step (bash -e) instead of
-          # reading as "nothing changed".
-          code=true
-          dry_runs=run
-          from=
-          to=HEAD
-          if [ "$EVENT" = pull_request ]; then
-            from=HEAD^1
-          elif [ "$EVENT" = merge_group ] && [ -n "$BASE_SHA" ] && [ -n "$HEAD_SHA" ]; then
-            from=$BASE_SHA
-            to=$HEAD_SHA
-          elif [ "$EVENT" = push ] && [ "$(git rev-parse HEAD^1)" = "$BEFORE" ]; then
-            from=HEAD^1
-          fi
-          if [ -n "$from" ]; then
-            changed=$(git diff --name-only "$from" "$to")
-            if [ "$EVENT" != push ] && [ -n "$changed" ] && ! printf '%s\n' "$changed" | grep -Ev '\.md$' | grep -q .; then
-              code=false
-            fi
-            pattern=$(printf '%s' "$BENCH_PATHS" | tr -d ' ')
-            # grep exits 1 for no match; anything else (a bad pattern)
-            # stops the step rather than skip the dry runs.
-            matches=$(grep -Ec -- "$pattern" <<< "$changed") || [ $? -eq 1 ]
-            if [ -n "$changed" ] && [ "$matches" -eq 0 ]; then
-              dry_runs=skip
-            fi
-          fi
-          echo "code=$code" >> "$GITHUB_OUTPUT"
-          echo "dry_runs=$dry_runs" >> "$GITHUB_OUTPUT"
-          echo "touches code: $code"
-          echo "benchmark dry runs: $dry_runs"
+        run: bash scripts/ci-changes.sh
       # rustup 1.28 and later no longer install the toolchain on first use;
       # with no argument this installs the one rust-toolchain.toml names.
       - name: Install the toolchain from rust-toolchain.toml
@@ -133,7 +84,7 @@ jobs:
         if: steps.changes.outputs.code == 'true'
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Install the dependency policy and unused-dependency checkers
+      - name: Install the dependency policy and unused-dependency checkers and the test runner
         if: steps.changes.outputs.code == 'true'
         run: |
           bash scripts/install-ci-tools.sh "$RUNNER_TEMP/ci-tools"
@@ -144,44 +95,113 @@ jobs:
           # `skip` or `run`; tests/benchmark_harness.rs skips on `skip` only.
           LANGSPAN_BENCH_DRY_RUNS: ${{ steps.changes.outputs.dry_runs }}
         run: sh scripts/check.sh
+      - name: Name the tests that passed only on retry
+        id: flaky
+        if: always() && steps.changes.outputs.code == 'true'
+        run: python3 -I -B scripts/flaky-tests.py target/nextest/ci/junit.xml
+      - name: Keep the JUnit report
+        if: always() && steps.changes.outputs.code == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: junit-linux
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: warn
+          retention-days: 14
   # The same check on Apple silicon. `macos-26` is GitHub's current arm64
   # image (`macos-latest` points at it); a pinned label, so an image change
-  # is a deliberate edit here.
-  #
-  # macOS runners are the costlier and scarcer ones, so this job starts
-  # only after Linux passes and only when code changed: most
-  # failures show on both, and macOS is kept for what only it finds (it
-  # caught the races fixed in #29 and #40). A job skipped this way counts as
-  # passed for a required check.
+  # is a deliberate edit here. It starts with Linux, not after it, and
+  # decides what the change touches for itself, the same way.
   macos:
     name: macOS
-    needs: linux
-    if: needs.linux.outputs.code == 'true'
     runs-on: macos-26
     timeout-minutes: 40
     permissions:
       contents: read
+    outputs:
+      flaky: ${{ steps.flaky.outputs.flaky }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: ${{ github.event_name != 'merge_group' && 2 || 0 }}
+      - name: Decide what the change touches
+        id: changes
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+        run: bash scripts/ci-changes.sh
       - name: Install the toolchain from rust-toolchain.toml
+        if: steps.changes.outputs.code == 'true'
         run: |
           rustup --version
           rustup toolchain install
           rustc --version
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        if: steps.changes.outputs.code == 'true'
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Install the dependency policy and unused-dependency checkers
+      - name: Install the dependency policy and unused-dependency checkers and the test runner
+        if: steps.changes.outputs.code == 'true'
         run: |
           bash scripts/install-ci-tools.sh "$RUNNER_TEMP/ci-tools"
           echo "$RUNNER_TEMP/ci-tools" >> "$GITHUB_PATH"
       - name: Check formatting, dependencies, lint, real integration tests and the demonstration
+        if: steps.changes.outputs.code == 'true'
         env:
-          # Linux's decision, so both jobs run the same tests.
-          LANGSPAN_BENCH_DRY_RUNS: ${{ needs.linux.outputs.dry_runs }}
+          LANGSPAN_BENCH_DRY_RUNS: ${{ steps.changes.outputs.dry_runs }}
         run: sh scripts/check.sh
+      - name: Name the tests that passed only on retry
+        id: flaky
+        if: always() && steps.changes.outputs.code == 'true'
+        run: python3 -I -B scripts/flaky-tests.py target/nextest/ci/junit.xml
+      - name: Keep the JUnit report
+        if: always() && steps.changes.outputs.code == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: junit-macos
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: warn
+          retention-days: 14
+  # A test that passed only on retry on main opens one issue, or comments
+  # on it while it is open, naming the tests. Only this job can write, and
+  # only issues; it checks out nothing and runs no repository code. The
+  # names come from the two jobs' outputs, through the environment.
+  flaky-report:
+    name: Flaky test report
+    needs: [linux, macos]
+    if: always() && github.ref == 'refs/heads/main' && (needs.linux.outputs.flaky != '' || needs.macos.outputs.flaky != '')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update the flaky test issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TITLE: Flaky tests seen on main
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.sha }}
+          LINUX_FLAKY: ${{ needs.linux.outputs.flaky }}
+          MACOS_FLAKY: ${{ needs.macos.outputs.flaky }}
+        run: |
+          # One line per test: "- `binary test` (Linux)".
+          list() {
+            printf '%s\n' "$2" | while IFS= read -r name; do
+              if [ -n "$name" ]; then printf -- '- `%s` (%s)\n' "$name" "$1"; fi
+            done
+          }
+          body=$(printf 'These tests failed a try and then passed on main at %s, so the run passed.\n\n%s\n%s\n\nRun: %s\n\nGive each a deterministic fix the same day (docs/development-process.md).' \
+            "$SHA" "$(list Linux "$LINUX_FLAKY")" "$(list macOS "$MACOS_FLAKY")" "$RUN_URL")
+          number=$(gh issue list --state open --search "\"$TITLE\" in:title" --json number,title \
+            --jq 'map(select(.title == env.TITLE)) | .[0].number // empty')
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body "$body"
+          else
+            gh issue create --title "$TITLE" --body "$body"
+          fi
   # A nightly run that fails opens one issue, or comments on it while it is
   # still open, so the failure isn't missed. Only this job can write, and
   # only issues; it checks out nothing and runs no repository code. The

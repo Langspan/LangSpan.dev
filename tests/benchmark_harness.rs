@@ -11,7 +11,7 @@
 //! The dry runs are the slow part: about 11 minutes of an 18-minute macOS
 //! job (issue #286). CI sets `LANGSPAN_BENCH_DRY_RUNS=skip` when a change
 //! touches no benchmark, briefing, hook or daemon code, and runs them every
-//! night on `main`; `.github/workflows/check.yml` owns the list of paths.
+//! night on `main`; `scripts/ci-changes.sh` owns the list of paths.
 //! Any other value, or none, runs them, so a local check always does.
 
 use std::ffi::OsStr;

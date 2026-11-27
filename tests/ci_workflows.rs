@@ -1,8 +1,10 @@
 #![cfg(unix)]
 //! The workflows that provide required checks also run on merge-queue
-//! commits, and check.yml's "Decide what the change touches" step decides
-//! from the merge group's base there. The step's own text, taken from
-//! check.yml, runs here with bash in temporary git repositories.
+//! commits, and scripts/ci-changes.sh, which each check.yml job runs to
+//! decide what the change touches, decides from the merge group's base
+//! there. It runs here with bash in temporary git repositories. The tests
+//! that run under nextest and the report of those that passed only on retry
+//! are checked here too.
 
 use std::{
     fs,
@@ -13,11 +15,29 @@ use std::{
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
-fn workflow(name: &str) -> String {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join(".github/workflows")
-        .join(name);
+fn root() -> &'static Path {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn read(relative: &str) -> String {
+    let path = root().join(relative);
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+}
+
+fn workflow(name: &str) -> String {
+    read(&format!(".github/workflows/{name}"))
+}
+
+/// The text of one job in a workflow: from `  id:` to the next job.
+fn job(text: &str, id: &str) -> String {
+    let header = format!("  {id}:");
+    let mut lines = text.lines().skip_while(|line| *line != header);
+    let first = lines.next().unwrap_or_else(|| panic!("no job {id}"));
+    let body = lines.take_while(|line| line.is_empty() || line.starts_with("   "));
+    std::iter::once(first)
+        .chain(body)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[test]
@@ -33,42 +53,6 @@ fn required_check_workflows_run_on_merge_queue_commits() {
             on.lines().any(|line| line.trim_end() == "  merge_group:"),
             "{name} does not run on merge_group, so a merge queue would wait for its checks"
         );
-    }
-}
-
-/// The step's environment names and script, as check.yml has them.
-struct Step {
-    bench_paths: String,
-    script: String,
-}
-
-fn decide_step() -> Step {
-    let text = workflow("check.yml");
-    let step = text
-        .split("- name: Decide what the change touches\n")
-        .nth(1)
-        .expect("check.yml has the step `Decide what the change touches`");
-    let bench_paths = step
-        .split("BENCH_PATHS: >-\n")
-        .nth(1)
-        .expect("the step sets BENCH_PATHS")
-        .lines()
-        .take_while(|line| !line.trim_start().starts_with("run:"))
-        .map(str::trim)
-        .collect::<Vec<_>>()
-        .join(" ");
-    let script = step
-        .split("        run: |\n")
-        .nth(1)
-        .expect("the step has a run block")
-        .lines()
-        .take_while(|line| line.is_empty() || line.starts_with("          "))
-        .map(|line| line.strip_prefix("          ").unwrap_or(line))
-        .collect::<Vec<_>>()
-        .join("\n");
-    Step {
-        bench_paths,
-        script,
     }
 }
 
@@ -117,20 +101,18 @@ impl Repo {
         self.git(&["rev-parse", "HEAD"])
     }
 
-    /// Runs the step for `event` and returns (code, dry_runs).
+    /// Runs scripts/ci-changes.sh for `event` and returns (code, dry_runs).
     fn decide(&self, event: &str, base: &str, head: &str) -> (String, String) {
-        let step = decide_step();
         // Outside the work tree, so a later commit never adds it.
         let output = self.0.with_extension("github-output");
         let _ = fs::remove_file(&output);
         let out = Command::new("bash")
-            .args(["-e", "-c", &step.script])
+            .arg(root().join("scripts/ci-changes.sh"))
             .current_dir(&self.0)
             .env("EVENT", event)
             .env("BEFORE", "")
             .env("BASE_SHA", base)
             .env("HEAD_SHA", head)
-            .env("BENCH_PATHS", &step.bench_paths)
             .env("GITHUB_OUTPUT", &output)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -209,4 +191,119 @@ fn a_pull_request_still_decides_from_head_parent() {
         repo.decide("pull_request", "", &head),
         decided("false", "skip")
     );
+}
+
+#[test]
+fn linux_and_macos_start_together() {
+    let text = workflow("check.yml");
+    for id in ["linux", "macos"] {
+        assert!(
+            !job(&text, id).contains("\n    needs:"),
+            "the {id} job waits for another job, so Linux and macOS run in series"
+        );
+    }
+}
+
+#[test]
+fn the_suite_runs_under_nextest_with_retries_only_off_pull_requests() {
+    let script = read("scripts/test-foreign-home.sh");
+    assert!(script.contains("cargo nextest run --workspace --locked"));
+    assert!(script.contains("cargo test --doc --workspace --locked"));
+    // A flaky test must show on a pull request; in the merge queue and on
+    // main it may pass on a later try, and is then reported.
+    assert!(
+        workflow("check.yml")
+            .contains("NEXTEST_RETRIES: ${{ github.event_name == 'pull_request' && '0' || '2' }}")
+    );
+    let config = read(".config/nextest.toml");
+    for line in [
+        "slow-timeout = { period = \"60s\", terminate-after = 3 }",
+        "leak-timeout = { period = \"1s\", result = \"fail\" }",
+        "test-threads = \"num-cpus\"",
+        "junit.path = \"junit.xml\"",
+    ] {
+        assert!(
+            config.lines().any(|l| l == line),
+            "nextest.toml lacks {line}"
+        );
+    }
+    assert!(
+        !config.lines().any(|l| l.starts_with("retries")),
+        "retries come from NEXTEST_RETRIES by event, not from the profile"
+    );
+}
+
+/// A new empty directory under the system temporary directory.
+fn temp_dir(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "ls-{name}-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// Runs scripts/flaky-tests.py on `junit` and returns (stdout, summary,
+/// GITHUB_OUTPUT).
+fn flaky_report(junit: &Path) -> (String, String, String) {
+    let dir = temp_dir("flaky-report");
+    let summary = dir.join("summary.md");
+    let output = dir.join("output");
+    let out = Command::new("python3")
+        .args(["-I", "-B"])
+        .arg(root().join("scripts/flaky-tests.py"))
+        .arg(junit)
+        .env("GITHUB_STEP_SUMMARY", &summary)
+        .env("GITHUB_OUTPUT", &output)
+        .output()
+        .expect("python3 runs scripts/flaky-tests.py");
+    let read_or_empty = |p: &Path| fs::read_to_string(p).unwrap_or_default();
+    let result = (read_or_empty(&summary), read_or_empty(&output));
+    let _ = fs::remove_dir_all(&dir);
+    assert!(out.status.success(), "flaky-tests.py failed: {out:?}");
+    (String::from_utf8(out.stdout).unwrap(), result.0, result.1)
+}
+
+#[test]
+fn the_flaky_report_names_a_test_that_passed_only_on_retry_and_no_other() {
+    let (stdout, summary, output) =
+        flaky_report(&root().join("tests/fixtures/nextest/junit-retries.xml"));
+    assert_eq!(stdout, "flaky_sample passes_on_its_second_try\n");
+    assert!(summary.contains("passed only on retry"), "{summary}");
+    assert!(summary.contains("`flaky_sample passes_on_its_second_try`"));
+    // A test that failed every try fails the run; it is not flaky.
+    assert!(!summary.contains("fails_every_try"), "{summary}");
+    assert!(!summary.contains("always_passes"), "{summary}");
+    let mut lines = output.lines();
+    let delimiter = lines
+        .next()
+        .and_then(|l| l.strip_prefix("flaky<<"))
+        .unwrap_or_else(|| panic!("no flaky output in {output:?}"));
+    assert_eq!(lines.next(), Some("flaky_sample passes_on_its_second_try"));
+    assert_eq!(lines.next(), Some(delimiter));
+}
+
+#[test]
+fn the_flaky_report_says_so_when_no_test_or_no_report_is_there() {
+    let dir = temp_dir("flaky-none");
+    let junit = dir.join("junit.xml");
+    fs::write(
+        &junit,
+        r#"<testsuites><testsuite name="a"><testcase name="t" classname="a" time="0.1"/></testsuite></testsuites>"#,
+    )
+    .unwrap();
+    let (stdout, summary, output) = flaky_report(&junit);
+    assert_eq!(stdout, "");
+    assert!(
+        summary.contains("No test passed only on retry."),
+        "{summary}"
+    );
+    assert!(output.starts_with("flaky<<"), "{output}");
+    assert_eq!(output.lines().count(), 2, "{output}");
+
+    let (stdout, summary, _) = flaky_report(&dir.join("missing.xml"));
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(stdout, "");
+    assert!(summary.contains("No JUnit report"), "{summary}");
 }
