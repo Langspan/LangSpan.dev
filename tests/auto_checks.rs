@@ -609,8 +609,11 @@ fn a_batch_of_writes_runs_one_check_on_that_exact_tree_and_its_failure_is_delive
     });
 }
 
+/// Slow (about 13 s): the 5 s debounce must stay far longer than the gaps
+/// in a burst on a loaded machine, and the test then watches for a second
+/// run for longer than the debounce.
 #[test]
-fn a_burst_of_batches_runs_one_check_on_the_tree_it_left() {
+fn slow_a_burst_of_batches_runs_one_check_on_the_tree_it_left() {
     // Far longer than the gaps between the three batches below.
     let f = Fixture::new(5000);
     // It logs as it starts and then takes a second, so a run started

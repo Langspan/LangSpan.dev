@@ -1069,8 +1069,9 @@ fn a_workspace_registered_again_after_removal_is_not_compared_with_its_earlier_i
 }
 
 /// How long the daemon holds the indexer's notices after a pass, for the
-/// tests below: far longer than the switch or removal they make meanwhile.
-const REPORT_DELAY_MS: u64 = 3000;
+/// tests below: far longer than the switch or removal they make meanwhile,
+/// a clone and one or two CLI calls.
+const REPORT_DELAY_MS: u64 = 2000;
 
 /// A world whose indexer reports `REPORT_DELAY_MS` after each pass.
 fn slow_reporting_world() -> World {

@@ -634,9 +634,10 @@ async fn the_mcp_answer_stays_within_a_briefing_with_forty_sessions() {
 /// Real daemon process and real SQLite: 800,000 intent events are written
 /// into the log before the daemon starts, as a long-lived store holds them.
 /// Folding all of them took 2.6 s on a cloud Linux runner (debug build),
-/// the bounded fold 0.2 s: the limit is far from both.
+/// the bounded fold 0.2 s: the limit is far from both. Slow (about 13 s):
+/// the bound shows only on a history this long.
 #[test]
-fn an_admission_completes_promptly_while_reports_read_a_long_history() {
+fn slow_an_admission_completes_promptly_while_reports_read_a_long_history() {
     const HISTORY_PAIRS: i64 = 400_000;
     const ADMISSION_LIMIT: Duration = Duration::from_secs(1);
     let mut w = World::new();

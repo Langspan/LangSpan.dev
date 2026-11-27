@@ -42,15 +42,18 @@ junit.path = "junit.xml"
 # M-series laptop with 4 test threads: 1,103 tests in 15 s, against 1,866
 # in about 113 s with one thread per core for the whole suite. The rest run
 # in the merge queue, on main and nightly (the `ci` profile, no filter).
+# A test named `slow_…` is slow for a reason its comment states, and only
+# the full lane runs it (docs/development-process.md#slow-tests).
 [profile.ci-fast]
 inherits = "ci"
 default-filter = """
-kind(lib) | kind(bin)
+(kind(lib) | kind(bin)
 | package(langspan-core) | package(langspan-graph)
 | binary_id(langspan::protocol) | binary_id(langspan::store)
 | binary_id(langspan::git_output) | binary_id(langspan::mcp_frame)
 | binary_id(langspan::ci_workflows)
 | binary_id(langspan::readme_and_agent_docs)
 | binary_id(langspan::tool_count_in_docs)
-| binary_id(langspan::cli_golden) | binary_id(langspan::cli_transcript)
+| binary_id(langspan::cli_golden) | binary_id(langspan::cli_transcript))
+- test(/(^|::)slow_/)
 """

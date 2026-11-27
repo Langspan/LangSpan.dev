@@ -182,6 +182,15 @@ jobs:
           # `skip` or `run`; tests/benchmark_harness.rs skips on `skip` only.
           LANGSPAN_BENCH_DRY_RUNS: ${{ steps.changes.outputs.dry_runs }}
         run: sh scripts/check.sh
+      # In the full lane, no test took over 10 s unless it is named
+      # `slow_…` (issue #311, docs/development-process.md#slow-tests). It
+      # reports without failing the job until the slow tests in files this
+      # change left alone (the benchmark harness, between_steps, the Codex
+      # capture, four in graph.rs and one unit test) are shortened or named.
+      - name: Check that no untagged test took over 10 s
+        if: success() && steps.changes.outputs.code == 'true' && env.NEXTEST_PROFILE == 'ci'
+        continue-on-error: true
+        run: python3 -I -B scripts/slow-tests.py target/nextest/ci/junit.xml
       - name: Name the tests that passed only on retry
         id: flaky
         if: always() && steps.changes.outputs.code == 'true'
