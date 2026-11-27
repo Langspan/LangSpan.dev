@@ -921,6 +921,43 @@ fn the_skill_is_written_only_when_asked_reported_by_doctor_and_removed_exactly()
 }
 
 #[test]
+fn an_uninstall_dry_run_shows_each_section_file_with_its_own_remaining_text() {
+    use langspan::{install::Vendor, skill};
+    let home = Home::new();
+    home.claude_and_codex();
+    home.write(".gemini/settings.json", "{}\n");
+    let gemini_notes = "# My Gemini notes\n\nRun the tests first.\n";
+    let agents = home.write(".codex/AGENTS.md", OWNER_AGENTS);
+    home.ok(&["install", "--skill", "--hosts", "codex", "--apply"]);
+    // Gemini CLI can no longer be installed; an earlier install left this.
+    let gemini = home.write(
+        ".gemini/GEMINI.md",
+        &format!("{gemini_notes}\n{}", skill::render(Vendor::Gemini)),
+    );
+    let hosts = ["--hosts", "codex,gemini-cli"];
+
+    // Each file keeps different notes once its section goes, so neither
+    // preview stands in for the other (PR #400 review).
+    let dry = home.ok(&[&["uninstall"][..], &hosts].concat());
+    assert!(!dry.contains("would get the same skill text"), "{dry}");
+    for (path, notes) in [(&agents, OWNER_AGENTS), (&gemini, gemini_notes)] {
+        let shown = format!(
+            "{} would become ({} bytes):\n{}",
+            path.display(),
+            notes.len(),
+            notes.trim_end()
+        );
+        assert!(dry.contains(&shown), "{dry}");
+    }
+    let skill_line = skill::SOURCE.lines().next().unwrap();
+    assert!(!dry.contains(skill_line), "{dry}");
+
+    home.ok(&[&["uninstall", "--apply"][..], &hosts].concat());
+    assert_eq!(fs::read_to_string(&agents).unwrap(), OWNER_AGENTS);
+    assert_eq!(fs::read_to_string(&gemini).unwrap(), gemini_notes);
+}
+
+#[test]
 fn a_skill_file_langspan_did_not_write_stops_the_install_and_is_kept() {
     let home = Home::new();
     home.claude_and_codex();

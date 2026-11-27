@@ -1507,7 +1507,7 @@ fn user_install(
             println!("{text}");
         }
     }
-    // Each skill's text is shown once, however many hosts get a copy.
+    // Install shows the skill once; uninstall shows each file's own remainder.
     let mut shown: Option<&std::path::Path> = None;
     for plan in &skills {
         if plan.unchanged() {
@@ -1535,7 +1535,7 @@ fn user_install(
                 ),
                 _ => {
                     println!("{}", plan.shown());
-                    if plan.planned.is_some() {
+                    if install && plan.planned.is_some() {
                         shown = Some(&plan.path);
                     }
                 }
