@@ -241,6 +241,40 @@ class Indexing(unittest.TestCase):
         self.assertEqual(source.pub_items(), 1)
         self.assertEqual(source.indexing(), (1, 0))
 
+    def test_indexing_across_a_comment_counts(self):
+        # Each operand kind, then block, nested, doc and line comments before `[`.
+        src = (
+            "fn f(v: &[u8], i: usize) -> u8 {\n"
+            "    let a = v /* element */ [i];\n"
+            "    let b = f(v, i) /* a /* b */ */ [..i];\n"
+            "    let c = v[0] /** doc */ [1..];\n"
+            '    let d = b"ab" /* c */ [i];\n'
+            "    let e = v.get(i)? /* c */ /* d */ [0];\n"
+            "    let g = v // line\n"
+            "        [i];\n"
+            "    a + e + g\n"
+            "}\n"
+        )
+        self.assertEqual(ratchets.Source(src).indexing(), (5, 2))
+
+    def test_a_comment_before_an_array_or_slice_pattern_is_not_indexing(self):
+        # A keyword or punctuation before the comment starts a literal, type or pattern.
+        src = (
+            "fn f(v: &mut /* c */ [u8]) -> /* c */ [u8; 2] {\n"
+            "    let /* c */ [a, b] = [1, 2];\n"
+            "    let x = /* c */ [a, b];\n"
+            "    for y in /* c */ [a, b] {}\n"
+            "    match /* c */ [a, b] { _ => {} }\n"
+            "    if let /* c */ [_] = v {}\n"
+            "    return /* c */ [a, b];\n"
+            "}\n"
+        )
+        self.assertEqual(ratchets.Source(src).indexing(), (0, 0))
+
+    def test_marking_a_comment_keeps_its_lines(self):
+        marked = ratchets.strip("a /* x\ny */ b // z\n", mark=True)
+        self.assertEqual(marked, "a " + "\x01" * 4 + "\n" + "\x01" * 4 + " b " + "\x01" * 4 + "\n")
+
     def test_marking_an_unterminated_string_keeps_its_lines(self):
         self.assertEqual(ratchets.strip('x = "a\n', mark=True), "x =   \n")
 

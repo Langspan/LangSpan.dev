@@ -54,7 +54,8 @@ def _blank(text):
 def strip(src, mark=False):
     """Blank comments, strings and character literals, keeping every offset.
 
-    With mark, a string literal keeps a closing `"`, so an index can see its operand.
+    With mark, a string literal keeps a closing `"` and a comment becomes `\\x01`s,
+    so an index can see its operand and tell a comment from spacing.
     """
     out, i, n = [], 0, len(src)
     while i < n:
@@ -95,6 +96,8 @@ def strip(src, mark=False):
         blank = _blank(src[i:j])
         if mark and tok.endswith('"') and blank.endswith(" "):
             blank = blank[:-1] + '"'
+        elif mark and tok in ("//", "/*"):
+            blank = blank.replace(" ", "\x01")
         out.append(blank)
         i = j
     return "".join(out)
@@ -142,8 +145,11 @@ _PUB = re.compile(
 )
 # A `[` right after an operand: rustfmt puts a space or `<`, `&`, `(` before an
 # array type, literal or slice pattern, and `!` before a macro's. A `"` ends a
-# string literal (see strip's mark).
-_INDEX = re.compile(r"(?<=[\w)\]?\"])\[")
+# string literal and a `\x01` a comment (see strip's mark); rustfmt keeps a comment
+# between an operand and its `[`, so the operand is matched across one.
+_INDEX = re.compile(r"(\w+|[)\]?\"])(?:[\s\x01]*\x01[\s\x01]*)?\[")
+# Words that start an array, slice type or slice pattern after a comment.
+_NOT_OPERAND = {"break", "const", "if", "in", "let", "match", "mut", "return", "while"}
 
 
 class Source:
@@ -213,6 +219,8 @@ class Source:
             return self._indexing
         counts, s = [0, 0], self._marked
         for m in _INDEX.finditer(s):
+            if m.group(1) in _NOT_OPERAND:
+                continue
             depth, j = 0, m.end()
             while j < len(s) and (depth or s[j] != "]"):
                 depth += {"(": 1, "[": 1, "{": 1, ")": -1, "]": -1, "}": -1}.get(s[j], 0)
