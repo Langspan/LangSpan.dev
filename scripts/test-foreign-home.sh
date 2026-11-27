@@ -16,9 +16,11 @@
 # CI's full lane builds once and tests in shards (check.yml), through
 # LANGSPAN_TEST_STAGE: `archive` builds the suite into the nextest archive
 # LANGSPAN_TEST_ARCHIVE and runs only the doc tests; `shard` extracts that
-# archive into the checkout, at the paths the build used, and runs the
-# tests the arguments select (a `--partition`), without the doc tests.
-# Unset, it builds and runs everything.
+# archive into the checkout, at the paths the build used, and runs shard
+# LANGSPAN_TEST_SHARD (`K/N`) of its tests, without the doc tests. The
+# shard's tests come from scripts/ci-shards.py, which splits the measured
+# test time evenly; nextest must select exactly the count it expects, or
+# the shard fails. Unset, it builds and runs everything.
 set -eu
 : "${CARGO_HOME:=${HOME}/.cargo}"
 : "${RUSTUP_HOME:=${HOME}/.rustup}"
@@ -31,6 +33,10 @@ case $stage in
     archive=${LANGSPAN_TEST_ARCHIVE:-}
     if [ -z "$archive" ]; then
       echo "test-foreign-home.sh: the $stage stage needs LANGSPAN_TEST_ARCHIVE, the nextest archive's path" >&2
+      exit 2
+    fi
+    if [ "$stage" = shard ] && [ -z "${LANGSPAN_TEST_SHARD:-}" ]; then
+      echo "test-foreign-home.sh: the shard stage needs LANGSPAN_TEST_SHARD, the shard as K/N" >&2
       exit 2
     fi
     ;;
@@ -55,6 +61,22 @@ case $stage in
       --extract-to . --extract-overwrite --no-run
     set -- --binaries-metadata target/nextest/binaries-metadata.json \
       --cargo-metadata target/nextest/cargo-metadata.json --workspace-remap . "$@"
+    # Every shard lists the same archive and computes the same assignment.
+    skip=
+    if [ "${LANGSPAN_BENCH_DRY_RUNS:-}" = skip ]; then skip=--skip-dry-runs; fi
+    cargo nextest list "$@" --message-format json >target/nextest/all-tests.json
+    # shellcheck disable=SC2086 # $skip is one flag or none
+    plan=$(python3 -I -B scripts/ci-shards.py assign $skip --shard "$LANGSPAN_TEST_SHARD" \
+      target/nextest/all-tests.json)
+    expected=$(printf '%s\n' "$plan" | sed -n 1p)
+    filter=$(printf '%s\n' "$plan" | sed -n 2p)
+    cargo nextest list "$@" -E "$filter" --message-format json >target/nextest/shard-tests.json
+    selected=$(python3 -I -B scripts/ci-shards.py count target/nextest/shard-tests.json)
+    if [ "$selected" != "$expected" ]; then
+      echo "test-foreign-home.sh: nextest selects $selected tests for shard $LANGSPAN_TEST_SHARD, but scripts/ci-shards.py assigned it $expected; its filterset doesn't mean what the script expects, so fix the script" >&2
+      exit 1
+    fi
+    set -- "$@" -E "$filter"
     ;;
 esac
 

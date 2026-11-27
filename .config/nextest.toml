@@ -25,9 +25,16 @@ leak-timeout = { period = "1s", result = "fail" }
 # The benchmark harness's dry runs drive whole runs of the coordination
 # benchmark: the longest took 67 s on an Apple M-series laptop, and they ran
 # several times slower on CI's macOS runner. They are killed after 8 minutes.
+# They start first, with the `slow_` tests, so that a CI shard
+# (scripts/ci-shards.py) doesn't end waiting on one that started last.
 [[profile.default.overrides]]
 filter = "binary(benchmark_harness)"
 slow-timeout = { period = "120s", terminate-after = 4 }
+priority = 50
+
+[[profile.default.overrides]]
+filter = "test(/(^|::)slow_/)"
+priority = 50
 
 [profile.ci]
 failure-output = "immediate-final"

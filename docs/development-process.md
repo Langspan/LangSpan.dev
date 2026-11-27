@@ -191,9 +191,15 @@ the event (`LANGSPAN_CHECK_LANE`):
   every check but the tests and builds them into a
   [nextest archive](https://nexte.st/docs/ci-features/archiving/), and
   four shard jobs (`Linux tests 1` to `4`, `macOS tests 1` to `4`; the
-  `shard` lane) each run the tests nextest's `hash:K/4` partition gives
-  them, from that archive, under the same foreign home, retries and
-  reports. Every test runs in exactly one shard. The `Linux` and `macOS`
+  `shard` lane, `time:K/4`) each run the tests `scripts/ci-shards.py`
+  gives them, from that archive, under the same foreign home, retries and
+  reports. The script splits the measured times in
+  `scripts/ci-test-times.tsv` evenly; runner variance still moves a
+  shard by 15–20% from run to run ([evidence](evidence/ci/balance.md)).
+  Refresh the file from several full runs' JUnit reports, as its header
+  says, when the shards drift apart. Every test
+  runs in exactly one shard: a shard fails unless nextest selects the
+  count the script expects. The `Linux` and `macOS`
   checks are jobs of their own that pass only when the build job and
   every shard passed (`scripts/ci-shard-results.sh`); they name the
   shards' flaky and failed tests for the issues below. Four shards come
