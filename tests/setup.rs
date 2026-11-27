@@ -161,12 +161,15 @@ fn setup_without_a_terminal_or_yes_prints_the_plan_and_changes_nothing() {
     let shown = text(&output);
     assert!(output.status.success(), "{shown}");
     assert!(shown.contains("State directory: "), "{shown}");
-    assert!(
-        shown.contains(".claude/settings.json would become:"),
-        "{shown}"
-    );
+    // One line per file, no file's text, and the whole plan on a screen
+    // (issue #291).
+    assert!(shown.contains(".claude/settings.json"), "{shown}");
+    assert!(!shown.contains("would become"), "{shown}");
+    assert!(!shown.contains("\"hooks\""), "{shown}");
     assert!(shown.contains("skills/langspan/SKILL.md"), "{shown}");
     assert!(shown.contains("Coordinator:"), "{shown}");
+    assert!(shown.contains("--verbose"), "{shown}");
+    assert!(shown.lines().count() <= 24, "{shown}");
     assert!(
         shown.contains("Not run from a terminal and no --yes, so nothing was changed."),
         "{shown}"
@@ -176,6 +179,46 @@ fn setup_without_a_terminal_or_yes_prints_the_plan_and_changes_nothing() {
         "{shown}"
     );
     assert_eq!(base.snapshot(), before, "setup changed the home: {shown}");
+    assert!(daemons_for(&base.0).is_empty());
+}
+
+#[test]
+fn setup_verbose_shows_each_file_once_in_full() {
+    let base = Base::new();
+    fs::create_dir(base.home().join(".codex")).unwrap();
+    let home = base.home().to_string_lossy().into_owned();
+    let before = base.snapshot();
+    let output = base.run(&["setup", "--home", &home, "--verbose"], None);
+    let shown = text(&output);
+    assert!(output.status.success(), "{shown}");
+    assert!(
+        shown.contains(".claude/settings.json would become:"),
+        "{shown}"
+    );
+    // Claude Code's and Codex's copies of the skill: its text once.
+    assert_eq!(shown.matches("would become (").count(), 1, "{shown}");
+    assert!(
+        shown.contains(".codex/AGENTS.md would get the same skill text as "),
+        "{shown}"
+    );
+    assert_eq!(base.snapshot(), before, "{shown}");
+}
+
+#[test]
+fn setup_with_no_host_says_so_in_one_sentence_before_any_plan() {
+    let base = Base::new();
+    fs::remove_dir_all(base.home().join(".claude")).unwrap();
+    let home = base.home().to_string_lossy().into_owned();
+    let output = base.run(&["setup", "--home", &home, "--yes"], None);
+    let shown = text(&output);
+    assert!(!output.status.success(), "{shown}");
+    // Not a terminal, so the one line is the error's JSON form.
+    assert_eq!(shown.lines().count(), 1, "{shown}");
+    assert!(
+        shown.contains("No Claude Code, Codex or Cursor found"),
+        "{shown}"
+    );
+    assert!(shown.contains("--hosts"), "{shown}");
     assert!(daemons_for(&base.0).is_empty());
 }
 
@@ -193,6 +236,11 @@ fn setup_yes_without_a_service_starts_a_coordinator_and_a_second_run_changes_not
     );
     assert!(shown.contains("langspan doctor:"), "{shown}");
     assert!(shown.contains("ok Coordinator reachable"), "{shown}");
+    // A fresh install is a normal state, not a fault (issue #291).
+    assert!(!shown.contains("FIX"), "{shown}");
+    assert!(shown.contains("Nothing needs attention."), "{shown}");
+    let doctor = base.run(&["doctor", "--home", &home], None);
+    assert!(doctor.status.success(), "{}", text(&doctor));
     // Setup ends on the next step, after whatever doctor found (issue #290).
     assert_eq!(last_line(&output), "Try it: langspan demo", "{shown}");
     assert!(
