@@ -5,16 +5,17 @@
     "Change a setting on GitHub and here in the same pull request. No token or secret value belongs here."
   ],
   "actions_permissions": {
-    "allowed_actions": "all",
+    "allowed_actions": "selected",
     "enabled": true,
-    "sha_pinning_required": false
+    "sha_pinning_required": true,
+    "selected_actions_url": "https://api.github.com/repositories/1471867413/actions/permissions/selected-actions"
   },
   "automated_security_fixes": {
     "enabled": true,
     "paused": false
   },
   "code_scanning_default_setup": {
-    "state": "not-configured"
+    "state": "configured"
   },
   "private_vulnerability_reporting": {
     "enabled": true
@@ -25,7 +26,7 @@
     "allow_rebase_merge": true,
     "allow_squash_merge": true,
     "default_branch": "main",
-    "delete_branch_on_merge": false,
+    "delete_branch_on_merge": true,
     "has_discussions": true,
     "has_issues": true,
     "has_projects": true,
