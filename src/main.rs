@@ -5087,8 +5087,12 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
     })
 }
 
-/// The flags one command takes, read once its words are known.
+/// The flags one command takes, read once its words are known: a new flag
+/// is added to its command's entry in [`COMMANDS`].
 struct Flags {
+    /// Whether the command's words name this entry: all of them, and
+    /// those before a `--`.
+    form: fn(&[&str], &[&str]) -> bool,
     /// Flags without a value.
     switches: &'static [&'static str],
     /// Flags that take a value.
@@ -5120,114 +5124,352 @@ impl Repeat {
     }
 }
 
-const SWITCHES: &[&str] = &[
-    "--open",
-    "--allow-network",
-    "--demo",
-    "--check-again",
-    "--rebase",
-    "--adapt-renames",
-    "--symbols",
-    "--publish-as-branch",
-    "--mine",
-    "--detail",
-    "--rank",
-    "--renamed",
-    "--recent",
-    "--all",
-    "--skill",
-    "--create",
-    "--yes",
-    "--switch",
-    "--off",
-];
+impl Flags {
+    /// A command with no flags of its own.
+    const NONE: Flags = Flags {
+        form: |_, _| false,
+        switches: &[],
+        values: &[],
+        apply: false,
+        symbol: Repeat::No,
+        tag: Repeat::No,
+    };
+}
 
-const VALUES: &[&str] = &[
-    "--state-dir",
-    "--request-id",
-    "--summary",
-    "--ttl-ms",
-    "--after",
-    "--limit",
-    "--workspace",
-    "--root",
-    "--budget-ms",
-    "--event",
-    "--settings",
-    "--prompt-summary",
-    "--code-briefing",
-    "--presence",
-    "--presence-minutes",
-    "--max-peers",
-    "--remote",
-    "--name",
-    "--share-task",
-    "--onto",
-    "--timeout-s",
-    "--wait-s",
-    "--session",
-    "--to",
-    "--from",
+/// Flags every command reads: `--state-dir`, and the `--request-id` of a
+/// request to the coordinator. `--json`, `--apply`, `--symbol` and
+/// `--tag` are the parser's own; `-m` is `--message`.
+const EVERY_COMMAND: &[&str] = &["--state-dir", "--request-id"];
+
+/// The installers' options for the hosts they set up.
+const INSTALL_VALUES: &[&str] = &[
     "--home",
     "--hosts",
-    "--listen",
-    "-m",
-    "--message",
-    "--statusline",
-    "--deadline-ms",
-    "--forget",
-    "--since",
-    "--sound",
-    "--depth",
-    "--path",
-    "--out",
-    "--in",
-    "--before",
-    "--keep-days",
-    "--month",
-    "--format",
-    "--file",
-    "--tools",
-    "--host",
-    "--mcp-tools",
-    "--wait-ms",
-    "--max-hops",
-    "--mode",
+    "--prompt-summary",
+    "--presence",
+    "--presence-minutes",
     "--outline-reads",
+    "--statusline",
+    "--mcp-tools",
+];
+
+/// What each command takes. A form that decides `--apply`, `--symbol` or
+/// `--tag` matches the words exactly as the command's dispatch in `run`
+/// does; the first match wins.
+const COMMANDS: &[Flags] = &[
+    Flags {
+        form: |words, _| words.first() == Some(&"hook"),
+        values: &[
+            "--event",
+            "--workspace",
+            "--root",
+            "--mode",
+            "--ttl-ms",
+            "--budget-ms",
+            "--prompt-summary",
+            "--code-briefing",
+            "--presence",
+            "--presence-minutes",
+            "--outline-reads",
+        ],
+        ..Flags::NONE
+    },
+    Flags {
+        form: |words, _| matches!(words, ["install"] | ["uninstall"]),
+        switches: &["--skill"],
+        values: INSTALL_VALUES,
+        apply: true,
+        ..Flags::NONE
+    },
+    Flags {
+        form: |words, _| {
+            matches!(words, ["hooks", "install" | "remove", host]
+                if langspan::install::Vendor::from_name(host).is_some())
+        },
+        switches: &["--skill"],
+        values: &[
+            "--root",
+            "--settings",
+            "--workspace",
+            "--prompt-summary",
+            "--code-briefing",
+            "--presence",
+            "--presence-minutes",
+            "--outline-reads",
+        ],
+        apply: true,
+        ..Flags::NONE
+    },
+    Flags {
+        form: |words, _| words == ["setup"],
+        switches: &["--yes", "--skill"],
+        values: INSTALL_VALUES,
+        ..Flags::NONE
+    },
+    Flags {
+        form: |words, before| words.first() == Some(&"guidance") && words.len() == before.len(),
+        switches: &["--create"],
+        values: &["--format", "--root", "--file"],
+        apply: true,
+        ..Flags::NONE
+    },
+    Flags {
+        form: |_, before| before == ["doctor"],
+        values: &["--root", "--home"],
+        ..Flags::NONE
+    },
+    Flags {
+        form: |_, before| before == ["hosts"],
+        values: &["--home"],
+        ..Flags::NONE
+    },
+    Flags {
+        form: |_, before| matches!(before, ["check", "auto", _]),
+        switches: &["--off"],
+        values: &["--name", "--timeout-s"],
+        ..Flags::NONE
+    },
+    Flags {
+        form: |_, before| matches!(before, ["check", "flaky", _]),
+        values: &["--name", "--forget"],
+        ..Flags::NONE
+    },
+    Flags {
+        form: |_, before| matches!(before, ["check", "run" | "status", _]),
+        values: &["--name", "--timeout-s"],
+        ..Flags::NONE
+    },
+    Flags {
+        form: |_, before| matches!(before, ["integrate", "check", _, ..]),
+        switches: &["--rebase", "--adapt-renames", "--symbols"],
+        values: &["--name", "--onto", "--remote", "--timeout-s", "--session"],
+        ..Flags::NONE
+    },
+    Flags {
+        form: |_, before| matches!(before, ["land", _, ..]),
+        switches: &["--check-again", "--rebase", "--adapt-renames"],
+        values: &[
+            "--name",
+            "--onto",
+            "--remote",
+            "--timeout-s",
+            "--session",
+            "--wait-s",
+        ],
+        apply: true,
+        ..Flags::NONE
+    },
+    Flags {
+        form: |_, before| matches!(before, ["land-queue" | "land-cancel", _]),
+        values: &["--onto"],
+        ..Flags::NONE
+    },
+    Flags {
+        form: |_, before| before == ["statusline"],
+        values: &["--root", "--deadline-ms"],
+        ..Flags::NONE
+    },
+    Flags {
+        form: |_, before| before == ["count"],
+        values: &["--month"],
+        ..Flags::NONE
+    },
+    Flags {
+        form: |_, before| matches!(before, ["notify", _]),
+        values: &["--sound"],
+        ..Flags::NONE
+    },
+    Flags {
+        form: |_, before| before == ["commit"],
+        switches: &["--mine"],
+        values: &["--message", "--root", "--session"],
+        ..Flags::NONE
+    },
+    Flags {
+        form: |words, _| words.first() == Some(&"adopt"),
+        values: &["--root", "--session"],
+        ..Flags::NONE
+    },
+    Flags {
+        form: |_, before| before == ["status"],
+        switches: &["--mine", "--all"],
+        values: &["--root", "--session", "--after"],
+        ..Flags::NONE
+    },
+    Flags {
+        form: |words, _| words == ["dashboard"],
+        switches: &["--open", "--allow-network", "--demo"],
+        values: &["--listen"],
+        ..Flags::NONE
+    },
+    Flags {
+        form: |words, _| words == ["mcp"],
+        values: &["--tools", "--host"],
+        ..Flags::NONE
+    },
+    Flags {
+        form: |words, _| words == ["workspace", "list"],
+        values: &["--after"],
+        ..Flags::NONE
+    },
+    Flags {
+        form: |words, _| words.starts_with(&["workspace", "move"]),
+        switches: &["--switch"],
+        ..Flags::NONE
+    },
+    Flags {
+        form: |words, _| matches!(words, ["workspace", "remove", _]),
+        apply: true,
+        ..Flags::NONE
+    },
+    Flags {
+        form: |words, _| words.starts_with(&["intent", "set"]),
+        values: &["--summary"],
+        ..Flags::NONE
+    },
+    Flags {
+        form: |words, _| words.first() == Some(&"admit"),
+        values: &["--ttl-ms"],
+        ..Flags::NONE
+    },
+    Flags {
+        form: |words, _| words.first() == Some(&"brief"),
+        switches: &["--recent"],
+        values: &["--max-peers"],
+        ..Flags::NONE
+    },
+    Flags {
+        form: |words, _| words.starts_with(&["remote", "enable"]),
+        switches: &["--publish-as-branch"],
+        values: &["--root", "--remote", "--name", "--share-task"],
+        ..Flags::NONE
+    },
+    Flags {
+        form: |words, _| words.starts_with(&["remote", "sent"]),
+        values: &["--limit"],
+        ..Flags::NONE
+    },
+    Flags {
+        form: |words, _| words.starts_with(&["graph", "symbol"]),
+        switches: &["--detail", "--rank", "--renamed"],
+        values: &["--limit", "--session"],
+        ..Flags::NONE
+    },
+    Flags {
+        form: |words, _| {
+            words.starts_with(&["graph", "references"])
+                || words.starts_with(&["graph", "blind-spots"])
+        },
+        values: &["--limit"],
+        ..Flags::NONE
+    },
+    Flags {
+        form: |words, _| words.starts_with(&["graph", "impact"]),
+        values: &["--limit", "--depth"],
+        ..Flags::NONE
+    },
+    Flags {
+        form: |words, _| words.starts_with(&["graph", "path"]),
+        values: &["--max-hops"],
+        ..Flags::NONE
+    },
+    Flags {
+        form: |words, _| words.starts_with(&["graph", "map"]),
+        values: &["--depth"],
+        ..Flags::NONE
+    },
+    Flags {
+        form: |words, _| words.starts_with(&["graph", "export"]),
+        values: &["--out"],
+        ..Flags::NONE
+    },
+    Flags {
+        form: |words, _| matches!(words, ["graph", "import", _]),
+        values: &["--in"],
+        apply: true,
+        ..Flags::NONE
+    },
+    Flags {
+        form: |words, _| words.starts_with(&["graph", "history"]),
+        values: &["--path", "--limit", "--before"],
+        ..Flags::NONE
+    },
+    Flags {
+        form: |words, _| words.first() == Some(&"check-write"),
+        symbol: Repeat::Any,
+        ..Flags::NONE
+    },
+    Flags {
+        form: |words, _| words.first() == Some(&"recap"),
+        tag: Repeat::Once("recap filters by one tag: give --tag once"),
+        ..Flags::NONE
+    },
+    Flags {
+        form: |words, _| words.first() == Some(&"remember"),
+        values: &["--session"],
+        symbol: Repeat::Once("a note is anchored to one definition: give --symbol once"),
+        tag: Repeat::Any,
+        ..Flags::NONE
+    },
+    Flags {
+        form: |words, _| {
+            matches!(
+                words.first(),
+                Some(&"trail" | &"events" | &"changes" | &"recall")
+            )
+        },
+        values: &["--after", "--limit", "--path"],
+        ..Flags::NONE
+    },
+    Flags {
+        form: |words, _| matches!(words.first(), Some(&"today" | &"report")),
+        values: &["--since"],
+        ..Flags::NONE
+    },
+    Flags {
+        form: |words, _| words.starts_with(&["policy", "set"]),
+        values: &["--wait-ms"],
+        ..Flags::NONE
+    },
+    Flags {
+        form: |words, _| words.first() == Some(&"message"),
+        values: &["--from", "--to"],
+        ..Flags::NONE
+    },
+    Flags {
+        form: |words, _| {
+            words.starts_with(&["messages", "status"])
+                || words.starts_with(&["messages", "retract"])
+        },
+        values: &["--from"],
+        ..Flags::NONE
+    },
+    Flags {
+        form: |_, before| before == ["compact"],
+        values: &["--keep-days"],
+        apply: true,
+        ..Flags::NONE
+    },
 ];
 
 /// The flags of the command `words` name: all the words, and `before`,
 /// those before a `--`.
-fn flags_of(words: &[&str], before: &[&str]) -> Flags {
-    Flags {
-        switches: SWITCHES,
-        values: VALUES,
-        apply: before == ["compact"]
-            || matches!(words, ["workspace", "remove", _] | ["graph", "import", _]),
-        symbol: match words.first() {
-            Some(&"check-write") => Repeat::Any,
-            Some(&"remember") => {
-                Repeat::Once("a note is anchored to one definition: give --symbol once")
-            }
-            _ => Repeat::No,
-        },
-        tag: match words.first() {
-            Some(&"remember") => Repeat::Any,
-            Some(&"recap") => Repeat::Once("recap filters by one tag: give --tag once"),
-            _ => Repeat::No,
-        },
-    }
+fn flags_of(words: &[&str], before: &[&str]) -> &'static Flags {
+    COMMANDS
+        .iter()
+        .find(|flags| (flags.form)(words, before))
+        .unwrap_or(&Flags::NONE)
 }
 
 /// Whether some command declares `name` as a flag that takes a value
 /// (`Some(true)`) or none (`Some(false)`). The parser reads this before
 /// the command's words are known.
 fn takes_value(name: &str) -> Option<bool> {
-    let flags = flags_of(&[], &[]);
-    if flags.switches.contains(&name) {
-        Some(false)
-    } else if flags.values.contains(&name) {
+    let name = if name == "-m" { "--message" } else { name };
+    if EVERY_COMMAND.contains(&name) || COMMANDS.iter().any(|flags| flags.values.contains(&name)) {
         Some(true)
+    } else if COMMANDS.iter().any(|flags| flags.switches.contains(&name)) {
+        Some(false)
     } else {
         None
     }
