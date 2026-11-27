@@ -418,9 +418,10 @@ fn clients_of_protocol_4_and_3_get_reports_without_refusal_outcomes() {
     let f = Fixture::new();
     stale_refusal(&f);
     // Version 5 added it, and versions 6 (roadmap F5), 7 (issue #222), 8
-    // (issue #262) and 10 (roadmap A11) keep it.
+    // (issue #262), 9 (roadmap E1) and 10 (roadmap A11) keep it.
     for version in [
         langspan::protocol::PROTOCOL_VERSION,
+        langspan::protocol::PROTOCOL_VERSION_9,
         langspan::protocol::PROTOCOL_VERSION_8,
         langspan::protocol::PROTOCOL_VERSION_7,
         langspan::protocol::PROTOCOL_VERSION_6,

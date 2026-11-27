@@ -147,6 +147,9 @@ fn an_oversized_view_sheds_history_then_idle_sessions_but_keeps_open_admissions(
                 author: None,
                 text: "x".repeat(400),
                 paths: Vec::new(),
+                anchor: None,
+                anchor_state: None,
+                tags: Vec::new(),
             })
             .collect(),
     );
@@ -201,6 +204,9 @@ fn a_page_resumes_after_its_cursor_at_every_split_without_loss_or_repeat() {
                     author: None,
                     text: format!("note {index}"),
                     paths: Vec::new(),
+                    anchor: None,
+                    anchor_state: None,
+                    tags: Vec::new(),
                 })
                 .collect(),
         );
@@ -260,6 +266,9 @@ fn a_cursor_position_at_the_integer_limit_is_refused_not_overflowed() {
             author: None,
             text: "note".into(),
             paths: Vec::new(),
+            anchor: None,
+            anchor_state: None,
+            tags: Vec::new(),
         }],
     );
     // The position after this one does not exist: before the fix, adding one

@@ -24,8 +24,9 @@ official-SDK stdio MCP adapter. [ADR 0001](adr/0001-local-coordination.md)
 records the local foundation. The derived source index lives in
 `crates/langspan-graph`.
 
-Wire protocol is version 10 (version 8, 7, 6, 5, 4 and 3 clients are still answered,
-in their shapes; version 9 is roadmap E1's, not in this build; ADR 0004, ADR 0007, ADR 0008, ADR 0019, ADR 0020) and the SQLite schema marker version 4 (retention, J7 in
+Wire protocol is version 10 (version 9, 8, 7, 6, 5, 4 and 3 clients are still
+answered, in their shapes; ADR 0004, ADR 0007, ADR 0008, ADR 0019, ADR 0020,
+ADR 0023) and the SQLite schema marker version 4 (retention, J7 in
 [ADR 0025](adr/0025-distribution-lifecycle-and-store-beyond-the-first-release.md));
 older persisted records remain readable.
 

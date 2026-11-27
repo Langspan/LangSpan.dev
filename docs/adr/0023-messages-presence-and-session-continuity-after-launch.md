@@ -31,7 +31,7 @@ events and can follow them.
 | C8 | Two tasks on the same code told before either writes | Peers ranked by overlap | Built 25 November 2026 ([issue #45](https://github.com/Langspan/LangSpan.dev/issues/45)), ahead of the condition below: prompt targets, see [ADR 0004](0004-automatic-peer-briefing.md). Not yet run on a host |
 | C9 | Automatic handoff and trail at session end | Manual `handoff` | Built 26 November 2026 ([issue #46](https://github.com/Langspan/LangSpan.dev/issues/46)): a `trail_recorded` event at each session end, taken once by the next session; see "Trails at session end (C9)" below. Not yet run on a host |
 | C12 | Worktree advice and tidying | None | Not now. Tidying would remove the owner's worktrees |
-| E1 | Notes anchored to a definition with staleness, tags and confidence | One-line notes on a workspace or files | Not now |
+| E1 | Notes anchored to a definition with staleness, tags and confidence | One-line notes on a workspace or files | Built 26 November 2026 ([issue #60](https://github.com/Langspan/LangSpan.dev/issues/60)), ahead of the condition below: `remember --symbol` and `--tag`, an `anchor_state` checked after each index pass, and `recap --tag`; see "Anchored notes (E1)" below. No confidence score. Not yet run on a host |
 | E2 | `recall` search | Word search over held notes | Built 25 November 2026 ([issue #61](https://github.com/Langspan/LangSpan.dev/issues/61)), ahead of the condition below: `langspan recall` and MCP `langspan_recall`, see "Note search (E2)" below. Not yet run on a host |
 | E4 | Messages addressed by path and symbol | To one session or all | Not now |
 | E7 | Sender signed automatically | `--from SESSION` | Not now |
@@ -131,10 +131,95 @@ explicit failure (the CLI exits with status 1; over MCP it is the tool error
 `daemon_request_failed`, as for every other tool); an unknown workspace is the domain error
 `workspace_not_found`.
 
-Notes have no tags or anchors yet (E1), so the proposed `--tag` / `tag`
-argument and the `anchor` and `tags` fields are not offered; they arrive
-with E1, which adds them as further fields to match. Not yet observed: a
-real Claude Code session calling `langspan_recall` and acting on the result.
+Since E1, a found note also carries its `anchor`, `anchor_state` and `tags`
+when it has them. Recall has no tag filter; `recap --tag` filters by tag.
+Not yet observed: a real Claude Code session calling `langspan_recall` and
+acting on the result.
+
+## Anchored notes (E1)
+
+`langspan remember WORKSPACE TEXT [PATH...] --symbol NAME [--tag TAG]...` and
+MCP `langspan_remember` with `symbol` and `tags` record a note about one
+definition. The daemon looks the name up in its source index, in `PATH`s or
+in the whole workspace, and gives the core every definition of that name and
+which files the index holds at their present content (`RememberPrepared`, a
+prepared command no client can send). One definition: the note stores an
+`anchor` of `path`, `name`, `kind`, `line` and `body_digest` (the SHA-256 of
+the definition's own bytes) with `anchor_state: "current"`. None or several:
+nothing is recorded, and the command fails with `symbol_not_found` or
+`symbol_ambiguous`, listing up to 8 definitions by path and line. Tags are up
+to 4, each 1 to 32 bytes of `a`-`z`, `0`-`9` and `-`, kept once each and
+sorted; anything else is `invalid_tag`, refused before any event.
+
+After each index pass the indexer asks the state owner to check the
+workspace's anchors (`ObserveNoteAnchors`). The daemon reads one index
+snapshot and the core decides each state:
+
+- `current`: the anchor's file is indexed at its present content without a
+  syntax error, and a definition of that name and kind there has the
+  recorded `body_digest`;
+- `changed`: such a definition is there with another digest;
+- `gone`: none is there; a rename or a move reads `gone`, as in the index.
+  A deleted or moved file has no row in the index: once the index reads
+  every file, an anchor in a file without a row reads `gone` too;
+- `unknown`: the file has a row but is not indexed at its present content,
+  or the note holds only a name.
+
+The daemon looks each anchored name up in the files that decide it (a
+resolved anchor's own file, or the note's paths) before any cap, and across
+the workspace, capped at 200 definitions, only for a note without paths or
+for the not-found hint of `remember`. Definitions elsewhere therefore never
+hide a file's own; an ambiguous name whose workspace lookup reached the cap
+is reported as defined "at least" that many times.
+
+Each change of state is a `note_anchor_changed` event; the recorded digest
+stays, so a body put back reads `current` again. A check that changes
+nothing writes nothing, not even a receipt. Nothing is deleted: only
+`forget` removes a note.
+
+A briefing carries an anchored note to sessions whose files are the anchor's
+file or the note's files, or mention the name (a name lookup in the index, as
+`langspan_references`), never to every session. The four notes it holds are
+chosen current and plain notes first, then unknown, then changed and gone,
+each newest first; a note whose state changes is told again. The line names
+the definition and its state, then the tags, for example `Remembered for this
+repository (about parse_upload in "src/api.rs"; the code changed since this
+note was written) [api]: "…"`. `recap --tag TAG` and `langspan_recap` with
+`tag` list only notes carrying it. The 400-byte note, the 2,400-byte briefing
+and its 4-note limit are unchanged. Notes stay local: remote sharing does not
+publish them.
+
+Decisions the issue left open, each the smallest that meets it:
+
+- No complete scan at `remember`, or the one definition's file not indexed at
+  its present content: the note is recorded with only the name and
+  `anchor_state: "unknown"`. The next check fills the anchor if exactly one
+  definition is then found in scope and its file is fresh, reads `gone` if
+  none is found and the index reads every file, and otherwise stays
+  `unknown`. A `Remember` decided without the daemon's index behaves the same.
+- A file the index cannot read now (waiting, a syntax error, too large) makes
+  its anchors `unknown`, not `current`: the index's rows for it may be stale.
+- The anchor matches by name, path and kind; several definitions of that name
+  and kind in one file are `current` if any has the recorded digest.
+  `graph symbol --detail` lists a `current` anchored note only with the
+  definition that has that digest, whatever paths the note names.
+- `--symbol` with several paths searches them all; the anchor's path is the
+  definition's file.
+- A note recorded before E1 has no anchor and reads as unanchored; its
+  `remembered` event is read as before.
+- Wire protocol version 9 adds the note fields, `symbol`, `tags` and `tag`
+  (version 8 is issue #262's `inflight_partial`, ADR 0008).
+  A client of version 8 or earlier is told an anchored note only while it is
+  `current`, without the new fields, and a note with a symbol or tags, or a
+  recap by tag, is not sent to an earlier daemon.
+- `graph symbol --detail` lists an anchored note only with its own
+  definition and only while `current`, since that list has no state; it is
+  found by its anchor, so a note made without paths is listed too.
+- The note's line keeps the recorded line number; a definition that moves
+  within its file stays `current`.
+
+Not yet observed: a real Claude Code or Codex session briefed with an
+anchored note, then changing its approach to the changed definition.
 
 ## Trails at session end (C9)
 

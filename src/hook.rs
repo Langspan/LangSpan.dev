@@ -1189,6 +1189,69 @@ fn deceptive(c: char) -> bool {
 /// Text from another session or the repository, made safe to place on one
 /// line: deceptive characters become spaces and the result is at most
 /// `limit` bytes including its ellipsis.
+/// What a note is about, as a briefing line and the recap show it: its
+/// files, or its definition and whether that is still the code the note
+/// was written about (roadmap E1), then its tags. An anchored note never
+/// reads as current unless the index found its definition unchanged.
+pub fn note_about(note: &langspan_core::Note) -> String {
+    about_note(
+        &note.paths,
+        note.anchor.as_ref(),
+        note.anchor_state,
+        &note.tags,
+    )
+}
+
+/// `note_about` for a note's parts, as a recall returns them.
+pub fn about_note(
+    paths: &[String],
+    anchor: Option<&langspan_core::NoteAnchor>,
+    state: Option<langspan_core::AnchorState>,
+    tags: &[String],
+) -> String {
+    use langspan_core::AnchorState;
+    let list = |paths: &[String]| {
+        paths
+            .iter()
+            .map(|path| quoted(path))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let about = match (anchor, state) {
+        (Some(anchor), Some(state)) => {
+            let name = clean(&anchor.name, langspan_core::SYMBOL_BYTES);
+            // An indexed name is an identifier; anything else is quoted.
+            let name = if name
+                .chars()
+                .all(|c| c.is_alphanumeric() || matches!(c, '_' | '$' | '.' | ':'))
+            {
+                name
+            } else {
+                format!("{name:?}")
+            };
+            let place = match &anchor.path {
+                Some(path) => format!(" in {}", list(std::slice::from_ref(path))),
+                None if !paths.is_empty() => format!(" in {}", list(paths)),
+                None => String::new(),
+            };
+            let state = match state {
+                AnchorState::Current => "",
+                AnchorState::Changed => "; the code changed since this note was written",
+                AnchorState::Gone => "; that definition is no longer there",
+                AnchorState::Unknown => "; not yet checked against the code",
+            };
+            format!(" (about {name}{place}{state})")
+        }
+        _ if paths.is_empty() => String::new(),
+        _ => format!(" (about {})", list(paths)),
+    };
+    if tags.is_empty() {
+        about
+    } else {
+        format!("{about} [{}]", tags.join(", "))
+    }
+}
+
 pub(crate) fn clean(text: &str, limit: usize) -> String {
     let text: String = text
         .chars()
@@ -2790,11 +2853,7 @@ fn render_peers_placed(
     keep_placed(&mut placed.checkout_changes, &shown);
     let mut shown = Vec::new();
     for note in &briefing.notes {
-        let about = if note.paths.is_empty() {
-            String::new()
-        } else {
-            format!(" (about {})", list(&note.paths))
-        };
+        let about = note_about(note);
         let full = format!(
             "Remembered for this repository{about}: {:?}",
             clean(&note.text, langspan_core::NOTE_BYTES)
@@ -6620,6 +6679,9 @@ mod briefing_text {
                 author: None,
                 text: "y".repeat(400),
                 paths: vec![format!("src/{long}.rs")],
+                anchor: None,
+                anchor_state: None,
+                tags: Vec::new(),
             })
             .collect();
         full.interface_changes = (0..4)
@@ -6998,6 +7060,9 @@ mod briefing_text {
                 author: None,
                 text: "y".repeat(400),
                 paths: Vec::new(),
+                anchor: None,
+                anchor_state: None,
+                tags: Vec::new(),
             })
             .collect();
         let text = render_briefing(&full);
@@ -8264,6 +8329,9 @@ mod placed_briefing {
                 author: None,
                 text: format!("{n} {}", "n".repeat(300)),
                 paths: Vec::new(),
+                anchor: None,
+                anchor_state: None,
+                tags: Vec::new(),
             })
             .collect();
         delivered.stale_reads = paths("s", 30, 30)

@@ -1,7 +1,7 @@
 use langspan::protocol::{
     OLDEST_PROTOCOL_VERSION, PROTOCOL_VERSION, PROTOCOL_VERSION_4, PROTOCOL_VERSION_5,
-    PROTOCOL_VERSION_6, PROTOCOL_VERSION_7, PROTOCOL_VERSION_8, Request, Response, encode,
-    encode_for, encode_record_for, read_frame,
+    PROTOCOL_VERSION_6, PROTOCOL_VERSION_7, PROTOCOL_VERSION_8, PROTOCOL_VERSION_9, Request,
+    Response, encode, encode_for, encode_record_for, read_frame,
 };
 use langspan_core::Command;
 
@@ -1149,9 +1149,9 @@ fn v5_report_response_and_its_version_4_and_3_forms_match_the_golden_vectors() {
     // A version 5 client still reads `refusal_outcomes`.
     assert_eq!(encode_for(PROTOCOL_VERSION_5, &response).unwrap(), wire);
     // Version 6 changed landings, version 7 (issue #222) activity,
-    // briefings and events, version 8 (issue #262) briefings, and version
-    // 10 (roadmap A11) activity and events: their report is the version 5
-    // form.
+    // briefings and events, version 8 (issue #262) briefings, version 9
+    // (roadmap E1) notes and version 10 (roadmap A11) activity and events:
+    // their report is the version 5 form.
     for later in [
         PROTOCOL_VERSION_6,
         PROTOCOL_VERSION_7,
@@ -1390,7 +1390,7 @@ fn a_version_3_reply_leaves_out_trails() {
 
 /// Issue #262: a client of version 7 or earlier reads briefings with
 /// `deny_unknown_fields`, so its answer does not say the index was partial;
-/// a version 8 client's does.
+/// a client of version 8 or later is told.
 #[test]
 fn a_version_7_reply_leaves_out_a_partial_index() {
     use langspan_core::{Briefing, Outcome};
@@ -1417,11 +1417,14 @@ fn a_version_7_reply_leaves_out_a_partial_index() {
             "{version}: {earlier:#}"
         );
     }
-    let current: Response =
-        serde_json::from_slice(&encode_for(PROTOCOL_VERSION, &response).unwrap()).unwrap();
-    assert!(
-        matches!(&current.outcome, Outcome::Briefing { briefing: read } if read.inflight_partial)
-    );
+    for version in [PROTOCOL_VERSION_8, PROTOCOL_VERSION_9, PROTOCOL_VERSION] {
+        let current: Response =
+            serde_json::from_slice(&encode_for(version, &response).unwrap()).unwrap();
+        assert!(
+            matches!(&current.outcome, Outcome::Briefing { briefing: read } if read.inflight_partial),
+            "version {version}"
+        );
+    }
 }
 
 /// Roadmap D7 (review comment 4707749784): to a version 3 client an
@@ -1576,6 +1579,10 @@ fn a_state_record_is_encoded_in_each_versions_shape_for_its_parts() {
         },
     };
     assert_eq!(
+        encode_record_for(PROTOCOL_VERSION_7, &activity).unwrap(),
+        serde_json::to_string(&activity).unwrap()
+    );
+    assert_eq!(
         encode_record_for(PROTOCOL_VERSION, &activity).unwrap(),
         serde_json::to_string(&activity).unwrap()
     );
@@ -1707,13 +1714,14 @@ fn an_earlier_reply_leaves_out_what_version_7_added_to_activity_briefings_and_ev
             serde_json::from_str::<Response>(&current).unwrap(),
             response
         );
-        // Version 8 (issue #262) and version 10 (roadmap A11) keep them: a
-        // version 8 or 7 client reads the same answer.
-        for kept in [PROTOCOL_VERSION_8, PROTOCOL_VERSION_7] {
+        // Version 8 (issue #262) changed only a partial index, version 9
+        // (roadmap E1) only notes and version 10 (roadmap A11) only outline
+        // reads: version 7, 8 and 9 clients read the same answer.
+        for version in [PROTOCOL_VERSION_7, PROTOCOL_VERSION_8, PROTOCOL_VERSION_9] {
             assert_eq!(
-                String::from_utf8(encode_for(kept, &response).unwrap()).unwrap(),
+                String::from_utf8(encode_for(version, &response).unwrap()).unwrap(),
                 current,
-                "version {kept}"
+                "version {version}"
             );
         }
         for version in EARLIER_VERSIONS {
@@ -1801,7 +1809,7 @@ fn an_earlier_reply_leaves_out_what_version_10_added_to_activity_and_events() {
             serde_json::from_str::<Response>(&current).unwrap(),
             response
         );
-        for version in [PROTOCOL_VERSION_8, PROTOCOL_VERSION_7]
+        for version in [PROTOCOL_VERSION_9, PROTOCOL_VERSION_8, PROTOCOL_VERSION_7]
             .into_iter()
             .chain(EARLIER_VERSIONS)
         {
@@ -1809,8 +1817,8 @@ fn an_earlier_reply_leaves_out_what_version_10_added_to_activity_and_events() {
             assert!(!earlier.contains("\"outlined\""), "{version}: {earlier}");
             assert!(!earlier.contains("read_outlined"), "{version}: {earlier}");
             let read = serde_json::from_str::<Response>(&earlier).unwrap();
-            // Versions 8 and 7 keep what version 7 added; earlier versions
-            // lose it too.
+            // Versions 9, 8 and 7 keep what version 7 added; earlier
+            // versions lose it too.
             if let Outcome::Events { events } | Outcome::Changes { events, .. } = read.outcome {
                 let expected = if version >= PROTOCOL_VERSION_7 {
                     vec![kept.clone()]
@@ -1831,7 +1839,7 @@ fn an_earlier_reply_leaves_out_what_version_10_added_to_activity_and_events() {
             .unwrap()
             .contains("\"outlined\"")
     );
-    for version in [PROTOCOL_VERSION_8, PROTOCOL_VERSION_7]
+    for version in [PROTOCOL_VERSION_9, PROTOCOL_VERSION_8, PROTOCOL_VERSION_7]
         .into_iter()
         .chain(EARLIER_VERSIONS)
     {
@@ -1842,7 +1850,7 @@ fn an_earlier_reply_leaves_out_what_version_10_added_to_activity_and_events() {
 
 /// Roadmap A11's golden vectors: the hook's `outline_read` request, the
 /// `read_outline` answer, and an event page with `read_outlined`, which a
-/// version 8 client receives without that event.
+/// version 9 or 8 client receives without that event.
 #[test]
 fn v10_outline_request_answer_and_events_match_the_committed_golden_vectors() {
     use langspan_core::{Event, Outcome};
@@ -1882,21 +1890,34 @@ fn v10_outline_request_answer_and_events_match_the_committed_golden_vectors() {
     };
     assert!(matches!(events[0].event, Event::ReadOutlined { .. }));
     assert_eq!(encode(&response).unwrap(), wire);
-    response.version = PROTOCOL_VERSION_8;
-    assert_eq!(
-        encode_for(PROTOCOL_VERSION_8, &response).unwrap(),
-        include_bytes!("../fixtures/events-response-v8.json")
-    );
+    // Version 9 (roadmap E1) and version 8 have no `read_outlined`: theirs
+    // is the page without it.
+    for (version, earlier) in [
+        (
+            PROTOCOL_VERSION_9,
+            &include_bytes!("../fixtures/events-response-v9.json")[..],
+        ),
+        (
+            PROTOCOL_VERSION_8,
+            &include_bytes!("../fixtures/events-response-v8.json")[..],
+        ),
+    ] {
+        response.version = version;
+        assert_eq!(
+            encode_for(version, &response).unwrap(),
+            earlier,
+            "version {version}"
+        );
+    }
 }
 
-/// Version 9 is roadmap E1's (#273), whose shape this build does not have:
-/// the daemon refuses it rather than answer in a shape that client cannot
-/// read, and answers every other version from the oldest to its own.
+/// Version 9 is roadmap E1's, before roadmap A11's outline reads: the
+/// daemon answers every version from the oldest to its own, 9 included.
 #[test]
-fn the_daemon_answers_every_version_but_9() {
+fn the_daemon_answers_every_version_from_the_oldest_to_its_own() {
     use langspan::protocol::answers;
     for version in OLDEST_PROTOCOL_VERSION..=PROTOCOL_VERSION {
-        assert_eq!(answers(version), version != 9, "version {version}");
+        assert!(answers(version), "version {version}");
     }
     assert!(!answers(OLDEST_PROTOCOL_VERSION - 1));
     assert!(!answers(PROTOCOL_VERSION + 1));
@@ -2040,4 +2061,201 @@ fn recording_a_rebased_or_adapted_landing_fits_only_version_6_and_later() {
     for version in std::iter::once(PROTOCOL_VERSION).chain(EARLIER_VERSIONS) {
         assert!(fits(version, &with(false, false)), "version {version}");
     }
+}
+
+/// Version 9 (roadmap E1): a note carries `anchor`, `anchor_state` and
+/// `tags`. A client of version 8 or earlier reads a note with
+/// `deny_unknown_fields` and would show an anchored note without its state,
+/// so it is told an anchored note only while its definition is current, as
+/// a plain note; a changed, gone or unknown one is left out.
+#[test]
+fn anchored_notes_reach_an_earlier_client_only_while_current_and_without_the_new_fields() {
+    use langspan_core::{AnchorState, Note, NoteAnchor, Outcome, Recap};
+    let note = |id: &str, state: Option<AnchorState>| Note {
+        note_id: id.into(),
+        workspace_id: "app".into(),
+        author: None,
+        text: "keep it pure".into(),
+        paths: vec!["src/api.rs".into()],
+        anchor: state.map(|_| NoteAnchor {
+            name: "parse_upload".into(),
+            path: Some("src/api.rs".into()),
+            kind: Some("function".into()),
+            line: Some(1),
+            body_digest: Some("a".repeat(64)),
+        }),
+        anchor_state: state,
+        tags: if state.is_some() {
+            vec!["api".into()]
+        } else {
+            Vec::new()
+        },
+    };
+    let recap = Recap {
+        workspace_id: "app".into(),
+        root: "/repo".into(),
+        branch_ref: None,
+        sessions: Vec::new(),
+        omitted_sessions: 0,
+        omitted_items: 0,
+        interface_changes: Vec::new(),
+        checks: Vec::new(),
+        landings: Vec::new(),
+        notes: vec![
+            note("plain", None),
+            note("current", Some(AnchorState::Current)),
+            note("changed", Some(AnchorState::Changed)),
+            note("gone", Some(AnchorState::Gone)),
+            note("unknown", Some(AnchorState::Unknown)),
+        ],
+        messages: Vec::new(),
+        trails: Vec::new(),
+        teammates: Vec::new(),
+        publishing: None,
+        scan_failure: None,
+        scan_coverage: None,
+    };
+    let response = Response {
+        version: PROTOCOL_VERSION,
+        request_id: "r".into(),
+        replayed: false,
+        generation: 1,
+        lease_valid: None,
+        outcome: Outcome::Recap { recap },
+    };
+    // Version 9 introduced them and version 10 (roadmap A11) keeps them.
+    for version in [PROTOCOL_VERSION_9, PROTOCOL_VERSION] {
+        let now: serde_json::Value =
+            serde_json::from_slice(&encode_for(version, &response).unwrap()).unwrap();
+        assert_eq!(
+            now["outcome"]["recap"]["notes"].as_array().unwrap().len(),
+            5,
+            "version {version}"
+        );
+        assert_eq!(
+            now["outcome"]["recap"]["notes"][2]["anchor_state"], "changed",
+            "version {version}"
+        );
+    }
+    for version in [PROTOCOL_VERSION_8, PROTOCOL_VERSION_7]
+        .into_iter()
+        .chain(EARLIER_VERSIONS)
+    {
+        let earlier: serde_json::Value =
+            serde_json::from_slice(&encode_for(version, &response).unwrap()).unwrap();
+        let notes = earlier["outcome"]["recap"]["notes"].as_array().unwrap();
+        let ids: Vec<&str> = notes
+            .iter()
+            .map(|held| held["note_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["plain", "current"], "version {version}");
+        for held in notes {
+            let fields: Vec<&String> = held.as_object().unwrap().keys().collect();
+            assert_eq!(
+                fields,
+                ["note_id", "workspace_id", "author", "text", "paths"],
+                "version {version}"
+            );
+        }
+    }
+}
+
+/// A note with a symbol or tags, and a recap by tag, need version 9 or
+/// later; the same requests without them fit every version.
+#[test]
+fn a_note_with_a_symbol_or_tags_fits_only_version_9_and_later() {
+    use langspan::protocol::fits;
+    let remember = |symbol: Option<&str>, tags: &[&str]| Command::Remember {
+        workspace_id: "app".into(),
+        author: None,
+        text: "keep it pure".into(),
+        paths: Vec::new(),
+        symbol: symbol.map(str::to_owned),
+        tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
+    };
+    let recap = |tag: Option<&str>| Command::Recap {
+        workspace_id: "app".into(),
+        tag: tag.map(str::to_owned),
+    };
+    for command in [
+        remember(Some("parse_upload"), &[]),
+        remember(None, &["api"]),
+        recap(Some("api")),
+    ] {
+        assert!(fits(PROTOCOL_VERSION, &command));
+        assert!(fits(PROTOCOL_VERSION_9, &command));
+        for version in [PROTOCOL_VERSION_8, PROTOCOL_VERSION_7]
+            .into_iter()
+            .chain(EARLIER_VERSIONS)
+        {
+            assert!(!fits(version, &command), "version {version}: {command:?}");
+        }
+    }
+    for version in [
+        PROTOCOL_VERSION,
+        PROTOCOL_VERSION_9,
+        PROTOCOL_VERSION_8,
+        PROTOCOL_VERSION_7,
+    ]
+    .into_iter()
+    .chain(EARLIER_VERSIONS)
+    {
+        assert!(fits(version, &remember(None, &[])));
+        assert!(fits(version, &recap(None)));
+    }
+}
+
+/// Golden vectors for version 9 (roadmap E1): a note with a symbol and
+/// tags, and a recap by tag, read and encode as the fixtures, and only a
+/// version 9 or later daemon is sent them.
+#[test]
+fn v9_note_requests_match_the_golden_vectors() {
+    use langspan::protocol::fits;
+    for wire in [
+        &include_bytes!("../fixtures/remember-request-v9.json")[..],
+        &include_bytes!("../fixtures/recap-tag-request-v9.json")[..],
+    ] {
+        let request: Request = serde_json::from_slice(wire).unwrap();
+        assert_eq!(request.version, PROTOCOL_VERSION_9);
+        assert_eq!(encode(&request).unwrap(), wire);
+        assert!(fits(PROTOCOL_VERSION_9, &request.command));
+        assert!(fits(PROTOCOL_VERSION, &request.command));
+        assert!(!fits(PROTOCOL_VERSION_8, &request.command));
+    }
+    let remember: Request =
+        serde_json::from_slice(include_bytes!("../fixtures/remember-request-v9.json")).unwrap();
+    assert!(matches!(
+        &remember.command,
+        Command::Remember { symbol: Some(name), tags, .. } if name == "parse_upload" && tags == &["api"]
+    ));
+}
+
+/// A version 9 recall answer and its version 8 form: an earlier client is
+/// told an anchored note only while its definition is current, as a plain
+/// note, and a version 8 client keeps everything else.
+#[test]
+fn v9_recall_response_and_its_version_8_form_match_the_golden_vectors() {
+    use langspan_core::{AnchorState, Outcome};
+    let wire = include_bytes!("../fixtures/recall-response-v9.json");
+    let mut response: Response = serde_json::from_slice(wire).unwrap();
+    assert_eq!(response.version, PROTOCOL_VERSION_9);
+    let Outcome::Recall { recall } = &response.outcome else {
+        panic!("{response:?}");
+    };
+    let states: Vec<Option<AnchorState>> =
+        recall.notes.iter().map(|note| note.anchor_state).collect();
+    assert_eq!(
+        states,
+        [None, Some(AnchorState::Current), Some(AnchorState::Changed)]
+    );
+    assert_eq!(encode_for(PROTOCOL_VERSION_9, &response).unwrap(), wire);
+
+    let earlier = include_bytes!("../fixtures/recall-response-v8.json");
+    response.version = PROTOCOL_VERSION_8;
+    assert_eq!(
+        String::from_utf8(encode_for(PROTOCOL_VERSION_8, &response).unwrap()).unwrap(),
+        String::from_utf8_lossy(earlier)
+    );
+    let read: Response = serde_json::from_slice(earlier).unwrap();
+    assert_eq!(read.version, PROTOCOL_VERSION_8);
 }

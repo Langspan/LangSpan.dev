@@ -112,6 +112,8 @@ impl World {
                 author: None,
                 text: format!("n{index:03} {}", escaping(390)),
                 paths: Vec::new(),
+                symbol: None,
+                tags: Vec::new(),
             });
         }
     }

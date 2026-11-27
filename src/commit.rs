@@ -1504,6 +1504,7 @@ pub(crate) fn live_sessions(
         request_id: "read".into(),
         command: Command::Recap {
             workspace_id: config.workspace_id.clone(),
+            tag: None,
         },
     };
     let response = crate::client::call_until(&config.state_dir, &request, deadline)

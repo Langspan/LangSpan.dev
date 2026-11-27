@@ -358,12 +358,14 @@ fn a_large_definition_past_many_small_ones_is_in_the_outline() {
 }
 
 /// Review comment 4714078108, through the real daemon: once a session was
-/// given an outline, a client of protocol version 8 or 7 still reads
+/// given an outline, a client of protocol version 9, 8 or 7 still reads
 /// status, state records and events, which carry neither `outlined` nor the
 /// `read_outlined` event; a version 10 client's carry both.
 #[test]
 fn a_version_7_client_reads_status_and_events_after_an_outline() {
-    use langspan::protocol::{PROTOCOL_VERSION, PROTOCOL_VERSION_7, PROTOCOL_VERSION_8, Request};
+    use langspan::protocol::{
+        PROTOCOL_VERSION, PROTOCOL_VERSION_7, PROTOCOL_VERSION_8, PROTOCOL_VERSION_9, Request,
+    };
     use langspan_core::Command;
     use std::io::{BufRead, BufReader};
     let world = World::new();
@@ -388,7 +390,12 @@ fn a_version_7_client_reads_status_and_events_after_an_outline() {
         assert_ne!(reply["outcome"]["type"], "error", "{line}");
         line
     };
-    for version in [PROTOCOL_VERSION_7, PROTOCOL_VERSION_8, PROTOCOL_VERSION] {
+    for version in [
+        PROTOCOL_VERSION_7,
+        PROTOCOL_VERSION_8,
+        PROTOCOL_VERSION_9,
+        PROTOCOL_VERSION,
+    ] {
         let status = ask(version, "status", Command::Status);
         let records = ask(
             version,

@@ -71,6 +71,8 @@ fn remember(
             author: author.map(str::to_owned),
             text: text.into(),
             paths: paths.iter().map(|path| (*path).into()).collect(),
+            symbol: None,
+            tags: Vec::new(),
         },
         5,
     )
@@ -106,6 +108,7 @@ fn recap(state: &mut State) -> Recap {
         "read",
         Command::Recap {
             workspace_id: "work".into(),
+            tag: None,
         },
         100,
     ) {
@@ -302,7 +305,8 @@ fn a_recap_is_bounded_and_orders_current_sessions_first() {
         decide(
             &state,
             &Command::Recap {
-                workspace_id: "nowhere".into()
+                workspace_id: "nowhere".into(),
+                tag: None,
             },
             "r",
             1
@@ -429,6 +433,9 @@ fn note(id: &str, text: &str, paths: &[&str], at_ms: Option<u64>) -> Event {
             author: Some("alice".into()),
             text: text.into(),
             paths: paths.iter().map(|path| (*path).into()).collect(),
+            anchor: None,
+            anchor_state: None,
+            tags: Vec::new(),
         },
         at: stamp(at_ms),
     }
@@ -953,6 +960,8 @@ fn notes_and_messages_are_recorded_with_the_time_they_were_made() {
             author: None,
             text: "keep save synchronous".into(),
             paths: vec!["src/store.rs".into()],
+            symbol: None,
+            tags: Vec::new(),
         },
         "r1",
         42,

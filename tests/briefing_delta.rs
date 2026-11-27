@@ -522,6 +522,7 @@ fn an_earlier_client_reads_activity_given_in_parts_without_the_fields_version_7_
         langspan::protocol::PROTOCOL_VERSION_4,
         langspan::protocol::OLDEST_PROTOCOL_VERSION,
         langspan::protocol::PROTOCOL_VERSION_8,
+        langspan::protocol::PROTOCOL_VERSION_9,
         PROTOCOL_VERSION,
     ] {
         let joined = joined_parts(&f, version);

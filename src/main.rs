@@ -171,9 +171,10 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  line, notes and messages naming the file within 30
                                  minutes, and changes back to an earlier signature.
                                  Reads only
-  recap WORKSPACE                A bounded account of one workspace: sessions, recent
+  recap WORKSPACE [--tag TAG]    A bounded account of one workspace: sessions, recent
                                  edits, interface changes, checks, landings, notes and
-                                 messages not yet acknowledged, then withdrawn ones
+                                 messages not yet acknowledged, then withdrawn ones.
+                                 --tag lists only the notes carrying TAG
   trail WORKSPACE [--limit N]    Trails ended sessions left, newest first (--limit 1
                                  to 16, default 4): task line, files read and edited
                                  with line ranges, checks after the last write, files
@@ -201,9 +202,13 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  holder, up to N ms (0 to 2000, default 2000; 0 is
                                  refuse), never past half the hook's remaining budget,
                                  then compare the file again. Every other kind is fixed
-  remember WORKSPACE TEXT [PATH...] [--session ID]
+  remember WORKSPACE TEXT [PATH...] [--session ID] [--symbol NAME] [--tag TAG]...
                                  Keep a one-line note for the repository or for files;
-                                 sessions working there are told. Survives restarts
+                                 sessions working there are told. Survives restarts.
+                                 --symbol anchors it to the one indexed definition of
+                                 NAME in PATH (or the workspace); briefings then say
+                                 whether that code changed since. Up to 4 tags, each
+                                 1 to 32 bytes of a-z, 0-9 and '-'
   forget WORKSPACE NOTE          Remove a note
   recall WORKSPACE QUERY [--path PATH] [--limit N]
                                  Find held notes holding every word of QUERY (1 to 200
@@ -4411,11 +4416,22 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
         command,
         mut options,
         symbols,
+        tags,
         json,
         apply,
     } = parse_options(input)?;
-    if !symbols.is_empty() && args.first().map(String::as_str) != Some("check-write") {
+    let action = args.first().map(String::as_str);
+    if !symbols.is_empty() && !matches!(action, Some("check-write" | "remember")) {
         return Err("option --symbol is not valid for this command".into());
+    }
+    if action == Some("remember") && symbols.len() > 1 {
+        return Err("a note is anchored to one definition: give --symbol once".into());
+    }
+    if !tags.is_empty() && !matches!(action, Some("remember" | "recap")) {
+        return Err("option --tag is not valid for this command".into());
+    }
+    if action == Some("recap") && tags.len() > 1 {
+        return Err("recap filters by one tag: give --tag once".into());
     }
     if let [action] = args.as_slice()
         && (action == "install" || action == "uninstall")
@@ -4776,6 +4792,7 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
             },
             ["recap", workspace] => Command::Recap {
                 workspace_id: (*workspace).into(),
+                tag: tags.first().cloned(),
             },
             ["trail", workspace] => Command::Trails {
                 workspace_id: (*workspace).into(),
@@ -4840,6 +4857,8 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                 author: options.remove("--session"),
                 text: (*text).into(),
                 paths: paths.iter().map(|path| (*path).into()).collect(),
+                symbol: symbols.first().cloned(),
+                tags: tags.clone(),
             },
             ["forget", workspace, note] => Command::Forget {
                 workspace_id: (*workspace).into(),
@@ -5046,8 +5065,11 @@ struct ParsedOptions {
     /// Everything after a literal `--`: a check's command line.
     command: Vec<String>,
     options: BTreeMap<String, String>,
-    /// Each `--symbol NAME`, in order: the one option that may repeat.
+    /// Each `--symbol NAME`, in order: one of the two options that may
+    /// repeat.
     symbols: Vec<String>,
+    /// Each `--tag TAG`, in order (`remember`; `recap` takes one).
+    tags: Vec<String>,
     json: bool,
     apply: bool,
 }
@@ -5057,6 +5079,7 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
     let mut command = Vec::new();
     let mut options = BTreeMap::new();
     let mut symbols = Vec::new();
+    let mut tags = Vec::new();
     let mut json = false;
     let mut apply = false;
     let mut raw = false;
@@ -5071,6 +5094,7 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             "--" => raw = true,
             "--json" => json = true,
             "--symbol" => symbols.push(input.next().ok_or("--symbol needs a value")?),
+            "--tag" => tags.push(input.next().ok_or("--tag needs a value")?),
             "--apply" => apply = true,
             // Flags, kept with the options so that only the commands that take
             // them accept them (`dashboard`: `--open`, `--allow-network`, `--demo`;
@@ -5136,6 +5160,7 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
         command,
         options,
         symbols,
+        tags,
         json,
         apply,
     })
@@ -6106,6 +6131,9 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
                 }
             }
         }
+        Outcome::NoteAnchorsObserved { changed } => {
+            println!("{changed} anchored note(s) changed state.");
+        }
         Outcome::Remembered { note } => println!(
             "Remembered as {}. Forget it with `langspan forget {} {}`.",
             note.note_id, note.workspace_id, note.note_id
@@ -6420,15 +6448,19 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
                 );
             }
             for note in &recap.notes {
+                // An anchored or tagged note says what it is about as a
+                // briefing does, with the state of its definition.
+                let about = if note.anchor.is_some() || !note.tags.is_empty() {
+                    langspan::hook::note_about(note)
+                } else if note.paths.is_empty() {
+                    String::new()
+                } else {
+                    format!(" about {:?}", note.paths)
+                };
                 println!(
-                    "Remembered ({}): {}{}",
+                    "Remembered ({}){about}: {}",
                     note.note_id,
                     serde_json::to_string(&note.text)?,
-                    if note.paths.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" about {:?}", note.paths)
-                    }
                 );
             }
         }
@@ -6451,7 +6483,14 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
                         .map(|author| format!(", by {author}"))
                         .unwrap_or_default(),
                     serde_json::to_string(&note.text)?,
-                    if note.paths.is_empty() {
+                    if note.anchor.is_some() || !note.tags.is_empty() {
+                        langspan::hook::about_note(
+                            &note.paths,
+                            note.anchor.as_ref(),
+                            note.anchor_state,
+                            &note.tags,
+                        )
+                    } else if note.paths.is_empty() {
                         String::new()
                     } else {
                         format!(" about {:?}", note.paths)
