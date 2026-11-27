@@ -51,6 +51,18 @@ class Temporary(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def option(self, argv, flag):
+        """The values after FLAG, up to the next option."""
+        values = []
+        for value in argv[argv.index(flag) + 1:]:
+            if value.startswith("--"):
+                break
+            values.append(value)
+        return values
+
+    def transcript(self, lines):
+        return "\n".join(json.dumps(line) for line in lines) + "\n"
+
 
 class DriverUnitTests(Temporary):
     def test_assignment_is_seeded_sized_and_shaped(self):
@@ -92,15 +104,6 @@ class DriverUnitTests(Temporary):
         # The seed varies the layout wherever the pool allows it.
         self.assertGreater(len(layouts[2]), 1, layouts)
         self.assertGreater(len(layouts[5]), 1, layouts)
-
-    def option(self, argv, flag):
-        """The values after FLAG, up to the next option."""
-        values = []
-        for value in argv[argv.index(flag) + 1:]:
-            if value.startswith("--"):
-                break
-            values.append(value)
-        return values
 
     def test_claude_command_streams_its_transcript_keeps_prompts_and_limits_tools(self):
         for arm in driver.ARMS:
@@ -367,7 +370,12 @@ class DriverUnitTests(Temporary):
             with self.subTest(name):
                 started = time.monotonic()
                 arm = "langspan" if "Skill" in start else "worktrees"
-                code, text = self.guard(start + "sleep 20\nprintf '%s\\n' '{\"type\":\"late\"}'\n", arm)
+                # One process waits and then writes, so stopping it leaves
+                # nothing behind: a shell's orphaned `sleep` held this suite's
+                # output open for 20 s after the suite had finished.
+                late = "import time; time.sleep(20); print('{\"type\":\"late\"}')"
+                code, text = self.guard(start + "exec %s -I -c %s\n" % (shlex.quote(sys.executable), shlex.quote(late)),
+                                        arm)
                 self.assertLess(time.monotonic() - started, 15, "the session was stopped, not waited for")
                 self.assertEqual(code, driver.TOOL_CHECK_EXIT, text)
                 self.assertNotIn('"late"', text)
@@ -996,9 +1004,6 @@ class DriverUnitTests(Temporary):
                          {"total": 20, "peer_checkout": 9, "outside_clone": 3, "not_allowed": 8})
         self.assertIsNone(driver.denial_counts(None, root, work, 1, {}))
 
-    def transcript(self, lines):
-        return "\n".join(json.dumps(line) for line in lines) + "\n"
-
     def test_a_session_transcript_gives_its_result_cost_duration_and_turns(self):
         lines = [
             {"type": "system", "subtype": "init", "model": "model-x"},
@@ -1090,6 +1095,8 @@ class DriverUnitTests(Temporary):
         self.assertEqual(driver.scan_summary(None, "worktrees")["status"], "not_applicable")
         self.assertEqual(driver.scan_summary(None, "langspan")["status"], "unknown")
 
+
+class HookLogWrapper(Temporary):
     def test_the_hook_log_passes_a_refusal_through_even_when_it_cannot_log(self):
         command = "cat >/dev/null; printf '{\"decision\":\"deny\"}'; echo why >&2; exit 2"
         payload = json.dumps({"hook_event_name": "PreToolUse", "tool_use_id": "call-1", "session_id": "s"})
@@ -1196,10 +1203,23 @@ class DriverUnitTests(Temporary):
                               input="", capture_output=True, text=True, timeout=30)
         self.assertEqual(done.returncode, 128 + signal.SIGTERM, done.stderr)
         cases.append(late)
-        time.sleep(3)
+        # Every hook command names its `late` file, and so does each process
+        # it forked, so a survivor would still be listed: wait until none is
+        # (it writes within 2 s if it survived), then check nothing wrote.
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            listing = subprocess.run(["ps", "-ww", "-A", "-o", "args="], capture_output=True, text=True,
+                                     check=True, timeout=10).stdout
+            survivors = [line for line in listing.splitlines() if any(str(late) in line for late in cases)]
+            if not survivors:
+                break
+            time.sleep(.05)
+        self.assertEqual(survivors, [], "the hooks' processes outlived the wrapper")
         for late in cases:
             self.assertFalse(late.exists(), late)
 
+
+class RepairAndSummary(Temporary):
     def test_notes_and_merge_logs_survive_a_failed_merge(self):
         work = self.root / "work"
         work.mkdir()
@@ -1634,14 +1654,14 @@ class StandinHooks(Temporary):
         # On a loaded machine a hook can start late. Its decision is what the
         # dry run measures, so the edit waits for it, and the log says it was late.
         deny = json.dumps({"hookSpecificOutput": {"permissionDecision": "deny"}})
-        session, log = self.session("sleep 2; printf '%%s' %s" % shlex.quote(deny), 1)
+        session, log = self.session("sleep 0.6; printf '%%s' %s" % shlex.quote(deny), 0.3)
         denied = session.fire("PreToolUse", "Write", {"file_path": "x"}, "edit-1")
         log.flush()
         entry = json.loads((self.root / "standin.jsonl").read_text().splitlines()[0])
         self.assertTrue(denied, entry)
         self.assertEqual(entry["decision"], "deny", entry)
         self.assertTrue(entry["late"], entry)
-        self.assertGreaterEqual(entry["elapsed_ms"], 2000, entry)
+        self.assertGreaterEqual(entry["elapsed_ms"], 600, entry)
         self.assertEqual(session.late_hooks, 1)
 
     def test_a_hook_past_the_standin_bound_leaves_no_process_running(self):
@@ -1654,7 +1674,7 @@ class StandinHooks(Temporary):
         # stand-in's SIGKILL does not reach, and for a child that ignores
         # the SIGTERM sent first.
         original = standin_agent.HOOK_SECONDS
-        standin_agent.HOOK_SECONDS = 2
+        standin_agent.HOOK_SECONDS = 0.5
         self.addCleanup(setattr, standin_agent, "HOOK_SECONDS", original)
         for trap in ("", "trap '' TERM; "):
             for kind, command in self.commands(
@@ -1835,14 +1855,17 @@ class RefusalCollection(Temporary):
             settings = json.loads((clones[0] / ".claude" / "settings.local.json").read_text())
             # LangSpan's hooks start late, behind the hook-log wrapper, as
             # a slow start of the hook process on a loaded runner makes
-            # them: PreToolUse past its 5 s timeout, PostToolUse within it.
-            for event, delay in (("PreToolUse", 6), ("PostToolUse", 4)):
+            # them: PreToolUse past its host timeout, PostToolUse within it.
+            # The installed 5 s timeout is cut to 1 s here, so the test
+            # waits 1.5 s for the late hook instead of 6 s.
+            for event, delay in (("PreToolUse", 1.5), ("PostToolUse", 0.5)):
                 for entry in settings["hooks"][event]:
                     for hook in entry["hooks"]:
                         self.assertEqual(hook["timeout"], 5, hook)
+                        hook["timeout"] = 1
                         *wrapper, inner = shlex.split(hook["command"])
                         hook["command"] = " ".join(shlex.quote(part)
-                                                   for part in wrapper + ["sleep %d; %s" % (delay, inner)])
+                                                   for part in wrapper + ["sleep %s; %s" % (delay, inner)])
             target = (clones[0] / "shelf" / "report.py").resolve()
             with open(self.root / "hooks.jsonl", "w") as log:
                 session = standin_agent.Session(settings, log, str(clones[0].resolve()))
