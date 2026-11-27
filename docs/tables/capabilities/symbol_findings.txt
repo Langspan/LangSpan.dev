@@ -1,0 +1,1 @@
+a check record's `symbol_findings`, and `record_check`'s (issue #265)

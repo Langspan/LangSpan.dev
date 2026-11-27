@@ -1,0 +1,1 @@
+Commit only this session's own uncommitted changes in a shared checkout, with the owner's identity and hooks

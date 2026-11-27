@@ -1,0 +1,1 @@
+a landing's `rebased` and `adapted`, in the landing and in `record_landing` (roadmap F5)
