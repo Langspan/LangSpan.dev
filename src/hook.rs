@@ -18,8 +18,10 @@ pub use crate::file_state::{MAX_VERSION_BYTES, file_state};
 use crate::file_state::{file_content, version_of};
 pub use crate::ids::{file_key, valid_host_id, wire_id, workspace_request_id};
 pub use crate::input::{MAX_EVENT_BYTES, read_stdin_until};
-pub use crate::redact::{contains_secret, redact, redact_check, redact_command, refuse_secret};
 pub use crate::text::age;
+pub use crate::text::redact::{
+    contains_secret, redact, redact_check, redact_command, refuse_secret,
+};
 pub(crate) use crate::text::{SUMMARY_LIMIT, clean, quoted, truncate};
 #[cfg(test)]
 use prompt::PROMPT_SCAN_BYTES;

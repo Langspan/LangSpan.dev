@@ -19,7 +19,7 @@ use std::collections::BTreeSet;
 // as well, so the bounded form (`bounded`) can be tried at every limit. Its
 // own unit tests come with it and run here a second time.
 #[allow(dead_code)]
-#[path = "../src/redact.rs"]
+#[path = "../src/text/redact.rs"]
 mod redact;
 
 // The redactor's unit tests load this helper too; it holds one pure function.
