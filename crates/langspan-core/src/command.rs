@@ -144,6 +144,12 @@ pub enum Command {
     IntentEnd {
         session_id: String,
     },
+    Reserve {
+        session_id: String,
+        key: String,
+        #[serde(default, skip_serializing_if = "is_zero_u64")]
+        after: u64,
+    },
     Admit {
         session_id: String,
         paths: Vec<String>,
@@ -1133,6 +1139,12 @@ enum CommandWire {
     },
     IntentEnd {
         session_id: String,
+    },
+    Reserve {
+        session_id: String,
+        key: String,
+        #[serde(default, skip_serializing_if = "is_zero_u64")]
+        after: u64,
     },
     Admit {
         session_id: String,

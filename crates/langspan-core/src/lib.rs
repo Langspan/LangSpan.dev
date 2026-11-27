@@ -31,6 +31,7 @@ mod refusal_outcome;
 mod remote;
 mod rename_holds;
 mod report;
+mod reservations;
 mod route;
 mod sessions;
 mod shared;
@@ -103,6 +104,10 @@ pub use report::{
     OTHER_HOST, REPORT_HISTORY_EVENTS, REPORT_SESSIONS, Report, ReportCounts, ReportHost,
     ReportKnown, ReportQuery, ReportSession, host_kind, known_sessions, open_intents, report,
     session_workspaces,
+};
+pub use reservations::{
+    BRIEF_RESERVATIONS, Counter, MAX_RESERVATION_CLAIMS, MAX_RESERVATION_KEYS,
+    RESERVATION_KEY_BYTES, Reservation,
 };
 pub use route::Route;
 pub use sessions::*;
@@ -245,6 +250,11 @@ pub struct State {
     /// the ended session's ID (issue #161). One adoption per ended session.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub adoptions: BTreeMap<String, Adoption>,
+    /// Reserved numbers per scope (a repository, or a workspace outside
+    /// Git), then key (ADR 0040), at most `MAX_RESERVATION_KEYS` keys each.
+    /// In the snapshot; briefings carry them, never the status reply.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub reservations: BTreeMap<String, BTreeMap<String, Counter>>,
     /// Recorded renames per workspace, newest first, at most `MAX_RENAMES`
     /// (roadmap D7): what `graph symbol --renamed` follows. A name defined
     /// again is dropped. Derived on replay; not part of the status reply.
@@ -867,6 +877,11 @@ fn decide_checked(
             summary,
         } => sessions::decide_intent_set(state, session_id, paths, summary),
         Command::IntentEnd { session_id } => sessions::decide_intent_end(state, session_id),
+        Command::Reserve {
+            session_id,
+            key,
+            after,
+        } => reservations::decide_reserve(state, session_id, key, *after, now_ms),
         // The summary is the adapter's one line; the digests let it learn,
         // without any peer's words, whether a live peer's prompt began the
         // same way, so that it can name this prompt by where it differs.
@@ -1273,6 +1288,7 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
         } => sessions::apply_session_seen(state, session_id, at_ms, generation)?,
         Event::IntentSet { intent } => sessions::apply_intent_set(state, intent)?,
         Event::IntentEnded { session_id } => sessions::apply_intent_ended(state, session_id)?,
+        Event::Reserved { reservation } => reservations::apply_reserved(state, reservation)?,
         Event::SessionPrompted {
             session_id,
             summary,

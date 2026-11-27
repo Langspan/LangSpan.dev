@@ -49,6 +49,7 @@ pub const CAPABILITIES: &[(&str, Option<u16>)] = &[
     ("refusal_outcomes", Some(PROTOCOL_VERSION_5)),
     ("rename_holds", None),
     ("renames", Some(PROTOCOL_VERSION_4)),
+    ("reservations", None),
     ("symbol_findings", Some(PROTOCOL_VERSION_6)),
     ("tolerant_responses", None),
     ("trails", Some(PROTOCOL_VERSION_4)),
@@ -167,6 +168,11 @@ pub fn encode_with(
     {
         callers.clear();
     }
+    if !granted.has("reservations")
+        && let Outcome::Briefing { briefing } = &mut earlier.outcome
+    {
+        briefing.reserved.clear();
+    }
     let mut value = serde_json::to_value(&earlier)?;
     earlier_shape(granted, &mut value);
     if let Value::Object(fields) = &mut value {
@@ -279,6 +285,7 @@ fn event_needs(event: &Event) -> Needs {
         E::ContextAdded { .. } | E::ToldForgotten { .. } => Needs::Capability("briefing_memory"),
         E::NoteAnchorChanged { .. } => Needs::Capability("anchored_notes"),
         E::ReadOutlined { .. } => Needs::Capability("outline_reads"),
+        E::Reserved { .. } => Needs::Capability("reservations"),
         // Added at version 5 without a new version (#214).
         E::InterfaceNoticesTold { .. } => Needs::Version(6),
         // Added at version 4 without a new version (roadmap B28 and C9).
@@ -452,9 +459,11 @@ fn without_briefing_memory(outcome: &mut Outcome) {
 /// recap by tag, are not sent to a daemon without `anchored_notes`
 /// (roadmap E1), nor a recap asked for `since` to one without
 /// `recap_since` (roadmap C10). A check of renamed names alone is not sent
-/// to a daemon without `rename_holds` (issue #213).
+/// to a daemon without `rename_holds` (issue #213), nor a reservation to
+/// one without `reservations` (ADR 0040).
 pub fn fits_with(granted: Capabilities, command: &Command) -> bool {
     match command {
+        Command::Reserve { .. } => granted.has("reservations"),
         Command::RecordLanding {
             rebased, adapted, ..
         } => granted.has("landing_rewrites") || (rebased.is_empty() && adapted.is_empty()),
@@ -501,7 +510,7 @@ pub fn for_capabilities(granted: Capabilities, command: &mut Command) {
 /// Why a request that does not fit a daemon of `version` is not sent.
 pub fn older_daemon(version: u16) -> String {
     format!(
-        "the running daemon speaks protocol version {version}, which cannot read this request (a rebased or adapted landing, a note's symbol or tags, a recap's since, or a rename check); restart the daemon after upgrading LangSpan"
+        "the running daemon speaks protocol version {version}, which cannot read this request (a rebased or adapted landing, a note's symbol or tags, a recap's since, a rename check, or a reservation); restart the daemon after upgrading LangSpan"
     )
 }
 
