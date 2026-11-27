@@ -9,13 +9,53 @@ LangSpan ships as one binary for macOS and Linux. Each [release](https://github.
 | Linux, ARM64 (`Linux aarch64`) | `aarch64-unknown-linux-gnu` |
 | Linux, x86-64 (`Linux x86_64`) | `x86_64-unknown-linux-gnu` |
 
-Linux requires glibc 2.35 or later. The macOS binary isn't signed with an Apple Developer ID. The Homebrew tap and install script are not published.
+Linux requires glibc 2.35 or later. The macOS binary isn't signed with an Apple Developer ID. The Homebrew tap is not published.
+
+## Use the install script
+
+Close Claude Code. To install the latest release, run:
+
+```shell
+curl -fsSL https://github.com/Langspan/LangSpan.dev/releases/latest/download/install.sh | sh
+```
+
+To install a particular release, give its version: `curl -fsSL https://github.com/Langspan/LangSpan.dev/releases/latest/download/install.sh | sh -s -- v0.4.0`.
+
+The script does the following:
+
+1. Finds your target from `uname -sm`. On another platform it stops and points to [Build from source](#build-from-source).
+2. Downloads `SHA256SUMS` and your target's archive over HTTPS.
+3. Checks the archive's SHA-256 against `SHA256SUMS` before it extracts anything.
+4. Copies `langspan` to `~/.local/bin`. It doesn't use root or change your shell startup files.
+5. Prints the next steps: add `~/.local/bin` to `PATH` if it isn't there, or put it first if an earlier `langspan` elsewhere on `PATH` would run instead (the script names that file), run `langspan setup`, then run `langspan demo`.
+
+The script doesn't run `langspan setup` itself. A failed download, a checksum that doesn't match or an unknown platform stops it with a message that says what failed and what to do; nothing is installed. Each release attaches the script as `install.sh`, and `SHA256SUMS` lists it.
+
+To read the script before you run it, download it, read it, then run the copy you read:
+
+```shell
+curl -fsSLO https://github.com/Langspan/LangSpan.dev/releases/latest/download/install.sh
+less install.sh
+sh install.sh
+```
+
+To also check that the release workflow built it, run `gh attestation verify install.sh -R Langspan/LangSpan.dev` ([verify where the archive was built](#verify-a-download)). The source is [`scripts/install.sh`](../scripts/install.sh).
+
+<a id="a-browser-download-on-macos"></a>
+
+### A browser download on macOS
+
+macOS marks a file that a browser downloads, and Gatekeeper rejects the marked `langspan` binary because it has no Apple Developer ID signature. `curl` doesn't set that mark, so the script and the steps below install a binary that runs. If you downloaded the archive in a browser, remove the mark from the installed binary:
+
+```shell
+xattr -d com.apple.quarantine "$HOME/.local/bin/langspan"
+```
 
 <a id="install-and-connect"></a>
 
-## Install and connect
+## Install by hand
 
-Close Claude Code. In an empty folder, set your target on the first line and paste the block into zsh, or bash 5.1 or later:
+To install without the script, close Claude Code. In an empty folder, set your target on the first line and paste the block into zsh, or bash 5.1 or later:
 
 ```sh
 target=aarch64-apple-darwin

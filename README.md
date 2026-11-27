@@ -15,6 +15,16 @@ Command blocked by PreToolUse hook: LangSpan coordination conflict.
 
 ## Quickstart
 
+Close Claude Code. To install the latest release on macOS or Linux, run:
+
+```shell
+curl -fsSL https://github.com/Langspan/LangSpan.dev/releases/latest/download/install.sh | sh
+```
+
+The script checks the download against the release's `SHA256SUMS` and installs `langspan` in `~/.local/bin`, without root. It doesn't run setup. Follow the steps it prints: add `~/.local/bin` to `PATH` if needed, run `langspan setup`, then `langspan demo`. To read the script before you run it, see the [install guide](docs/install.md#use-the-install-script).
+
+### Install by hand
+
 Find your platform's target. To check, run `uname -sm`.
 
 | Platform | Target |
@@ -79,7 +89,7 @@ Setup connects Claude Code, Codex and Cursor when it finds them. To add Antigrav
 
 Coordination covers edits that go through the hooks. Interface notices match names and are advisory. The [coordination benchmark](benchmarks/coordination/README.md) has no published result yet.
 
-Writes outside the hooks, and edits a host approves after a hold ends, can bypass coordination; your agent host's permissions and your review still apply. A hold doesn't establish that changes in different files are compatible. LangSpan runs on macOS and Linux (glibc 2.35 or later). The macOS binary isn't signed with an Apple Developer ID, and no install script or Homebrew formula is published yet.
+Writes outside the hooks, and edits a host approves after a hold ends, can bypass coordination; your agent host's permissions and your review still apply. A hold doesn't establish that changes in different files are compatible. LangSpan runs on macOS and Linux (glibc 2.35 or later). The macOS binary isn't signed with an Apple Developer ID, so macOS rejects it after a browser download; use the install script or `curl`, or see the [install guide](docs/install.md#a-browser-download-on-macos). No Homebrew formula is published yet.
 
 </details>
 
