@@ -756,7 +756,7 @@ fn report(
             }
             _ => (running.check.clone(), None, Vec::new()),
         };
-    let request_id = crate::hook::wire_id(
+    let request_id = crate::ids::wire_id(
         "auto-check",
         &[
             workspace_id,

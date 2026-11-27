@@ -383,7 +383,7 @@ mod tests {
         }
         for tool in named {
             assert!(
-                crate::mcp::TOOL_NAMES.contains(&tool),
+                crate::tool_names::TOOL_NAMES.contains(&tool),
                 "{tool} is not a LangSpan tool"
             );
         }

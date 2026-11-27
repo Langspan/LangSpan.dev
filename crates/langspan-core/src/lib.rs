@@ -8,11 +8,14 @@ use serde::{Deserialize, Serialize};
 
 mod anchors;
 mod classes;
+mod command;
 mod count;
 mod dashboard;
+mod event;
 mod flaky;
 mod history;
 mod lines;
+mod outcome;
 mod policy;
 mod rank;
 mod recall;
@@ -24,6 +27,7 @@ mod status;
 mod status_line;
 mod today;
 mod trail;
+mod validate;
 mod workspaces;
 mod write_check;
 pub use anchors::{
@@ -33,6 +37,7 @@ pub use anchors::{
 pub use classes::{
     FailureClass, KeptTests, MAX_FIXED_NAMED, MAX_WRITE_RUNS, MAX_WRITERS_NAMED, WriteRun,
 };
+pub use command::Command;
 pub use count::{
     COUNT_DAYS, COUNT_KINDS, COUNT_REFUSALS, COUNT_WORKSPACES, CountQuery, RefusalCount,
     count_refusals, validate_count_days,
@@ -43,6 +48,7 @@ pub use dashboard::{
     LandingRow, MessageRow, NoteRow, NoticeRow, OverlapRow, PublishRow, RecentFile, ScanRow,
     WorkspaceRow, dashboard_denials,
 };
+pub use event::Event;
 pub use flaky::{
     FLAKY_DECAY_RUNS, FLAKY_MIN_FLIPS, FLAKY_WINDOW_RUNS, FlakyCount, FlakyTest, LastTests,
     MAX_FLAKY_LISTED, MAX_LEARNED_CHECKS, MAX_LEARNED_TESTS, MAX_TEST_NAME_BYTES, MAX_TEST_NAMES,
@@ -53,6 +59,7 @@ pub use history::{
     HISTORY_RELATED, HISTORY_RELATED_MS, History, HistoryEntry, HistoryMessage, HistoryNote,
     HistoryQuery, history as definition_history,
 };
+pub use outcome::Outcome;
 pub use policy::{
     DEFAULT_WAIT_MS, MAX_UNSETTLED, MAX_WAIT_MS, Policy, PolicyCase, PolicyRow, SettledOutcome,
     UnsettledRefusal, WaitResult,
@@ -96,6 +103,16 @@ pub use today::{
 pub use trail::{
     MAX_TRAIL_FACTS, MAX_TRAILS, TRAIL_BYTES, TRAIL_CHECKS, TRAIL_FILES, TRAIL_JSON_BYTES,
     TRAIL_RANGES, TRAIL_WAITING, Trail, TrailCheck, TrailFacts, TrailFile, TrailView,
+};
+pub use validate::{MAX_BATCH_OPERATIONS, validate_observed_file, validate_request_id};
+pub(crate) use validate::{
+    current_session, error, is_hex_digest, known_session, normalized_paths, normalized_related_ids,
+    normalized_workspace_links, presence_paths, prompt_target_paths, validate_batch,
+    validate_branch_observation, validate_canonical_paths, validate_checkout,
+    validate_checkout_run, validate_coverage, validate_disk_observation, validate_fact_header,
+    validate_failure, validate_host_name, validate_id, validate_presence_setting,
+    validate_relative_path, validate_session_liveness, validate_session_registration,
+    validate_summary, validate_tool_identity, validate_workspace, validate_workspace_link_targets,
 };
 pub use workspaces::{
     MAX_ENDING_SESSIONS, MAX_WORKSPACE_PAGE, WorkspaceEnding, WorkspaceKept, WorkspaceSummary,
@@ -312,7 +329,6 @@ pub struct KnownVersion {
 
 /// A file whose version on disk differs from the one the session last read.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct StaleFile {
     pub path: String,
     pub read: FileState,
@@ -324,7 +340,6 @@ pub struct StaleFile {
 
 /// A file the asking session read that a peer has since reported editing.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct StaleRead {
     pub path: String,
     pub session_id: String,
@@ -468,7 +483,6 @@ pub struct BranchObservation {
 /// Bounded metadata for the store's most recent completed workspace scan. A
 /// missing summary means no baseline, distinct from a scan with zero files.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct ScanSummary {
     pub workspace_id: String,
     pub observed_at_ms: u64,
@@ -642,7 +656,6 @@ pub const MAX_OUTLINED: usize = 64;
 /// One definition in a file's outline (roadmap A11): what the source index
 /// holds, without its signature or any other text of the file.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct OutlineEntry {
     pub name: String,
     pub kind: String,
@@ -675,7 +688,6 @@ pub struct LookedPath {
 
 /// One path a peer was looking at, as a briefing shows it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct PresencePath {
     pub path: String,
     pub kind: PresenceKind,
@@ -892,7 +904,6 @@ pub const BRIEF_PATHS: usize = 8;
 pub const BRIEF_HORIZON_MS: u64 = 30 * 60 * 1000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct RecentPath {
     pub path: String,
     pub age_ms: u64,
@@ -900,7 +911,6 @@ pub struct RecentPath {
 
 /// One other session's relevant work, as shown to the asking session.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct PeerWork {
     pub session_id: String,
     pub workspace_id: String,
@@ -997,7 +1007,6 @@ pub const PUBLICATION_BYTES: usize = 16 * 1024;
 
 /// One publication that left this machine, as recorded when it was pushed.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct SentPublication {
     /// Position in the local event log.
     pub seq: u64,
@@ -1017,7 +1026,6 @@ pub const MAX_RETENTION_DAYS: u32 = 3650;
 /// One compaction of the event log (ADR 0025, J7). Times are wall-clock
 /// Unix milliseconds.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct CompactionReport {
     /// False for a dry run, which deleted nothing.
     pub applied: bool,
@@ -1081,7 +1089,6 @@ pub struct RemotePeer {
 
 /// A teammate's session on another machine, as shown to the asking session.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct RemotePeerWork {
     pub name: String,
     pub work: RemoteWork,
@@ -1263,7 +1270,6 @@ pub enum Applicability {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct CheckView {
     pub record: CheckRecord,
     pub applicability: Applicability,
@@ -1478,7 +1484,6 @@ pub struct TurnWaiter {
 
 /// A landing in line for the push turn, as reported to callers.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct QueuedLanding {
     pub ticket: String,
     pub session_id: Option<String>,
@@ -1568,7 +1573,6 @@ pub struct LandingAttempt {
 /// detail (`GraphSymbol { detail: true }`); otherwise the record is the one
 /// every earlier version sent.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct SymbolRef {
     pub path: String,
     pub name: String,
@@ -1621,7 +1625,6 @@ pub const MAX_SYMBOL_NOTES: usize = 4;
 /// One name called within a definition: how often, and the line of the
 /// first call. A name, not a resolved target.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct CallCount {
     pub name: String,
     pub count: u32,
@@ -1631,7 +1634,6 @@ pub struct CallCount {
 /// Call sites of a name, found by name only. `sites` are `path:line`, in
 /// path and line order, at most `MAX_CALLER_SITES`; `count` is all of them.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct Callers {
     pub count: u32,
     pub sites: Vec<String>,
@@ -1639,7 +1641,6 @@ pub struct Callers {
 
 /// A remembered note, quoted for a symbol lookup.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct SymbolNote {
     pub id: String,
     pub text: String,
@@ -1648,7 +1649,6 @@ pub struct SymbolNote {
 /// A check record named by a symbol lookup: its name, `passed` or
 /// `failed`, and the tree it ran on.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct LastCheck {
     pub name: String,
     pub result: String,
@@ -1657,7 +1657,6 @@ pub struct LastCheck {
 
 /// A place a name is mentioned. Not a resolved use: any symbol of that name.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct NameRef {
     pub path: String,
     pub name: String,
@@ -1672,7 +1671,6 @@ pub const MAX_IMPACT_DEPTH: u32 = 3;
 /// mention a name the previous level's files export. Found by name, not
 /// resolved, so each level compounds the false positives of the one before.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct ImpactLevel {
     /// From 1: level 1 mentions an export of the queried file.
     pub level: u32,
@@ -1683,7 +1681,6 @@ pub struct ImpactLevel {
 
 /// A file reached at its first level, and how.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct ImpactFile {
     pub path: String,
     /// The exported name of `from` that this file mentions.
@@ -1710,7 +1707,6 @@ pub const MAX_MAP_EDGES: usize = 256;
 /// call in it that the next step's definition answers to, or, for the last
 /// step, the definition alone.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct PathStep {
     pub path: String,
     /// The call's line, or for the last step the definition's first line.
@@ -1733,7 +1729,6 @@ pub struct PathStep {
 
 /// One chain of calls from `graph path`'s first name to its second.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct SymbolPath {
     pub steps: Vec<PathStep>,
     /// Any step is `ambiguous`.
@@ -1743,7 +1738,6 @@ pub struct SymbolPath {
 /// One area of a `graph map` (roadmap D3): the files whose module path
 /// starts with `path`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct MapArea {
     pub path: String,
     pub files: u32,
@@ -1755,7 +1749,6 @@ pub struct MapArea {
 
 /// Edges of one kind from one `graph map` area to another, counted.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct MapEdge {
     pub from: String,
     pub to: String,
@@ -1769,7 +1762,6 @@ pub struct MapEdge {
 /// How much of a workspace the index covers, so a short answer is not read
 /// as a complete one.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct GraphCoverage {
     /// Files in the last complete scan in a supported language.
     pub indexable_files: u32,
@@ -1793,7 +1785,6 @@ pub struct GraphCoverage {
 
 /// A file indexed with a syntax error or a bound reached.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct PartialFile {
     pub path: String,
     /// Wall-clock milliseconds since which its indexed versions have been
@@ -1803,7 +1794,6 @@ pub struct PartialFile {
 
 /// Other source files the index has no grammar for, by extension.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct LanguageCount {
     pub extension: String,
     pub files: u32,
@@ -1811,7 +1801,6 @@ pub struct LanguageCount {
 
 /// Full counts of each blind-spot list, however many paths are returned.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct BlindTotals {
     pub partial: u32,
     pub never_clean: u32,
@@ -1823,7 +1812,6 @@ pub struct BlindTotals {
 /// Where the index is blind, by reason. A file can be in more than one
 /// list (a partial file can also be waiting for its newer version).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct BlindSpots {
     /// Indexed with a syntax error or a bound reached.
     pub partial: Vec<PartialFile>,
@@ -1907,7 +1895,6 @@ pub struct InterfaceChange {
 /// from `path` and `after_name` came, linked by `evidence` (absent for a
 /// rename recorded before it was kept).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct Rename {
     pub name: String,
     pub after_name: String,
@@ -1995,7 +1982,6 @@ pub struct CallSite {
 /// argument count does not fit the new signature, or the function it names
 /// was renamed or removed. A name match, not a resolved call.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct CallBreak {
     pub notice_id: String,
     pub call: CallSite,
@@ -2090,7 +2076,6 @@ pub struct WorktreeFile {
 
 /// An interface change that touches the asking session's own files.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct InterfaceImpact {
     pub path: String,
     pub by_session: Option<String>,
@@ -2140,7 +2125,6 @@ pub struct InflightSymbol {
 
 /// An in-flight symbol as a briefing or `graph inflight` tells it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct InflightNotice {
     pub path: String,
     /// The worktree's root.
@@ -2357,7 +2341,6 @@ pub struct Adoption {
 /// checkout and that nobody has adopted: the briefing suggests `langspan
 /// adopt` (issue #161). Its task line is data from that session.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct LeftWork {
     pub session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2388,7 +2371,6 @@ pub struct RetractedMessage {
 /// line a briefing cut. The text and paths are data from the sender, never
 /// instructions.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct ShownMessage {
     pub message_id: String,
     /// The sending session; `None` for the owner.
@@ -2456,7 +2438,6 @@ pub enum RecipientState {
 
 /// One recipient of a message and whether it was given it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct RecipientStatus {
     pub session_id: String,
     pub status: RecipientState,
@@ -2478,7 +2459,6 @@ pub const DELIVERED_MEANS: &str =
 /// Who was given a sent message: what `messages status` answers its sender
 /// (roadmap E12). Read-only: asking records nothing.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct MessageStatus {
     pub message_id: String,
     /// The sending session; `None` for the owner.
@@ -2716,7 +2696,6 @@ pub struct ScanFailure {
 
 /// One session in a recap: what it is and what it last did.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct RecapSession {
     pub session_id: String,
     /// Registered since the daemon last started.
@@ -2739,7 +2718,6 @@ pub struct RecapSession {
 /// A bounded account of one workspace: who is here, what changed, what is
 /// remembered, what evidence exists and what LangSpan cannot currently see.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct Recap {
     pub workspace_id: String,
     pub root: String,
@@ -2818,7 +2796,6 @@ pub const CONTEXT_FILES: u32 = 5;
 /// One name asked about in a code-context query, with where it is defined
 /// and which files mention it. A name match, not a resolved symbol.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct NameContext {
     pub name: String,
     pub definitions: Vec<SymbolRef>,
@@ -2853,7 +2830,6 @@ pub const REMOTE_WORK: usize = 8;
 pub const REMOTE_HORIZON_MS: u64 = 10 * 60 * 1000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct Briefing {
     pub session_id: String,
     /// False when the same peers and paths were already delivered.
@@ -3183,7 +3159,6 @@ pub struct UncoordinatedChange {
 /// An uncoordinated change as one session's briefing carries it: the files
 /// still at a version no session has reported.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct UncoordinatedNotice {
     pub sessions: Vec<String>,
     pub paths: Vec<String>,
@@ -3192,7 +3167,6 @@ pub struct UncoordinatedNotice {
 
 /// A checkout change as one session's briefing carries it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct CheckoutNotice {
     pub from_branch: Option<String>,
     pub to_branch: Option<String>,
@@ -3291,490 +3265,6 @@ impl CheckoutRun {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-pub enum Event {
-    Booted {
-        generation: u64,
-    },
-    /// The daemon's clock read with the wall clock as a generation started,
-    /// so its times can be placed on a day (the status line, `langspan today`).
-    ClockAnchored {
-        anchor: ClockAnchor,
-    },
-    /// A write or commit was refused. Recorded with the refusal's receipt,
-    /// so a retry of the same request is not counted again.
-    WriteRefused {
-        session_id: String,
-        workspace_id: String,
-        kind: RefusalKind,
-        /// At most `REFUSAL_PATHS`, sorted.
-        paths: Vec<String>,
-        /// The other session the refusal names, when there is one.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        peer_session_id: Option<String>,
-        /// The refused tool call's input digest (`ToolIdentity`), so the
-        /// coordination report can tell an identical retry from a changed
-        /// call. Absent for a held commit and from records written before it
-        /// was kept.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        input_digest: Option<String>,
-        at_ms: u64,
-        generation: u64,
-    },
-    /// A hook waited for a current holder instead of refusing at once
-    /// (roadmap B28), and how the wait ended.
-    WriteWaited {
-        session_id: String,
-        workspace_id: String,
-        /// At most `REFUSAL_PATHS`, sorted.
-        paths: Vec<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        holder_session_id: Option<String>,
-        waited_ms: u64,
-        result: WaitResult,
-        at_ms: u64,
-        generation: u64,
-    },
-    /// What the session did after a write refusal: its next admitted tool
-    /// write, or its stop (roadmap B28). `ms_to_next_admitted` is the time
-    /// from the refusal to an admitted write of one of its paths.
-    RefusalSettled {
-        session_id: String,
-        workspace_id: String,
-        kind: RefusalKind,
-        paths: Vec<String>,
-        refused_at_ms: u64,
-        outcome: SettledOutcome,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        ms_to_next_admitted: Option<u64>,
-        at_ms: u64,
-        generation: u64,
-    },
-    /// The owner set a workspace's policy for a current holder (roadmap
-    /// B28). `wait_ms` is zero for `refuse`.
-    PolicySet {
-        workspace_id: String,
-        case: PolicyCase,
-        policy: Policy,
-        wait_ms: u32,
-    },
-    WorkspaceRegistered {
-        workspace: Workspace,
-    },
-    /// The owner rebound the workspace to another checkout root (roadmap
-    /// G6). Everything kept under its ID stays; file versions recorded
-    /// under `from_root` are dropped. Local only.
-    WorkspaceMoved {
-        workspace: Workspace,
-        from_root: String,
-    },
-    /// The owner took the workspace out of coordination (roadmap G6): it,
-    /// its sessions and everything derived for them leave the state. The
-    /// events before this one stay in the log. Local only.
-    WorkspaceRemoved {
-        workspace_id: String,
-    },
-    SessionRegistered {
-        session: Session,
-    },
-    SessionLivenessObserved {
-        liveness: SessionLiveness,
-    },
-    /// A hook run of the session reached the daemon (roadmap J12). Evidence
-    /// that it is working; it grants, renews and releases nothing.
-    SessionSeen {
-        session_id: String,
-        at_ms: u64,
-        generation: u64,
-    },
-    IntentSet {
-        intent: Intent,
-    },
-    IntentEnded {
-        session_id: String,
-    },
-    LeaseGranted {
-        lease: Lease,
-    },
-    LeaseCompleted {
-        lease_id: String,
-    },
-    LeaseExpired {
-        lease_id: String,
-    },
-    OperationObserved {
-        observation: Observation,
-    },
-    DiskObserved {
-        observation: DiskObservation,
-    },
-    BranchObserved {
-        observation: BranchObservation,
-    },
-    WorkspaceGitObserved {
-        git: WorkspaceGit,
-    },
-    SessionPrompted {
-        session_id: String,
-        summary: String,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        line_digests: Vec<String>,
-        at_ms: u64,
-        generation: u64,
-    },
-    /// The definition paths the session's prompt named, replacing earlier
-    /// ones. Local only: never published.
-    PromptTargetsSet {
-        session_id: String,
-        paths: Vec<String>,
-        at_ms: u64,
-        generation: u64,
-    },
-    /// Paths a session's search or shell command looked at (roadmap A13).
-    /// Paths only, never a pattern or command text. Local only: never
-    /// published. Reads are presence through `SourceObserved`.
-    PresenceObserved {
-        session_id: String,
-        kind: PresenceKind,
-        paths: Vec<String>,
-        at_ms: u64,
-        generation: u64,
-    },
-    /// The session's presence setting; the default removes its record.
-    PresenceSet {
-        session_id: String,
-        setting: PresenceSetting,
-    },
-    SessionEnded {
-        session_id: String,
-    },
-    /// A session took over an ended session's uncommitted work (issue
-    /// #161).
-    SessionAdopted {
-        adoption: Adoption,
-    },
-    /// What a session left as it ended (roadmap C9). Replaces an earlier
-    /// trail of the same session.
-    TrailRecorded {
-        trail: Trail,
-    },
-    /// `session_id` was told the trail `from` left.
-    TrailTaken {
-        workspace_id: String,
-        from: String,
-        session_id: String,
-    },
-    /// The host said the session finished its reply (Stop, StopFailure or
-    /// SubagentStop). `released` are the tool admissions still open then,
-    /// completed by this event's preceding `LeaseCompleted` events.
-    /// `failure` is the host's error type when the reply ended on an error.
-    SessionStopped {
-        session_id: String,
-        released: Vec<String>,
-        failure: Option<String>,
-        at_ms: u64,
-        generation: u64,
-        /// The host's ID of the prompt whose reply finished, when it gave
-        /// one (issue #214). Absent from older records.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        prompt_id: Option<String>,
-    },
-    /// The host finished a batch of tool calls and is about to ask the model
-    /// again (Claude Code's PostToolBatch). `operation_ids` name at most
-    /// `MAX_BATCH_OPERATIONS` of the `calls`.
-    ToolBatchObserved {
-        session_id: String,
-        operation_ids: Vec<String>,
-        calls: u32,
-        at_ms: u64,
-        generation: u64,
-    },
-    BriefingDelivered {
-        session_id: String,
-        signature: String,
-        /// The keys of the items the session has now been told, at most
-        /// `MAX_TOLD` (issue #222). Absent from a delivery recorded before
-        /// them: the next briefing is then the full view.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        told: Vec<u64>,
-        /// When this delivery placed items in the session's context; absent
-        /// when it only forgot items that no longer apply.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        told_at_ms: Option<u64>,
-    },
-    /// A hook placed `bytes` of text in the session's context; `turn` when
-    /// it did so at the start of a turn (a session start or a prompt), with
-    /// zero bytes when it had nothing to add (issue #222).
-    ContextAdded {
-        session_id: String,
-        bytes: u64,
-        turn: bool,
-        generation: u64,
-    },
-    /// These told items were not placed in the session's context: they are
-    /// told again (review comment 4711375989). At most `MAX_TOLD` keys.
-    ToldForgotten {
-        session_id: String,
-        keys: Vec<u64>,
-    },
-    /// These in-flight signatures were placed in the session's context with
-    /// a briefing (roadmap C7). Each is told once.
-    InflightDelivered {
-        session_id: String,
-        keys: Vec<String>,
-    },
-    /// A write was told about these interface notices (ADR 0029).
-    InterfaceAlerted {
-        session_id: String,
-        notice_ids: Vec<String>,
-    },
-    /// These interface notices were placed in the session's context, by a
-    /// briefing or between its steps (issue #214). Each is told once
-    /// between steps, and one told there is left out of later briefings.
-    InterfaceNoticesTold {
-        session_id: String,
-        notice_ids: Vec<String>,
-        via: NoticeVia,
-    },
-    /// The session's whole read of this file version was refused once with
-    /// an outline (roadmap A11). No read version is recorded: stale checks
-    /// are unaffected.
-    ReadOutlined {
-        session_id: String,
-        path: String,
-        digest: String,
-    },
-    SourceObserved {
-        session_id: String,
-        files: Vec<ObservedFile>,
-        origin: SourceOrigin,
-        at_ms: u64,
-        generation: u64,
-    },
-    RemoteEnabled {
-        link: RemoteLink,
-    },
-    RemoteDisabled {
-        workspace_id: String,
-    },
-    /// The outbound record: what left this machine for a workspace. The
-    /// payload and time are absent from records written before they were
-    /// kept.
-    RemotePublished {
-        workspace_id: String,
-        sequence: u64,
-        signature: String,
-        payload: Option<String>,
-        published_at_ms: Option<u64>,
-    },
-    RemoteObserved {
-        peer: RemotePeer,
-    },
-    RemoteForgotten {
-        workspace_id: String,
-        participant: String,
-    },
-    RemoteWithdrawn {
-        workspace_id: String,
-    },
-    CheckRecorded {
-        check: CheckRecord,
-        /// The per-test results of a working-tree record, kept to compare a
-        /// later run with (issue #69). Absent from older logs.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        tests: Option<KeptTests>,
-    },
-    AutoCheckEnabled {
-        check: AutoCheck,
-    },
-    AutoCheckDisabled {
-        workspace_id: String,
-    },
-    /// An automatic check's result, to be delivered once to each of
-    /// `session_ids`. Follows the `CheckRecorded` of the same record.
-    CheckReported {
-        session_ids: Vec<String>,
-        notice: CheckNotice,
-    },
-    /// The result was placed in the session's context.
-    CheckDelivered {
-        session_id: String,
-        check_id: String,
-    },
-    /// Which tests one run of check `name` failed and passed on `tree_oid`:
-    /// names only, no output. Follows the `CheckRecorded` of record
-    /// `check_id`; `rerun` for the run made again on the same tree, which is
-    /// no record of its own. Compared with the check's last such result of
-    /// the same `command_id`, unless a write was recorded in the workspace
-    /// since.
-    TestsRecorded {
-        workspace_id: String,
-        check_id: String,
-        name: String,
-        tree_oid: String,
-        command: String,
-        command_id: String,
-        results: TestResults,
-        #[serde(default, skip_serializing_if = "is_false")]
-        rerun: bool,
-        at_ms: u64,
-    },
-    /// The owner cleared what was learned about `test`, in check `name` or
-    /// in every check.
-    FlakyTestForgotten {
-        workspace_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        name: Option<String>,
-        test: String,
-    },
-    Landed {
-        landing: Landing,
-    },
-    TurnTaken {
-        turn: Turn,
-    },
-    /// The landing ended; `attempts` is how each try went.
-    TurnReleased {
-        workspace_id: String,
-        onto: String,
-        turn_id: String,
-        attempts: Vec<LandingAttempt>,
-    },
-    TurnRenewed {
-        workspace_id: String,
-        onto: String,
-        turn_id: String,
-        expires_at_ms: u64,
-    },
-    TurnExpired {
-        workspace_id: String,
-        onto: String,
-        turn_id: String,
-    },
-    TurnQueueJoined {
-        waiter: TurnWaiter,
-    },
-    /// A waiting landing asked again: it stays in line until `seen_until_ms`.
-    TurnQueueSeen {
-        workspace_id: String,
-        onto: String,
-        ticket: String,
-        seen_until_ms: u64,
-    },
-    TurnQueueLeft {
-        workspace_id: String,
-        onto: String,
-        ticket: String,
-        reason: LeftQueue,
-    },
-    InterfaceChanged {
-        notice: InterfaceNotice,
-    },
-    /// Files of another worktree found to mention a held notice's changed
-    /// names (issue #194).
-    InterfaceDependentsFound {
-        notice_workspace_id: String,
-        notice_id: String,
-        files: Vec<WorktreeFile>,
-    },
-    Remembered {
-        note: Note,
-        /// When it was remembered. Absent from notes recorded before it was
-        /// kept; a definition's history (roadmap D4) places notes near
-        /// interface changes by it.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        at: Option<Stamp>,
-    },
-    Forgotten {
-        workspace_id: String,
-        note_id: String,
-    },
-    /// An anchored note's definition, compared with a complete scan, is in
-    /// a new state (roadmap E1). `anchor` is filled in when the note held
-    /// only a name.
-    NoteAnchorChanged {
-        workspace_id: String,
-        note_id: String,
-        anchor: NoteAnchor,
-        state: AnchorState,
-    },
-    /// `at_ms` and `generation` say when it was sent, on the daemon's
-    /// clock; absent in records written before roadmap E12.
-    MessageSent {
-        message: Message,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        at_ms: Option<u64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        generation: Option<u64>,
-    },
-    /// The session was given the message. `via` is the path that placed it
-    /// in the session's context, and `at_ms` and `generation` when; all
-    /// three are absent in records written before roadmap E12.
-    MessageAcknowledged {
-        workspace_id: String,
-        message_id: String,
-        session_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        via: Option<Delivery>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        at_ms: Option<u64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        generation: Option<u64>,
-    },
-    /// The message was withdrawn by `by` (its sender; `None` for the
-    /// owner). The `MessageSent` event stays in the log.
-    MessageRetracted {
-        workspace_id: String,
-        message_id: String,
-        by: Option<String>,
-    },
-    /// The session was told to disregard a withdrawn message.
-    RetractionDelivered {
-        session_id: String,
-        message_id: String,
-    },
-    ScanFailed {
-        failure: ScanFailure,
-    },
-    ScanRecovered {
-        workspace_id: String,
-    },
-    /// `None` when the last completed scan versioned every file.
-    ScanCoverageObserved {
-        workspace_id: String,
-        coverage: Option<ScanCoverage>,
-    },
-    CheckoutChanged {
-        change: CheckoutChange,
-    },
-    CheckoutRunObserved {
-        run: CheckoutRun,
-    },
-    /// A scan saw files change that no session reported, with Codex
-    /// sessions registered in the checkout (issue #129).
-    UncoordinatedChanged {
-        change: UncoordinatedChange,
-    },
-    /// A briefing carried this uncoordinated change to this session.
-    UncoordinatedDelivered {
-        workspace_id: String,
-        change_id: String,
-        session_id: String,
-    },
-    /// A host check found this host present and not covered by any
-    /// LangSpan install. Recorded once; repeated only after a
-    /// `HostCleared`.
-    HostNotInstalled {
-        host: UninstalledHost,
-    },
-    /// A host recorded as not installed is covered now, or its
-    /// configuration directory is gone.
-    HostCleared {
-        host: String,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RecordedEvent {
     pub seq: u64,
@@ -3807,2373 +3297,6 @@ impl fmt::Display for CoreError {
 }
 
 impl std::error::Error for CoreError {}
-
-impl Command {
-    /// Whether `other`, sent under this command's request ID, is the same
-    /// request: an identical retry, answered with the recorded outcome.
-    /// What the sender measures anew on every send is not compared: the age
-    /// of each written-lines entry of an admission (`WrittenLines::age_ms`)
-    /// and a checkout run's `finished_ago_ms`, which change between two
-    /// deliveries of one tool call.
-    pub fn same_request(&self, other: &Command) -> bool {
-        fn ageless(command: &Command) -> Option<Command> {
-            let mut command = command.clone();
-            match &mut command {
-                Command::AdmitTool { overwrites, .. } => {
-                    for entry in overwrites.iter_mut() {
-                        entry.age_ms = 0;
-                    }
-                }
-                Command::ObserveCheckoutRun {
-                    finished_ago_ms, ..
-                } => *finished_ago_ms = 0,
-                _ => return None,
-            }
-            Some(command)
-        }
-        match (ageless(self), ageless(other)) {
-            (Some(ours), Some(theirs)) => ours == theirs,
-            _ => self == other,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
-pub enum Command {
-    WorkspaceRegister {
-        workspace_id: String,
-        root: String,
-    },
-    /// Prepared adapter input only. It is absent from CommandWire and cannot be
-    /// serialized as a receipt: only the original WorkspaceRegister is stored.
-    #[serde(skip_serializing)]
-    WorkspaceRegisterVerified {
-        workspace_id: String,
-        root: String,
-        verified_overlaps: Vec<String>,
-    },
-    /// Read-only: one page of the registered workspaces with what each
-    /// holds, in ID order, after the workspace ID `after` (from the first
-    /// when absent). The daemon's store also bounds each page's bytes.
-    WorkspaceList {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        after: Option<String>,
-    },
-    /// Rebind the workspace to `root`: a checkout the owner moved (the old
-    /// root is gone), or with `switch` another checkout of the same
-    /// repository. The daemon checks the filesystem and Git before the core
-    /// decides; an owner command only, never an MCP tool.
-    WorkspaceMove {
-        workspace_id: String,
-        root: String,
-        #[serde(default, skip_serializing_if = "is_false")]
-        switch: bool,
-    },
-    /// Prepared adapter input only, as `WorkspaceRegisterVerified`: the
-    /// receipt stores the original `WorkspaceMove`.
-    #[serde(skip_serializing)]
-    WorkspaceMoveVerified {
-        workspace_id: String,
-        root: String,
-        verified_overlaps: Vec<String>,
-    },
-    /// Take the workspace out of coordination. Without `apply`, a read that
-    /// says what would end and changes nothing.
-    WorkspaceRemove {
-        workspace_id: String,
-        #[serde(default, skip_serializing_if = "is_false")]
-        apply: bool,
-    },
-    SessionRegister {
-        session_id: String,
-        workspace_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        parent: Option<String>,
-        #[serde(default, skip_serializing_if = "is_false")]
-        headless: bool,
-    },
-    ObserveSessionLiveness {
-        session_id: String,
-        process: ProcessIdentity,
-        status: LivenessStatus,
-    },
-    /// A hook run of the session reached the daemon. Recorded only when the
-    /// last record is `SESSION_SEEN_INTERVAL_MS` old (roadmap J12).
-    SessionSeen {
-        session_id: String,
-    },
-    /// The hook placed `bytes` of text in the session's context, at a
-    /// turn's start (`turn`, zero bytes allowed) or after a tool call
-    /// (issue #222). A measurement only.
-    RecordContext {
-        session_id: String,
-        bytes: u64,
-        #[serde(default, skip_serializing_if = "is_false")]
-        turn: bool,
-    },
-    /// The hook could not place these briefing items in the session's
-    /// context (its text budget was full): they are no longer told, so the
-    /// next briefing of changes only tells them (review comment 4711375989).
-    /// At most `MAX_TOLD` keys, from `briefing_keys`.
-    ForgetTold {
-        session_id: String,
-        keys: Vec<u64>,
-    },
-    IntentSet {
-        session_id: String,
-        paths: Vec<String>,
-        summary: String,
-    },
-    IntentEnd {
-        session_id: String,
-    },
-    Admit {
-        session_id: String,
-        paths: Vec<String>,
-        ttl_ms: u64,
-    },
-    AdmitTool {
-        session_id: String,
-        paths: Vec<String>,
-        ttl_ms: u64,
-        operation: ToolIdentity,
-        /// The admitted files as the adapter saw them on disk just before
-        /// asking. A path left out is admitted with an unknown base.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        base: Vec<ObservedFile>,
-        /// Where in each file the edit was located. A path left out, or
-        /// whose base is not the version its regions name, is held whole.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        regions: Vec<PathRegions>,
-        /// Lines other sessions wrote recently that this edit would change,
-        /// in the base version, from the hook's line journal.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        overwrites: Vec<WrittenLines>,
-    },
-    ObserveSource {
-        session_id: String,
-        files: Vec<ObservedFile>,
-        origin: SourceOrigin,
-    },
-    RemoteEnable {
-        workspace_id: String,
-        remote: String,
-        participant: String,
-        name: String,
-        share_task: bool,
-        /// Publish under `refs/heads/langspan/peers/` instead of
-        /// `refs/langspan/peers/`. ADR 0006.
-        #[serde(default, skip_serializing_if = "is_false")]
-        publish_as_branch: bool,
-    },
-    RemoteDisable {
-        workspace_id: String,
-    },
-    /// Read-only: what this workspace would publish next.
-    RemoteOutbox {
-        workspace_id: String,
-    },
-    /// The publication was pushed. `payload` is the exact `state.json` the
-    /// remote now holds (at most `PUBLICATION_BYTES`) and `published_at_ms`
-    /// the wall-clock time of the push in Unix milliseconds, for people.
-    RemotePublished {
-        workspace_id: String,
-        sequence: u64,
-        signature: String,
-        /// Absent from records written before payloads were kept.
-        #[serde(default, skip_serializing_if = "String::is_empty")]
-        payload: String,
-        #[serde(default, skip_serializing_if = "is_zero_u64")]
-        published_at_ms: u64,
-        /// The namespace the push went to (`true`: the branch namespace).
-        /// Absent from records of earlier builds, which are taken as current.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        as_branch: Option<bool>,
-    },
-    /// Read-only: the latest publications that left for a workspace, newest
-    /// first, with their exact payloads.
-    RemoteSent {
-        workspace_id: String,
-        limit: u32,
-    },
-    ObserveRemote {
-        workspace_id: String,
-        publication: Publication,
-    },
-    /// The teammate's ref is gone from the remote: they withdrew.
-    ForgetRemote {
-        workspace_id: String,
-        participant: String,
-    },
-    /// The daemon removed a disabled workspace's ref from the remote.
-    RemoteWithdrawn {
-        workspace_id: String,
-    },
-    RecordCheck {
-        workspace_id: String,
-        name: String,
-        command: String,
-        tree_oid: String,
-        head_oid: Option<String>,
-        inputs: Vec<String>,
-        result: CheckResult,
-        duration_ms: u64,
-        /// For an automatic check: the sessions to tell, and its output's
-        /// end.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        report: Option<Box<CheckReport>>,
-        /// The tests its output named, for a working-tree check that passed
-        /// or failed.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        tests: Option<TestResults>,
-        /// The tests of a second run on the same tree, made to learn which
-        /// tests flip; its result is not recorded.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        rerun: Option<TestResults>,
-        /// With `rerun`: the workspace's [`State::writes`] when the first
-        /// run's tree was taken. The rerun is compared only if no write was
-        /// recorded since, even one the tree no longer shows.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        writes_before: Option<u64>,
-        /// With `tests`: the command's identity, 64 lowercase hex digits
-        /// that differ for any two argument vectors. `command` is a cut and
-        /// redacted summary, which two commands can share; results are
-        /// compared only when this is equal.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        command_id: Option<String>,
-        /// For a combined check asked for them: what comparing the
-        /// branches' definitions found, kept with the record.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        symbol_findings: Option<Box<SymbolFindings>>,
-    },
-    /// Read-only: the tests known to flip on unchanged code, of check `name`
-    /// or of every check.
-    FlakyTests {
-        workspace_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        name: Option<String>,
-    },
-    /// Clear what was learned about `test`, in check `name` or in every
-    /// check.
-    ForgetFlakyTest {
-        workspace_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        name: Option<String>,
-        test: String,
-    },
-    /// Run `argv` automatically after a session's writes in the workspace,
-    /// recorded as check `name`. Replaces any earlier automatic check.
-    AutoCheckEnable {
-        workspace_id: String,
-        name: String,
-        argv: Vec<String>,
-        timeout_s: u32,
-        /// The wider check to run after it when the session's writes
-        /// changed an indexed interface that other files mention.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        on_interface_change: Option<Box<WiderCheck>>,
-    },
-    AutoCheckDisable {
-        workspace_id: String,
-    },
-    /// Read-only: every record for the workspace and whether it applies to
-    /// `tree_oid`.
-    CheckStatus {
-        workspace_id: String,
-        tree_oid: Option<String>,
-    },
-    /// Read-only: may `tree_oid` be landed on the strength of check `name`?
-    LandingReadiness {
-        workspace_id: String,
-        name: String,
-        tree_oid: String,
-    },
-    RecordLanding {
-        workspace_id: String,
-        onto: String,
-        commit_oid: String,
-        tree_oid: String,
-        inputs: Vec<String>,
-        check_id: String,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        rebased: Vec<Rewritten>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        adapted: Vec<String>,
-    },
-    /// Take the push turn for `onto`, or be told who holds it. With
-    /// `queue`, wait in line for it instead.
-    TakeTurn {
-        workspace_id: String,
-        onto: String,
-        session_id: Option<String>,
-        ttl_ms: u64,
-        /// The turn this landing already holds: extend it to `ttl_ms` from
-        /// now instead of taking a new one. Refused if it has ended.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        turn_id: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        queue: Option<TurnQueueing>,
-    },
-    /// End a turn this landing holds, recording how each attempt went.
-    ReleaseTurn {
-        workspace_id: String,
-        onto: String,
-        turn_id: String,
-        attempts: Vec<LandingAttempt>,
-    },
-    /// Stop a landing waiting for the push turn. One that holds it already
-    /// is not stopped.
-    LeaveTurnQueue {
-        workspace_id: String,
-        onto: String,
-        ticket: String,
-        reason: LeftQueue,
-    },
-    /// Who holds `onto`'s push turn and who waits for it. A read.
-    TurnQueue {
-        workspace_id: String,
-        onto: String,
-    },
-    ObserveInterface {
-        workspace_id: String,
-        path: String,
-        changes: Vec<InterfaceChange>,
-        dependents: Vec<String>,
-    },
-    /// Files of `workspace_id` that the index finds mention a name changed
-    /// by the notice `notice_id` of `notice_workspace_id`, another worktree
-    /// of the same repository (issue #194). Internal to the daemon's scan.
-    ObserveInterfaceDependents {
-        notice_workspace_id: String,
-        notice_id: String,
-        workspace_id: String,
-        paths: Vec<String>,
-    },
-    /// `symbol` anchors the note to the one indexed definition of that name
-    /// in `paths` (or in the workspace when empty), roadmap E1. The daemon
-    /// looks it up (`RememberPrepared`); decided without its index, the
-    /// anchor is `unknown` until the next complete scan.
-    Remember {
-        workspace_id: String,
-        author: Option<String>,
-        text: String,
-        paths: Vec<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        symbol: Option<String>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        tags: Vec<String>,
-    },
-    /// Compare the workspace's anchored notes with its index (roadmap E1),
-    /// asked by the indexer after each pass. Records only state changes; an
-    /// ask that changes nothing writes nothing, not even a receipt.
-    ObserveNoteAnchors {
-        workspace_id: String,
-    },
-    Forget {
-        workspace_id: String,
-        note_id: String,
-    },
-    /// Send one line to a session of the workspace, or with `to` absent to
-    /// every other session of it. `from` absent means the owner.
-    SendMessage {
-        workspace_id: String,
-        from: Option<String>,
-        to: Option<String>,
-        text: String,
-        paths: Vec<String>,
-    },
-    /// The session has seen the message; it is not delivered to it again.
-    AckMessage {
-        session_id: String,
-        message_id: String,
-    },
-    /// Read-only: one message as it was sent, from its `message_sent`
-    /// event, so also after every recipient has acknowledged it.
-    ShowMessage {
-        workspace_id: String,
-        message_id: String,
-    },
-    /// Read-only: who was given a sent message (roadmap E12).
-    /// `message_id` absent means the newest message `from` sent, or the
-    /// owner's newest when `from` is absent too.
-    MessageStatus {
-        workspace_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        from: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        message_id: Option<String>,
-    },
-    /// Leave one line for the next other session that starts or is
-    /// prompted in this session's workspace. Leases, intents and activity
-    /// are unchanged.
-    Handoff {
-        session_id: String,
-        text: String,
-        paths: Vec<String>,
-    },
-    /// Withdraw a sent message or handoff: `message_id` absent means the
-    /// newest message `from` sent. `from` is the sender, or absent for the
-    /// owner, who may withdraw any message.
-    RetractMessage {
-        workspace_id: String,
-        from: Option<String>,
-        message_id: Option<String>,
-    },
-    /// The observer's latest attempt: a failure with its reason, or `None`
-    /// for a completed scan.
-    ObserveScan {
-        workspace_id: String,
-        failure: Option<String>,
-        /// What a completed scan did not version; ignored for a failure.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        coverage: Option<ScanCoverage>,
-    },
-    /// The observer saw the checkout change under the sessions in it.
-    /// Internal to the daemon's scan, like `ObserveDisk`.
-    ObserveCheckout {
-        workspace_id: String,
-        from_branch: Option<String>,
-        to_branch: Option<String>,
-        from_head: Option<String>,
-        to_head: Option<String>,
-        files: u32,
-    },
-    /// A session's shell command ran a Git operation that changed its
-    /// checkout (`CheckoutRun`). Sent by the session's post-tool hook.
-    ObserveCheckoutRun {
-        session_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        command: Option<String>,
-        to_branch: Option<String>,
-        to_head: Option<String>,
-        /// How long the command ran, as its hook measured it.
-        ran_ms: u64,
-        /// How long ago the command finished, as its hook measured it when
-        /// sending: a report redelivered later keeps the command's own
-        /// window. A duration, not a time: the daemon places the finish
-        /// this long before its own now, never after it. Absent from an
-        /// earlier hook, which reported as the command finished.
-        #[serde(default, skip_serializing_if = "is_zero_u64")]
-        finished_ago_ms: u64,
-        /// The command changed no file's content (`CheckoutRun`). Absent
-        /// from an earlier hook.
-        #[serde(default, skip_serializing_if = "is_false")]
-        files_unchanged: bool,
-    },
-    /// Files a scan saw change outside a checkout change, at their new
-    /// versions. The core keeps those no session of the workspace reported
-    /// and names its Codex sessions (issue #129). Internal to the daemon's
-    /// scan, like `ObserveDisk`.
-    ObserveUncoordinated {
-        workspace_id: String,
-        files: Vec<ObservedFile>,
-        /// When the scan began reading the checkout, on the clock the core is
-        /// told. A session that reported a file since then is newer than the
-        /// version the scan saw. Absent: not known, and no file is excused.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        scanned_from_ms: Option<u64>,
-    },
-    /// The daemon's host check: every host present now with no LangSpan
-    /// install covering it, by name (roadmap A7). Hosts held from an
-    /// earlier check and absent here are cleared.
-    ObserveHosts {
-        not_installed: Vec<String>,
-    },
-    /// Read-only: a bounded account of one workspace. With `tag`, only
-    /// notes carrying it are listed (roadmap E1). With `since`, the answer
-    /// also says what happened after that point of the event log, read by
-    /// the daemon's store (roadmap C10, capability `recap_since`).
-    Recap {
-        workspace_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        tag: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        since: Option<SinceFrom>,
-    },
-    /// Read-only: the newest trails ended sessions left in one workspace
-    /// (roadmap C9), at most `limit` (1 to `MAX_TRAILS`, default 4).
-    Trails {
-        workspace_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        limit: Option<u32>,
-    },
-    /// Read-only: the held notes of one workspace that hold every word of
-    /// `query`, about `path` or the whole workspace when a path is given
-    /// (roadmap E2). Never recorded, never counted as delivered.
-    Recall {
-        workspace_id: String,
-        query: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        path: Option<String>,
-        limit: u32,
-    },
-    /// Read-only, answered from the event log: the recorded interface
-    /// changes of definitions named `name`, newest first, in `path` or in
-    /// any file, older than `before_seq` when given (roadmap D4). Never
-    /// recorded.
-    History {
-        workspace_id: String,
-        name: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        path: Option<String>,
-        limit: u32,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        before_seq: Option<u64>,
-    },
-    /// Read-only, answered from the event log: what happened since
-    /// `from_ms` (wall clock, Unix milliseconds) in one workspace, or in
-    /// every workspace when none is named, and what is still open.
-    Today {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        workspace_id: Option<String>,
-        from_ms: u64,
-    },
-    /// Read-only, answered from the event log: the coordination report of
-    /// one workspace since `from_ms` (wall clock, Unix milliseconds), per
-    /// session and per host kind.
-    Report {
-        workspace_id: String,
-        from_ms: u64,
-    },
-    /// Read-only, answered from the event log: refusals in the local days
-    /// starting at each of `days` (wall clock, Unix milliseconds), the last
-    /// being the end, once per session, kind and path set per day (H5).
-    Count {
-        days: Vec<u64>,
-    },
-    /// Read-only: the person's status line for the directory `root`, with
-    /// refusals counted from `from_ms` (wall clock, Unix milliseconds).
-    StatusLine {
-        root: String,
-        from_ms: u64,
-    },
-    /// A refusal the hook decided itself (a held commit), recorded as a
-    /// `WriteRefused` event. Other kinds are recorded by the admission
-    /// that refuses them.
-    RecordRefusal {
-        session_id: String,
-        kind: RefusalKind,
-        paths: Vec<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        peer_session_id: Option<String>,
-    },
-    /// Read-only: the policy table in effect for a workspace (roadmap B28).
-    Policy {
-        workspace_id: String,
-    },
-    /// The owner sets the policy for a current holder. Every other case is
-    /// fixed and refused with `policy_fixed`.
-    SetPolicy {
-        workspace_id: String,
-        case: PolicyCase,
-        policy: Policy,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        wait_ms: Option<u32>,
-    },
-    /// Read-only: the current holders an admission of these paths would
-    /// meet now, polled by a hook that waits for them.
-    Holders {
-        session_id: String,
-        paths: Vec<String>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        base: Vec<ObservedFile>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        regions: Vec<PathRegions>,
-    },
-    /// A hook's wait for a current holder and how it ended, recorded as
-    /// `WriteWaited`, with the refusal it ended in. `changed` are the paths
-    /// whose version changed during the wait, as they are now.
-    RecordWait {
-        session_id: String,
-        paths: Vec<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        holder_session_id: Option<String>,
-        waited_ms: u64,
-        result: WaitResult,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        changed: Vec<ObservedFile>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        input_digest: Option<String>,
-    },
-    /// Read-only, answered from the derived index: where `name` is defined.
-    /// With `detail`, each definition also carries its body digest, calls,
-    /// callers, notes and last check (roadmap D1).
-    GraphSymbol {
-        workspace_id: String,
-        name: String,
-        limit: u32,
-        #[serde(default, skip_serializing_if = "is_false")]
-        detail: bool,
-        /// The client reads `GraphCoverage::blind_in_scope`. A request
-        /// without it is one an earlier build sends, and its answer keeps
-        /// the coverage shape that build knows.
-        #[serde(default, skip_serializing_if = "is_false")]
-        blind_in_scope: bool,
-        /// Rank the definitions as a code briefing does and give each the
-        /// files that mention its name (roadmap C2).
-        #[serde(default, skip_serializing_if = "is_false")]
-        rank: bool,
-        /// The asking session, whose own files rank first.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        session_id: Option<String>,
-        /// Follow recorded renames of `name` to its newest name and look
-        /// that up instead (roadmap D7); the answer's `renamed` says which.
-        #[serde(default, skip_serializing_if = "is_false")]
-        renamed: bool,
-    },
-    /// Read-only: where `name` is mentioned.
-    GraphReferences {
-        workspace_id: String,
-        name: String,
-        limit: u32,
-        #[serde(default, skip_serializing_if = "is_false")]
-        blind_in_scope: bool,
-    },
-    /// Read-only: what `path` exports and which files mention those names.
-    GraphImpact {
-        workspace_id: String,
-        path: String,
-        limit: u32,
-        #[serde(default, skip_serializing_if = "is_false")]
-        blind_in_scope: bool,
-        /// Levels to follow, 1 to `MAX_IMPACT_DEPTH` (roadmap D2). Above 1
-        /// the answer adds `levels`; at 1 the field is absent from the
-        /// request, which is then the one earlier builds send, and the
-        /// answer is theirs too.
-        #[serde(default = "one", skip_serializing_if = "is_one")]
-        depth: u32,
-    },
-    /// Read-only: the files the index cannot answer for, by reason, at
-    /// most `limit` paths per list (roadmap D8).
-    GraphBlindSpots {
-        workspace_id: String,
-        limit: u32,
-    },
-    /// Read-only: the shortest chains of calls from a definition named
-    /// `from` to one named `to`, at most `max_hops` calls long (1 to
-    /// `MAX_PATH_HOPS`), found by name and by import path (roadmap D3).
-    GraphPath {
-        workspace_id: String,
-        from: String,
-        to: String,
-        #[serde(default = "default_path_hops")]
-        max_hops: u32,
-    },
-    /// Read-only: the workspace's areas at `depth` (1 to `MAX_MAP_DEPTH`)
-    /// with their files, exports and languages, and the edges between them
-    /// (roadmap D3).
-    GraphMap {
-        workspace_id: String,
-        #[serde(default = "one")]
-        depth: u32,
-    },
-    /// Read-only: for each name that is defined in the workspace, up to
-    /// `limit` definitions and the files that mention it. Never recorded.
-    GraphContext {
-        workspace_id: String,
-        names: Vec<String>,
-        limit: u32,
-        /// Rank each name's definitions and give each the files that
-        /// mention its name (roadmap C2). Without it the answer is the one
-        /// earlier builds give, in path order.
-        #[serde(default, skip_serializing_if = "is_false")]
-        rank: bool,
-        /// The asking session, whose own files rank first.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        session_id: Option<String>,
-        /// Paths and qualifiers the prompt names (`store` in `store::upload`).
-        /// Used for this query only: never logged, recorded or kept.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        qualifiers: Vec<String>,
-    },
-    /// Read-only: what other worktrees of the workspace's repository have
-    /// in flight that any of its indexed files mention (roadmap C7). Never
-    /// recorded.
-    GraphInflight {
-        workspace_id: String,
-    },
-    /// Owner-only, CLI-only: write the workspace's source index to the
-    /// absolute path `path` as JSON Lines, created owner-only and never over
-    /// an existing file (roadmap D5). Not recorded.
-    GraphExport {
-        workspace_id: String,
-        path: String,
-    },
-    /// Owner-only, CLI-only: read an exported index from the absolute path
-    /// `path`. Only files whose content here has the exported digest, and
-    /// that the index does not hold already, are loaded, and only with
-    /// `apply`; without it nothing changes. Not recorded (roadmap D5).
-    GraphImport {
-        workspace_id: String,
-        path: String,
-        #[serde(default, skip_serializing_if = "is_false")]
-        apply: bool,
-    },
-    /// Answered by the daemon from its records, the line journal and its
-    /// source index (roadmap B26): whether `paths` are held, which of their
-    /// lines peers wrote recently and whether they are stale for the
-    /// session, and what a peer just changed in `symbols` (or, without
-    /// any, in the definitions of `paths`). A read: never recorded.
-    CheckWrite {
-        session_id: String,
-        paths: Vec<String>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        symbols: Vec<String>,
-    },
-    /// Answered by the daemon with its source index: the calls among
-    /// `calls` whose argument count does not fit a signature another live
-    /// session changed, from notices not yet alerted to this session. The
-    /// daemon records the notices it alerts to (`AcknowledgeInterface`);
-    /// the calls themselves are never recorded.
-    CheckCalls {
-        session_id: String,
-        calls: Vec<CallSite>,
-    },
-    /// The session was alerted to these interface notices at a write; it
-    /// is not alerted to them again.
-    AcknowledgeInterface {
-        session_id: String,
-        notice_ids: Vec<String>,
-    },
-    /// The interface notices owed to a running session that no briefing or
-    /// earlier delivery told it, for a host's between-step mechanism
-    /// (issue #214). Records only what it tells. `stops` is the count an
-    /// earlier answer gave: once the session finished a reply since, its
-    /// turn is over and nothing is told. Never the session at work: a
-    /// waiting watcher does not count as activity. `prompt_id` is the
-    /// host's ID of the prompt the watcher started at: once that prompt's
-    /// reply finished, even before the watcher's first answer, its turn is
-    /// over.
-    BetweenSteps {
-        session_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        stops: Option<u64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        prompt_id: Option<String>,
-    },
-    /// The session's hook placed these interface notices of a briefing in
-    /// its context (`Briefing::interface_notice_ids`), so no between-step
-    /// watcher tells them again (issue #214). A hook reports only the ones
-    /// its rendered text showed.
-    InterfaceShown {
-        session_id: String,
-        notice_ids: Vec<String>,
-    },
-    /// A whole read by the session of `path`, whose content on disk has
-    /// SHA-256 `digest` and is `lines` lines and `bytes` bytes long
-    /// (roadmap A11). The daemon answers with the file's outline when the
-    /// file is large, indexed whole at that digest, and the session was not
-    /// given this version's outline before; otherwise with none.
-    OutlineRead {
-        session_id: String,
-        path: String,
-        digest: String,
-        lines: u64,
-        bytes: u64,
-    },
-    Complete {
-        session_id: String,
-        lease_id: String,
-    },
-    Observe {
-        session_id: String,
-        operation_id: String,
-        source: String,
-        tool: String,
-        paths: Vec<String>,
-        result: ToolResult,
-        lease_id: Option<String>,
-    },
-    ObserveTool {
-        session_id: String,
-        operation: ToolIdentity,
-        paths: Vec<String>,
-        result: ToolResult,
-        lease_id: Option<String>,
-    },
-    ObserveDisk {
-        workspace_id: String,
-        path: String,
-        before: Option<FileState>,
-        after: FileState,
-        related_operation_ids: Vec<String>,
-    },
-    ObserveBranch {
-        workspace_id: String,
-        branch_ref: String,
-        head_oid: Option<String>,
-        tree_oid: Option<String>,
-    },
-    ObserveWorkspaceGit {
-        workspace_id: String,
-        repository_id: String,
-        branch_ref: Option<String>,
-    },
-    SessionPrompt {
-        session_id: String,
-        summary: String,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        line_digests: Vec<String>,
-    },
-    /// Where the definitions the session's prompt named are, from the
-    /// source index: replaces the session's earlier prompt targets. Paths
-    /// only, at most `MAX_PROMPT_TARGETS`.
-    SetPromptTargets {
-        session_id: String,
-        paths: Vec<String>,
-    },
-    /// Paths a search or shell command looked at: 1 to `PRESENCE_PATHS`
-    /// relative paths, never the pattern or the command. `kind` is `search`
-    /// or `shell`; reads arrive as `observe_source`.
-    ObservePresence {
-        session_id: String,
-        kind: PresenceKind,
-        paths: Vec<String>,
-    },
-    /// Whether peers are shown where this session looks, and how old a
-    /// peer's presence this session is shown (`window_ms`,
-    /// `MIN_PRESENCE_WINDOW_MS` to `BRIEF_HORIZON_MS`).
-    SetPresence {
-        session_id: String,
-        shown: bool,
-        window_ms: u64,
-    },
-    SessionEnd {
-        session_id: String,
-        /// What the end hook read from the line journal for the trail
-        /// (roadmap C9). Absent from an older client: the trail has no line
-        /// ranges and no uncommitted files.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        trail: Option<TrailFacts>,
-    },
-    /// The session finished a reply: complete what its tool calls still
-    /// hold. `failure` is the host's error type (lower-case letters and
-    /// underscores) when the reply ended on an error.
-    SessionStop {
-        session_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        failure: Option<String>,
-        /// The host's ID of the prompt whose reply finished (issue #214).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        prompt_id: Option<String>,
-    },
-    /// A batch of the session's tool calls has finished.
-    ObserveToolBatch {
-        session_id: String,
-        operation_ids: Vec<String>,
-        calls: u32,
-    },
-    Brief {
-        session_id: String,
-        max_peers: u32,
-        /// True when the result is being placed in the session's context.
-        /// Only then is it remembered as delivered; a look from outside
-        /// neither suppresses the session's next briefing nor counts as
-        /// activity.
-        deliver: bool,
-        /// True for a briefing placed in context during a turn, after a
-        /// tool call. A handoff waits for a session's start or next prompt.
-        #[serde(default, skip_serializing_if = "is_false")]
-        mid_turn: bool,
-        /// Add what changed recently in the repository (roadmap C3). Set
-        /// by session-start hooks and `langspan brief --recent` only; never
-        /// with `mid_turn`.
-        #[serde(default, skip_serializing_if = "is_false")]
-        recent: bool,
-        /// How far back `recent` looks. The daemon sets it from its
-        /// configuration; absent means `RECENT_WINDOW_MS`.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        recent_window_ms: Option<u64>,
-        /// True when the session asked through the MCP tool
-        /// `langspan_brief`, so a message it carries is recorded as
-        /// delivered that way (roadmap E12).
-        #[serde(default, skip_serializing_if = "is_false")]
-        mcp: bool,
-        /// Sessions whose journaled lines are still uncommitted in this
-        /// session's checkout, as its adapter found them at the session's
-        /// start. The ended ones nobody adopted are named in the briefing.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        left: Vec<String>,
-        /// Leave out what the session was already told and is unchanged,
-        /// and count it in `Briefing::unchanged` (issue #222). Set by
-        /// prompt and mid-turn hooks; a session start and an explicit
-        /// request get the full view.
-        #[serde(default, skip_serializing_if = "is_false")]
-        changes_only: bool,
-    },
-    /// Take over an ended session's journaled, uncommitted lines in the
-    /// same workspace (issue #161). Refused for a live session and for one
-    /// of another workspace. The line journal is the adapter's: once the
-    /// event is recorded, the adapter credits the lines to `session_id`.
-    Adopt {
-        session_id: String,
-        from: String,
-    },
-    /// Prepared adapter input only, as `WorkspaceRegisterVerified`: the
-    /// receipt stores the original `Brief`. `inflight` is what the daemon's
-    /// source index found other worktrees have in flight that the session's
-    /// workspace mentions (roadmap C7), and `inflight_partial` that the
-    /// index had not finished a first scan of a worktree it reads.
-    #[serde(skip_serializing)]
-    BriefPrepared {
-        session_id: String,
-        max_peers: u32,
-        deliver: bool,
-        mid_turn: bool,
-        recent: bool,
-        recent_window_ms: Option<u64>,
-        mcp: bool,
-        left: Vec<String>,
-        changes_only: bool,
-        inflight: Vec<InflightSymbol>,
-        #[serde(default)]
-        inflight_partial: bool,
-        /// Names of anchored notes that the session's files mention, as
-        /// the index found them (roadmap E1).
-        mentioned: BTreeSet<String>,
-    },
-    /// Prepared adapter input only: the receipt stores the original
-    /// `Remember`. `index` is what the daemon's source index holds of
-    /// `symbol`, absent without a complete scan.
-    #[serde(skip_serializing)]
-    RememberPrepared {
-        workspace_id: String,
-        author: Option<String>,
-        text: String,
-        paths: Vec<String>,
-        symbol: Option<String>,
-        tags: Vec<String>,
-        index: Option<AnchorIndex>,
-    },
-    /// Prepared adapter input only: `ObserveNoteAnchors` with one snapshot
-    /// of the index. The daemon sends none without a complete scan.
-    #[serde(skip_serializing)]
-    NoteAnchorsPrepared {
-        workspace_id: String,
-        index: AnchorIndex,
-    },
-    /// Read-only: the bounded view of what matters now. Closed admissions
-    /// are counted, not listed; the answer always fits one frame.
-    Status,
-    /// Read-only: one page of every state record, history included, after
-    /// the cursor `after` (from the start when absent). Answered by the
-    /// daemon's store, which bounds each page's bytes.
-    StatusRecords {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        after: Option<String>,
-        /// A smaller page than the store's own bound, in bytes; absent for
-        /// the store's bound. The MCP adapter asks for one when a full page
-        /// does not fit its reply, which carries the page twice.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        page_bytes: Option<u32>,
-    },
-    /// Read-only: a bounded view of every session on every machine heard
-    /// from, with what is held, what overlaps, evidence and health.
-    Dashboard,
-    /// Read-only: the version the running coordinator was built as and its
-    /// process ID, for `doctor` (roadmap I5). Answered by the daemon, never
-    /// recorded. A daemon from before it answers with an error.
-    Version,
-    Events {
-        after: u64,
-        limit: u32,
-    },
-    Changes {
-        workspace_id: String,
-        after: u64,
-        limit: u32,
-    },
-    /// Retention (ADR 0025, J7): snapshot the derived state and delete the
-    /// events and receipts recorded more than `keep_days` ago. A dry run
-    /// (`apply` false) deletes nothing and reports what would go. Answered
-    /// by the daemon's store; never recorded and never replayed.
-    Compact {
-        keep_days: u32,
-        #[serde(default, skip_serializing_if = "is_false")]
-        apply: bool,
-    },
-}
-
-// Serde's internally tagged unit variants ignore extra fields. The empty struct
-// variant here preserves Command::Status while enforcing the wire contract.
-#[derive(Deserialize)]
-#[serde(
-    remote = "Command",
-    tag = "op",
-    rename_all = "snake_case",
-    deny_unknown_fields
-)]
-enum CommandWire {
-    WorkspaceRegister {
-        workspace_id: String,
-        root: String,
-    },
-    WorkspaceList {
-        #[serde(default)]
-        after: Option<String>,
-    },
-    WorkspaceMove {
-        workspace_id: String,
-        root: String,
-        #[serde(default)]
-        switch: bool,
-    },
-    WorkspaceRemove {
-        workspace_id: String,
-        #[serde(default)]
-        apply: bool,
-    },
-    SessionRegister {
-        session_id: String,
-        workspace_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        parent: Option<String>,
-        #[serde(default, skip_serializing_if = "is_false")]
-        headless: bool,
-    },
-    ObserveSessionLiveness {
-        session_id: String,
-        process: ProcessIdentity,
-        status: LivenessStatus,
-    },
-    /// A hook run of the session reached the daemon. Recorded only when the
-    /// last record is `SESSION_SEEN_INTERVAL_MS` old (roadmap J12).
-    SessionSeen {
-        session_id: String,
-    },
-    /// The hook placed `bytes` of text in the session's context, at a
-    /// turn's start (`turn`, zero bytes allowed) or after a tool call
-    /// (issue #222). A measurement only.
-    RecordContext {
-        session_id: String,
-        bytes: u64,
-        #[serde(default, skip_serializing_if = "is_false")]
-        turn: bool,
-    },
-    /// The hook could not place these briefing items in the session's
-    /// context (its text budget was full): they are no longer told, so the
-    /// next briefing of changes only tells them (review comment 4711375989).
-    /// At most `MAX_TOLD` keys, from `briefing_keys`.
-    ForgetTold {
-        session_id: String,
-        keys: Vec<u64>,
-    },
-    IntentSet {
-        session_id: String,
-        paths: Vec<String>,
-        summary: String,
-    },
-    IntentEnd {
-        session_id: String,
-    },
-    Admit {
-        session_id: String,
-        paths: Vec<String>,
-        ttl_ms: u64,
-    },
-    AdmitTool {
-        session_id: String,
-        paths: Vec<String>,
-        ttl_ms: u64,
-        operation: ToolIdentity,
-        /// The admitted files as the adapter saw them on disk just before
-        /// asking. A path left out is admitted with an unknown base.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        base: Vec<ObservedFile>,
-        /// Where in each file the edit was located. A path left out, or
-        /// whose base is not the version its regions name, is held whole.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        regions: Vec<PathRegions>,
-        /// Lines other sessions wrote recently that this edit would change,
-        /// in the base version, from the hook's line journal.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        overwrites: Vec<WrittenLines>,
-    },
-    ObserveSource {
-        session_id: String,
-        files: Vec<ObservedFile>,
-        origin: SourceOrigin,
-    },
-    RemoteEnable {
-        workspace_id: String,
-        remote: String,
-        participant: String,
-        name: String,
-        share_task: bool,
-        #[serde(default)]
-        publish_as_branch: bool,
-    },
-    RemoteDisable {
-        workspace_id: String,
-    },
-    /// Read-only: what this workspace would publish next.
-    RemoteOutbox {
-        workspace_id: String,
-    },
-    /// The publication was pushed. `payload` is the exact `state.json` the
-    /// remote now holds (at most `PUBLICATION_BYTES`) and `published_at_ms`
-    /// the wall-clock time of the push in Unix milliseconds, for people.
-    RemotePublished {
-        workspace_id: String,
-        sequence: u64,
-        signature: String,
-        /// Absent from records written before payloads were kept.
-        #[serde(default, skip_serializing_if = "String::is_empty")]
-        payload: String,
-        #[serde(default, skip_serializing_if = "is_zero_u64")]
-        published_at_ms: u64,
-        /// The namespace the push went to (`true`: the branch namespace).
-        /// Absent from records of earlier builds, which are taken as current.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        as_branch: Option<bool>,
-    },
-    /// Read-only: the latest publications that left for a workspace, newest
-    /// first, with their exact payloads.
-    RemoteSent {
-        workspace_id: String,
-        limit: u32,
-    },
-    ObserveRemote {
-        workspace_id: String,
-        publication: Publication,
-    },
-    /// The teammate's ref is gone from the remote: they withdrew.
-    ForgetRemote {
-        workspace_id: String,
-        participant: String,
-    },
-    /// The daemon removed a disabled workspace's ref from the remote.
-    RemoteWithdrawn {
-        workspace_id: String,
-    },
-    RecordCheck {
-        workspace_id: String,
-        name: String,
-        command: String,
-        tree_oid: String,
-        head_oid: Option<String>,
-        inputs: Vec<String>,
-        result: CheckResult,
-        duration_ms: u64,
-        /// For an automatic check: the sessions to tell, and its output's
-        /// end.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        report: Option<Box<CheckReport>>,
-        /// The tests its output named, for a working-tree check that passed
-        /// or failed.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        tests: Option<TestResults>,
-        /// The tests of a second run on the same tree, made to learn which
-        /// tests flip; its result is not recorded.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        rerun: Option<TestResults>,
-        /// With `rerun`: the workspace's [`State::writes`] when the first
-        /// run's tree was taken. The rerun is compared only if no write was
-        /// recorded since, even one the tree no longer shows.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        writes_before: Option<u64>,
-        /// With `tests`: the command's identity, 64 lowercase hex digits
-        /// that differ for any two argument vectors. `command` is a cut and
-        /// redacted summary, which two commands can share; results are
-        /// compared only when this is equal.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        command_id: Option<String>,
-        /// For a combined check asked for them: what comparing the
-        /// branches' definitions found, kept with the record.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        symbol_findings: Option<Box<SymbolFindings>>,
-    },
-    /// Read-only: the tests known to flip on unchanged code, of check `name`
-    /// or of every check.
-    FlakyTests {
-        workspace_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        name: Option<String>,
-    },
-    /// Clear what was learned about `test`, in check `name` or in every
-    /// check.
-    ForgetFlakyTest {
-        workspace_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        name: Option<String>,
-        test: String,
-    },
-    /// Run `argv` automatically after a session's writes in the workspace,
-    /// recorded as check `name`. Replaces any earlier automatic check.
-    AutoCheckEnable {
-        workspace_id: String,
-        name: String,
-        argv: Vec<String>,
-        timeout_s: u32,
-        /// The wider check to run after it when the session's writes
-        /// changed an indexed interface that other files mention.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        on_interface_change: Option<Box<WiderCheck>>,
-    },
-    AutoCheckDisable {
-        workspace_id: String,
-    },
-    /// Read-only: every record for the workspace and whether it applies to
-    /// `tree_oid`.
-    CheckStatus {
-        workspace_id: String,
-        tree_oid: Option<String>,
-    },
-    /// Read-only: may `tree_oid` be landed on the strength of check `name`?
-    LandingReadiness {
-        workspace_id: String,
-        name: String,
-        tree_oid: String,
-    },
-    RecordLanding {
-        workspace_id: String,
-        onto: String,
-        commit_oid: String,
-        tree_oid: String,
-        inputs: Vec<String>,
-        check_id: String,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        rebased: Vec<Rewritten>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        adapted: Vec<String>,
-    },
-    /// Take the push turn for `onto`, or be told who holds it. With
-    /// `queue`, wait in line for it instead.
-    TakeTurn {
-        workspace_id: String,
-        onto: String,
-        session_id: Option<String>,
-        ttl_ms: u64,
-        /// The turn this landing already holds: extend it to `ttl_ms` from
-        /// now instead of taking a new one. Refused if it has ended.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        turn_id: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        queue: Option<TurnQueueing>,
-    },
-    /// End a turn this landing holds, recording how each attempt went.
-    ReleaseTurn {
-        workspace_id: String,
-        onto: String,
-        turn_id: String,
-        attempts: Vec<LandingAttempt>,
-    },
-    /// Stop a landing waiting for the push turn. One that holds it already
-    /// is not stopped.
-    LeaveTurnQueue {
-        workspace_id: String,
-        onto: String,
-        ticket: String,
-        reason: LeftQueue,
-    },
-    /// Who holds `onto`'s push turn and who waits for it. A read.
-    TurnQueue {
-        workspace_id: String,
-        onto: String,
-    },
-    ObserveInterface {
-        workspace_id: String,
-        path: String,
-        changes: Vec<InterfaceChange>,
-        dependents: Vec<String>,
-    },
-    /// Files of `workspace_id` that the index finds mention a name changed
-    /// by the notice `notice_id` of `notice_workspace_id`, another worktree
-    /// of the same repository (issue #194). Internal to the daemon's scan.
-    ObserveInterfaceDependents {
-        notice_workspace_id: String,
-        notice_id: String,
-        workspace_id: String,
-        paths: Vec<String>,
-    },
-    /// `symbol` anchors the note to the one indexed definition of that name
-    /// in `paths` (or in the workspace when empty), roadmap E1. The daemon
-    /// looks it up (`RememberPrepared`); decided without its index, the
-    /// anchor is `unknown` until the next complete scan.
-    Remember {
-        workspace_id: String,
-        author: Option<String>,
-        text: String,
-        paths: Vec<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        symbol: Option<String>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        tags: Vec<String>,
-    },
-    /// Compare the workspace's anchored notes with its index (roadmap E1),
-    /// asked by the indexer after each pass. Records only state changes; an
-    /// ask that changes nothing writes nothing, not even a receipt.
-    ObserveNoteAnchors {
-        workspace_id: String,
-    },
-    Forget {
-        workspace_id: String,
-        note_id: String,
-    },
-    /// Send one line to a session of the workspace, or with `to` absent to
-    /// every other session of it. `from` absent means the owner.
-    SendMessage {
-        workspace_id: String,
-        from: Option<String>,
-        to: Option<String>,
-        text: String,
-        paths: Vec<String>,
-    },
-    /// The session has seen the message; it is not delivered to it again.
-    AckMessage {
-        session_id: String,
-        message_id: String,
-    },
-    /// Read-only: one message as it was sent, from its `message_sent`
-    /// event, so also after every recipient has acknowledged it.
-    ShowMessage {
-        workspace_id: String,
-        message_id: String,
-    },
-    /// Read-only: who was given a sent message (roadmap E12).
-    /// `message_id` absent means the newest message `from` sent, or the
-    /// owner's newest when `from` is absent too.
-    MessageStatus {
-        workspace_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        from: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        message_id: Option<String>,
-    },
-    /// Leave one line for the next other session that starts or is
-    /// prompted in this session's workspace. Leases, intents and activity
-    /// are unchanged.
-    Handoff {
-        session_id: String,
-        text: String,
-        paths: Vec<String>,
-    },
-    /// Withdraw a sent message or handoff: `message_id` absent means the
-    /// newest message `from` sent. `from` is the sender, or absent for the
-    /// owner, who may withdraw any message.
-    RetractMessage {
-        workspace_id: String,
-        from: Option<String>,
-        message_id: Option<String>,
-    },
-    /// The observer's latest attempt: a failure with its reason, or `None`
-    /// for a completed scan.
-    ObserveScan {
-        workspace_id: String,
-        failure: Option<String>,
-        /// What a completed scan did not version; ignored for a failure.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        coverage: Option<ScanCoverage>,
-    },
-    /// The observer saw the checkout change under the sessions in it.
-    /// Internal to the daemon's scan, like `ObserveDisk`.
-    ObserveCheckout {
-        workspace_id: String,
-        from_branch: Option<String>,
-        to_branch: Option<String>,
-        from_head: Option<String>,
-        to_head: Option<String>,
-        files: u32,
-    },
-    /// A session's shell command ran a Git operation that changed its
-    /// checkout (`CheckoutRun`). Sent by the session's post-tool hook.
-    ObserveCheckoutRun {
-        session_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        command: Option<String>,
-        to_branch: Option<String>,
-        to_head: Option<String>,
-        /// How long the command ran, as its hook measured it.
-        ran_ms: u64,
-        /// How long ago the command finished, as its hook measured it when
-        /// sending: a report redelivered later keeps the command's own
-        /// window. A duration, not a time: the daemon places the finish
-        /// this long before its own now, never after it. Absent from an
-        /// earlier hook, which reported as the command finished.
-        #[serde(default, skip_serializing_if = "is_zero_u64")]
-        finished_ago_ms: u64,
-        /// The command changed no file's content (`CheckoutRun`). Absent
-        /// from an earlier hook.
-        #[serde(default, skip_serializing_if = "is_false")]
-        files_unchanged: bool,
-    },
-    /// Files a scan saw change outside a checkout change, at their new
-    /// versions. The core keeps those no session of the workspace reported
-    /// and names its Codex sessions (issue #129). Internal to the daemon's
-    /// scan, like `ObserveDisk`.
-    ObserveUncoordinated {
-        workspace_id: String,
-        files: Vec<ObservedFile>,
-        /// When the scan began reading the checkout, on the clock the core is
-        /// told. A session that reported a file since then is newer than the
-        /// version the scan saw. Absent: not known, and no file is excused.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        scanned_from_ms: Option<u64>,
-    },
-    /// The daemon's host check: every host present now with no LangSpan
-    /// install covering it, by name (roadmap A7). Hosts held from an
-    /// earlier check and absent here are cleared.
-    ObserveHosts {
-        not_installed: Vec<String>,
-    },
-    /// Read-only: a bounded account of one workspace. With `tag`, only
-    /// notes carrying it are listed (roadmap E1). With `since`, the answer
-    /// also says what happened after that point of the event log, read by
-    /// the daemon's store (roadmap C10, capability `recap_since`).
-    Recap {
-        workspace_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        tag: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        since: Option<SinceFrom>,
-    },
-    /// Read-only: the newest trails ended sessions left in one workspace
-    /// (roadmap C9), at most `limit` (1 to `MAX_TRAILS`, default 4).
-    Trails {
-        workspace_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        limit: Option<u32>,
-    },
-    /// Read-only: the held notes of one workspace that hold every word of
-    /// `query`, about `path` or the whole workspace when a path is given
-    /// (roadmap E2). Never recorded, never counted as delivered.
-    Recall {
-        workspace_id: String,
-        query: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        path: Option<String>,
-        limit: u32,
-    },
-    /// Read-only, answered from the event log: the recorded interface
-    /// changes of definitions named `name`, newest first, in `path` or in
-    /// any file, older than `before_seq` when given (roadmap D4). Never
-    /// recorded.
-    History {
-        workspace_id: String,
-        name: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        path: Option<String>,
-        limit: u32,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        before_seq: Option<u64>,
-    },
-    /// Read-only, answered from the event log: what happened since
-    /// `from_ms` (wall clock, Unix milliseconds) in one workspace, or in
-    /// every workspace when none is named, and what is still open.
-    Today {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        workspace_id: Option<String>,
-        from_ms: u64,
-    },
-    /// Read-only, answered from the event log: the coordination report of
-    /// one workspace since `from_ms` (wall clock, Unix milliseconds), per
-    /// session and per host kind.
-    Report {
-        workspace_id: String,
-        from_ms: u64,
-    },
-    /// Read-only, answered from the event log: refusals in the local days
-    /// starting at each of `days` (wall clock, Unix milliseconds), the last
-    /// being the end, once per session, kind and path set per day (H5).
-    Count {
-        days: Vec<u64>,
-    },
-    /// Read-only: the person's status line for the directory `root`, with
-    /// refusals counted from `from_ms` (wall clock, Unix milliseconds).
-    StatusLine {
-        root: String,
-        from_ms: u64,
-    },
-    /// A refusal the hook decided itself (a held commit), recorded as a
-    /// `WriteRefused` event. Other kinds are recorded by the admission
-    /// that refuses them.
-    RecordRefusal {
-        session_id: String,
-        kind: RefusalKind,
-        paths: Vec<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        peer_session_id: Option<String>,
-    },
-    /// Read-only: the policy table in effect for a workspace (roadmap B28).
-    Policy {
-        workspace_id: String,
-    },
-    /// The owner sets the policy for a current holder. Every other case is
-    /// fixed and refused with `policy_fixed`.
-    SetPolicy {
-        workspace_id: String,
-        case: PolicyCase,
-        policy: Policy,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        wait_ms: Option<u32>,
-    },
-    /// Read-only: the current holders an admission of these paths would
-    /// meet now, polled by a hook that waits for them.
-    Holders {
-        session_id: String,
-        paths: Vec<String>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        base: Vec<ObservedFile>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        regions: Vec<PathRegions>,
-    },
-    /// A hook's wait for a current holder and how it ended, recorded as
-    /// `WriteWaited`, with the refusal it ended in. `changed` are the paths
-    /// whose version changed during the wait, as they are now.
-    RecordWait {
-        session_id: String,
-        paths: Vec<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        holder_session_id: Option<String>,
-        waited_ms: u64,
-        result: WaitResult,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        changed: Vec<ObservedFile>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        input_digest: Option<String>,
-    },
-    /// Read-only, answered from the derived index: where `name` is defined.
-    /// With `detail`, each definition also carries its body digest, calls,
-    /// callers, notes and last check (roadmap D1).
-    GraphSymbol {
-        workspace_id: String,
-        name: String,
-        limit: u32,
-        #[serde(default, skip_serializing_if = "is_false")]
-        detail: bool,
-        /// The client reads `GraphCoverage::blind_in_scope`. A request
-        /// without it is one an earlier build sends, and its answer keeps
-        /// the coverage shape that build knows.
-        #[serde(default, skip_serializing_if = "is_false")]
-        blind_in_scope: bool,
-        /// Rank the definitions as a code briefing does and give each the
-        /// files that mention its name (roadmap C2).
-        #[serde(default, skip_serializing_if = "is_false")]
-        rank: bool,
-        /// The asking session, whose own files rank first.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        session_id: Option<String>,
-        /// Follow recorded renames of `name` to its newest name and look
-        /// that up instead (roadmap D7); the answer's `renamed` says which.
-        #[serde(default, skip_serializing_if = "is_false")]
-        renamed: bool,
-    },
-    /// Read-only: where `name` is mentioned.
-    GraphReferences {
-        workspace_id: String,
-        name: String,
-        limit: u32,
-        #[serde(default, skip_serializing_if = "is_false")]
-        blind_in_scope: bool,
-    },
-    /// Read-only: what `path` exports and which files mention those names.
-    GraphImpact {
-        workspace_id: String,
-        path: String,
-        limit: u32,
-        #[serde(default, skip_serializing_if = "is_false")]
-        blind_in_scope: bool,
-        /// Levels to follow, 1 to `MAX_IMPACT_DEPTH` (roadmap D2). Above 1
-        /// the answer adds `levels`; at 1 the field is absent from the
-        /// request, which is then the one earlier builds send, and the
-        /// answer is theirs too.
-        #[serde(default = "one", skip_serializing_if = "is_one")]
-        depth: u32,
-    },
-    /// Read-only: the files the index cannot answer for, by reason, at
-    /// most `limit` paths per list (roadmap D8).
-    GraphBlindSpots {
-        workspace_id: String,
-        limit: u32,
-    },
-    GraphPath {
-        workspace_id: String,
-        from: String,
-        to: String,
-        #[serde(default = "default_path_hops")]
-        max_hops: u32,
-    },
-    GraphMap {
-        workspace_id: String,
-        #[serde(default = "one")]
-        depth: u32,
-    },
-    /// Read-only: for each name that is defined in the workspace, up to
-    /// `limit` definitions and the files that mention it. Never recorded.
-    GraphContext {
-        workspace_id: String,
-        names: Vec<String>,
-        limit: u32,
-        /// Rank each name's definitions and give each the files that
-        /// mention its name (roadmap C2). Without it the answer is the one
-        /// earlier builds give, in path order.
-        #[serde(default, skip_serializing_if = "is_false")]
-        rank: bool,
-        /// The asking session, whose own files rank first.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        session_id: Option<String>,
-        /// Paths and qualifiers the prompt names (`store` in `store::upload`).
-        /// Used for this query only: never logged, recorded or kept.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        qualifiers: Vec<String>,
-    },
-    /// Read-only: what other worktrees of the workspace's repository have
-    /// in flight that any of its indexed files mention (roadmap C7). Never
-    /// recorded.
-    GraphInflight {
-        workspace_id: String,
-    },
-    GraphExport {
-        workspace_id: String,
-        path: String,
-    },
-    GraphImport {
-        workspace_id: String,
-        path: String,
-        #[serde(default)]
-        apply: bool,
-    },
-    CheckWrite {
-        session_id: String,
-        paths: Vec<String>,
-        #[serde(default)]
-        symbols: Vec<String>,
-    },
-    /// Answered by the daemon with its source index: the calls among
-    /// `calls` whose argument count does not fit a signature another live
-    /// session changed, from notices not yet alerted to this session. The
-    /// daemon records the notices it alerts to (`AcknowledgeInterface`);
-    /// the calls themselves are never recorded.
-    CheckCalls {
-        session_id: String,
-        calls: Vec<CallSite>,
-    },
-    /// The session was alerted to these interface notices at a write; it
-    /// is not alerted to them again.
-    AcknowledgeInterface {
-        session_id: String,
-        notice_ids: Vec<String>,
-    },
-    /// The interface notices owed to a running session that no briefing or
-    /// earlier delivery told it, for a host's between-step mechanism
-    /// (issue #214). Records only what it tells. `stops` is the count an
-    /// earlier answer gave: once the session finished a reply since, its
-    /// turn is over and nothing is told. Never the session at work: a
-    /// waiting watcher does not count as activity. `prompt_id` is the
-    /// host's ID of the prompt the watcher started at: once that prompt's
-    /// reply finished, even before the watcher's first answer, its turn is
-    /// over.
-    BetweenSteps {
-        session_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        stops: Option<u64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        prompt_id: Option<String>,
-    },
-    /// The session's hook placed these interface notices of a briefing in
-    /// its context (`Briefing::interface_notice_ids`), so no between-step
-    /// watcher tells them again (issue #214). A hook reports only the ones
-    /// its rendered text showed.
-    InterfaceShown {
-        session_id: String,
-        notice_ids: Vec<String>,
-    },
-    /// A whole read by the session of `path`, whose content on disk has
-    /// SHA-256 `digest` and is `lines` lines and `bytes` bytes long
-    /// (roadmap A11). The daemon answers with the file's outline when the
-    /// file is large, indexed whole at that digest, and the session was not
-    /// given this version's outline before; otherwise with none.
-    OutlineRead {
-        session_id: String,
-        path: String,
-        digest: String,
-        lines: u64,
-        bytes: u64,
-    },
-    Complete {
-        session_id: String,
-        lease_id: String,
-    },
-    Observe {
-        session_id: String,
-        operation_id: String,
-        source: String,
-        tool: String,
-        paths: Vec<String>,
-        result: ToolResult,
-        lease_id: Option<String>,
-    },
-    ObserveTool {
-        session_id: String,
-        operation: ToolIdentity,
-        paths: Vec<String>,
-        result: ToolResult,
-        lease_id: Option<String>,
-    },
-    ObserveDisk {
-        workspace_id: String,
-        path: String,
-        before: Option<FileState>,
-        after: FileState,
-        related_operation_ids: Vec<String>,
-    },
-    ObserveBranch {
-        workspace_id: String,
-        branch_ref: String,
-        head_oid: Option<String>,
-        tree_oid: Option<String>,
-    },
-    ObserveWorkspaceGit {
-        workspace_id: String,
-        repository_id: String,
-        branch_ref: Option<String>,
-    },
-    SessionPrompt {
-        session_id: String,
-        summary: String,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        line_digests: Vec<String>,
-    },
-    /// Where the definitions the session's prompt named are, from the
-    /// source index: replaces the session's earlier prompt targets. Paths
-    /// only, at most `MAX_PROMPT_TARGETS`.
-    SetPromptTargets {
-        session_id: String,
-        paths: Vec<String>,
-    },
-    /// Paths a search or shell command looked at: 1 to `PRESENCE_PATHS`
-    /// relative paths, never the pattern or the command. `kind` is `search`
-    /// or `shell`; reads arrive as `observe_source`.
-    ObservePresence {
-        session_id: String,
-        kind: PresenceKind,
-        paths: Vec<String>,
-    },
-    /// Whether peers are shown where this session looks, and how old a
-    /// peer's presence this session is shown (`window_ms`,
-    /// `MIN_PRESENCE_WINDOW_MS` to `BRIEF_HORIZON_MS`).
-    SetPresence {
-        session_id: String,
-        shown: bool,
-        window_ms: u64,
-    },
-    SessionEnd {
-        session_id: String,
-        /// What the end hook read from the line journal for the trail
-        /// (roadmap C9). Absent from an older client: the trail has no line
-        /// ranges and no uncommitted files.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        trail: Option<TrailFacts>,
-    },
-    /// The session finished a reply: complete what its tool calls still
-    /// hold. `failure` is the host's error type (lower-case letters and
-    /// underscores) when the reply ended on an error.
-    SessionStop {
-        session_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        failure: Option<String>,
-        /// The host's ID of the prompt whose reply finished (issue #214).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        prompt_id: Option<String>,
-    },
-    /// A batch of the session's tool calls has finished.
-    ObserveToolBatch {
-        session_id: String,
-        operation_ids: Vec<String>,
-        calls: u32,
-    },
-    Brief {
-        session_id: String,
-        max_peers: u32,
-        /// True when the result is being placed in the session's context.
-        /// Only then is it remembered as delivered; a look from outside
-        /// neither suppresses the session's next briefing nor counts as
-        /// activity.
-        deliver: bool,
-        /// True for a briefing placed in context during a turn, after a
-        /// tool call. A handoff waits for a session's start or next prompt.
-        #[serde(default, skip_serializing_if = "is_false")]
-        mid_turn: bool,
-        #[serde(default, skip_serializing_if = "is_false")]
-        recent: bool,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        recent_window_ms: Option<u64>,
-        /// True when the session asked through the MCP tool
-        /// `langspan_brief`, so a message it carries is recorded as
-        /// delivered that way (roadmap E12).
-        #[serde(default, skip_serializing_if = "is_false")]
-        mcp: bool,
-        #[serde(default)]
-        left: Vec<String>,
-        #[serde(default)]
-        changes_only: bool,
-    },
-    Adopt {
-        session_id: String,
-        from: String,
-    },
-    Status {},
-    StatusRecords {
-        #[serde(default)]
-        after: Option<String>,
-        #[serde(default)]
-        page_bytes: Option<u32>,
-    },
-    Dashboard {},
-    Version {},
-    Events {
-        after: u64,
-        limit: u32,
-    },
-    Changes {
-        workspace_id: String,
-        after: u64,
-        limit: u32,
-    },
-    Compact {
-        keep_days: u32,
-        #[serde(default)]
-        apply: bool,
-    },
-}
-
-impl<'de> Deserialize<'de> for Command {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        CommandWire::deserialize(deserializer)
-    }
-}
-
-// One reply per request, built and sent once: its size does not matter, and
-// boxing `Status`'s state would only add an allocation to every status read.
-#[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-pub enum Outcome {
-    Workspace {
-        workspace: Workspace,
-    },
-    Workspaces {
-        workspaces: Vec<WorkspaceSummary>,
-        /// The cursor for the next page (`after`), when more remain.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        next: Option<String>,
-    },
-    WorkspaceMoved {
-        workspace: Workspace,
-        from_root: String,
-        kept: WorkspaceKept,
-    },
-    /// `applied` is false for a dry run: nothing ended.
-    WorkspaceRemoval {
-        workspace_id: String,
-        applied: bool,
-        ending: WorkspaceEnding,
-    },
-    Session {
-        session: Session,
-    },
-    SessionLiveness {
-        liveness: SessionLiveness,
-    },
-    /// The session's last recorded hook run, this one or one less than
-    /// `SESSION_SEEN_INTERVAL_MS` earlier.
-    SessionSeen {
-        session_id: String,
-        last_hook_ms: u64,
-    },
-    /// What the session's hooks have added to its context so far.
-    ContextRecorded {
-        session_id: String,
-        context: ContextUse,
-    },
-    /// How many of the named items the session had been told and now has
-    /// not; zero when none was, and nothing is recorded.
-    ToldForgotten {
-        session_id: String,
-        forgotten: u32,
-    },
-    Intent {
-        intent: Intent,
-    },
-    IntentEnded {
-        session_id: String,
-    },
-    Admitted {
-        lease: Lease,
-    },
-    Conflict {
-        holders: Vec<Conflict>,
-    },
-    Completed {
-        lease_id: String,
-    },
-    Observed {
-        observation: Observation,
-    },
-    DiskObserved {
-        observation: DiskObservation,
-    },
-    BranchObserved {
-        observation: BranchObservation,
-    },
-    /// `state` is the bounded view of what matters now; `summary` says what
-    /// it counts instead of listing and what it left out to fit one frame.
-    /// An answer from a build before the summary has none.
-    Status {
-        state: State,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        summary: Option<StatusSummary>,
-    },
-    /// One page of state records in a fixed order. `next` resumes after the
-    /// last of them; it is absent on the last page.
-    StatusRecords {
-        records: Vec<StatusRecord>,
-        next: Option<String>,
-    },
-    Events {
-        events: Vec<RecordedEvent>,
-    },
-    Changes {
-        events: Vec<RecordedEvent>,
-        scan: Option<ScanSummary>,
-    },
-    WorkspaceGit {
-        git: WorkspaceGit,
-    },
-    SessionPrompted {
-        session_id: String,
-        /// Leading prompt lines a live peer's latest prompt in the same
-        /// repository shares with this one, by digest.
-        #[serde(default, skip_serializing_if = "is_zero")]
-        shared_lines: u32,
-    },
-    PromptTargets {
-        session_id: String,
-        paths: Vec<String>,
-    },
-    PresenceObserved {
-        session_id: String,
-        paths: u32,
-    },
-    Presence {
-        session_id: String,
-        setting: PresenceSetting,
-    },
-    SessionEnded {
-        session_id: String,
-    },
-    /// `recorded` is false when this session had already adopted `from`:
-    /// nothing new was recorded, and the adapter may finish crediting the
-    /// lines. `root` is the workspace's, whose line journal holds them.
-    /// `live` names `from`'s subagents that have not ended: their lines
-    /// (and their own subagents') stay theirs. `earlier` names the sessions
-    /// whose adoptions lead to `from`: an adopter that ended before its
-    /// lines were credited left them there, and they are credited too.
-    /// `kept` names subagents of `from` (or of an `earlier` session) that
-    /// another session adopted: their lines (and their own subagents') are
-    /// that session's to credit, so they stay where they are.
-    Adopted {
-        adoption: Adoption,
-        root: String,
-        recorded: bool,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        live: Vec<String>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        earlier: Vec<String>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        kept: Vec<String>,
-    },
-    SessionStopped {
-        session_id: String,
-        released: Vec<String>,
-        /// The session wrote a file since its last batch or stop.
-        #[serde(default, skip_serializing_if = "is_false")]
-        wrote: bool,
-    },
-    ToolBatchObserved {
-        session_id: String,
-        calls: u32,
-        /// The session wrote a file since its last batch or stop.
-        #[serde(default, skip_serializing_if = "is_false")]
-        wrote: bool,
-    },
-    AutoCheck {
-        check: AutoCheck,
-    },
-    AutoCheckDisabled {
-        workspace_id: String,
-    },
-    Briefing {
-        briefing: Briefing,
-    },
-    /// Nothing was admitted: the session's view of these files is out of date.
-    StaleBase {
-        stale: Vec<StaleFile>,
-    },
-    /// Nothing was admitted: the edit would change lines other live
-    /// sessions wrote recently, and this session has not read the file.
-    UnreadLines {
-        lines: Vec<WrittenLines>,
-    },
-    SourceObserved {
-        session_id: String,
-        files: u32,
-    },
-    RemoteLink {
-        link: RemoteLink,
-    },
-    RemoteDisabled {
-        workspace_id: String,
-    },
-    RemoteOutbox {
-        publication: Publication,
-        signature: String,
-        /// False when the content matches the last recorded publication.
-        changed: bool,
-    },
-    /// Newest first. `more` is true when older records were left out to
-    /// keep the answer within one frame.
-    RemoteSent {
-        sent: Vec<SentPublication>,
-        more: bool,
-        /// Wall-clock Unix milliseconds from which the list is complete:
-        /// publications recorded before it may have been removed by
-        /// retention. Absent when nothing has ever been removed.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        since_ms: Option<u64>,
-    },
-    /// What a compaction removed, or with `applied` false would remove.
-    Compaction {
-        report: CompactionReport,
-    },
-    /// `accepted` is false for a publication that is not newer than the one
-    /// already held: a replay, or one that arrived out of order.
-    RemoteObserved {
-        participant: String,
-        accepted: bool,
-    },
-    CheckRecorded {
-        check: CheckRecord,
-    },
-    Checks {
-        checks: Vec<CheckView>,
-    },
-    /// Known-flaky tests, newest flip first; `more` when some were left out.
-    FlakyTests {
-        workspace_id: String,
-        tests: Vec<FlakyTest>,
-        #[serde(default, skip_serializing_if = "is_false")]
-        more: bool,
-    },
-    /// `forgotten` is false when nothing was learned about the test.
-    FlakyTestForgotten {
-        workspace_id: String,
-        test: String,
-        forgotten: bool,
-    },
-    /// `ready` only when a passing check of that name exists for exactly
-    /// the tree asked about. `reason` says what is missing otherwise.
-    Readiness {
-        ready: bool,
-        reason: String,
-        check: Option<CheckRecord>,
-    },
-    Landed {
-        landing: Landing,
-    },
-    /// The caller holds the turn.
-    Turn {
-        turn: Turn,
-    },
-    /// Another landing holds the turn; nothing was taken. `held_ms` is
-    /// how long it has held it.
-    TurnBusy {
-        holder: Turn,
-        held_ms: u64,
-    },
-    /// The caller is waiting for the turn, at `position` (1 is next).
-    /// `waiting` is the whole line, first first.
-    TurnWaiting {
-        position: u32,
-        holder: Option<Turn>,
-        held_ms: Option<u64>,
-        waiting: Vec<QueuedLanding>,
-    },
-    /// The caller neither has the turn nor is waiting for it: the queue is
-    /// full, or the caller did not ask to wait and others are in line.
-    TurnUnavailable {
-        holder: Option<Turn>,
-        held_ms: Option<u64>,
-        waiting: Vec<QueuedLanding>,
-        queue_full: bool,
-    },
-    /// Who holds a target's push turn and who waits for it, first first.
-    TurnQueue {
-        holder: Option<Turn>,
-        held_ms: Option<u64>,
-        waiting: Vec<QueuedLanding>,
-    },
-    /// `left` is false when the landing was not waiting.
-    TurnQueueLeft {
-        ticket: String,
-        left: bool,
-    },
-    /// `released` is false when the turn was not held by `turn_id`: it had
-    /// already ended.
-    TurnReleased {
-        turn_id: String,
-        released: bool,
-    },
-    InterfaceObserved {
-        notice: InterfaceNotice,
-    },
-    /// How many files of another worktree were added to the notice's
-    /// `elsewhere`; zero when every one was already listed or it is full.
-    InterfaceDependentsObserved {
-        notice_id: String,
-        added: u32,
-    },
-    Remembered {
-        note: Note,
-    },
-    /// How many anchored notes an index pass moved to a new state.
-    NoteAnchorsObserved {
-        changed: u32,
-    },
-    Forgotten {
-        note_id: String,
-        /// False when no such note existed.
-        removed: bool,
-    },
-    MessageSent {
-        message: Message,
-    },
-    /// `acknowledged` is false when the message was not owed to the
-    /// session: already acknowledged, dropped, or never addressed to it.
-    MessageAcknowledged {
-        message_id: String,
-        acknowledged: bool,
-    },
-    MessageShown {
-        message: ShownMessage,
-    },
-    MessageStatus {
-        status: MessageStatus,
-    },
-    /// Sessions that were still owed it and now are not, and sessions that
-    /// had received it and will be told to disregard it.
-    MessageRetracted {
-        message_id: String,
-        withdrawn_unread: Vec<String>,
-        told_to_disregard: Vec<String>,
-    },
-    ScanObserved {
-        workspace_id: String,
-        failed: bool,
-    },
-    /// The hosts held as not installed after a host check.
-    HostsObserved {
-        not_installed: Vec<String>,
-    },
-    CheckoutObserved {
-        change: CheckoutChange,
-    },
-    CheckoutRunObserved {
-        run: CheckoutRun,
-    },
-    /// The Codex sessions named and the files kept; both empty when every
-    /// change was explained or nothing new was recorded.
-    UncoordinatedObserved {
-        sessions: Vec<String>,
-        paths: Vec<String>,
-    },
-    Recap {
-        recap: Recap,
-    },
-    Trails {
-        workspace_id: String,
-        trails: Vec<TrailView>,
-        /// Trails left out so that the answer fits one frame.
-        #[serde(default, skip_serializing_if = "is_zero")]
-        omitted: u32,
-    },
-    Recall {
-        recall: Recall,
-    },
-    History {
-        history: History,
-    },
-    Today {
-        today: Today,
-    },
-    Report {
-        report: Report,
-    },
-    Count {
-        count: RefusalCount,
-    },
-    StatusLine {
-        line: StatusLine,
-    },
-    RefusalRecorded {
-        session_id: String,
-    },
-    Policy {
-        workspace_id: String,
-        rows: Vec<PolicyRow>,
-    },
-    Holders {
-        holders: Vec<Conflict>,
-    },
-    WaitRecorded {
-        session_id: String,
-    },
-    Dashboard {
-        dashboard: Dashboard,
-    },
-    /// The answer to `Command::Version`.
-    Version {
-        version: String,
-        pid: u32,
-    },
-    /// Every list is a name match bounded by the request's limit. `coverage`
-    /// says how much of the workspace was indexed when it was answered.
-    Graph {
-        symbols: Vec<SymbolRef>,
-        references: Vec<NameRef>,
-        /// `name` on a detailed symbol lookup: callers are found by name,
-        /// not resolved. Absent otherwise.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        resolution: Option<String>,
-        coverage: GraphCoverage,
-        truncated: bool,
-        /// `graph impact` with a depth above 1: each level's files, from
-        /// the same index snapshot as `coverage`. Absent otherwise.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        levels: Option<Vec<ImpactLevel>>,
-        /// `graph symbol --renamed` of a name with a recorded rename: the
-        /// renames followed, in order; `symbols` are the last new name's.
-        /// Absent otherwise.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        renamed: Option<Vec<Rename>>,
-    },
-    /// Only names with at least one definition, in the order asked.
-    GraphContext {
-        matches: Vec<NameContext>,
-        coverage: GraphCoverage,
-    },
-    /// What other worktrees have in flight that the workspace mentions, in
-    /// worktree, path and name order. `coverage` is the asking workspace's;
-    /// a worktree without a complete scan contributes nothing.
-    GraphInflight {
-        inflight: Vec<InflightNotice>,
-        coverage: GraphCoverage,
-        truncated: bool,
-    },
-    /// The shortest chains of calls between two names (roadmap D3), at
-    /// most `MAX_PATHS`, in path and line order of their steps. Empty when
-    /// none is within the hops asked for. `edges_visited` counts what the
-    /// search read; `truncated` says a bound, the deadline or the chain
-    /// limit cut it, so a missing or longer chain may still exist.
-    GraphPath {
-        /// The query, as asked.
-        from: String,
-        to: String,
-        max_hops: u32,
-        paths: Vec<SymbolPath>,
-        edges_visited: u32,
-        coverage: GraphCoverage,
-        truncated: bool,
-    },
-    /// The workspace's areas and the edges between them (roadmap D3), in
-    /// area order and then by count. `truncated`: some areas or edges are
-    /// not listed.
-    GraphMap {
-        depth: u32,
-        areas: Vec<MapArea>,
-        edges: Vec<MapEdge>,
-        coverage: GraphCoverage,
-        truncated: bool,
-    },
-    /// The source index was written to a file (roadmap D5).
-    GraphExported {
-        workspace_id: String,
-        files: u32,
-        partial_files: u32,
-        bytes: u64,
-    },
-    /// What an index import found, by file line (roadmap D5). Only
-    /// `loaded` files were written, and only when `applied`.
-    GraphImported {
-        workspace_id: String,
-        applied: bool,
-        /// Same content here, and not yet indexed here: loaded, or would be.
-        loaded: u32,
-        /// Content here differs, or the file is missing or not in the last
-        /// scan: left to the indexer.
-        different: u32,
-        /// Already indexed here: the local rows are kept.
-        kept: u32,
-        /// Over a parse bound (symbols, references, imports, calls, line size).
-        over_limits: u32,
-        /// Not a valid file record, or a path seen earlier in the file.
-        malformed: u32,
-    },
-    /// `ready` is false when the index has no complete scan of the
-    /// workspace: nothing was checked.
-    CallBreaks {
-        breaks: Vec<CallBreak>,
-        coverage: GraphCoverage,
-        ready: bool,
-    },
-    /// The answer to `CheckWrite` (roadmap B26). Nothing was recorded.
-    WriteCheck {
-        check: WriteCheck,
-    },
-    /// Where the index cannot answer for the workspace's source (roadmap
-    /// D8). Each list is in path order and holds at most the request's
-    /// limit; `totals` has the full counts. Paths only, never content.
-    GraphBlindSpots {
-        blind_spots: BlindSpots,
-        coverage: GraphCoverage,
-        /// The last scan attempt failed: the lists are as of the last
-        /// complete one, if any.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        scan_failure: Option<ScanFailure>,
-        truncated: bool,
-    },
-    InterfaceAcknowledged {
-        session_id: String,
-        notice_ids: Vec<String>,
-    },
-    /// The answer to `OutlineRead` (roadmap A11). `outline` is present only
-    /// when the read is to be refused once with it; `skipped` says why it
-    /// is not. `definitions` is how many the index holds for the file: more
-    /// than `outline` lists when the daemon kept only the largest.
-    ReadOutline {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        outline: Option<Vec<OutlineEntry>>,
-        #[serde(default, skip_serializing_if = "is_zero")]
-        definitions: u32,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        skipped: Option<String>,
-    },
-    /// What a session is told between its steps (issue #214). `open` is
-    /// false once the turn the asking watcher started in is over, or the
-    /// session ended; `stops` is the reference for its next ask.
-    BetweenSteps {
-        session_id: String,
-        open: bool,
-        stops: u64,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        interface_changes: Vec<InterfaceImpact>,
-    },
-    Error {
-        code: String,
-        message: String,
-    },
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -14418,154 +11541,6 @@ pub fn call_breaks(
     Ok(breaks)
 }
 
-pub fn validate_request_id(id: &str) -> Result<(), CoreError> {
-    validate_id(id, "request ID").map_err(|mut error| {
-        error.code = "invalid_request_id".into();
-        error
-    })
-}
-
-/// The most operations one tool-batch record names.
-pub const MAX_BATCH_OPERATIONS: usize = 64;
-
-/// A host's error type, such as Claude Code's `rate_limit`: 1 to 40
-/// lower-case ASCII letters and underscores. Never free text.
-fn validate_failure(failure: &str) -> Result<(), CoreError> {
-    if failure.is_empty()
-        || failure.len() > 40
-        || !failure
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
-    {
-        return Err(error(
-            "invalid_failure",
-            "A stop failure is the host's error type: 1 to 40 lower-case letters or underscores",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_batch(operation_ids: &[String], calls: u32) -> Result<(), CoreError> {
-    let distinct: BTreeSet<&String> = operation_ids.iter().collect();
-    if operation_ids.is_empty()
-        || operation_ids.len() > MAX_BATCH_OPERATIONS
-        || distinct.len() != operation_ids.len()
-        || (calls as usize) < operation_ids.len()
-        || operation_ids
-            .iter()
-            .any(|id| validate_id(id, "operation ID").is_err())
-    {
-        return Err(error(
-            "invalid_batch",
-            "A tool batch names 1 to 64 distinct operation IDs and at least as many calls",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_id(id: &str, label: &str) -> Result<(), CoreError> {
-    if id.is_empty()
-        || id.len() > 128
-        || !id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
-    {
-        return Err(error(
-            "invalid_id",
-            &format!(
-                "{label} must contain 1 to 128 ASCII letters, digits, dots, underscores or hyphens"
-            ),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_tool_identity(operation: &ToolIdentity) -> Result<(), CoreError> {
-    validate_id(&operation.operation_id, "operation ID")?;
-    validate_id(&operation.source, "observation source")?;
-    validate_id(&operation.tool, "tool name")?;
-    if !is_hex_digest(&operation.input_digest, 64) {
-        return Err(error(
-            "invalid_input_digest",
-            "Tool input digest must contain exactly 64 hexadecimal characters",
-        ));
-    }
-    Ok(())
-}
-
-fn is_hex_digest(value: &str, length: usize) -> bool {
-    value.len() == length && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-fn validate_relative_path(path: &str) -> Result<(), CoreError> {
-    if path.is_empty()
-        || path.len() > 512
-        || path.contains(['\\', '\0'])
-        || path
-            .split('/')
-            .any(|part| part.is_empty() || part == "." || part == "..")
-    {
-        return Err(error(
-            "invalid_path",
-            "Each file key must be a relative path of at most 512 bytes without empty, dot or parent components, backslashes or NUL",
-        ));
-    }
-    Ok(())
-}
-
-fn normalized_paths(paths: &[String]) -> Result<Vec<String>, CoreError> {
-    if paths.is_empty() {
-        return Err(error(
-            "invalid_path",
-            "Specify at least one normalized relative file path",
-        ));
-    }
-    let mut unique = BTreeSet::new();
-    for path in paths {
-        validate_relative_path(path)?;
-        unique.insert(path.clone());
-        if unique.len() > 64 {
-            return Err(error(
-                "too_many_paths",
-                "A command can name at most 64 unique file paths; split independent work into separate operations",
-            ));
-        }
-    }
-    Ok(unique.into_iter().collect())
-}
-
-/// Prompt target paths, sorted and without repeats: 1 to
-/// `MAX_PROMPT_TARGETS` normalized relative paths.
-fn prompt_target_paths(paths: &[String]) -> Result<Vec<String>, CoreError> {
-    let paths = normalized_paths(paths)?;
-    if paths.len() > MAX_PROMPT_TARGETS {
-        return Err(error(
-            "too_many_paths",
-            &format!("A prompt names at most {MAX_PROMPT_TARGETS} target paths"),
-        ));
-    }
-    Ok(paths)
-}
-
-/// Presence paths, sorted and without repeats: 1 to `PRESENCE_PATHS`
-/// normalized relative paths, for a search or a shell command.
-fn presence_paths(kind: PresenceKind, paths: &[String]) -> Result<Vec<String>, CoreError> {
-    if kind == PresenceKind::Read {
-        return Err(error(
-            "invalid_presence",
-            "A read is recorded as an observed source version, not as presence",
-        ));
-    }
-    let paths = normalized_paths(paths)?;
-    if paths.len() > PRESENCE_PATHS {
-        return Err(error(
-            "too_many_paths",
-            &format!("A presence record names at most {PRESENCE_PATHS} paths"),
-        ));
-    }
-    Ok(paths)
-}
-
 impl Default for PresenceSetting {
     fn default() -> Self {
         Self {
@@ -14578,16 +11553,6 @@ impl Default for PresenceSetting {
 /// A session's presence setting: its own, or the default.
 fn presence_setting(state: &State, session_id: &str) -> PresenceSetting {
     state.presence.get(session_id).copied().unwrap_or_default()
-}
-
-fn validate_presence_setting(setting: &PresenceSetting) -> Result<(), CoreError> {
-    if !(MIN_PRESENCE_WINDOW_MS..=BRIEF_HORIZON_MS).contains(&setting.window_ms) {
-        return Err(error(
-            "invalid_limit",
-            "A presence window is between 1 and 30 minutes",
-        ));
-    }
-    Ok(())
 }
 
 /// Record that a session looked at `paths`: newest first, one entry per path.
@@ -14606,492 +11571,6 @@ fn look(activity: &mut SessionActivity, kind: PresenceKind, paths: &[String], at
     activity.looking.truncate(MAX_LOOKING);
 }
 
-fn normalized_related_ids(ids: &[String]) -> Result<Vec<String>, CoreError> {
-    let mut unique = BTreeSet::new();
-    for id in ids {
-        validate_id(id, "related operation ID")?;
-        unique.insert(id.clone());
-        if unique.len() > 64 {
-            return Err(error(
-                "too_many_related_operations",
-                "A disk observation may correlate at most 64 distinct operations",
-            ));
-        }
-    }
-    Ok(unique.into_iter().collect())
-}
-
-fn validate_fact_header(
-    state: &State,
-    observation_id: &str,
-    workspace_id: &str,
-    generation: u64,
-) -> Result<(), CoreError> {
-    validate_request_id(observation_id)?;
-    validate_id(workspace_id, "workspace ID")?;
-    if !state.workspaces.contains_key(workspace_id) {
-        return Err(error(
-            "workspace_not_found",
-            "Observation workspace is not registered; register it before recording facts",
-        ));
-    }
-    if generation != state.generation {
-        return Err(error(
-            "invalid_event",
-            "Observation must belong to the current daemon generation",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_file_state(state: &FileState) -> Result<(), CoreError> {
-    if let FileState::Present { digest, .. } = state
-        && !is_hex_digest(digest, 64)
-    {
-        return Err(error(
-            "invalid_content_digest",
-            "Observed file content digest must contain exactly 64 hexadecimal characters",
-        ));
-    }
-    Ok(())
-}
-
-/// Validate a prepared workspace-relative file key and its observed version.
-/// Full snapshot projections use the same rules even for clean or unchanged
-/// files, so an accepted baseline cannot become impossible to update later.
-pub fn validate_observed_file(path: &str, version: &FileState) -> Result<(), CoreError> {
-    validate_relative_path(path)?;
-    validate_file_state(version)
-}
-
-fn validate_disk_observation(
-    state: &State,
-    observation: &DiskObservation,
-) -> Result<(), CoreError> {
-    validate_fact_header(
-        state,
-        &observation.observation_id,
-        &observation.workspace_id,
-        observation.generation,
-    )?;
-    validate_observed_file(&observation.path, &observation.after)?;
-    if let Some(before) = &observation.before {
-        validate_file_state(before)?;
-    }
-    if normalized_related_ids(&observation.related_operation_ids)?
-        != observation.related_operation_ids
-    {
-        return Err(error(
-            "invalid_event",
-            "Related operation IDs in an event must already be sorted and unique",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_branch_observation(
-    state: &State,
-    observation: &BranchObservation,
-) -> Result<(), CoreError> {
-    validate_fact_header(
-        state,
-        &observation.observation_id,
-        &observation.workspace_id,
-        observation.generation,
-    )?;
-    let reference = &observation.branch_ref;
-    if reference.len() > 512
-        || reference.chars().any(char::is_control)
-        || (reference != "HEAD"
-            && !reference
-                .strip_prefix("refs/heads/")
-                .is_some_and(|name| !name.is_empty()))
-    {
-        return Err(error(
-            "invalid_branch_ref",
-            "Branch reference must be HEAD or a nonempty refs/heads/ name, at most 512 bytes without control characters",
-        ));
-    }
-    if observation.head_oid.is_some() != observation.tree_oid.is_some() {
-        return Err(error(
-            "invalid_branch_oids",
-            "Supply head and tree together; omit both only for an absent or unborn reference",
-        ));
-    }
-    for oid in [&observation.head_oid, &observation.tree_oid]
-        .into_iter()
-        .flatten()
-    {
-        if !is_hex_digest(oid, 40) && !is_hex_digest(oid, 64) {
-            return Err(error(
-                "invalid_git_oid",
-                "Observed Git object IDs must contain 40 or 64 hexadecimal characters",
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// A host's command-line name: lower-case letters and hyphens, as the
-/// adapters name them (`claude-code`, `antigravity`).
-fn validate_host_name(host: &str) -> Result<(), CoreError> {
-    if host.is_empty()
-        || host.len() > 32
-        || !host
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte == b'-')
-    {
-        return Err(error(
-            "invalid_hosts",
-            "a host name is 1 to 32 lower-case letters and hyphens",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_coverage(coverage: &ScanCoverage) -> Result<(), CoreError> {
-    for (paths, count) in [
-        (&coverage.too_large_paths, coverage.too_large),
-        (&coverage.submodule_paths, coverage.submodules),
-    ] {
-        if paths.len() > COVERAGE_PATHS || paths.len() as u64 > count {
-            return Err(error(
-                "invalid_coverage",
-                "A coverage record names at most 8 paths per reason, and no more than it counts",
-            ));
-        }
-        for path in paths {
-            validate_relative_path(path)?;
-        }
-    }
-    Ok(())
-}
-
-fn validate_checkout(state: &State, change: &CheckoutChange) -> Result<(), CoreError> {
-    validate_fact_header(
-        state,
-        &change.change_id,
-        &change.workspace_id,
-        change.generation,
-    )?;
-    validate_checkout_state(
-        [&change.from_branch, &change.to_branch],
-        [&change.from_head, &change.to_head],
-    )?;
-    if change.from_branch == change.to_branch
-        && change.from_head == change.to_head
-        && change.files == 0
-    {
-        return Err(error(
-            "invalid_checkout",
-            "A checkout change needs a different branch or HEAD, or changed files",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_checkout_run(state: &State, run: &CheckoutRun) -> Result<(), CoreError> {
-    validate_fact_header(state, &run.run_id, &run.workspace_id, run.generation)?;
-    if state
-        .sessions
-        .get(&run.session_id)
-        .is_none_or(|session| session.workspace_id != run.workspace_id)
-    {
-        return Err(error(
-            "unknown_session",
-            "A checkout run names a session registered in its workspace",
-        ));
-    }
-    validate_checkout_state([&run.to_branch], [&run.to_head])?;
-    if run.command.as_ref().is_some_and(|command| {
-        command.len() > MAX_CHECKOUT_COMMAND_BYTES || command.chars().any(char::is_control)
-    }) {
-        return Err(error(
-            "invalid_command",
-            "A checkout run's command is at most 256 bytes without control characters",
-        ));
-    }
-    if run.started_ms > run.finished_ms {
-        return Err(error(
-            "invalid_event",
-            "A checkout run cannot start after it finished",
-        ));
-    }
-    Ok(())
-}
-
-/// Branches are nonempty `refs/heads/` names; heads are Git object IDs.
-fn validate_checkout_state<const B: usize, const H: usize>(
-    branches: [&Option<String>; B],
-    heads: [&Option<String>; H],
-) -> Result<(), CoreError> {
-    for reference in branches.into_iter().flatten() {
-        if reference.len() > 512
-            || reference.chars().any(char::is_control)
-            || !reference
-                .strip_prefix("refs/heads/")
-                .is_some_and(|name| !name.is_empty())
-        {
-            return Err(error(
-                "invalid_branch_ref",
-                "A checkout branch is a nonempty refs/heads/ name, at most 512 bytes without control characters",
-            ));
-        }
-    }
-    for oid in heads.into_iter().flatten() {
-        validate_oid(oid)?;
-    }
-    Ok(())
-}
-
-fn validate_canonical_paths(paths: &[String]) -> Result<(), CoreError> {
-    if normalized_paths(paths)? != paths {
-        return Err(error(
-            "invalid_event",
-            "Event file keys must already be sorted and unique",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_summary(summary: &str) -> Result<(), CoreError> {
-    if summary.len() > MAX_INTENT_SUMMARY_BYTES {
-        return Err(error(
-            "invalid_summary",
-            &format!(
-                "Intent summary exceeds {MAX_INTENT_SUMMARY_BYTES} UTF-8 bytes; shorten the summary"
-            ),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_workspace(state: &State, workspace: &Workspace) -> Result<(), CoreError> {
-    validate_id(&workspace.workspace_id, "workspace ID")?;
-    if workspace.root.is_empty() || workspace.root.contains('\0') {
-        return Err(error(
-            "invalid_root",
-            "Workspace root must be a nonempty canonical path without NUL",
-        ));
-    }
-    if normalized_workspace_links(&workspace.verified_overlaps)? != workspace.verified_overlaps {
-        return Err(error(
-            "invalid_event",
-            "Verified workspace overlaps must already be sorted and unique",
-        ));
-    }
-    validate_workspace_link_targets(
-        state,
-        &workspace.workspace_id,
-        &workspace.root,
-        &workspace.verified_overlaps,
-    )?;
-    if let Some(existing) = state.workspaces.get(&workspace.workspace_id)
-        && (existing.root != workspace.root
-            || existing.verified_overlaps != workspace.verified_overlaps)
-    {
-        return Err(error(
-            "workspace_conflict",
-            "Workspace ID is already bound to a different canonical root or verification record; use its existing registration",
-        ));
-    }
-    for existing in state.workspaces.values() {
-        if existing.workspace_id != workspace.workspace_id
-            && roots_overlap(&existing.root, &workspace.root)
-        {
-            let verified = workspace
-                .verified_overlaps
-                .binary_search(&existing.workspace_id)
-                .is_ok()
-                || existing
-                    .verified_overlaps
-                    .binary_search(&workspace.workspace_id)
-                    .is_ok();
-            if existing.root == workspace.root || !verified {
-                return Err(error(
-                    "workspace_conflict",
-                    "This root overlaps another workspace without a verified distinct worktree boundary; reuse its registered ID",
-                ));
-            }
-        }
-    }
-    if !state.workspaces.contains_key(&workspace.workspace_id) {
-        validate_no_parent_claims(state, workspace)?;
-    }
-    Ok(())
-}
-
-fn validate_no_parent_claims(state: &State, workspace: &Workspace) -> Result<(), CoreError> {
-    for lease in state.leases.values() {
-        if lease.status != LeaseStatus::Active || lease.generation != state.generation {
-            continue;
-        }
-        let Some(parent) = state.workspaces.get(&lease.workspace_id) else {
-            continue;
-        };
-        // A verified overlap whose roots do not overlap as text, such as a
-        // registered root that is now a link: the core cannot tell which of
-        // the lease's paths lie under this root, so any current admission
-        // there makes the registration wait.
-        if !roots_overlap(&parent.root, &workspace.root)
-            && workspace
-                .verified_overlaps
-                .binary_search(&parent.workspace_id)
-                .is_ok()
-        {
-            return Err(error(
-                "workspace_in_use",
-                "A current admission in a workspace this root overlaps through a link may cover it; complete it or wait for expiry, then start a new registration attempt with a new request ID",
-            ));
-        }
-        let prefix = if parent.root.ends_with('/') {
-            parent.root.clone()
-        } else {
-            format!("{}/", parent.root)
-        };
-        let Some(child_key) = workspace.root.strip_prefix(&prefix) else {
-            continue;
-        };
-        let child_key = child_key.trim_end_matches('/');
-        if !child_key.is_empty()
-            && lease.paths.iter().any(|path| {
-                path == child_key
-                    || path
-                        .strip_prefix(child_key)
-                        .is_some_and(|suffix| suffix.starts_with('/'))
-            })
-        {
-            return Err(error(
-                "workspace_in_use",
-                "A current parent-workspace admission covers this subtree; complete it or wait for expiry, then start a new registration attempt with a new request ID",
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn normalized_workspace_links(ids: &[String]) -> Result<Vec<String>, CoreError> {
-    let mut unique = BTreeSet::new();
-    for id in ids {
-        validate_id(id, "verified workspace ID")?;
-        unique.insert(id.clone());
-        if unique.len() > 64 {
-            return Err(error(
-                "too_many_verified_overlaps",
-                "A workspace registration can verify at most 64 distinct overlapping workspaces",
-            ));
-        }
-    }
-    Ok(unique.into_iter().collect())
-}
-
-fn validate_workspace_link_targets(
-    state: &State,
-    workspace_id: &str,
-    root: &str,
-    ids: &[String],
-) -> Result<(), CoreError> {
-    for id in ids {
-        let other = state.workspaces.get(id).ok_or_else(|| {
-            error(
-                "invalid_workspace_verification",
-                "A verified overlap must name an already registered workspace",
-            )
-        })?;
-        // The roots need not overlap as text: a registered root kept as
-        // given can be a link to a directory around or inside `root`, and
-        // only the adapter can resolve it.
-        if id == workspace_id || other.root == root {
-            return Err(error(
-                "invalid_workspace_verification",
-                "Verified overlaps must name distinct physical roots; identical roots must share one workspace ID",
-            ));
-        }
-    }
-    Ok(())
-}
-
-// The adapter supplies physical canonical roots. This lexical slash-component
-// check is an additional guard; platform-specific alias checks belong there.
-fn roots_overlap(a: &str, b: &str) -> bool {
-    fn contains(parent: &str, child: &str) -> bool {
-        parent == child
-            || child
-                .strip_prefix(parent)
-                .is_some_and(|suffix| parent.ends_with('/') || suffix.starts_with('/'))
-    }
-    contains(a, b) || contains(b, a)
-}
-
-fn validate_session_registration(state: &State, session: &Session) -> Result<(), CoreError> {
-    validate_id(&session.session_id, "session ID")?;
-    validate_id(&session.workspace_id, "workspace ID")?;
-    if !state.workspaces.contains_key(&session.workspace_id) {
-        return Err(error(
-            "workspace_not_found",
-            "Workspace is not registered; register it before attaching a session",
-        ));
-    }
-    if session.generation != state.generation {
-        return Err(error(
-            "invalid_event",
-            "Session registration must use the current daemon generation",
-        ));
-    }
-    if let Some(parent) = &session.parent {
-        validate_id(parent, "parent session ID")?;
-        if *parent == session.session_id {
-            return Err(error(
-                "invalid_session",
-                "A session cannot be its own parent; leave the parent out for a top-level session",
-            ));
-        }
-    }
-    if let Some(existing) = state.sessions.get(&session.session_id)
-        && existing.workspace_id != session.workspace_id
-    {
-        return Err(error(
-            "session_conflict",
-            "Session ID is already bound to a different workspace; use a new session ID",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_session_liveness(state: &State, liveness: &SessionLiveness) -> Result<(), CoreError> {
-    known_session(state, &liveness.session_id)?;
-    if liveness.process.pid == 0 {
-        return Err(error(
-            "invalid_process_identity",
-            "Process identity requires a positive PID and an OS boot/start token",
-        ));
-    }
-    validate_id(&liveness.process.start_token, "process start token")?;
-    if liveness.generation != state.generation {
-        return Err(error(
-            "invalid_event",
-            "Liveness observations must use the current daemon generation",
-        ));
-    }
-    if let Some(current) = state.session_liveness.get(&liveness.session_id)
-        && current.generation == state.generation
-    {
-        if current.process != liveness.process {
-            return Err(error(
-                "process_identity_mismatch",
-                "This session already names a different process incarnation in this generation; do not reuse its process identity",
-            ));
-        }
-        if liveness.observed_at_ms < current.observed_at_ms {
-            return Err(error(
-                "stale_liveness_observation",
-                "A liveness observation cannot replace newer evidence in the same generation",
-            ));
-        }
-    }
-    Ok(())
-}
-
 fn lease_relation(state: &State, lease: &Lease, now_ms: u64) -> LeaseRelation {
     match lease.status {
         LeaseStatus::Completed => LeaseRelation::Completed,
@@ -15100,40 +11579,6 @@ fn lease_relation(state: &State, lease: &Lease, now_ms: u64) -> LeaseRelation {
         LeaseStatus::Expired => LeaseRelation::Expired,
         LeaseStatus::Active if lease.expires_at_ms <= now_ms => LeaseRelation::Expired,
         LeaseStatus::Active => LeaseRelation::Current,
-    }
-}
-
-fn known_session<'a>(state: &'a State, session_id: &str) -> Result<&'a Session, CoreError> {
-    validate_id(session_id, "session ID")?;
-    state.sessions.get(session_id).ok_or_else(|| {
-        error(
-            "session_not_found",
-            "Session is not registered; attach it to a workspace first",
-        )
-    })
-}
-
-fn current_session<'a>(state: &'a State, session_id: &str) -> Result<&'a Session, CoreError> {
-    validate_id(session_id, "session ID")?;
-    let session = state.sessions.get(session_id).ok_or_else(|| {
-        error(
-            "session_not_found",
-            "Session is not registered; attach it to a workspace first",
-        )
-    })?;
-    if session.generation != state.generation {
-        return Err(error(
-            "stale_session",
-            "Session belongs to a previous daemon generation; register it again to reattach",
-        ));
-    }
-    Ok(session)
-}
-
-fn error(code: &str, message: &str) -> CoreError {
-    CoreError {
-        code: code.into(),
-        message: message.into(),
     }
 }
 

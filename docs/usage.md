@@ -163,9 +163,12 @@ owner-only. It logs a `daemon_stopping` line naming the reason
 coordinator for the folder now at that path, as it would after any stop; a
 folder that others can open is refused at start.
 
+SIGTERM, SIGINT and SIGHUP stop the daemon the same way, between requests, with
+reason `signal` and exit status 0; `langspan uninstall --apply` sends SIGTERM.
 A daemon that stops while an automatic check runs cancels the check and kills
 its command's process group first, waiting up to two seconds for it; a check
-still running then is logged as `auto_check_not_stopped`.
+still running then is logged as `auto_check_not_stopped`. SIGKILL can't be
+caught, so a running check outlives a daemon killed that way.
 
 A debug build of the daemon also exits after five minutes with no client and
 no automatic check running (reason `idle`), so a coordinator left by a test
@@ -223,8 +226,15 @@ precedence. `langspan doctor --root /path/to/checkout` reports both setups;
 through a symbolic link (`/tmp` and `/private/tmp` on macOS) is the same
 coordinator, and only a genuinely different directory is reported.
 `langspan uninstall --apply` removes the user-level entries it recognizes,
-stops and removes the coordinator's login service if `setup` installed one, and
-leaves the coordination state directory in place. A hooks or MCP file left
+stops and removes the coordinator's login service if `setup` installed one,
+stops the coordinator however it was started (one that holds `daemon.lock`
+but doesn't answer within 5 seconds fails the uninstall with nothing removed),
+removes the `~/.claude/skills` folder when
+the skill was all it held, and leaves the coordination state directory in
+place. It then prints the `rm` commands for the binary and the state directory.
+`--purge` removes the state directory as well; it refuses a directory that
+holds no `daemon.lock` and isn't empty, and it isn't valid with `--hosts`,
+since the other hosts' hooks still use that directory. A hooks or MCP file left
 holding nothing else (`{}`, or empty text) is removed rather than left behind.
 Running it again after an upgrade also removes such a file an earlier
 version left behind. A file with any of your own settings in it keeps them
@@ -3086,14 +3096,36 @@ version 6 or later; an earlier daemon records the check without them. A
 version 10 daemon built before capabilities refuses the field: restart it
 after upgrading.
 
+An event page (`langspan events`, `langspan_events`, `changes`) leaves out
+the events whose type the client's release cannot read: releases 0.1.0 to
+0.5.1 are served, each with the types in `fixtures/event-types/` for that
+release. 0.1.0 and 0.2.0 both speak version 3 and get the 53 types 0.1.0
+reads. A client of this build is told how many were left out, in the
+frame's `withheld`; an earlier release cannot read that count and is not
+told. Such a page may hold fewer events than asked for, or none while later
+events remain: upgrade the client to read them all.
+
+A client of this build ignores a field it does not know in a response and in
+the objects only responses carry, so a later daemon can add one there without
+a new version ([ADR 0015](adr/0015-version-tolerance.md)). Requests and
+events stay strict.
+
 ### Mixed versions after an upgrade
 
 LangSpan never downloads or replaces its own binary and makes no update
 check. Upgrade with a new release archive, checked as in
 [Verify the binary](install.md#verify-a-download), or by rebuilding from
 source; roll back by keeping the previous archive. `brew upgrade langspan`
-applies once the Homebrew tap is published. The store stays readable by the
-earlier build while the schema marker is unchanged.
+applies once the Homebrew tap is published. The earlier build reads the
+store only until the later one records an event kind or field it doesn't
+know, which can happen within minutes. From then on an earlier build that
+has [ADR 0038](adr/0038-store-rollback.md) refuses with one line naming the
+build to start instead; releases up to 0.5.1 stop with
+`invalid persisted event at sequence N`. Either start the later build again,
+or stop the coordinator and move the state directory aside, which starts an
+empty store and keeps the old history in the moved directory. A
+`config.json` key the earlier build doesn't know also stops it; remove the
+key. [ADR 0038](adr/0038-store-rollback.md) is the compatibility policy.
 
 After an upgrade, a coordinator started before it keeps running the old
 binary while hooks start the new one. `langspan doctor` asks the coordinator

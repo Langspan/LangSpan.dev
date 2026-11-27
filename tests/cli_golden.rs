@@ -398,6 +398,7 @@ const OPTIONS: &[(&str, Option<&str>)] = &[
     ("--recent", None),
     ("--all", None),
     ("--skill", None),
+    ("--purge", None),
     ("--create", None),
     ("--yes", None),
     ("--verbose", None),

@@ -22,13 +22,13 @@ fn path(state_dir: &Path, operation_id: &str) -> PathBuf {
 /// The request ID, and so the admission ID, of the admission asked for
 /// after a wait.
 pub fn admission_id(first: &str) -> String {
-    crate::hook::wire_id("admit-waited", &[first])
+    crate::ids::wire_id("admit-waited", &[first])
 }
 
 /// The request ID of the record of how the wait that `first` started
 /// ended.
 pub fn record_id(first: &str) -> String {
-    crate::hook::wire_id("waited", &[first])
+    crate::ids::wire_id("waited", &[first])
 }
 
 /// The admission the post-tool run of `operation_id` observes: the one

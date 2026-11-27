@@ -190,6 +190,111 @@ pub fn ensure(
     }
 }
 
+/// Whether a coordinator runs for `state_dir`: one holds `daemon.lock` from
+/// before it binds its socket until its process ends, so a coordinator that
+/// is starting, or too busy to accept a connection, counts too.
+pub fn running(state_dir: &Path) -> Result<bool, crate::Error> {
+    match open_lock(state_dir)? {
+        Some(lock) => held(&lock),
+        None => Ok(false),
+    }
+}
+
+/// `daemon.lock` in `state_dir`, or none when it or the directory is absent,
+/// so no coordinator ever ran there.
+fn open_lock(state_dir: &Path) -> Result<Option<fs::File>, crate::Error> {
+    let path = state_dir.join("daemon.lock");
+    match fs::symlink_metadata(&path) {
+        Ok(_) => Ok(Some(local::private_file(&path, false)?)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("cannot read {}: {error}", path.display()).into()),
+    }
+}
+
+/// Whether another process holds `lock`. Taking it to find out keeps it
+/// only until `lock` is dropped.
+fn held(lock: &fs::File) -> Result<bool, crate::Error> {
+    match lock.try_lock() {
+        Ok(()) => Ok(false),
+        Err(fs::TryLockError::WouldBlock) => Ok(true),
+        Err(fs::TryLockError::Error(error)) => {
+            Err(format!("cannot tell whether a coordinator holds daemon.lock: {error}").into())
+        }
+    }
+}
+
+/// Stops the coordinator for `state_dir`, for `uninstall` (issue #292):
+/// while one holds `daemon.lock`, waits until `deadline` for it to answer,
+/// asks it for its process id, sends that process SIGTERM, and waits for it
+/// to free the lock. Returns false when none was running, or when the lock
+/// came free before any signal; an error when one holds the lock but does
+/// not answer in time.
+pub fn stop(state_dir: &Path, deadline: Instant) -> Result<bool, crate::Error> {
+    use rustix::process::{Pid, Signal, kill_process};
+    let Some(lock) = open_lock(state_dir)? else {
+        return Ok(false);
+    };
+    loop {
+        if !held(&lock)? {
+            return Ok(false);
+        }
+        if crate::client::accepts(state_dir, probe_deadline(deadline)) {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "a coordinator holds daemon.lock in {} but did not answer in time; stop it yourself and run this again",
+                state_dir.display()
+            )
+            .into());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let asked = crate::protocol::Request::new("uninstall", langspan_core::Command::Version);
+    let pid = match crate::client::call_until(state_dir, &asked, deadline)?.outcome {
+        langspan_core::Outcome::Version { pid, .. } => pid,
+        other => return Err(format!("the coordinator answered {other:?} when asked for its process id; stop it yourself and run this again").into()),
+    };
+    let process = i32::try_from(pid)
+        .ok()
+        .and_then(Pid::from_raw)
+        .ok_or_else(|| format!("the coordinator gave process id {pid}, which is not one"))?;
+    // Checked again after the answer: a free lock means the coordinator
+    // ended meanwhile, and the id may now name another process: send nothing.
+    if !held(&lock)? {
+        return Ok(false);
+    }
+    kill_process(process, Signal::TERM)
+        .map_err(|error| format!("cannot stop the coordinator, process {pid}: {error}"))?;
+    wait_for_exit(&lock, pid, deadline)?;
+    Ok(true)
+}
+
+/// Waits until `deadline` for the coordinator, process `pid`, to free
+/// `daemon.lock`, which it holds until its process ends. A connect that
+/// fails is no such proof: one bounded by a deadline already past fails too.
+fn wait_for_exit(lock: &fs::File, pid: u32, deadline: Instant) -> Result<(), crate::Error> {
+    loop {
+        match lock.try_lock() {
+            Ok(()) => return Ok(()),
+            Err(fs::TryLockError::WouldBlock) => {}
+            Err(fs::TryLockError::Error(error)) => {
+                return Err(format!(
+                    "cannot tell whether the coordinator, process {pid}, stopped: {error}"
+                )
+                .into());
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "the coordinator, process {pid}, did not stop in time; run `kill {pid}` and run this again"
+            )
+            .into());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 /// A connect bounded to a small part of the caller's wait.
 fn probe_deadline(deadline: Instant) -> Instant {
     deadline.min(Instant::now() + Duration::from_millis(100))
@@ -345,6 +450,32 @@ mod tests {
         env.iter()
             .find(|(key, _)| key == name)
             .and_then(|(_, value)| value.to_str())
+    }
+
+    /// Issue #292: a coordinator that outlives the wait, here one that still
+    /// holds `daemon.lock`, is reported as not stopped; a wait whose
+    /// deadline passed before it started reports the same, never success.
+    /// A free lock means it stopped.
+    #[test]
+    fn the_wait_for_the_coordinator_to_stop_ends_in_an_error_at_its_deadline() {
+        let directory = std::env::temp_dir().join(format!("ls-stop-wait-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("daemon.lock");
+        let held = local::private_file(&path, true).unwrap();
+        held.try_lock().unwrap();
+        let waiting = local::private_file(&path, true).unwrap();
+        let start = Instant::now();
+        for deadline in [start + Duration::from_millis(300), start] {
+            let error = wait_for_exit(&waiting, 42, deadline)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("did not stop in time"), "{error}");
+            assert!(error.contains("kill 42"), "{error}");
+        }
+        assert!(start.elapsed() >= Duration::from_millis(300));
+        held.unlock().unwrap();
+        wait_for_exit(&waiting, 42, start).unwrap();
+        fs::remove_dir_all(&directory).unwrap();
     }
 
     #[test]

@@ -399,10 +399,11 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  set (never replacing one); off removes LangSpan's.
                                  --mcp-tools hooked writes `mcp --tools hooked` for
                                  Claude Code and Codex (default all)
-  uninstall [--home DIR] [--hosts ...] [--apply]
+  uninstall [--home DIR] [--hosts ...] [--purge] [--apply]
                                  Remove only what install and setup wrote, the skill
-                                 and the coordinator's login service included; the
-                                 state directory stays. --hosts gemini-cli removes an
+                                 and the coordinator's login service included, and
+                                 stop the coordinator. The state directory stays
+                                 unless --purge. --hosts gemini-cli removes an
                                  earlier Gemini CLI install from ~/.gemini/settings.json
                                  and ~/.gemini/GEMINI.md
 
@@ -1117,6 +1118,8 @@ fn user_install(
     let presence = presence(options)?;
     let outline_reads = outline_reads(options)?;
     let hosts = options.remove("--hosts");
+    let purge = options.remove("--purge").is_some();
+    let leftover = user_install::Leftover::check(&state_dir, purge, install, hosts.is_none())?;
     let with_skill = options.remove("--skill").is_some();
     if with_skill && !install {
         return Err(
@@ -1548,6 +1551,10 @@ fn user_install(
                 Some(_) => println!("Wrote {}.", plan.path.display()),
                 None => println!("Removed {}.", plan.path.display()),
             }
+            // Claude Code's `skills` folder, when the skill was all it held.
+            if plan.planned.is_none() && plan.vendor == Vendor::ClaudeCode {
+                let _ = plan.path.ancestors().nth(2).map(std::fs::remove_dir);
+            }
         } else {
             println!(
                 "{} already matches; nothing to change.",
@@ -1557,12 +1564,15 @@ fn user_install(
     }
     if !install {
         changed += remove_service(&home, apply)?;
+        changed += stop_coordinator(&state_dir, apply)?;
+    }
+    if let Some(leftover) = &leftover {
+        let (removed, lines) = leftover.finish(&executable, apply)?;
+        changed += removed;
+        lines.iter().for_each(|line| println!("{line}"));
     }
     if changed > 0 && mode == Mode::DryRun {
         println!("Dry run; nothing was written. Run the same command with --apply to write it.");
-    }
-    if !install && apply {
-        println!("LangSpan's state directory was left in place.");
     }
     for note in notes {
         println!("{note}");
@@ -1923,6 +1933,24 @@ fn remove_service(home: &UserHome, apply: bool) -> Result<usize, langspan::Error
         path.display()
     );
     Ok(1)
+}
+
+/// On uninstall, stops the coordinator for `state_dir`, however it was
+/// started. Returns 1 when one runs, else 0.
+fn stop_coordinator(state_dir: &std::path::Path, apply: bool) -> Result<usize, langspan::Error> {
+    use std::time::{Duration, Instant};
+    if !apply {
+        let runs = langspan::autostart::running(state_dir)?;
+        if runs {
+            println!("The coordinator would be stopped.");
+        }
+        return Ok(usize::from(runs));
+    }
+    let stopped = langspan::autostart::stop(state_dir, Instant::now() + Duration::from_secs(5))?;
+    if stopped {
+        println!("Stopped the coordinator.");
+    }
+    Ok(usize::from(stopped))
 }
 
 /// What a dry run shows of Gemini CLI's settings file: LangSpan's entries
@@ -3463,6 +3491,16 @@ fn doctor(
     // What doctor judges a workspace by must be complete, even when the
     // bounded view leaves it out to fit a frame.
     match langspan::client::status_from(state_dir, &["workspace_git", "remote_peers"]) {
+        // A socket that accepts is a coordinator that runs but is stuck
+        // (issue #329): starting another would find it holding the lock.
+        Err(error) if accepts_connections(state_dir) => note(
+            false,
+            format!(
+                "Coordinator at {} accepts connections but does not answer: {error}. It is running but stuck; restart it: {}.",
+                state_dir.display(),
+                restart_hint(home, state_dir, None)
+            ),
+        ),
         Err(error) => note(
             false,
             format!(
@@ -4007,6 +4045,17 @@ fn main_install_problem(
 /// What `doctor` says of the tool events whose installed matcher is not the
 /// one this version writes (`install::stale_matchers`).
 const STALE_MATCHER: &str = "the matcher does not name the tools this version handles";
+
+/// Whether `state_dir`'s socket accepts a connection within a second.
+#[cfg(unix)]
+fn accepts_connections(state_dir: &std::path::Path) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    client::accepts(state_dir, deadline)
+}
+#[cfg(not(unix))]
+fn accepts_connections(_: &std::path::Path) -> bool {
+    false
+}
 
 /// How to restart the coordinator for `state_dir`: through the login
 /// service when `setup` installed one, otherwise by stopping process `pid`
@@ -5254,8 +5303,15 @@ const COMMANDS: &[Flags] = &[
         ..Flags::NONE
     },
     Flags {
-        form: |words, _| matches!(words, ["install"] | ["uninstall"]),
+        form: |words, _| words == ["install"],
         switches: &["--skill"],
+        values: INSTALL_VALUES,
+        apply: true,
+        ..Flags::NONE
+    },
+    Flags {
+        form: |words, _| words == ["uninstall"],
+        switches: &["--skill", "--purge"],
         values: INSTALL_VALUES,
         apply: true,
         ..Flags::NONE

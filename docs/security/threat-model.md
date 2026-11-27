@@ -154,6 +154,23 @@ long-running process started from a host's hook.
 | **Denial of service**: starting the coordinator holds a hook past its budget, or a failing coordinator is restarted from every hook | A hook spends at most half of its remaining budget, including the lock wait, then answers as before; `langspan mcp` waits at most 2 seconds. A start within the last 30 seconds is not repeated. The started process has standard input and output on `/dev/null`, so the host never waits on it. Every `launchctl` and `systemctl` call is bounded to 10 seconds. | A coordinator that crashes at start is tried again every 30 seconds by hooks, or every 5 seconds (systemd) or 10 (launchd) by the service, each adding to `daemon.log`. The on-demand start moves a log over 8 MiB aside; the service's log is not rotated. |
 | **Elevation of privilege** | The service is per user (`gui/UID`, `systemd --user`), never system-wide, and no `sudo` is run. `--home` installs no service, so a spare home cannot change the login user's manager. `LANGSPAN_AUTOSTART=off` turns the on-demand start off. | A user-level hook already runs code on every session; the on-demand start makes that code also leave a process running. |
 
+## Uninstall: stopping the coordinator and `--purge`
+
+`langspan uninstall --apply` asks the coordinator on its socket for its process
+id and sends that process SIGTERM. `--purge` removes the state directory. Both
+act on something outside the files `install` wrote.
+
+| Threat | Control | Residual risk |
+| --- | --- | --- |
+| **Spoofing**: the reported process id names a process other than the coordinator, because something else answers on the socket or the coordinator exited and its id was reused | The client connects only to a socket that is owner-only in an owner-only state directory, so only the same user can answer there. Just before the signal, `uninstall` tries `daemon.lock`, which a running coordinator holds for its whole life; if the lock is free no coordinator runs, the id may be reused, and no signal is sent (`tests/user_install.rs`, `uninstall_signals_no_process_when_no_coordinator_holds_the_lock`). The kernel delivers the signal only to the user's own processes. | The moment between the lock check and the signal remains; a coordinator that exits in it and has its id reused at once lets SIGTERM reach another of the user's processes. A same-user process that holds the lock and answers on the socket can name any of the user's processes, which that user could already signal. |
+| **Tampering**: `--purge` removes a directory that isn't LangSpan's | Dry run by default, naming the directory. It removes only a real directory, not a symbolic link, that holds `daemon.lock` or is empty; any other refuses with nothing removed. It is refused with `--hosts`, since the remaining hosts' hooks still use the directory. | A directory holding a `daemon.lock` of the user's own making is treated as LangSpan's. |
+| **Repudiation** | Each step prints what it did: the coordinator stopped, the directory removed, and the `rm` commands for what is left. | No log is kept; `daemon.log` goes with a purged directory. |
+| **Information disclosure** | Nothing is read beyond the process id and the directory's listing. | None known. |
+| **Denial of service**: uninstall waits on a coordinator that won't stop | The wait is bounded to 5 seconds and ends when the coordinator frees `daemon.lock`, which happens only as its process ends; at the deadline the error names the process id and `kill`, and `--purge` removes nothing (`src/autostart.rs`, `the_wait_for_the_coordinator_to_stop_ends_in_an_error_at_its_deadline`). |
+| **Tampering**: `--purge` removes the state directory of a coordinator that runs but does not answer, because it is still starting or its socket's queue is full | Uninstall decides whether a coordinator runs from `daemon.lock`, which a coordinator takes before it binds its socket, not from whether the socket answers. While the lock is held it waits, within the same 5 seconds, for the coordinator to answer; a coordinator that never does fails the uninstall with nothing removed, and one that frees the lock meanwhile has stopped (`tests/user_install.rs`, `uninstall_refuses_to_purge_while_a_silent_coordinator_holds_the_lock`, `uninstall_purges_once_a_silent_coordinator_frees_the_lock`). A dry run reports such a coordinator as one it would stop. | None known. |
+| **Tampering**: an automatic check outlives the coordinator that enforces its time limit | The coordinator catches SIGTERM, SIGINT and SIGHUP and stops through the same path as any other stop, which ends each running check's process group first (`tests/auto_checks.rs`, `a_daemon_stopped_by_a_signal_stops_its_running_automatic_check`). | SIGKILL can't be caught: a coordinator killed that way leaves a running check to end by itself. | A hook that starts a coordinator meanwhile starts a new one; uninstall removes the hooks first, so only a session already running can do this. |
+| **Elevation of privilege** | No `sudo`, no signal to another user's process. | None known. |
+
 ## Host detection
 
 `langspan hosts`, `doctor` and the daemon's hourly host check (roadmap A7,
@@ -1048,6 +1065,15 @@ Installer regressions cover stable ownership and refusal to replace symlinks.
 A message reaches each recipient once and never its sender, a look from outside
 acknowledges nothing, a handoff goes to exactly one other session, and a
 message whose rendered line could not fit is not selected for that briefing.
+
+A panic on any coordinator thread ends the process with status 1 after one
+`daemon_stopping` line with reason `panic`, and removes its socket first, so
+the login service restarts it and a hook may start one; the process never keeps
+accepting requests it cannot answer. A hook keeps its own panic fallback.
+`doctor` names a coordinator that accepts connections but does not answer, and
+says how to restart it. Its connection probe is nonblocking with a 1-second
+deadline, so a full listen backlog reports the coordinator as unreachable
+instead of stalling `doctor`.
 
 These tests establish specific component properties. Full current socket CI and
 real native-host M3 acceptance remain separate checks in

@@ -390,10 +390,11 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  set (never replacing one); off removes LangSpan's.
                                  --mcp-tools hooked writes `mcp --tools hooked` for
                                  Claude Code and Codex (default all)
-  uninstall [--home DIR] [--hosts ...] [--apply]
+  uninstall [--home DIR] [--hosts ...] [--purge] [--apply]
                                  Remove only what install and setup wrote, the skill
-                                 and the coordinator's login service included; the
-                                 state directory stays. --hosts gemini-cli removes an
+                                 and the coordinator's login service included, and
+                                 stop the coordinator. The state directory stays
+                                 unless --purge. --hosts gemini-cli removes an
                                  earlier Gemini CLI install from ~/.gemini/settings.json
                                  and ~/.gemini/GEMINI.md
 

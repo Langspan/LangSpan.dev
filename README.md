@@ -105,6 +105,16 @@ Watch both sessions in LangSpan Live, the read-only dashboard, with `langspan da
 
 [Installation options](docs/install.md): verify a download, build from source, or set up a single project.
 
+### Remove LangSpan
+
+The first line shows what would change. The second removes the hooks, MCP entries, skill and login service, stops the coordinator and deletes its state directory. The third deletes the binary.
+
+```sh
+langspan uninstall --purge
+langspan uninstall --purge --apply
+rm "$(command -v langspan)"
+```
+
 [![Latest stable release](https://img.shields.io/github/v/release/Langspan/LangSpan.dev?style=flat-square&labelColor=151513&display_name=tag&sort=date&color=A34A34)](https://github.com/Langspan/LangSpan.dev/releases/latest) [![Rust checks on main](https://github.com/Langspan/LangSpan.dev/actions/workflows/check.yml/badge.svg?branch=main&event=push)](https://github.com/Langspan/LangSpan.dev/actions/workflows/check.yml) [![Core license](https://img.shields.io/github/license/Langspan/LangSpan.dev?style=flat-square&labelColor=151513&color=3F3E44)](https://github.com/Langspan/LangSpan.dev/blob/main/LICENSE) [![Supported release platforms: macOS and Linux](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-3F3E44?style=flat-square&labelColor=151513)](https://langspan.dev/#start) [![Project website](https://img.shields.io/badge/website-langspan.dev-3F3E44?style=flat-square&labelColor=151513)](https://langspan.dev/)
 
 <a id="get-started"></a>

@@ -1,0 +1,1 @@
+{"version":10,"request_id":"old","replayed":false,"generation":0,"lease_valid":null,"outcome":{"type":"error","code":"unsupported_version","message":"expected protocol version 3 to 10; restart the daemon after upgrading LangSpan"}}

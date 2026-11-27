@@ -429,13 +429,16 @@ pub fn patch_edits(patch: &str) -> Vec<(String, crate::regions::Edit)> {
             sections.push((path.to_owned(), None));
             continue;
         }
-        let Some((_, Some(hunks))) = sections.last_mut() else {
+        let Some((_, current @ Some(_))) = sections.last_mut() else {
             continue;
         };
         if line.starts_with("*** Move to: ") {
-            sections.last_mut().expect("a current section").1 = None;
+            *current = None;
             continue;
         }
+        let Some(hunks) = current else {
+            continue;
+        };
         if line.starts_with("*** ") {
             continue;
         }
@@ -445,7 +448,9 @@ pub fn patch_edits(patch: &str) -> Vec<(String, crate::regions::Edit)> {
                 continue;
             }
         }
-        let hunk = hunks.last_mut().expect("a current hunk");
+        let Some(hunk) = hunks.last_mut() else {
+            continue;
+        };
         let (kind, text) = match line.chars().next() {
             Some('+') => (HunkLine::Added, &line[1..]),
             Some('-') => (HunkLine::Removed, &line[1..]),
