@@ -151,11 +151,11 @@ pub(crate) fn bounded(text: &str, limit: usize, home: Option<&str>) -> String {
         if text.len() <= limit {
             return text;
         }
-        let mut cut = limit - MARK.len();
+        let mut cut = limit.saturating_sub(MARK.len());
         while !text.is_char_boundary(cut) {
             cut -= 1;
         }
-        format!("{}{MARK}", &text[..cut])
+        format!("{}{}", &text[..cut], mark_within(limit - cut))
     };
     let mut text = text.to_owned();
     // Each pass only replaces text with the mark or cuts it, so a fixed
@@ -167,7 +167,13 @@ pub(crate) fn bounded(text: &str, limit: usize, home: Option<&str>) -> String {
         }
         text = next;
     }
-    MARK.to_owned()
+    mark_within(limit).to_owned()
+}
+
+/// The mark, cut to `limit` bytes when the whole mark doesn't fit. The mark
+/// is ASCII, so any cut falls on a character boundary.
+fn mark_within(limit: usize) -> &'static str {
+    &MARK[..MARK.len().min(limit)]
 }
 
 /// One pass can leave text that a second pass redacts further: a PEM block

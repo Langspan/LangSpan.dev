@@ -3,7 +3,8 @@
 //! schema marker. Each statement is held to the constant it repeats:
 //! `PROTOCOL_VERSION` and `OLDEST_PROTOCOL_VERSION` in `src/protocol.rs`, and
 //! `SCHEMA_VERSION` in `src/store.rs`. Changing a constant without these
-//! documents fails here.
+//! documents fails here. A document split into pages (`docs/usage.md` and the
+//! pages under `docs/usage/`) is read as one.
 
 use std::fs;
 use std::path::Path;
@@ -157,14 +158,30 @@ fn problems(name: &str, text: &str, code: Versions) -> Vec<String> {
     problems
 }
 
+/// The document's text: the file, then each page in the directory of the
+/// same name (`docs/usage/` for `docs/usage.md`), in file-name order.
+fn document(root: &Path, name: &str) -> String {
+    let mut text = fs::read_to_string(root.join(name)).expect("read the document");
+    let Ok(entries) = fs::read_dir(root.join(name.trim_end_matches(".md"))) else {
+        return text;
+    };
+    let mut pages: Vec<_> = entries
+        .map(|entry| entry.expect("list the document's pages").path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "md"))
+        .collect();
+    pages.sort();
+    for page in pages {
+        text.push('\n');
+        text.push_str(&fs::read_to_string(&page).expect("read a page of the document"));
+    }
+    text
+}
+
 fn check(code: Versions) -> Vec<String> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     DOCUMENTS
         .iter()
-        .flat_map(|name| {
-            let text = fs::read_to_string(root.join(name)).expect("read the document");
-            problems(name, &text, code)
-        })
+        .flat_map(|name| problems(name, &document(root, name), code))
         .collect()
 }
 
@@ -179,6 +196,14 @@ fn the_finder_reads_the_forms_the_documents_use() {
     assert_eq!(found.schema, [4]);
     assert_eq!(found.ranges, [(3, 10)]);
     assert_eq!(found.lists, [vec![9, 8, 7, 6, 5, 4, 3]]);
+}
+
+#[test]
+fn a_split_document_includes_its_pages() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let text = document(root, "docs/usage.md");
+    let mcp = fs::read_to_string(root.join("docs/usage/mcp.md")).unwrap();
+    assert!(text.contains(&mcp), "docs/usage/mcp.md is not read");
 }
 
 #[test]

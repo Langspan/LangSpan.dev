@@ -1,7 +1,7 @@
 //! No document states how many MCP tools there are. The set of tools is
 //! written once, as `langspan::mcp::TOOL_NAMES`; a count written in prose goes
 //! stale with the next tool and makes every branch that adds one conflict.
-//! The tool table in `docs/usage.md` is held to that list by name.
+//! The tool table in `docs/usage/mcp.md` is held to that list by name.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -139,20 +139,15 @@ fn the_count_finder_catches_the_forms_documents_have_used() {
 
 #[test]
 fn the_usage_tool_table_names_exactly_the_listed_tools() {
-    let usage =
-        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/usage.md")).unwrap();
-    let section = usage
-        .split("\n## MCP\n")
-        .nth(1)
-        .expect("docs/usage.md has an MCP section");
-    let section = section.split("\n## ").next().unwrap();
-    let rows: Vec<&str> = section
+    let page = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/usage/mcp.md"))
+        .expect("docs/usage/mcp.md is the MCP page");
+    let rows: Vec<&str> = page
         .lines()
         .filter_map(|line| line.strip_prefix("| `"))
         .filter_map(|line| line.split('`').next())
         .collect();
     if let Err(problem) = langspan::mcp::compare_tool_names(rows) {
-        panic!("the tool table under \"## MCP\" in docs/usage.md: {problem}");
+        panic!("the tool table in docs/usage/mcp.md: {problem}");
     }
 }
 
