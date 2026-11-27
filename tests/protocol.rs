@@ -1,3 +1,4 @@
+use langspan::protocol::{CAPABILITIES, Capabilities, encode_with, fits_with, for_capabilities};
 use langspan::protocol::{
     OLDEST_PROTOCOL_VERSION, PROTOCOL_VERSION, PROTOCOL_VERSION_4, PROTOCOL_VERSION_5,
     PROTOCOL_VERSION_6, PROTOCOL_VERSION_7, PROTOCOL_VERSION_8, PROTOCOL_VERSION_9,
@@ -2070,7 +2071,9 @@ fn recording_a_rebased_or_adapted_landing_fits_only_version_6_and_later() {
 /// requests are left as they are.
 #[test]
 fn a_briefing_of_changes_only_is_asked_of_version_7_and_later() {
-    use langspan::protocol::for_version;
+    let for_version = |version: u16, command: &mut Command| {
+        for_capabilities(Capabilities::negotiate(version, None), command);
+    };
     let wire = include_bytes!("../fixtures/brief-changes-only-request-v7.json");
     let request: Request = serde_json::from_slice(wire).unwrap();
     assert_eq!(request.version, PROTOCOL_VERSION_7);
@@ -2303,4 +2306,193 @@ fn v9_recall_response_and_its_version_8_form_match_the_golden_vectors() {
     );
     let read: Response = serde_json::from_slice(earlier).unwrap();
     assert_eq!(read.version, PROTOCOL_VERSION_8);
+}
+
+fn names(list: &[&str]) -> Vec<String> {
+    list.iter().map(|name| (*name).to_string()).collect()
+}
+
+/// ADR 0037: a request of version 3 to 10 that names no capabilities is
+/// granted its version's, so each of those clients keeps its exact shape.
+#[test]
+fn versions_3_to_10_map_to_their_capability_sets() {
+    let four: &[&str] = &["renames", "trails"];
+    let five = [four, &["interface_notices", "refusal_outcomes"]].concat();
+    let six = [&five[..], &["landing_rewrites", "symbol_findings"]].concat();
+    let seven = [&six[..], &["briefing_memory"]].concat();
+    let eight = [&seven[..], &["inflight_partial"]].concat();
+    let nine = [&eight[..], &["anchored_notes"]].concat();
+    let ten = [&nine[..], &["outline_reads"]].concat();
+    for (version, set) in [
+        (OLDEST_PROTOCOL_VERSION, &[][..]),
+        (PROTOCOL_VERSION_4, four),
+        (PROTOCOL_VERSION_5, &five),
+        (PROTOCOL_VERSION_6, &six),
+        (PROTOCOL_VERSION_7, &seven),
+        (PROTOCOL_VERSION_8, &eight),
+        (PROTOCOL_VERSION_9, &nine),
+        (PROTOCOL_VERSION_10, &ten),
+    ] {
+        let mut expected = names(set);
+        expected.sort();
+        assert_eq!(
+            Capabilities::negotiate(version, None).names(),
+            expected,
+            "{version}"
+        );
+    }
+    assert_eq!(
+        Capabilities::negotiate(PROTOCOL_VERSION, None),
+        Capabilities::ALL
+    );
+}
+
+/// The handshake: the daemon grants the names it knows and, when that is
+/// fewer than the request named, says which. A client and daemon of the
+/// same build exchange the bytes they did before capabilities.
+#[test]
+fn the_daemon_grants_the_capabilities_it_knows_and_names_them_when_fewer() {
+    let wire = include_bytes!("../fixtures/capabilities/request.json");
+    let request: Request = serde_json::from_slice(wire).unwrap();
+    assert_eq!(encode(&request).unwrap(), wire);
+    let named = request.capabilities.as_deref();
+    let granted = Capabilities::negotiate(request.version, named);
+    assert_eq!(granted, Capabilities::ALL);
+
+    let answer = include_bytes!("../fixtures/capabilities/answer.json");
+    let mut value: serde_json::Value = serde_json::from_slice(answer).unwrap();
+    value.as_object_mut().unwrap().shift_remove("capabilities");
+    let response: Response = serde_json::from_value(value).unwrap();
+    assert_eq!(encode_with(granted, named, &response).unwrap(), answer);
+
+    let all = Capabilities::ALL.names();
+    assert_eq!(
+        encode_with(granted, Some(&all), &response).unwrap(),
+        encode(&response).unwrap()
+    );
+    let current = Request::new("r-1", Command::Status);
+    assert_eq!(current.capabilities, Some(all));
+    assert_eq!(current.with_version(PROTOCOL_VERSION_9).capabilities, None);
+}
+
+/// Issue #265: a check record's findings reach only a client with the
+/// `symbol_findings` capability, which versions 6 to 10 have.
+#[test]
+fn check_findings_reach_only_a_client_with_the_symbol_findings_capability() {
+    let with = include_bytes!("../fixtures/capabilities/symbol_findings/with.json");
+    let without = include_bytes!("../fixtures/capabilities/symbol_findings/without.json");
+    let mut response: Response = serde_json::from_slice(with).unwrap();
+    let all = Capabilities::ALL.names();
+    assert_eq!(
+        encode_with(Capabilities::ALL, Some(&all), &response).unwrap(),
+        with
+    );
+    let others: Vec<String> = all
+        .into_iter()
+        .filter(|name| name != "symbol_findings")
+        .collect();
+    let granted = Capabilities::negotiate(PROTOCOL_VERSION, Some(&others));
+    assert_eq!(
+        String::from_utf8(encode_with(granted, Some(&others), &response).unwrap()).unwrap(),
+        String::from_utf8_lossy(without)
+    );
+    let langspan_core::Outcome::CheckRecorded { check } = response.outcome.clone() else {
+        panic!("{response:?}");
+    };
+    let record = langspan_core::StatusRecord::Check {
+        key: "check-1".into(),
+        check,
+    };
+    for version in OLDEST_PROTOCOL_VERSION..=PROTOCOL_VERSION {
+        response.version = version;
+        let text = String::from_utf8(encode_for(version, &response).unwrap()).unwrap();
+        let has = version >= PROTOCOL_VERSION_6;
+        assert_eq!(text.contains("symbol_findings"), has, "{version}");
+        let text = encode_record_for(version, &record).unwrap();
+        assert_eq!(text.contains("symbol_findings"), has, "record, {version}");
+    }
+}
+
+/// Issue #265: a daemon without `symbol_findings` is asked to record the
+/// check without its findings, which are advisory, instead of refusing the
+/// request after the check has run.
+#[test]
+fn a_check_is_recorded_without_findings_by_a_daemon_without_them() {
+    let base: serde_json::Value =
+        serde_json::from_slice(include_bytes!("../fixtures/record-check-command-v10.json"))
+            .unwrap();
+    let with: serde_json::Value = serde_json::from_slice(include_bytes!(
+        "../fixtures/capabilities/symbol_findings/with.json"
+    ))
+    .unwrap();
+    let mut value = base.clone();
+    value["command"]["symbol_findings"] = with["outcome"]["check"]["symbol_findings"].clone();
+    let found: Request = serde_json::from_value(value).unwrap();
+    for version in OLDEST_PROTOCOL_VERSION..=PROTOCOL_VERSION {
+        let granted = Capabilities::negotiate(version, None);
+        let mut request = found.clone();
+        assert!(fits_with(granted, &request.command), "{version}");
+        for_capabilities(granted, &mut request.command);
+        let expected = if version >= PROTOCOL_VERSION_6 {
+            found.clone()
+        } else {
+            serde_json::from_value(base.clone()).unwrap()
+        };
+        assert_eq!(request, expected, "{version}");
+    }
+}
+
+/// Issue #283: two features each add a capability on a line of its own, in
+/// name order, and Git merges the two additions without a conflict.
+#[test]
+fn two_new_capabilities_are_added_on_lines_of_their_own() {
+    let source = include_str!("../src/protocol.rs");
+    let start = source.find("pub const CAPABILITIES").expect("the table");
+    let body: Vec<String> = source[start..]
+        .lines()
+        .skip(1)
+        .take_while(|line| line.trim() != "];")
+        .map(str::to_string)
+        .collect();
+    assert_eq!(body.len(), CAPABILITIES.len(), "one line per capability");
+    for (line, (name, _)) in body.iter().zip(CAPABILITIES) {
+        let entry = format!("(\"{name}\", ");
+        assert!(line.trim_start().starts_with(&entry), "{line}");
+        // rustfmt aligns trailing comments, so one would move its neighbours.
+        assert!(line.ends_with("),"), "no trailing comment: {line}");
+    }
+    let listed: Vec<&str> = CAPABILITIES.iter().map(|(name, _)| *name).collect();
+    let mut sorted = listed.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(listed, sorted, "in name order, each once");
+
+    let add = |name: &str| {
+        let line = format!("    (\"{name}\", None),");
+        let mut lines = body.clone();
+        let at = lines
+            .iter()
+            .position(|held| held.trim_start() > line.trim_start())
+            .unwrap_or(lines.len());
+        lines.insert(at, line);
+        lines.join("\n") + "\n"
+    };
+    let dir = std::env::temp_dir().join(format!("ls-capabilities-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::write(dir.join("base"), body.join("\n") + "\n").unwrap();
+    std::fs::write(dir.join("ours"), add("batched_reads")).unwrap();
+    std::fs::write(dir.join("theirs"), add("session_tags")).unwrap();
+    let merged = std::process::Command::new("git")
+        .args(["merge-file", "-p", "ours", "base", "theirs"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+    let text = String::from_utf8(merged.stdout).unwrap();
+    assert!(merged.status.success(), "a conflict:\n{text}");
+    assert!(
+        text.contains("\"batched_reads\"") && text.contains("\"session_tags\""),
+        "{text}"
+    );
 }
