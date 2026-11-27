@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/Langspan/LangSpan.dev/compare/v0.5.0...v0.5.1) (2026-11-27)
+
+
+### Bug fixes
+
+* setup output a stranger can read ([#400](https://github.com/Langspan/LangSpan.dev/issues/400)) ([54a4fdf](https://github.com/Langspan/LangSpan.dev/commit/54a4fdf6384f17f29a53fa219635c1ca33278373))
+
 ## [0.5.0](https://github.com/Langspan/LangSpan.dev/compare/v0.4.0...v0.5.0) (2026-11-27)
 
 
