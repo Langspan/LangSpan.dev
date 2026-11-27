@@ -1,0 +1,1 @@
+{"version":10,"request_id":"acknowledge-interface-1","command":{"op":"acknowledge_interface","session_id":"claude-code.alice","notice_ids":["notice-1"]}}

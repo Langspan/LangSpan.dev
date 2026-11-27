@@ -1,0 +1,1 @@
+{"version":10,"request_id":"observe-remote-1","command":{"op":"observe_remote","workspace_id":"app","publication":{"participant":"codex.bob","name":"parse","sequence":1,"work":[{"host":"codex","session":"claude-code.alice","branch_ref":"refs/heads/main","summary":"Rework the session handler","editing":["src/api.rs"],"recent":["example"]}]}}}

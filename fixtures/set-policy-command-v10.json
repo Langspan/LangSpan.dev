@@ -1,0 +1,1 @@
+{"version":10,"request_id":"set-policy-1","command":{"op":"set_policy","workspace_id":"app","case":"advisory","policy":"advisory"}}

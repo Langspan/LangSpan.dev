@@ -1,0 +1,1 @@
+{"version":10,"request_id":"observe-interface-1","command":{"op":"observe_interface","workspace_id":"app","path":"src/api.rs","changes":[{"name":"parse","kind":"example","change":"example","before":"example","after":"example"}],"dependents":["example"]}}

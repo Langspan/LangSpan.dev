@@ -1,0 +1,1 @@
+{"version":10,"request_id":"intent-set-1","command":{"op":"intent_set","session_id":"claude-code.alice","paths":["src/api.rs"],"summary":"Rework the session handler"}}

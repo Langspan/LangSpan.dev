@@ -1,0 +1,1 @@
+{"version":10,"request_id":"observe-uncoordinated-1","command":{"op":"observe_uncoordinated","workspace_id":"app","files":[{"path":"src/api.rs","state":{"type":"missing"}}]}}
