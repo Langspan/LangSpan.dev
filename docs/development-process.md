@@ -156,9 +156,10 @@ the event (`LANGSPAN_CHECK_LANE`):
   `shard` lane, `time:K/4`) each run the tests `scripts/ci-shards.py`
   gives them, from that archive, under the same foreign home, retries and
   reports. The script splits the measured times in
-  `scripts/ci-test-times.tsv` evenly, so the shards finish close together
-  ([evidence](evidence/ci/balance.md)); refresh the file from a full run's
-  JUnit reports as its header says when the shards drift apart. Every test
+  `scripts/ci-test-times.tsv` evenly; runner variance still moves a
+  shard by 15–20% from run to run ([evidence](evidence/ci/balance.md)).
+  Refresh the file from several full runs' JUnit reports, as its header
+  says, when the shards drift apart. Every test
   runs in exactly one shard: a shard fails unless nextest selects the
   count the script expects. The `Linux` and `macOS`
   checks are jobs of their own that pass only when the build job and

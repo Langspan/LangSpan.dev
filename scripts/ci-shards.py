@@ -30,8 +30,10 @@ of the tests not named singly.
 
 Options: --times FILE (default scripts/ci-test-times.tsv); --skip-dry-runs,
 when LANGSPAN_BENCH_DRY_RUNS=skip makes the benchmark dry runs return at
-once; --threads N, the tests one shard runs at once (default: this
-machine's CPUs).
+once; --threads N, the tests one shard runs at once (default: the
+platform's on CI's standard runners, 4 on Linux and 3 on macOS, never this
+machine's, so every shard of a platform computes the same assignment
+whatever runner it lands on).
 """
 
 import argparse
@@ -43,6 +45,8 @@ import xml.etree.ElementTree as ET
 
 TIMES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ci-test-times.tsv")
 PLATFORMS = ("linux", "macos")
+# The threads of CI's standard runners (ubuntu-24.04, macos-26).
+THREADS = {"linux": 4, "macos": 3}
 # A test that took this long on its platform gets a row of its own.
 SINGLE_SECONDS = 2.0
 REST = "*"
@@ -229,12 +233,14 @@ def main():
         p = sub.add_parser(name)
         p.add_argument("--platform", choices=PLATFORMS, default=here, required=here is None)
         p.add_argument("--skip-dry-runs", action="store_true")
-        p.add_argument("--threads", type=int, default=os.cpu_count() or 1)
+        p.add_argument("--threads", type=int)
     sub.choices["assign"].add_argument("--shard", required=True)
     sub.choices["assign"].add_argument("list")
     sub.choices["balance"].add_argument("--shards", type=int, required=True)
     sub.add_parser("count").add_argument("list")
     args = parser.parse_args()
+    if getattr(args, "threads", 0) is None:
+        args.threads = THREADS[args.platform]
     try:
         if args.command == "record":
             record(args)

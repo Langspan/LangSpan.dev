@@ -262,9 +262,9 @@ jobs:
           key: ${{ steps.keys.outputs.audit }}
   # The full lane's tests, in shards of the archive the build job made:
   # scripts/ci-shards.py gives each test to one shard by the measured times
-  # in scripts/ci-test-times.tsv, so every test runs exactly once and the
-  # shards take about as long as each other (docs/evidence/ci/balance.md).
-  # Four shards, from the measured test time
+  # in scripts/ci-test-times.tsv, so every test runs exactly once and each
+  # shard gets an even share of the measured test time
+  # (docs/evidence/ci/balance.md). Four shards, from the measured test time
   # (docs/evidence/ci/shards.md); a fifth would mostly wait on the slowest
   # benchmark dry run. Each shard runs on its own standard runner, under the
   # foreign home, with retries and reports as the unsharded run had.

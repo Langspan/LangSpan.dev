@@ -838,6 +838,49 @@ fn measured_shards_are_the_same_on_every_shard_whatever_the_list_order() {
             .collect();
         outputs.push(shards);
     }
+    // Without --threads the assignment is the platform's, not this
+    // machine's: runners of one platform with different CPU counts would
+    // otherwise split the tests differently, and a test would run twice or
+    // not at all. A 40 s test and twenty 10 s binaries: at 4 threads the
+    // other shard fills to 40 s after 16 binaries, at 3 after 12, and at 8
+    // or more never, so each of those splits differently.
+    let mut times_rows = String::from("linux\tlangspan::a\tslow\t40.0\t1\n");
+    let mut binaries: Vec<(String, Vec<(&str, bool)>)> =
+        vec![("langspan::a".into(), vec![("slow", true)])];
+    for b in 0..20 {
+        times_rows.push_str(&format!("linux\tlangspan::b{b}\t*\t10.0\t1\n"));
+        binaries.push((format!("langspan::b{b}"), vec![("t", true)]));
+    }
+    fs::write(&times, times_rows).unwrap();
+    let list = dir.join("threads.json");
+    let borrowed: Vec<(&str, &[(&str, bool)])> = binaries
+        .iter()
+        .map(|(b, t)| (b.as_str(), t.as_slice()))
+        .collect();
+    fs::write(&list, nextest_list(&borrowed)).unwrap();
+    let first = |threads: Option<&str>| {
+        let mut args: Vec<&std::ffi::OsStr> = vec![
+            "--times".as_ref(),
+            times.as_os_str(),
+            "assign".as_ref(),
+            "--platform".as_ref(),
+            "linux".as_ref(),
+            "--shard".as_ref(),
+            "1/2".as_ref(),
+        ];
+        if let Some(threads) = threads {
+            args.push("--threads".as_ref());
+            args.push(threads.as_ref());
+        }
+        args.push(list.as_os_str());
+        let (ok, stdout, stderr) = ci_shards(&args);
+        assert!(ok, "{stderr}");
+        stdout
+    };
+    let standard = first(Some("4"));
+    assert_ne!(standard, first(Some("3")));
+    assert_ne!(standard, first(Some("8")));
+    assert_eq!(first(None), standard);
     let _ = fs::remove_dir_all(&dir);
     assert_eq!(outputs[0], outputs[1]);
     assert_eq!(outputs[0], outputs[2]);
