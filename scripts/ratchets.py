@@ -476,7 +476,19 @@ class Workspace:
             for role in sorted(r for r in self.ns.roles if not self.module_root(r)):
                 failures.append(f"{NAMESPACES}: role {role} has no src/{role.replace('::', '/')}.rs; "
                                 "delete its row")
-        self.edges()
+        # Users of an alias: every file of the root crate, unit tests and lib.rs
+        # included (where an alias is also a bare path head), and tests/.
+        for path in self.paths:
+            with open(os.path.join(self.root, path), encoding="utf-8") as fh:
+                text = strip(fh.read())
+            module = _module_path(path)
+            if module == ["main"]:
+                paths = named_paths(text, None, (), ("crate", "langspan"))
+            else:
+                children = _CHILD.findall(text) + ([] if module else list(self.aliases))
+                paths = named_paths(text, module, children)
+            for segs in paths:
+                self.resolve(segs)
         for here, _, files in os.walk(os.path.join(self.root, "tests")):
             for f in (f for f in files if f.endswith(".rs")):
                 with open(os.path.join(here, f), encoding="utf-8") as fh:
@@ -498,6 +510,7 @@ def _module_path(path):
 
 _ALIAS = re.compile(r"^[ \t]*(?:pub(?:\([^)]*\))?\s+)?use\s+(\w+(?:::\w+)+)(?:\s+as\s+(\w+))?\s*;", re.M)
 _CHILD = re.compile(r"^[ \t]*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;", re.M)
+_INLINE_MOD = re.compile(r"\bmod\s+(\w+)\s*\{")
 _PATH_HEAD = re.compile(r"(?<![\w:])\$?(\w+)\s*::\s*")
 _WORD = re.compile(r"(\w+)\s*")
 _RENAME = re.compile(r"as\s+\w+\s*")
@@ -529,17 +542,22 @@ def named_paths(text, module_path, children, prefixes=("crate",)):
     """The first two segments of each crate-absolute module path text names.
 
     A path starts at one of prefixes or, with a module_path, at `super`, `self`
-    or one of the file's child modules. A `self` in a group names its parent.
+    or (outside an inline module) one of the file's child modules. `super` and
+    `self` start from the inline `mod name { ... }` blocks around them. A `self`
+    in a group names its parent.
     """
     consumed = 0
+    scopes = [(m.end() - 1, _matching_brace(text, m.end() - 1), m.group(1))
+              for m in _INLINE_MOD.finditer(text)]
     for m in _PATH_HEAD.finditer(text):
         head = m.group(1)
         if m.start() < consumed:
             continue
+        scope = [name for start, end, name in scopes if start < m.start() < end]
         if head in prefixes:
             out = []
-        elif module_path is not None and (head in ("super", "self") or head in children):
-            out = list(module_path) + ([head] if head in children else [])
+        elif module_path is not None and (head in ("super", "self") or head in children and not scope):
+            out = list(module_path) + scope + ([head] if head in children and not scope else [])
             out = out[:-1] if head == "super" else out
         else:
             continue

@@ -481,6 +481,35 @@ class Namespaces(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(set(ratchets.named_paths(text, module, children)), want)
 
+    def test_super_and_self_resolve_within_their_inline_module(self):
+        cases = [
+            ("mod nested { use super::b::T; }", ["a"], {("a", "b")}),
+            ("mod nested { use self::b::T; }", ["a"], {("a", "nested")}),
+            ("mod nested { use super::super::b::T; }", ["a"], {("b", "T")}),
+            ("mod n { mod m { use super::super::b; } }", ["a"], {("a", "b")}),
+            ("mod n { fn f() {} }\nuse super::b;", ["a"], {("b",)}),
+            ("pub(crate) mod n {}\nmod m { use super::b; }", ["a", "x"], {("a", "x")}),
+            ("mod n { use super::b; }", [], {("b",)}),
+            ("mod n { use k::x; }\nuse k::y;", ["a"], {("a", "k")}),
+        ]
+        for text, module, want in cases:
+            with self.subTest(text=text):
+                self.assertEqual(set(ratchets.named_paths(text, module, {"k"})), want)
+
+    def test_an_inline_module_path_is_not_a_false_outward_edge(self):
+        self.namespaces("namespace\ta\tutility", "namespace\tb\tinterface")
+        self.ws.write("src/a.rs", "mod nested {\n    use super::b::Thing;\n}\n")
+        self.assertEqual(self.ws.check(), ([], []))
+        self.ws.write("src/a.rs", "mod nested {\n    use super::super::b::Thing;\n}\n")
+        self.assertIn("module a now depends on b, a new outward (utility -> interface) edge",
+                      self.failures()[0])
+
+    def test_an_inline_module_in_a_role_file_stays_in_its_role(self):
+        self.ws.write("src/b.rs", "mod x;\nmod y;\n")
+        self.ws.write("src/b/x.rs", "// role: feature\nmod n { use super::y::Y; }\n")
+        self.ws.write("src/b/y.rs", "// role: feature\nuse crate::b::x::X;\n")
+        self.assertEqual(self.ws.check(), ([], []))
+
     def test_a_rename_to_an_outer_namespace_is_not_an_edge(self):
         self.namespaces("namespace\ta\tutility", "namespace\tb\tutility",
                         "namespace\tc\tinterface", "allow\ta\tb")
@@ -559,6 +588,28 @@ class Namespaces(unittest.TestCase):
         ])
         self.ws.write("tests/uses.rs", "use langspan::old::Thing;\n")
         self.assertEqual(self.ws.check(), ([], []))
+
+    def test_the_crate_root_and_unit_tests_are_alias_users(self):
+        alias = "mod a;\nmod b;\npub use b::inner as old;\n"
+        inline_test = "#[cfg(test)]\nmod tests {\n    use crate::old::Thing;\n}\n"
+        cases = [
+            ("crate path in lib.rs", {"src/lib.rs": alias + "fn f() { crate::old::g() }\n"}),
+            ("bare path in lib.rs", {"src/lib.rs": alias + "fn f() { old::g() }\n"}),
+            ("inline unit test", {"src/a.rs": inline_test}),
+            ("test module file", {"src/a.rs": "#[cfg(test)]\nmod tests;\n",
+                                  "src/a/tests.rs": "use crate::old::Thing;\n"}),
+            ("unit test in main.rs", {"src/main.rs": inline_test.replace("crate::", "langspan::")}),
+        ]
+        for name, files in cases:
+            with self.subTest(name):
+                ws = Workspace(self)
+                ws.write("src/lib.rs", alias)
+                ws.write("src/a.rs", "")
+                ws.write("src/b.rs", "")
+                ws.write("src/b/inner.rs", "")
+                for path, text in files.items():
+                    ws.write(path, text)
+                self.assertEqual(ws.check(), ([], []))
 
     def test_a_pipeline_naming_an_adapter_fails(self):
         self.namespaces("namespace\ta\t-", "namespace\tb\t-", "role\tb::x\tadapter")
