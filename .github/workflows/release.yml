@@ -330,13 +330,13 @@ jobs:
       - name: Install with the published install script
         run: |
           set -euo pipefail
-          HOME="$RUNNER_TEMP/home" sh published/install.sh "$TAG"
-          cmp "$RUNNER_TEMP/home/.local/bin/langspan" "published/langspan-$TAG-$TARGET/langspan"
-          got=$("$RUNNER_TEMP/home/.local/bin/langspan" --version)
+          HOME="$RUNNER_TEMP/install-home" sh published/install.sh "$TAG"
+          cmp "$RUNNER_TEMP/install-home/.local/bin/langspan" "published/langspan-$TAG-$TARGET/langspan"
+          got=$("$RUNNER_TEMP/install-home/.local/bin/langspan" --version)
           echo "$got"
           [ "$got" = "langspan ${TAG#v}" ]
       - name: Two-developer demonstration on the installed binary
-        run: LANGSPAN="$RUNNER_TEMP/home/.local/bin/langspan" bash source/scripts/demo-two-developers.sh
+        run: LANGSPAN="$RUNNER_TEMP/install-home/.local/bin/langspan" bash source/scripts/demo-two-developers.sh
 
   # A published release that fails verification stops being the one users
   # get: it is marked a prerelease, the previous release becomes latest
