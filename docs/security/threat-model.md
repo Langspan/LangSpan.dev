@@ -1,10 +1,30 @@
 # Local coordination threat model
 
-**Scope:** the M3 working tree, extending [ADR 0001](../adr/0001-local-coordination.md),
+**Scope:** LangSpan as built on `main`, extending [ADR 0001](../adr/0001-local-coordination.md),
 [ADR 0002](../adr/0002-claude-code-adapter.md) and
 [ADR 0003](../adr/0003-native-coordination-observation.md). Native-host M3
 acceptance is pending. LangSpan is a cooperative developer tool, not an
 isolation boundary between programs running as the same OS user.
+
+## Index
+
+"Last verified" is the date someone last checked a section against the code
+or a real run, and what they checked. "Not recorded" means no such check has
+been written down since this index was added.
+
+| Boundary | Section | Last verified |
+| --- | --- | --- |
+| CLI/MCP JSON → daemon, and the socket peer | [Data and boundaries](#data-and-boundaries), [Caller authority](#caller-authority) | 2026-11-27: protocol versions, against `src/protocol.rs`; `tests/versions_in_docs.rs` holds them. |
+| Persisted store → replay | [Data and boundaries](#data-and-boundaries), [Retention](#retention) | 2026-11-27: schema marker, against `src/store.rs`; the same test holds it. |
+| Native host → hooks and installed settings | [Native adapters and installation](#native-adapters-and-installation) to [A linked worktree's own install](#a-linked-worktrees-own-install), [Antigravity](#antigravity) | Not recorded. |
+| Session events, shell commands and Git | [Session events and peer briefings](#session-events-and-peer-briefings) to [Removing an earlier Gemini CLI install](#removing-an-earlier-gemini-cli-install), [Worktrees, processes and passive observations](#worktrees-processes-and-passive-observations) | Not recorded. |
+| Another machine | [Cross-machine publication](#cross-machine-publication) | Not recorded. |
+| Programs the coordinator runs | [Checks, combining and landing](#checks-combining-and-landing), [Automatic checks after a session's writes](#automatic-checks-after-a-sessions-writes) | Not recorded. |
+| Notes, messages, index and stored history | [Remembered notes](#remembered-notes) to [Source index](#source-index), [Region admission](#region-admission) to [Retention](#retention) | Not recorded. |
+| Browser → dashboard, and desktop notices | [Dashboard](#dashboard), [Desktop notices](#desktop-notices) | Not recorded. |
+| Benchmark driver → agent CLIs | [Coordination benchmark driver](#coordination-benchmark-driver) | Not recorded. |
+| GitHub Actions → published releases | [Release pipeline](#release-pipeline), [The install script](#the-install-script), [CI build cache](#ci-build-cache) | 2026-11-27: releases exist; their controls are not yet observed (see the release pipeline). |
+| Mixed versions | [Mixed versions and `doctor`'s version check](#mixed-versions-and-doctors-version-check) | Not recorded. |
 
 ## Data and boundaries
 
@@ -29,13 +49,13 @@ repository instructions.
 
 | Boundary | Treatment |
 | --- | --- |
-| CLI/MCP JSON → daemon | Protocol 5 (versions 4 and 3 still answered, in their shape), typed commands, strict internal request fields, bounded frames and durable mutation identity. MCP uses the SDK lifecycle and the same operations. |
+| CLI/MCP JSON → daemon | Protocol 10 (versions 3 to 10 answered, each in its own shape; a new wire field adds a named capability, not a version, [ADR 0037](../adr/0037-protocol-capabilities.md)), typed commands, strict internal request fields, bounded frames and durable mutation identity. MCP uses the SDK lifecycle and the same operations. |
 | Write check (`check_write`) → workspace files, line journal and index | Any client of the owner-only socket names a registered session, 1 to 8 workspace-relative paths (no `..`, no absolute path) and up to 16 names. The daemon reads at most 16 files of the session's own workspace, each a regular file of at most 512 KiB and never through a symbolic link at its last component, plus their journal entries and one index snapshot. It returns line ranges, signatures, session IDs and ages, never file content, as labelled data in at most 24 KiB; it records nothing. A same-user client learns what `status`, `graph symbol` and the journal already give it. |
 | Native host event → hook | Bounded envelope, vendor-specific supported shapes, usable native IDs and a typed semantic input digest. Unknown host fields grant no authority. |
 | Supplied paths → filesystem/Git identity | Canonical roots and paths, traversal/escape checks, verified worktree relationships and registered-descendant exclusions. |
 | Git subprocess/content → observer | Fixed read-only commands, optional locks and lazy fetching disabled, bounded output/deadline and no interpretation of repository text as instructions. Incomplete scans fail without replacing the previous complete snapshot. A scan over its content bounds is partial and says so; what it left out is never reported as deleted. `git status` (partial scans) and `check run`'s private index run with every configured filter driver switched off and fsmonitor off, so no repository program runs; only the driver names are read from the configuration, never their commands, and a name containing `=` or a newline fails the operation. Submodules are not read into. A checkout change is built by the daemon's own scan; like `observe_disk`, the internal `observe_checkout` command is also accepted from any client of the owner-only socket, so a same-user process can fabricate one. It reaches briefings only, as cleaned and quoted branch names and hexadecimal commit IDs. A checkout run (`observe_checkout_run`, issue #139) is a session's shell hook reporting that its own Git command changed the checkout; any client of the socket can also send one for a registered session, which keeps a checkout change from that session's briefing for up to the run's duration (capped at two hours) plus 60 seconds, ending as long before the report's arrival as the report's finish age says (durations on the daemon's clock, so never after the arrival), and names that session to the others. It cannot hide a change from any other session, and stale refusals are unaffected. Its command line is redacted by the hook and again by the daemon, capped at 256 bytes and refused with control characters, and shown to other sessions only quoted, as data. |
 | Process metadata → session evidence | Same-user process incarnation, alive/exited/unknown, explicit time and generation; no effect on admission authority. |
-| Persisted JSON → replay and read views | Versioned schema, validated replay, preserved historical records, one owner and atomic event/receipt or event/snapshot commits. An event that does not parse stops the store opening; a receipt that does not parse is skipped and its request refused on retry ([ADR 0015](../adr/0015-version-tolerance.md)). |
+| Persisted JSON → replay and read views | Versioned schema (SQLite schema marker version 4; an earlier build refuses a store it cannot read, [ADR 0038](../adr/0038-store-rollback.md)), validated replay, preserved historical records, one owner and atomic event/receipt or event/snapshot commits. An event that does not parse stops the store opening; a receipt that does not parse is skipped and its request refused on retry ([ADR 0015](../adr/0015-version-tolerance.md)). |
 | Hook settings → disk | Dry run first, explicit apply, recognized owned entries only, preservation of unrelated settings and refusal of settings-file symlinks. |
 | Daemon → automatic check | Off by default; the owner's own command, set with `check auto`, an owner grant with no MCP tool ([caller authority](#caller-authority)), run without a shell in its own process group within its time limit, outside any agent host's sandbox. Its output's redacted, bounded end reaches the event log and the triggering sessions' context as labelled data ([ADR 0030](../adr/0030-automatic-checks-after-write-batches.md)). The comparison with a session's baseline (issue #69) adds no input: it uses test names already parsed and redacted, and the IDs of other sessions in the same workspace that wrote, which are cooperative labels from the owner-only socket, cleaned and capped like every session ID in a briefing. A same-user process that records a false check result or a false write can make a failure read as new or already failing; it cannot change the record, its result or what `land` accepts. |
 | Daemon → desktop notifier | Off by default; `osascript` or `notify-send` from the daemon's `PATH`, with a title and a body of at most 200 bytes (workspace, session, paths) as arguments, in its own process group, killed at 2 seconds, on a thread of its own ([Desktop notices](#desktop-notices)). |
@@ -980,8 +1000,12 @@ place of the CLI, never a model.
 
 [ADR 0031](../adr/0031-releases.md) adds a new boundary: binaries built by
 GitHub Actions and downloaded by users. It runs only in
-`Langspan/LangSpan.dev`; no release has been made yet, so none of the controls
-below has been observed in a real run.
+`Langspan/LangSpan.dev`. Releases have been published since v0.1.0
+([changelog](../../CHANGELOG.md)). What a real release showed is not yet
+recorded here: whether its archives' SHA-256 lines in `SHA256SUMS` and its
+attestations verify with `gh attestation verify`, and whether the repository
+setting that makes a published release immutable is on. Until it is, the
+controls below are as designed, not as observed.
 
 Each job of `release.yml` and what its token may write:
 
