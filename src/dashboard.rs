@@ -9,7 +9,7 @@
 //! `MAX_CONNECTIONS` are served at once. See ADR 0013.
 
 use crate::{client, count, protocol::Request};
-use langspan_core::{Command, Outcome};
+use langspan_core::{Command, DashboardEvent, DashboardEvents, Outcome};
 use std::{
     fs,
     io::{self, Read, Write},
@@ -408,7 +408,7 @@ fn route(request: &Parsed, arrived: SocketAddr, context: &Context) -> Reply {
             "the Host header does not name this dashboard's address; open the URL langspan dashboard printed",
         );
     }
-    if request.path != "/" && request.path != "/api/state" {
+    if !matches!(request.path.as_str(), "/" | "/api/state" | "/api/events") {
         return Reply::text(404, "not found");
     }
     let supplied = request
@@ -445,12 +445,13 @@ fn route(request: &Parsed, arrived: SocketAddr, context: &Context) -> Reply {
             "this dashboard serves simulated data only; run langspan dashboard without --demo for the coordinator's view",
         );
     }
+    if request.path == "/api/events" {
+        return events(context, &request.query);
+    }
     state(context)
 }
 
-/// The coordinator's view through the ordinary socket client. Markup
-/// characters are escaped even inside JSON strings, so the body cannot be
-/// read as HTML whatever a client does with it.
+/// The coordinator's view through the ordinary socket client.
 fn state(context: &Context) -> Reply {
     let state_dir = context.state_dir.as_path();
     let request = Request::new("read", Command::Dashboard);
@@ -494,6 +495,12 @@ fn state(context: &Context) -> Reply {
             serde_json::json!({"available": false, "error": error.to_string()}),
         ),
     };
+    json_reply(status, &body)
+}
+
+/// Markup characters are escaped even inside JSON strings, so the body
+/// cannot be read as HTML whatever a client does with it.
+fn json_reply(status: u16, body: &serde_json::Value) -> Reply {
     let json = body
         .to_string()
         .replace('<', "\\u003c")
@@ -505,6 +512,107 @@ fn state(context: &Context) -> Reply {
         body: json.into_bytes(),
         allow: false,
     }
+}
+
+/// Rows a page holds unless the query says otherwise.
+const FEED_LIMIT: u32 = 100;
+
+/// `after` and `limit` from the query, defaulting to 0 and `FEED_LIMIT`;
+/// `limit` within the store's own bound of 1 to 1000.
+fn feed_query(query: &str) -> Result<(u64, u32), String> {
+    let (mut after, mut limit) = (0, FEED_LIMIT);
+    for pair in query.split('&') {
+        if let Some(value) = pair.strip_prefix("after=") {
+            after = value
+                .parse()
+                .map_err(|_| format!("after must be a whole number between 0 and {}", u64::MAX))?;
+        } else if let Some(value) = pair.strip_prefix("limit=") {
+            limit = value
+                .parse()
+                .ok()
+                .filter(|limit| (1..=1000).contains(limit))
+                .ok_or("limit must be a whole number between 1 and 1000")?;
+        }
+    }
+    Ok((after, limit))
+}
+
+/// One row per recorded event, reduced to an allowlist: its type, the first
+/// session, workspace and time it names (breadth first, so a field of the
+/// event wins over one nested in it), and every `path` and `paths` it
+/// carries. Nothing else, so prompt summaries, message and note text, task
+/// lines, payloads and any field added later are never served.
+fn feed_page(after: u64, events: &[langspan_core::RecordedEvent]) -> DashboardEvents {
+    use serde_json::Value;
+    let rows = events.iter().map(|recorded| {
+        let value = serde_json::to_value(&recorded.event).unwrap_or_default();
+        let mut queue = std::collections::VecDeque::from([&value]);
+        let (mut session_id, mut workspace_id, mut at_ms) = (None, None, None);
+        let mut paths = Vec::new();
+        while let Some(next) = queue.pop_front() {
+            match next {
+                Value::Object(fields) => {
+                    for (key, field) in fields {
+                        match (key.as_str(), field) {
+                            ("session_id", Value::String(id)) => {
+                                session_id = session_id.or(Some(id.as_str()));
+                            }
+                            ("workspace_id", Value::String(id)) => {
+                                workspace_id = workspace_id.or(Some(id.as_str()));
+                            }
+                            ("at_ms", Value::Number(ms)) => at_ms = at_ms.or_else(|| ms.as_u64()),
+                            ("path", Value::String(path)) => paths.push(path.clone()),
+                            ("paths", Value::Array(items)) => paths
+                                .extend(items.iter().filter_map(Value::as_str).map(str::to_owned)),
+                            _ => queue.push_back(field),
+                        }
+                    }
+                }
+                Value::Array(items) => queue.extend(items),
+                _ => {}
+            }
+        }
+        let kind = value
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        DashboardEvent::new(recorded.seq, kind, session_id, workspace_id, at_ms, paths)
+    });
+    DashboardEvents::new(after, rows.collect())
+}
+
+/// A page of the coordinator's event log, `/api/events` (issue #500).
+fn events(context: &Context, query: &str) -> Reply {
+    let (after, limit) = match feed_query(query) {
+        Ok(asked) => asked,
+        Err(message) => return Reply::text(400, &message),
+    };
+    let request = Request::new("read", Command::Events { after, limit });
+    let (status, body) = match client::call(&context.state_dir, &request) {
+        Ok(response) => match response.outcome {
+            Outcome::Events { events } => {
+                let page = feed_page(after, &events);
+                (
+                    200,
+                    serde_json::json!({"available": true, "version": page.version,
+                        "next": page.next, "events": page.events}),
+                )
+            }
+            Outcome::Error { code, message } => (
+                503,
+                serde_json::json!({"available": false, "error": format!("{code}: {message}")}),
+            ),
+            _ => (
+                503,
+                serde_json::json!({"available": false, "error": "the coordinator answered with something other than events; restart the daemon after upgrading LangSpan"}),
+            ),
+        },
+        Err(error) => (
+            503,
+            serde_json::json!({"available": false, "error": error.to_string()}),
+        ),
+    };
+    json_reply(status, &body)
 }
 
 /// This local month's refusal count, the fields `langspan count --json`
@@ -868,6 +976,80 @@ mod tests {
         let lan: SocketAddr = "192.168.1.5:7311".parse().unwrap();
         assert!(host_allowed("192.168.1.5:7311", lan));
         assert!(!host_allowed("localhost:7311", lan));
+    }
+
+    /// The `/api/events` page (issue #500), version 1: one row per stored
+    /// event in seq order, each an allowlist projection. Prompt summaries,
+    /// message text, task lines and publication payloads are never in it.
+    #[test]
+    fn the_event_feed_keeps_ids_times_and_paths_and_drops_every_text() {
+        use langspan_core::{DASHBOARD_PATHS, DASHBOARD_TEXT, RecordedEvent};
+        let long = "d/".repeat(DASHBOARD_TEXT);
+        let many: Vec<String> = (0..DASHBOARD_PATHS + 2)
+            .map(|n| format!("f{n}.rs"))
+            .collect();
+        let mut leased = many.clone();
+        leased[0] = long.clone();
+        let events = [
+            serde_json::json!({"type": "session_prompted", "session_id": "s1",
+                "summary": "SECRET-PROMPT", "at_ms": 5, "generation": 1}),
+            serde_json::json!({"type": "message_sent", "at_ms": 6, "message": {
+                "message_id": "m1", "workspace_id": "work", "from": "s1",
+                "to": {"kind": "everyone"}, "text": "SECRET-MESSAGE", "paths": ["a.rs"]}}),
+            serde_json::json!({"type": "remote_published", "workspace_id": "work", "sequence": 1,
+                "signature": "SECRET-SIGNATURE", "payload": "SECRET-PAYLOAD", "published_at_ms": 7}),
+            serde_json::json!({"type": "intent_set", "intent": {"session_id": "s1",
+                "workspace_id": "work", "paths": ["b.rs"], "summary": "SECRET-TASK", "generation": 1}}),
+            serde_json::json!({"type": "lease_granted", "lease": {"lease_id": "l1",
+                "session_id": "s1", "workspace_id": "work", "paths": leased,
+                "generation": 1, "expires_at_ms": 9, "status": "active"}}),
+            serde_json::json!({"type": "booted", "generation": 2}),
+        ];
+        let recorded: Vec<RecordedEvent> = events
+            .into_iter()
+            .zip(41..)
+            .map(|(event, seq)| RecordedEvent {
+                seq,
+                event: serde_json::from_value(event).unwrap(),
+            })
+            .collect();
+        let page = serde_json::to_value(feed_page(40, &recorded)).unwrap();
+        let mut clipped: String = long.chars().take(DASHBOARD_TEXT - 1).collect();
+        clipped.push('…');
+        let mut shown: Vec<String> = many[..DASHBOARD_PATHS].to_vec();
+        shown[0] = clipped;
+        assert_eq!(
+            page,
+            serde_json::json!({"version": 1, "next": 46, "events": [
+                {"seq": 41, "type": "session_prompted", "session_id": "s1", "at_ms": 5,
+                 "paths": [], "more_paths": 0},
+                {"seq": 42, "type": "message_sent", "workspace_id": "work", "at_ms": 6,
+                 "paths": ["a.rs"], "more_paths": 0},
+                {"seq": 43, "type": "remote_published", "workspace_id": "work",
+                 "paths": [], "more_paths": 0},
+                {"seq": 44, "type": "intent_set", "session_id": "s1", "workspace_id": "work",
+                 "paths": ["b.rs"], "more_paths": 0},
+                {"seq": 45, "type": "lease_granted", "session_id": "s1", "workspace_id": "work",
+                 "paths": shown, "more_paths": 2},
+                {"seq": 46, "type": "booted", "paths": [], "more_paths": 0},
+            ]})
+        );
+        assert!(!page.to_string().contains("SECRET"), "{page}");
+        // An empty page resumes where it was asked from.
+        assert_eq!(
+            serde_json::to_value(feed_page(46, &[])).unwrap(),
+            serde_json::json!({"version": 1, "next": 46, "events": []})
+        );
+    }
+
+    #[test]
+    fn the_event_feed_query_is_bounded_and_says_the_range() {
+        assert_eq!(feed_query(""), Ok((0, 100)));
+        assert_eq!(feed_query("t=x&after=7&limit=1000"), Ok((7, 1000)));
+        for bad in ["after=-1", "after=x", "limit=0", "limit=1001", "limit="] {
+            let error = feed_query(bad).unwrap_err();
+            assert!(error.contains("between"), "{bad}: {error}");
+        }
     }
 
     #[test]

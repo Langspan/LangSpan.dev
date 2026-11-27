@@ -483,6 +483,8 @@ fn the_demo_is_labeled_simulated_and_serves_no_coordinator_state() {
     let state = get(port, &format!("/api/state?t={token}"), "");
     assert_eq!(state.status, 404, "{}", state.body);
     assert!(!state.body.contains("real task line"));
+    let events = get(port, &format!("/api/events?t={token}"), "");
+    assert_eq!(events.status, 404, "{}", events.body);
 }
 
 #[test]
@@ -567,4 +569,82 @@ fn the_dashboard_install_advice_names_this_coordinator_state_directory() {
     // The page shows the coordinator's command rather than building one.
     let page = get(port, &format!("/?t={token}"), "").body;
     assert!(page.contains("install_advice"), "the page uses the advice");
+}
+
+const FEED_PROMPT: &str = "FEED-PROMPT-TEXT rework the parser";
+
+/// Poll `/api/events` two at a time from `after` until a page is empty,
+/// adding each row's seq and type to `seen`.
+fn drain_feed(port: u16, header: &str, after: &mut u64, seen: &mut Vec<(u64, String)>) {
+    loop {
+        let reply = get(port, &format!("/api/events?after={after}&limit=2"), header);
+        assert_eq!(reply.status, 200, "{}", reply.body);
+        assert!(reply.headers.contains("content-type: application/json"));
+        assert!(!reply.body.contains("FEED-PROMPT-TEXT"), "{}", reply.body);
+        let page: Value = serde_json::from_str(&reply.body).unwrap();
+        assert_eq!(page["available"], true, "{page}");
+        assert_eq!(page["version"], 1, "{page}");
+        let events = page["events"].as_array().unwrap();
+        assert!(events.len() <= 2, "{page}");
+        let next = page["next"].as_u64().unwrap();
+        if events.is_empty() {
+            assert_eq!(next, *after, "an empty page resumes where it was asked");
+            return;
+        }
+        for event in events {
+            let kind = event["type"].as_str().unwrap().to_owned();
+            seen.push((event["seq"].as_u64().unwrap(), kind));
+        }
+        *after = next;
+    }
+}
+
+/// Real daemon, hooks and TCP, because what is verified is the order of
+/// the events the coordinator really appended, read across separate polls
+/// while more arrive (issue #500).
+#[test]
+fn the_event_feed_pages_every_event_in_seq_order_without_gaps_or_prompt_text() {
+    let mut f = Fixture::new();
+    f.start_daemon();
+    f.prompt(ALICE, FEED_PROMPT);
+    assert_eq!(f.codex_admit(BOB, "call-1", "a.txt"), "admitted");
+    let (port, token) = f.start_dashboard();
+    let header = format!("X-LangSpan-Token: {token}\r\n");
+
+    let (mut after, mut seen) = (0, Vec::new());
+    drain_feed(port, &header, &mut after, &mut seen);
+    let first = seen.len();
+    assert!(first > 2, "several pages were read: {seen:?}");
+    // More happens; the next polls carry on from `next`.
+    assert_eq!(f.codex_admit(CAROL, "call-2", "a.txt"), "denied");
+    f.prompt(CAROL, FEED_PROMPT);
+    drain_feed(port, &header, &mut after, &mut seen);
+    assert!(seen.len() > first, "the later events arrived: {seen:?}");
+    assert_eq!(seen[0].0, 1, "{seen:?}");
+    for pair in seen.windows(2) {
+        assert_eq!(pair[1].0, pair[0].0 + 1, "seq order, no gaps: {seen:?}");
+    }
+    for kind in ["session_prompted", "lease_granted", "write_refused"] {
+        assert!(seen.iter().any(|(_, t)| t == kind), "{kind} in {seen:?}");
+    }
+
+    // The same refusals as the rest of the dashboard.
+    assert_eq!(get(port, "/api/events", "").status, 401);
+    let wrong = format!("X-LangSpan-Token: {}\r\n", "0".repeat(64));
+    assert_eq!(get(port, "/api/events", &wrong).status, 403);
+    let target = format!("/api/events?t={token}");
+    let foreign = format!("GET {target} HTTP/1.1\r\nHost: evil.example:{port}\r\n\r\n");
+    assert_eq!(send(port, foreign.as_bytes()).status, 421);
+    let post = format!("POST {target} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n");
+    assert_eq!(send(port, post.as_bytes()).status, 405);
+    let bad = get(port, "/api/events?limit=5000", &header);
+    assert_eq!(bad.status, 400, "{}", bad.body);
+    assert!(bad.body.contains("between 1 and 1000"), "{}", bad.body);
+
+    // A stopped coordinator is said, not hidden.
+    f.stop_daemon();
+    let down = get(port, "/api/events", &header);
+    assert_eq!(down.status, 503, "{}", down.body);
+    let down: Value = serde_json::from_str(&down.body).unwrap();
+    assert_eq!(down["available"], false, "{down}");
 }

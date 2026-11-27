@@ -42,8 +42,15 @@ light or dark theme; the theme button switches it.
 
 `langspan dashboard --demo` serves the same page and renderer with four
 fictional scenes, labeled "Simulated data", for demonstrations. It reads
-nothing from the coordinator, and its `/api/state` answers 404. The live page
-never contains the demo scenes.
+nothing from the coordinator, and its `/api/state` and `/api/events` answer
+404. The live page never contains the demo scenes.
+
+`GET /api/events?after=SEQ&limit=N` serves the coordinator's event log in seq
+order, for a script or a future Live view that replays it: `after` defaults
+to 0, `limit` to 100 (at most 1000), and the next poll asks after the reply's
+`next`. Each row carries only the event's seq, type, session, workspace,
+time and file paths, never prompt summaries or message text. It needs the
+same token and `Host` as `/api/state` ([ADR 0013](../adr/0013-dashboard.md)).
 
 `scripts/dashboard-browser-check.mjs` drives the real binary and a headless
 browser that speaks the DevTools protocol (`--browser PATH`; Node 22 or
