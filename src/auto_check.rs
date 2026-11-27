@@ -22,7 +22,7 @@
 //! Nothing here touches coordination state directly: the record goes to the
 //! state owner as a request, like any client's.
 
-use crate::{daemon::Registration, integrate, test_output};
+use crate::{integrate, registration::Registration, test_output};
 use langspan_core::{
     AutoCheck, CheckReport, CheckResult, Command, InterfaceCause, InterfaceChange,
     MAX_CAUSE_DEPENDENTS, MAX_REPORT_DEPENDENT_PATHS, NOTICE_DEPENDENTS, Outcome, TestResults,

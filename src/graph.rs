@@ -1269,7 +1269,7 @@ impl Index {
     /// or at `deadline`.
     pub fn export(
         &self,
-        of: &crate::daemon::Registration,
+        of: &crate::registration::Registration,
         out: &mut impl std::io::Write,
         now_ms: u64,
         deadline: Instant,
@@ -1412,7 +1412,7 @@ impl Index {
     /// `deadline`, leaves the index as it was.
     pub fn import(
         &mut self,
-        of: &crate::daemon::Registration,
+        of: &crate::registration::Registration,
         scan: &ScanView,
         input: &mut impl std::io::BufRead,
         apply: bool,
@@ -1513,7 +1513,7 @@ impl Index {
     /// `reads` is not run, and the answer is empty and not scanned.
     pub fn with_coverage<T: Default>(
         &self,
-        of: &crate::daemon::Registration,
+        of: &crate::registration::Registration,
         reads: impl FnOnce(&Self) -> Result<T, Failure>,
     ) -> Result<(T, GraphCoverage), Failure> {
         // A deferred transaction in WAL mode reads one snapshot, fixed at
@@ -3426,8 +3426,8 @@ mod review_regressions {
     }
 
     /// Workspace `w` at `root`, never moved or removed: what `pass` indexes.
-    fn of(root: &Path) -> crate::daemon::Registration {
-        crate::daemon::Registration {
+    fn of(root: &Path) -> crate::registration::Registration {
+        crate::registration::Registration {
             workspace_id: "w".into(),
             root: root.to_path_buf(),
             revision: 0,
@@ -3451,12 +3451,12 @@ mod review_regressions {
             .with_coverage(&of(&dir.0), |index| index.symbol("w", "upload", 10))
             .unwrap();
         assert_eq!((symbols.len(), coverage.scanned), (1, true));
-        let moved = crate::daemon::Registration {
+        let moved = crate::registration::Registration {
             root: dir.0.join("elsewhere"),
             ..of(&dir.0)
         };
         // Removed and registered again, or switched away and back.
-        let removed = crate::daemon::Registration {
+        let removed = crate::registration::Registration {
             revision: 1,
             ..of(&dir.0)
         };
