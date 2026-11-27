@@ -1,0 +1,10 @@
+lines	4754
+pub	5
+fn	answer	228
+fn	check_calls	163
+fn	check_write	171
+fn	prepare	163
+fn	remote_pass	156
+fn	run	355
+edge	auto_check
+edge	graph
