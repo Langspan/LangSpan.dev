@@ -371,6 +371,49 @@ fn pull_requests_read_the_build_cache_and_only_main_writes_it() {
     }
 }
 
+#[test]
+fn cargo_audit_has_its_own_cache_and_the_build_cache_paths_stay_put() {
+    let text = workflow("check.yml");
+    // actions/cache versions an entry by its path list: a change here
+    // matches no entry main saved, and every pull request builds cold.
+    assert!(
+        text.contains(
+            "  CACHE_PATHS: |\n    ~/.cargo/registry/index\n    ~/.cargo/registry/cache\n    \
+             ~/.cargo/git/db\n    target\n    ~/.cache/langspan-ci-tools/cargo-nextest\n  CACHE_LIMIT_MB:"
+        ),
+        "CACHE_PATHS changed; change it in a pull request of its own"
+    );
+    for id in ["linux", "macos"] {
+        let job = job(&text, id);
+        let restore = job
+            .split("- name: Restore cargo-audit\n")
+            .nth(1)
+            .unwrap_or_else(|| panic!("{id} doesn't restore cargo-audit"));
+        for part in [
+            "path: ~/.cache/langspan-ci-tools/cargo-audit\n",
+            "key: cargo-audit-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('scripts/install-ci-tools.sh') }}",
+            "restore-keys: ${{ github.ref != 'refs/heads/main' && ",
+        ] {
+            assert!(
+                restore.contains(part),
+                "{id}'s cargo-audit restore lacks {part}"
+            );
+        }
+        assert!(
+            restore.contains("- name: Install the dependency policy"),
+            "{id} restores cargo-audit after installing it"
+        );
+        let save = job
+            .split("- name: Save cargo-audit\n")
+            .nth(1)
+            .unwrap_or_else(|| panic!("{id} doesn't save cargo-audit"));
+        assert!(save.starts_with(
+            "        if: github.ref == 'refs/heads/main' && steps.changes.outputs.code == 'true' && steps.audit-cache.outputs.cache-hit != 'true'\n"
+        ), "{id} could save cargo-audit off main");
+        assert!(save.contains("key: ${{ steps.audit-cache.outputs.cache-primary-key }}"));
+    }
+}
+
 /// Runs scripts/ci-cache-size.sh over `paths` with `limit_mb`, and returns
 /// (GITHUB_OUTPUT, stdout).
 fn cache_size(paths: &str, limit_mb: &str) -> (String, String) {
