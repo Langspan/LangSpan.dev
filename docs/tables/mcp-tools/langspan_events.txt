@@ -1,0 +1,1 @@
+Read an ordered page of persisted events

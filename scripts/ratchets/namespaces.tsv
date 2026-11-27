@@ -17,8 +17,6 @@
 # utility
 namespace	text	utility
 namespace	ids	utility
-namespace	sha256	utility
-namespace	registration	utility
 namespace	clock	utility
 namespace	local_day	utility
 namespace	zone	utility
@@ -27,15 +25,12 @@ namespace	regions	utility
 namespace	breaks	utility
 namespace	vendor	utility
 namespace	tool_names	utility
-allow	ids	sha256
 allow	breaks	regions
 allow	breaks	text
-allow	regions	sha256
+allow	regions	ids
 
 # infrastructure
-namespace	local	infrastructure
-namespace	file_state	infrastructure
-namespace	input	infrastructure
+namespace	fs	infrastructure
 namespace	git	infrastructure
 namespace	sha1	infrastructure
 namespace	observer	infrastructure
@@ -56,13 +51,12 @@ namespace	binary_version	infrastructure
 allow	observer	git
 allow	observer	sha1
 allow	remote	git
-allow	remote	local
-allow	client	local
+allow	remote	fs
+allow	client	fs
 allow	autostart	client
-allow	autostart	local
-allow	shell	file_state
+allow	autostart	fs
+allow	shell	fs
 allow	shell	git
-allow	shell	local
 allow	store	observer
 allow	graph	git
 allow	graph	index_file

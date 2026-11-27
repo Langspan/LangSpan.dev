@@ -1,0 +1,1 @@
+Search a workspace's remembered notes: every query word in a note's text or paths, without case; best first, at most 50

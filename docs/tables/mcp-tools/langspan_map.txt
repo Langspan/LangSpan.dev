@@ -1,0 +1,1 @@
+Map the workspace's areas, with their files, exports and languages, and the imports and calls between them

@@ -1,0 +1,1 @@
+Read one message in full as it was sent, also after acknowledgement; for a briefing line marked `(cut; …)`

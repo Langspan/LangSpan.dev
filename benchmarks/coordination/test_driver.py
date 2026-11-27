@@ -65,6 +65,60 @@ class Temporary(unittest.TestCase):
 
 
 class DriverUnitTests(Temporary):
+    def stale_trial(self, arm):
+        """The recorded langspan-follow trial laid out as a run left it: real
+        checkouts (Git lists what each changed), the committed files in them,
+        and each transcript in the runner's directory. Returns the
+        stale_section arguments."""
+        work, runner_dir = self.root / arm / "work", self.root / arm / "runner"
+        work.mkdir(parents=True)
+        runner_dir.mkdir()
+        _, base, clones = driver.prepare_fixture(work, 2, arm)
+        recording = HERE / "testdata" / "stale-callers" / "langspan-follow.json"
+        trial = json.loads(recording.read_text(encoding="utf-8").replace("/bench/work", str(work)))
+        commands = {}
+        for index, (clone, events, committed) in enumerate(zip(clones, trial["transcripts"], trial["committed"]), 1):
+            for path, text in committed.items():
+                (clone / path).parent.mkdir(parents=True, exist_ok=True)
+                (clone / path).write_text(text, encoding="utf-8")
+            (runner_dir / ("s%d.out" % index)).write_text(self.transcript(events), encoding="utf-8")
+            commands[("agent", "s%d" % index)] = {"stdout_path": "s%d.out" % index}
+        return dict(trial["plan"], base=base), commands, runner_dir, work
+
+    def test_the_stale_caller_measure_reads_every_file_a_session_changed(self):
+        # Real Git: what the driver verifies is Git's list of changed and
+        # untracked files in each kind of checkout.
+        for arm in ("worktrees", "langspan"):
+            with self.subTest(arm=arm):
+                plan, commands, runner_dir, work = self.stale_trial(arm)
+                self.assertEqual(driver.stale_section(plan, commands, runner_dir, work)["status"], "reported")
+                # A caller added with Bash, untracked and then committed.
+                extra = work / "s2" / "shelf" / "features" / "extra.py"
+                extra.write_text("from shelf.dates import days_left\nx = days_left(1)\n", encoding="utf-8")
+                found = driver.stale_section(plan, commands, runner_dir, work)
+                self.assertEqual(found["status"], "unknown")
+                self.assertIn("shelf/features/extra.py", found["reason"])
+                driver.git("add", "-A", cwd=work / "s2")
+                driver.git("commit", "-q", "-m", "extra", cwd=work / "s2")
+                self.assertIn("extra.py", driver.stale_section(plan, commands, runner_dir, work)["reason"])
+                # A fixture caller Bash removed.
+                extra.unlink()
+                (work / "s2" / "shelf" / "report.py").unlink()
+                found = driver.stale_section(plan, commands, runner_dir, work)
+                self.assertIn("shelf/report.py", found["reason"])
+                # A base Git does not know lists nothing.
+                self.assertIn("changed files", driver.stale_section(dict(plan, base="0" * 40), commands, runner_dir,
+                                                                    work)["reason"])
+
+    def test_a_missing_transcript_file_is_unknown_not_zero(self):
+        plan, commands, runner_dir, work = self.stale_trial("worktrees")
+        (runner_dir / "s2.out").unlink()
+        # With no module left either, nothing else shows the session's work.
+        (work / "s2" / "shelf" / "features" / "gone.py").unlink()
+        found = driver.stale_section(plan, commands, runner_dir, work)
+        self.assertEqual(found["status"], "unknown")
+        self.assertIn("session 2 has no transcript", found["reason"])
+
     def test_assignment_is_seeded_sized_and_shaped(self):
         for n in tasks.SESSION_COUNTS:
             rename = tasks.assign("rename_vs_new_caller", n, 7)

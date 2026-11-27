@@ -68,6 +68,8 @@ DEFAULT_WAIT_MS
 DELIVERED_MEANS
 DENIAL_WINDOW
 Dashboard
+DashboardEvent
+DashboardEvents
 Decision
 DefinitionFacts
 Delivery

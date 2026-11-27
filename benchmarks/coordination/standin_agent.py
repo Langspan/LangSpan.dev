@@ -37,8 +37,8 @@ has ended, so its change stays in flight while they work. When the notice
 tells it of the change only after its edit, it makes the informed edit then.
 A refused edit is read again and retried once, then skipped. It prints a
 short transcript in the shape of ``claude -p --output-format stream-json``:
-a first line listing its tools, as Claude Code's does, and the result line
-last.
+a first line listing its tools, as Claude Code's does, each edit's
+``tool_use`` and ``tool_result``, and the result line last.
 """
 
 import json
@@ -201,10 +201,19 @@ class Session:
         self.fire("PostToolUse", "Read", {"file_path": str(path.resolve())}, "read-" + uuid.uuid4().hex)
 
     def edit(self, path, tool, tool_input, apply):
+        """Make one edit through the hooks, printing its call and result as
+        Claude Code's stream-json does: a refused call's result is an error."""
         for attempt in (1, 2):
             call = "edit-" + uuid.uuid4().hex
-            if not self.fire("PreToolUse", tool, tool_input, call):
+            print(json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": call, "name": tool, "input": tool_input}]}}), flush=True)
+            denied = self.fire("PreToolUse", tool, tool_input, call)
+            if not denied:
                 apply()
+            print(json.dumps({"type": "user", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": call, "is_error": denied,
+                 "content": "refused by a hook" if denied else "done"}]}}), flush=True)
+            if not denied:
                 self.fire("PostToolUse", tool, tool_input, call)
                 return True
             self.refusals.append({"path": str(path), "attempt": attempt})
