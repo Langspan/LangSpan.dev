@@ -1,0 +1,5 @@
+exit: Some(0)
+--- stdout
+
+--- stderr
+{"level":"info","event":"langspan_hook","coverage":"unknown","detail":"host event exceeds 8 MiB"}

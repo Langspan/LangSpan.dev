@@ -132,16 +132,23 @@ pub struct AnchorLookup {
 /// is looked up so the command is still refused for naming too many.
 const LOOKUP_PATHS: usize = 64 + 1;
 
+/// Look `name` up in `scope`'s first `LOOKUP_PATHS` distinct paths, so a
+/// repeated path never displaces a later one. The cap is per call: notes
+/// on one name each keep their own files, at most `MAX_NOTES` notes of at
+/// most 8 files each.
 fn add_lookup(lookups: &mut BTreeMap<String, AnchorLookup>, name: &str, scope: &[&str]) {
     let lookup = lookups.entry(name.to_owned()).or_default();
     if scope.is_empty() {
         lookup.workspace = true;
     }
+    let mut distinct = BTreeSet::new();
     for path in scope {
-        if lookup.paths.len() >= LOOKUP_PATHS {
+        if distinct.len() >= LOOKUP_PATHS {
             break;
         }
-        lookup.paths.insert((*path).to_owned());
+        if distinct.insert(*path) {
+            lookup.paths.insert((*path).to_owned());
+        }
     }
 }
 

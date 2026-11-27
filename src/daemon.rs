@@ -4512,6 +4512,9 @@ mod unix {
                     _ => crate::process::probe(process),
                 },
             }),
+            Command::StatusLine { root, from_ms: ms } => {
+                Ok(crate::status_line::resolved(root, *ms))
+            }
             _ => Ok(command.clone()),
         }
     }

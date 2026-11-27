@@ -304,6 +304,39 @@ fn the_line_counts_current_sessions_and_each_refusal_once() {
     assert!(!fixture.line().contains("a.txt"));
 }
 
+/// A client may name the folder through a symbolic link (on macOS the
+/// temporary directory is one): the daemon resolves it before matching the
+/// registered root, so the session there still counts.
+#[test]
+fn a_session_reached_through_a_symlinked_folder_counts_as_here() {
+    let fixture = Fixture::new();
+    fixture.prompt(ALICE);
+    // The query as any client sends it, the path not resolved first.
+    let ask = |root: &Path| {
+        let command = Command::StatusLine {
+            root: root.to_string_lossy().into_owned(),
+            from_ms: 0,
+        };
+        match client::call(&fixture.state(), &Request::new("read", command))
+            .unwrap()
+            .outcome
+        {
+            Outcome::StatusLine { line } => line,
+            other => panic!("{other:?}"),
+        }
+    };
+    let link = fixture.base.join("link");
+    std::os::unix::fs::symlink(fixture.work(), &link).unwrap();
+    fs::create_dir(fixture.work().join("sub")).unwrap();
+    for root in [link.clone(), link.join("sub")] {
+        let line = ask(&root);
+        assert_eq!(line.workspace_id.as_deref(), Some("work"), "{root:?}");
+        assert_eq!(line.sessions_here, 1, "{root:?}");
+    }
+    // A folder that does not exist is matched as given: nothing here.
+    assert_eq!(ask(&fixture.base.join("gone")).workspace_id, None);
+}
+
 #[test]
 fn the_command_writes_nothing_to_the_state_directory() {
     let fixture = Fixture::new();

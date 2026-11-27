@@ -373,10 +373,10 @@ exit 0
 {"version":10,"request_id":"r-r3","replayed":true,"generation":1,"lease_valid":null,"outcome":{"type":"remote_disabled","workspace_id":"w"}}
 
 ## count request
-$ langspan request {"version":10,"request_id":"read","command":{"op":"count","days":[0,<ms>]}}
+$ langspan request {"version":10,"request_id":"read","command":{"op":"count","days":[0,86400000]}}
 exit 0
 0 refusals from <time> to <time> (UTC).
-$ langspan request {"version":10,"request_id":"read","command":{"op":"count","days":[0,<ms>]}} --json
+$ langspan request {"version":10,"request_id":"read","command":{"op":"count","days":[0,86400000]}} --json
 exit 0
 {"version":10,"request_id":"read","replayed":false,"generation":1,"lease_valid":null,"outcome":{"type":"count","count":{"from_ms":"<ms>","to_ms":"<ms>","refusals":0,"by_kind":{"commit_held":0,"conflict":0,"stale_base":0,"unread_lines":0},"by_workspace":{},"retried_through":0,"repeats":0,"truncated":false}}}
 
