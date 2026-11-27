@@ -18,7 +18,7 @@ use langspan_core::{
 };
 use langspan_graph::{Change, FileGraph, Language, MAX_SOURCE_BYTES, SymbolKind};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     path::Path,
     time::{Duration, Instant},
 };
@@ -148,17 +148,18 @@ pub fn findings(
     if Instant::now() >= deadline {
         return skipped(OVER_BUDGET.into());
     }
-    let (findings, more) = compare(&branches);
+    let (findings, more, cut) = compare(&branches, deadline);
     SymbolFindings {
         findings,
         more,
         files_indexed,
         files_skipped,
-        note: None,
+        note: cut.then(|| COMPARE_OVER_BUDGET.into()),
     }
 }
 
 const OVER_BUDGET: &str = "indexing the changed files took longer than its time limit";
+const COMPARE_OVER_BUDGET: &str = "comparing the branches' definitions reached its time limit: there may be more findings than these";
 
 /// Index what `commit` changed since it and `target` parted.
 fn branch(
@@ -425,11 +426,34 @@ fn index(
     Ok(())
 }
 
+/// Keep a finding while there are fewer than `MAX_SYMBOL_FINDINGS`, and only
+/// count the rest: a finding past the bound is never built.
+fn keep(all: &mut Vec<SymbolFinding>, more: &mut u32, finding: impl FnOnce() -> SymbolFinding) {
+    if all.len() < MAX_SYMBOL_FINDINGS {
+        all.push(finding());
+    } else {
+        *more = more.saturating_add(1);
+    }
+}
+
+/// A branch's uses by name, in the order it made them: a definition is
+/// compared only with the uses that name it.
+fn uses_by_name(branch: &Branch) -> BTreeMap<&str, Vec<&Use>> {
+    let mut by_name = BTreeMap::<&str, Vec<&Use>>::new();
+    for used in &branch.uses {
+        by_name.entry(&used.name).or_default().push(used);
+    }
+    by_name
+}
+
 /// The findings between every two branches, at most `MAX_SYMBOL_FINDINGS`
-/// in branch, path and line order, and how many more there were.
-fn compare(branches: &[Branch]) -> (Vec<SymbolFinding>, u32) {
+/// in branch, path and line order; how many more there were; and whether
+/// the comparison stopped at `deadline`, when there may be more still.
+fn compare(branches: &[Branch], deadline: Instant) -> (Vec<SymbolFinding>, u32, bool) {
     let mut all = Vec::new();
+    let mut more = 0_u32;
     let mut seen = BTreeSet::new();
+    let uses_of: Vec<_> = branches.iter().map(uses_by_name).collect();
     let finding =
         |kind, a: &Branch, d: &Definition, b: &Branch, path: &str, line: u32| SymbolFinding {
             finding: kind,
@@ -453,7 +477,8 @@ fn compare(branches: &[Branch]) -> (Vec<SymbolFinding>, u32) {
             args: None,
             takes: None,
         };
-    for (i, a) in branches.iter().enumerate() {
+    let mut cut = false;
+    'pairs: for (i, a) in branches.iter().enumerate() {
         for (j, b) in branches.iter().enumerate() {
             if i == j {
                 continue;
@@ -462,6 +487,13 @@ fn compare(branches: &[Branch]) -> (Vec<SymbolFinding>, u32) {
                 b.added.contains(name) || b.changed.iter().any(|other| other.name == name)
             };
             for d in a.changed.iter().filter(|d| !d.before.is_empty()) {
+                if Instant::now() >= deadline {
+                    cut = true;
+                    break 'pairs;
+                }
+                let uses = uses_of[j]
+                    .get(d.name.as_str())
+                    .map_or(&[][..], Vec::as_slice);
                 match &d.after {
                     Some(after) => {
                         // Each pair once, under the branch named first.
@@ -473,17 +505,20 @@ fn compare(branches: &[Branch]) -> (Vec<SymbolFinding>, u32) {
                                     && other.kind == d.kind
                                     && !langspan_graph::same_signature(after, other_after)
                                 {
-                                    let mut f = finding(
-                                        SymbolFindingKind::BothChanged,
-                                        a,
-                                        d,
-                                        b,
-                                        &other.path,
-                                        other.line,
-                                    );
-                                    f.other_after =
-                                        Some(clean(other_after, MAX_SYMBOL_FINDING_TEXT));
-                                    all.push(f);
+                                    keep(&mut all, &mut more, || SymbolFinding {
+                                        other_after: Some(clean(
+                                            other_after,
+                                            MAX_SYMBOL_FINDING_TEXT,
+                                        )),
+                                        ..finding(
+                                            SymbolFindingKind::BothChanged,
+                                            a,
+                                            d,
+                                            b,
+                                            &other.path,
+                                            other.line,
+                                        )
+                                    });
                                 }
                             }
                         }
@@ -495,25 +530,25 @@ fn compare(branches: &[Branch]) -> (Vec<SymbolFinding>, u32) {
                         if touches(&d.name) {
                             continue;
                         }
-                        for used in &b.uses {
+                        for used in uses {
                             if let Some((args, member)) = used.call
-                                && used.name == d.name
                                 && family(used.language) == family(d.language)
                                 && old.fits(args, member)
                                 && !new.fits(args, member)
                                 && seen.insert((i, j, d.name.clone(), used.path.clone(), used.line))
                             {
-                                let mut f = finding(
-                                    SymbolFindingKind::ChangedAndCalled,
-                                    a,
-                                    d,
-                                    b,
-                                    &used.path,
-                                    used.line,
-                                );
-                                f.args = Some(args);
-                                f.takes = Some(new);
-                                all.push(f);
+                                keep(&mut all, &mut more, || SymbolFinding {
+                                    args: Some(args),
+                                    takes: Some(new),
+                                    ..finding(
+                                        SymbolFindingKind::ChangedAndCalled,
+                                        a,
+                                        d,
+                                        b,
+                                        &used.path,
+                                        used.line,
+                                    )
+                                });
                             }
                         }
                     }
@@ -521,19 +556,20 @@ fn compare(branches: &[Branch]) -> (Vec<SymbolFinding>, u32) {
                         if touches(&d.name) {
                             continue;
                         }
-                        for used in &b.uses {
-                            if used.name == d.name
-                                && family(used.language) == family(d.language)
+                        for used in uses {
+                            if family(used.language) == family(d.language)
                                 && seen.insert((i, j, d.name.clone(), used.path.clone(), used.line))
                             {
-                                all.push(finding(
-                                    SymbolFindingKind::RemovedAndUsed,
-                                    a,
-                                    d,
-                                    b,
-                                    &used.path,
-                                    used.line,
-                                ));
+                                keep(&mut all, &mut more, || {
+                                    finding(
+                                        SymbolFindingKind::RemovedAndUsed,
+                                        a,
+                                        d,
+                                        b,
+                                        &used.path,
+                                        used.line,
+                                    )
+                                });
                             }
                         }
                     }
@@ -541,20 +577,18 @@ fn compare(branches: &[Branch]) -> (Vec<SymbolFinding>, u32) {
             }
         }
     }
-    // At most `MAX_SYMBOL_FINDINGS`, and only while they fit their share of
-    // the frame; the rest are counted.
-    let total = all.len();
+    // Only while they fit their share of the frame; the rest are counted.
     let mut bytes = 0;
-    let keep = all
+    let fit = all
         .iter()
-        .take(MAX_SYMBOL_FINDINGS)
         .take_while(|finding| {
             bytes += serde_json::to_vec(finding).map_or(FINDINGS_BYTES, |json| json.len() + 1);
             bytes <= FINDINGS_BYTES
         })
         .count();
-    all.truncate(keep);
-    (all, u32::try_from(total - keep).unwrap_or(u32::MAX))
+    let dropped = u32::try_from(all.len() - fit).unwrap_or(u32::MAX);
+    all.truncate(fit);
+    (all, more.saturating_add(dropped), cut)
 }
 
 fn arguments(count: u32) -> &'static str {
@@ -644,7 +678,7 @@ mod tests {
         );
         let calls: String = (0..40).map(|_| "fn c() { save(1); }\n").collect();
         let import = branch("import", &[("src/i.rs", "", &calls)]);
-        let (findings, more) = compare(&[sync, import]);
+        let (findings, more) = found(&[sync, import]);
         assert_eq!(findings.len(), MAX_SYMBOL_FINDINGS);
         assert_eq!(more, 40 - MAX_SYMBOL_FINDINGS as u32);
         assert!(
@@ -670,7 +704,7 @@ mod tests {
                 ("src/i.rs", "", "fn c() { save(1); }\n"),
             ],
         );
-        let (findings, _) = compare(&[sync, own]);
+        let (findings, _) = found(&[sync, own]);
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].finding, SymbolFindingKind::BothChanged);
     }
@@ -685,8 +719,8 @@ mod tests {
         );
         let rust = branch("rust", &[("src/i.rs", "", "fn c() { save(1); }\n")]);
         let script = branch("script", &[("web/i.ts", "", "save(1);\n")]);
-        assert_eq!(compare(&[retry, rust]).0, Vec::new());
-        assert_eq!(compare(&[sync, script]).0, Vec::new());
+        assert_eq!(found(&[retry, rust]).0, Vec::new());
+        assert_eq!(found(&[sync, script]).0, Vec::new());
     }
 
     #[test]
@@ -706,7 +740,7 @@ mod tests {
         );
         let call = format!("save({});\n", vec!["1"; MAX_ARITY as usize + 1].join(", "));
         let wide = branch("wide", &[("web/i.ts", "", &call)]);
-        assert_eq!(compare(&[one, wide]).0, Vec::new());
+        assert_eq!(found(&[one, wide]).0, Vec::new());
     }
 
     #[test]
@@ -728,7 +762,7 @@ mod tests {
                 ("src/i.rs", "", "fn c() { save(1); }\n"),
             ],
         );
-        assert_eq!(compare(&[sync, own]).0, Vec::new());
+        assert_eq!(found(&[sync, own]).0, Vec::new());
     }
 
     #[test]
@@ -741,7 +775,7 @@ mod tests {
         };
         let path = format!("src/{long}.rs");
         let (base, a, b) = (fns("x: u32"), fns("x: u32, y: u32"), fns("x: u64"));
-        let (findings, more) = compare(&[
+        let (findings, more) = found(&[
             branch(&long, &[(&path, &base, &a)]),
             branch(&long, &[(&path, &base, &b)]),
         ]);
@@ -758,7 +792,44 @@ mod tests {
         // Its parse finds nothing defined, which is not evidence `save` went.
         let edit = branch("edit", &[("src/s.rs", "pub fn save(x: u32) {}\n", ")\n")]);
         let caller = branch("caller", &[("src/i.rs", "", "fn c() { save(1); }\n")]);
-        assert_eq!(compare(&[edit, caller]).0, Vec::new());
+        assert_eq!(found(&[edit, caller]).0, Vec::new());
+    }
+
+    // Review follow-up #265: comparison work is bounded.
+
+    fn sync_and_callers(lines: usize, line: &str) -> [Branch; 2] {
+        let calls: String = (0..lines).map(|_| format!("{line}\n")).collect();
+        [sync(), branch("import", &[("src/i.rs", "", &calls)])]
+    }
+
+    #[test]
+    fn a_comparison_past_its_deadline_stops_and_says_so() {
+        let branches = sync_and_callers(3, "fn c() { save(1); }");
+        let (findings, more, cut) = compare(&branches, Instant::now());
+        assert_eq!((findings, more, cut), (Vec::new(), 0, true));
+        let (findings, more, cut) = compare(&branches, far());
+        assert_eq!((findings.len(), more, cut), (3, 0, false));
+        assert!(COMPARE_OVER_BUDGET.len() <= MAX_SYMBOL_FINDINGS_NOTE);
+    }
+
+    #[test]
+    fn findings_past_the_bound_are_counted_once_per_line() {
+        // Two calls on one line are one finding, past the bound as well.
+        let branches = sync_and_callers(40, "fn c() { save(1); save(2); }");
+        let (findings, more, cut) = compare(&branches, far());
+        assert_eq!(findings.len(), MAX_SYMBOL_FINDINGS);
+        assert_eq!((more, cut), (40 - MAX_SYMBOL_FINDINGS as u32, false));
+    }
+
+    /// What `compare` finds with time to spare.
+    fn found(branches: &[Branch]) -> (Vec<SymbolFinding>, u32) {
+        let (findings, more, cut) = compare(branches, far());
+        assert!(!cut);
+        (findings, more)
+    }
+
+    fn far() -> Instant {
+        Instant::now() + Duration::from_secs(3600)
     }
 
     // Review follow-up on #279: a partial parse still names the branch's own
@@ -794,7 +865,7 @@ mod tests {
                 ("src/i.rs", "", "fn c() { save(1); }\n"),
             ],
         );
-        assert_eq!(compare(&[sync(), own]).0, Vec::new());
+        assert_eq!(found(&[sync(), own]).0, Vec::new());
     }
 
     #[test]
@@ -808,7 +879,7 @@ mod tests {
                 ("src/i.rs", "", "fn c() { save(1); }\n"),
             ],
         );
-        assert_eq!(compare(&[sync(), own]).0, Vec::new());
+        assert_eq!(found(&[sync(), own]).0, Vec::new());
     }
 
     #[test]
@@ -822,7 +893,7 @@ mod tests {
                 ("src/i.rs", "", "fn c() { save(1); }\n"),
             ],
         );
-        assert_eq!(compare(&[sync(), own]).0, Vec::new());
+        assert_eq!(found(&[sync(), own]).0, Vec::new());
     }
 
     #[test]
@@ -835,7 +906,7 @@ mod tests {
                 ("src/i.rs", "", "fn c() { save(1); }\n"),
             ],
         );
-        assert_eq!(compare(&[sync(), own]).0, Vec::new());
+        assert_eq!(found(&[sync(), own]).0, Vec::new());
     }
 
     #[test]
@@ -850,7 +921,7 @@ mod tests {
                 ("src/i.rs", "", "fn c() { save(1); }\n"),
             ],
         );
-        let (findings, _) = compare(&[sync(), caller]);
+        let (findings, _) = found(&[sync(), caller]);
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].finding, SymbolFindingKind::ChangedAndCalled);
     }
