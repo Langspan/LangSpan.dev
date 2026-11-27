@@ -1,6 +1,4 @@
 pub	4
-edge	client
 edge	commit
 edge	formatter
-edge	git
 edge	journal

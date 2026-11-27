@@ -1,4 +1,4 @@
-//! Shared by the redaction tests (`src/hook/redact.rs`, `tests/remote.rs`).
+//! Shared by the redaction tests (`src/text/redact.rs`,`tests/remote.rs`).
 //!
 //! Secret scanners such as GitHub push protection and gitleaks flag any
 //! literal shaped like a live credential, even an invented one. A fixture

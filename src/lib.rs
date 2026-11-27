@@ -83,3 +83,6 @@ pub mod index_file;
 pub mod integrate;
 pub mod landing;
 pub mod rewrite;
+
+// Compatibility aliases: old paths kept until importers are repointed.
+use text::redact;
