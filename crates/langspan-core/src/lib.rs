@@ -31,6 +31,7 @@ mod refusal_outcome;
 mod remote;
 mod rename_holds;
 mod report;
+mod route;
 mod sessions;
 mod shared;
 mod since;
@@ -103,6 +104,7 @@ pub use report::{
     ReportKnown, ReportQuery, ReportSession, host_kind, known_sessions, open_intents, report,
     session_workspaces,
 };
+pub use route::Route;
 pub use sessions::*;
 pub(crate) use shared::*;
 pub use since::{
@@ -364,6 +366,10 @@ fn decide_checked(
     now_ms: u64,
 ) -> Result<Decision, CoreError> {
     validate_request_id(request_id)?;
+    match command.route() {
+        Route::Store | Route::Index | Route::Internal => return Err(route::answered_elsewhere()),
+        Route::Decide | Route::Read => {}
+    }
     match command {
         Command::SendMessage {
             workspace_id,
@@ -1035,6 +1041,7 @@ fn decide_checked(
                 },
             })
         }
+        // Refused above by route; named so a new decided command needs an arm.
         Command::Events { .. }
         | Command::Today { .. }
         | Command::Report { .. }
@@ -1058,10 +1065,7 @@ fn decide_checked(
         | Command::GraphExport { .. }
         | Command::GraphImport { .. }
         | Command::CheckWrite { .. }
-        | Command::CheckCalls { .. } => Err(error(
-            "storage_operation",
-            "Event history, status pages, change projections, sent messages and index queries are answered by the daemon's stores",
-        )),
+        | Command::CheckCalls { .. } => Err(route::answered_elsewhere()),
     }
 }
 

@@ -36,7 +36,7 @@ mod unix {
         protocol::{self, MAX_FRAME_BYTES, PROTOCOL_VERSION, Request, Response},
         store::{Execution, Store},
     };
-    use langspan_core::{Command, Outcome, State, validate_request_id};
+    use langspan_core::{Command, Outcome, Route, State, validate_request_id};
     use serde::Deserialize;
     use std::{
         fs,
@@ -1300,87 +1300,87 @@ mod unix {
                 message,
             );
         }
-        if command == Command::Version {
-            return Response {
-                version: PROTOCOL_VERSION,
-                request_id,
-                replayed: false,
-                generation: store.state().generation,
-                lease_valid: None,
-                outcome: Outcome::Version {
-                    version: crate::binary_version::VERSION.into(),
-                    pid: std::process::id(),
-                },
-            };
-        }
-        if let Command::CheckCalls { .. } = &command {
-            return checked_calls(store, graph, request_id, &command);
-        }
-        if let Command::OutlineRead { .. } = &command {
-            return outline_read(store, graph, request_id, command);
-        }
-        if let Command::CheckWrite {
-            session_id,
-            paths,
-            symbols,
-        } = &command
-        {
-            return check_write(
-                store,
-                graph,
-                state_dir,
-                request_id,
-                (session_id, paths, symbols),
-            );
-        }
-        if matches!(
-            command,
-            Command::GraphSymbol { .. }
-                | Command::GraphReferences { .. }
-                | Command::GraphImpact { .. }
-                | Command::GraphBlindSpots { .. }
-                | Command::GraphContext { .. }
-                | Command::GraphInflight { .. }
-                | Command::GraphPath { .. }
-                | Command::GraphMap { .. }
-        ) {
-            let answer = match &command {
-                Command::GraphPath {
-                    workspace_id,
-                    from,
-                    to,
-                    max_hops,
-                } => graph_path(graph, store.state(), (workspace_id, from, to, *max_hops))
-                    .map_err(|message| ("index_unavailable", message)),
-                Command::GraphMap {
-                    workspace_id,
-                    depth,
-                } => graph_map(graph, store.state(), workspace_id, *depth)
-                    .map_err(|message| ("index_unavailable", message)),
-                Command::GraphInflight { workspace_id } => {
-                    graph_inflight(graph, store.state(), workspace_id)
-                        .map_err(|message| ("index_unavailable", message))
-                }
-                Command::GraphBlindSpots {
-                    workspace_id,
-                    limit,
-                } => graph_blind_spots(graph, store.state(), workspace_id, *limit)
-                    .map_err(|message| ("index_unavailable", message)),
-                Command::GraphContext { .. } => graph_context(graph, store.state(), &command),
-                _ => graph_query(graph, store.state(), &command)
-                    .map_err(|message| ("index_unavailable", message)),
-            };
-            return match answer {
-                Ok(outcome) => Response {
+        match command.route() {
+            Route::Internal => {
+                return Response {
                     version: PROTOCOL_VERSION,
                     request_id,
                     replayed: false,
                     generation: store.state().generation,
                     lease_valid: None,
-                    outcome,
-                },
-                Err((code, message)) => error(request_id, store.state().generation, code, message),
-            };
+                    outcome: Outcome::Version {
+                        version: crate::binary_version::VERSION.into(),
+                        pid: std::process::id(),
+                    },
+                };
+            }
+            Route::Index => 'index: {
+                let answer = match &command {
+                    Command::CheckCalls { .. } => {
+                        return checked_calls(store, graph, request_id, &command);
+                    }
+                    Command::CheckWrite {
+                        session_id,
+                        paths,
+                        symbols,
+                    } => {
+                        return check_write(
+                            store,
+                            graph,
+                            state_dir,
+                            request_id,
+                            (session_id, paths, symbols),
+                        );
+                    }
+                    Command::GraphPath {
+                        workspace_id,
+                        from,
+                        to,
+                        max_hops,
+                    } => graph_path(graph, store.state(), (workspace_id, from, to, *max_hops))
+                        .map_err(|message| ("index_unavailable", message)),
+                    Command::GraphMap {
+                        workspace_id,
+                        depth,
+                    } => graph_map(graph, store.state(), workspace_id, *depth)
+                        .map_err(|message| ("index_unavailable", message)),
+                    Command::GraphInflight { workspace_id } => {
+                        graph_inflight(graph, store.state(), workspace_id)
+                            .map_err(|message| ("index_unavailable", message))
+                    }
+                    Command::GraphBlindSpots {
+                        workspace_id,
+                        limit,
+                    } => graph_blind_spots(graph, store.state(), workspace_id, *limit)
+                        .map_err(|message| ("index_unavailable", message)),
+                    Command::GraphContext { .. } => graph_context(graph, store.state(), &command),
+                    Command::GraphSymbol { .. }
+                    | Command::GraphReferences { .. }
+                    | Command::GraphImpact { .. } => graph_query(graph, store.state(), &command)
+                        .map_err(|message| ("index_unavailable", message)),
+                    // A transfer goes to the indexer before it gets here; one
+                    // that does arrive goes on to the store, which refuses it.
+                    // No other command routes here.
+                    _ => break 'index,
+                };
+                return match answer {
+                    Ok(outcome) => Response {
+                        version: PROTOCOL_VERSION,
+                        request_id,
+                        replayed: false,
+                        generation: store.state().generation,
+                        lease_valid: None,
+                        outcome,
+                    },
+                    Err((code, message)) => {
+                        error(request_id, store.state().generation, code, message)
+                    }
+                };
+            }
+            Route::Decide | Route::Read | Route::Store => {}
+        }
+        if let Command::OutlineRead { .. } = &command {
+            return outline_read(store, graph, request_id, command);
         }
         // A user-level hook names a repository by an ID derived from its
         // root. If that root is already registered under another ID (a

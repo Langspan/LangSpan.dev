@@ -1167,3 +1167,92 @@ fn today_finds_the_anchor_behind_a_hundred_thousand_events_of_one_generation() {
     assert_eq!(today.sessions[0].prompts as usize, TODAY_EVENTS);
     assert!(today.truncated, "older prompts of the window were not read");
 }
+
+/// Whether the store writes a receipt for each command and answers a retry
+/// from it, as the routing in `Store::execute` and `Store::replay` decides
+/// (issue #371). Real SQLite: whether a receipt is stored is persistence.
+#[test]
+fn store_records_and_replays_each_command_by_its_route() {
+    let database = Database::new();
+    let mut store = Store::open(&database.path()).unwrap();
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+    let mut files: Vec<_> = fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name.ends_with("-command-v10.json"))
+        .collect();
+    files.sort();
+    let mut commands: Vec<(String, Command)> = files
+        .iter()
+        .map(|file| {
+            let value: serde_json::Value =
+                serde_json::from_slice(&fs::read(dir.join(file)).unwrap()).unwrap();
+            let op = value["command"]["op"].as_str().unwrap().to_string();
+            (
+                op,
+                serde_json::from_value(value["command"].clone()).unwrap(),
+            )
+        })
+        .collect();
+    let apply = r#"{"op":"workspace_remove","workspace_id":"app","apply":true}"#;
+    commands.push((
+        "workspace_remove apply".into(),
+        serde_json::from_str(apply).unwrap(),
+    ));
+    // Read and stored commands are answered fresh and leave no receipt; so do
+    // the three that record nothing when nothing changed, as here.
+    let unrecorded = [
+        "status",
+        "dashboard",
+        "status_line",
+        "remote_outbox",
+        "check_status",
+        "flaky_tests",
+        "landing_readiness",
+        "turn_queue",
+        "workspace_list",
+        "workspace_remove",
+        "recap",
+        "trails",
+        "policy",
+        "holders",
+        "recall",
+        "events",
+        "today",
+        "report",
+        "count",
+        "history",
+        "status_records",
+        "changes",
+        "remote_sent",
+        "compact",
+        "show_message",
+        "message_status",
+        "session_seen",
+        "between_steps",
+        "observe_note_anchors",
+    ];
+    for (index, (op, command)) in commands.iter().enumerate() {
+        let id = format!("route-{index}");
+        let first = store.execute(&id, command, command, 1);
+        assert!(first.is_ok(), "{op}: {:?}", first.err());
+        let receipts: i64 = database
+            .connection()
+            .query_row(
+                "SELECT count(*) FROM receipts WHERE request_id = ?1",
+                [&id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let recorded = !unrecorded.contains(&op.as_str());
+        assert_eq!(receipts, i64::from(recorded), "{op}");
+        let second = store.execute(&id, command, command, 2);
+        if op == "version" {
+            // The daemon answers it before the store; the store records it
+            // but never looks the receipt up, so a retry here collides.
+            assert!(second.is_err(), "{op}");
+        } else {
+            assert_eq!(second.unwrap().replayed, recorded, "{op}");
+        }
+    }
+}
