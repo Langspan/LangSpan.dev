@@ -447,6 +447,36 @@ mod unix {
         }
     }
 
+    /// Opens, or creates, an owner-only file in the state directory for
+    /// writing. Refused for its permissions, it names the file and what to
+    /// do (issue #339); other refusals, such as a wrong owner, keep their own.
+    fn open_private(path: &Path) -> Result<fs::File, crate::Error> {
+        local::private_file(path, true).map_err(|e| match e.downcast_ref::<io::Error>() {
+            Some(io)
+                if matches!(
+                    io.kind(),
+                    io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem
+                ) =>
+            {
+                format!(
+                    "cannot open {} for writing: {e}; make the state directory and its files writable by you, then start the coordinator again",
+                    path.display()
+                )
+                .into()
+            }
+            _ => e,
+        })
+    }
+
+    /// Why a read or write of the store failed, for the client: which store,
+    /// SQLite's reason, and what to do (issue #339).
+    fn store_failed(state_dir: &Path, error: impl std::fmt::Display) -> String {
+        format!(
+            "the coordinator could not read or write its store in {}: {error}; free disk space or make the directory and its files writable, then retry (a write that failed was not recorded)",
+            state_dir.display()
+        )
+    }
+
     pub async fn run(state_dir: PathBuf) -> Result<(), crate::Error> {
         let _ = STARTED_MS.set(now_ms());
         let directory = local::prepare_directory(&state_dir)
@@ -455,7 +485,7 @@ mod unix {
             StateAnchor::of(&directory).map_err(|e| format!("read the state directory: {e}"))?;
         let idle_limit = idle_limit();
         let activity = Activity::new();
-        let lock = local::private_file(&directory.join("daemon.lock"), true)?;
+        let lock = open_private(&directory.join("daemon.lock"))?;
         lock.try_lock()
             .map_err(|error| format!("another daemon may own this state directory: {error}"))?;
         let config =
@@ -463,7 +493,7 @@ mod unix {
         let _ = RECENT_WINDOW_MS.set(config.recent_window_ms);
         let _ = OUTLINE_MIN.set((config.outline_min_lines, config.outline_min_bytes));
         let asked_to_stop = stop_on_signal()?;
-        local::private_file(&directory.join("state.sqlite3"), true)?;
+        open_private(&directory.join("state.sqlite3"))?;
         for name in ["state.sqlite3-wal", "state.sqlite3-shm"] {
             local::check_existing_file(&directory.join(name))?;
         }
@@ -1151,6 +1181,7 @@ mod unix {
     /// (issue #259).
     fn events_for_client(
         store: &Store,
+        state_dir: &Path,
         granted: protocol::Capabilities,
         command: &Command,
         outcome: &mut Outcome,
@@ -1162,7 +1193,7 @@ mod unix {
             let page = store.event_page(*after, *limit, |e| protocol::reads_event(granted, e));
             *outcome = page.unwrap_or_else(|e| Outcome::Error {
                 code: "storage_error".into(),
-                message: e.to_string(),
+                message: store_failed(state_dir, e),
             });
         }
     }
@@ -1414,7 +1445,7 @@ mod unix {
                     request_id,
                     store.state().generation,
                     "storage_error",
-                    e.to_string(),
+                    store_failed(state_dir, e),
                 );
             }
         }
@@ -1470,7 +1501,7 @@ mod unix {
                                 .map_err(|error| error.to_string())
                         });
                 }
-                events_for_client(store, granted, &command, &mut execution.outcome);
+                events_for_client(store, state_dir, granted, &command, &mut execution.outcome);
                 if let Outcome::Dashboard { dashboard } = &mut execution.outcome {
                     complete_dashboard(dashboard, store.state(), graph);
                 }
@@ -1486,7 +1517,7 @@ mod unix {
                 request_id,
                 store.state().generation,
                 "storage_error",
-                e.to_string(),
+                store_failed(state_dir, e),
             ),
         }
     }
