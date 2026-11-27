@@ -15,11 +15,11 @@ use proptest::prelude::*;
 use proptest::test_runner::FileFailurePersistence;
 use std::collections::BTreeSet;
 
-// The redactor's module is private to the hook; its source is compiled here
+// The redactor's module is private to the crate; its source is compiled here
 // as well, so the bounded form (`bounded`) can be tried at every limit. Its
 // own unit tests come with it and run here a second time.
 #[allow(dead_code)]
-#[path = "../src/hook/redact.rs"]
+#[path = "../src/redact.rs"]
 mod redact;
 
 // The redactor's unit tests load this helper too; it holds one pure function.

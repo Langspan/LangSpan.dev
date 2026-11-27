@@ -12,13 +12,13 @@ use std::{
     time::{Duration, Instant},
 };
 mod prompt;
-mod redact;
 mod render;
 mod shell_hooks;
 pub use crate::file_state::{MAX_VERSION_BYTES, file_state};
 use crate::file_state::{file_content, version_of};
 pub use crate::ids::{file_key, valid_host_id, wire_id, workspace_request_id};
 pub use crate::input::{MAX_EVENT_BYTES, read_stdin_until};
+pub use crate::redact::{contains_secret, redact, redact_check, redact_command, refuse_secret};
 pub use crate::text::age;
 pub(crate) use crate::text::{SUMMARY_LIMIT, clean, quoted, truncate};
 #[cfg(test)]
@@ -28,7 +28,6 @@ pub use prompt::{
     prompt_identifiers, prompt_line, prompt_line_digests, prompt_qualifiers, prompt_summary,
     prompt_target_paths,
 };
-pub use redact::{contains_secret, redact, redact_check, redact_command, refuse_secret};
 pub use render::{
     BRIEFING, CHECK_RESULT, CONFLICT, FLAKY_LABEL, STALE_SOURCE, UNCOORDINATED, UNREAD_LINES,
     about_note, checkout_text, compose_context, has_content, note_about, render_briefing,

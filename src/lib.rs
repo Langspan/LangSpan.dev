@@ -29,6 +29,7 @@ pub mod mcp;
 pub mod notify;
 pub mod protocol;
 pub mod recent;
+mod redact;
 mod reformat;
 pub mod regions;
 mod registration;

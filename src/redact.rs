@@ -525,7 +525,7 @@ fn tilde(text: String, home: Option<&str>) -> String {
 }
 
 #[cfg(test)]
-#[path = "../../tests/support/secret_shape.rs"]
+#[path = "../tests/support/secret_shape.rs"]
 mod secret_shape;
 
 #[cfg(test)]
