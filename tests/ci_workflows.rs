@@ -205,6 +205,93 @@ fn linux_and_macos_start_together() {
 }
 
 #[test]
+fn each_job_takes_its_runner_from_a_repository_variable() {
+    let text = workflow("check.yml");
+    assert!(
+        job(&text, "linux").contains("\n    runs-on: ${{ vars.LINUX_RUNNER || 'ubuntu-24.04' }}\n")
+    );
+    // On a pull request the macOS check only reports, on a standard runner.
+    assert!(job(&text, "macos").contains(
+        "\n    runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-24.04' || vars.MACOS_RUNNER || 'macos-26' }}\n"
+    ));
+}
+
+/// The lines of one `[profile.NAME]` section of .config/nextest.toml.
+fn profile(config: &str, name: &str) -> String {
+    let header = format!("[profile.{name}]");
+    config
+        .lines()
+        .skip_while(|line| *line != header)
+        .skip(1)
+        .take_while(|line| !line.starts_with('['))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn a_pull_request_runs_the_fast_lane_and_a_queued_commit_every_test() {
+    let text = workflow("check.yml");
+    for line in [
+        "LANGSPAN_CHECK_LANE: ${{ github.event_name == 'pull_request' && 'fast' || 'full' }}",
+        "NEXTEST_PROFILE: ${{ github.event_name == 'pull_request' && 'ci-fast' || 'ci' }}",
+    ] {
+        assert!(text.contains(line), "check.yml lacks {line}");
+    }
+    for id in ["linux", "macos"] {
+        assert!(
+            job(&text, id).contains(
+                "\n    timeout-minutes: ${{ github.event_name == 'pull_request' && 10 || github.event_name == 'merge_group' && 15 || 30 }}\n"
+            ),
+            "the {id} job has no time limit by lane"
+        );
+    }
+    // The macOS check passes at once on a pull request and says why; it
+    // checks out and decides nothing there, so every later step skips.
+    let macos = job(&text, "macos");
+    assert!(macos.contains("the full macOS run happens in the merge queue"));
+    for step in [
+        "uses: actions/checkout@",
+        "name: Decide what the change touches",
+    ] {
+        assert!(
+            macos.contains(&format!(
+                "- if: github.event_name != 'pull_request'\n        {step}"
+            )),
+            "macOS runs `{step}` on a pull request"
+        );
+    }
+    let config = read(".config/nextest.toml");
+    let fast = profile(&config, "ci-fast");
+    assert!(fast.contains("inherits = \"ci\""), "{fast}");
+    assert!(fast.contains("default-filter = "), "{fast}");
+    for name in ["default", "ci"] {
+        assert!(
+            !profile(&config, name).contains("default-filter"),
+            "the {name} profile leaves tests out, so the full lane would too"
+        );
+    }
+}
+
+#[test]
+fn check_sh_refuses_an_unknown_lane_before_it_runs_anything() {
+    // Outside the repository, so a check that started would fail otherwise.
+    let dir = temp_dir("check-lane");
+    let out = Command::new("sh")
+        .arg(root().join("scripts/check.sh"))
+        .current_dir(&dir)
+        .env("LANGSPAN_CHECK_LANE", "quick")
+        .output()
+        .unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("LANGSPAN_CHECK_LANE is 'quick'; set it to fast or full"),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn the_suite_runs_under_nextest_with_retries_only_off_pull_requests() {
     let script = read("scripts/test-foreign-home.sh");
     assert!(script.contains("cargo nextest run --workspace --locked"));

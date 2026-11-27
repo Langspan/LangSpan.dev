@@ -27,12 +27,21 @@ env:
   # demonstration on the debug binary only; main and manual runs also build
   # the release binary and run it again on that.
   LANGSPAN_CHECK_RELEASE: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
-  # cargo-nextest (.config/nextest.toml): the `ci` profile writes
-  # target/nextest/ci/junit.xml. No retry on a pull request, so a flaky
-  # test shows there; two in the merge queue and on main, so one flaky test
-  # doesn't eject a healthy pull request. A test that passed only on retry
-  # is named in the job summary, and on main in an issue (flaky-report).
-  NEXTEST_PROFILE: ci
+  # The lanes (docs/development-process.md#which-tests-run-when). A pull
+  # request runs the fast lane on Linux: format, dependency policy, lint
+  # and the tests nextest's `ci-fast` profile selects; the macOS check
+  # passes at once there. A merge-queue commit, main, the nightly run and a
+  # manual run take the full lane on both: every test (`ci` profile) and
+  # the demonstration. The merge queue is the gate, so nothing reaches main
+  # without the full lane.
+  LANGSPAN_CHECK_LANE: ${{ github.event_name == 'pull_request' && 'fast' || 'full' }}
+  # cargo-nextest (.config/nextest.toml) writes
+  # target/nextest/<profile>/junit.xml. No retry on a pull request, so a
+  # flaky test shows there; two in the merge queue and on main, so one
+  # flaky test doesn't eject a healthy pull request. A test that passed
+  # only on retry is named in the job summary, and on main in an issue
+  # (flaky-report).
+  NEXTEST_PROFILE: ${{ github.event_name == 'pull_request' && 'ci-fast' || 'ci' }}
   NEXTEST_RETRIES: ${{ github.event_name == 'pull_request' && '0' || '2' }}
 # A newer push to a pull request cancels its older run. Runs on main are
 # never cancelled, so every commit on main keeps its own result; the nightly
@@ -41,11 +50,21 @@ concurrency:
   group: check-${{ github.event.pull_request.number || github.sha }}${{ github.event_name == 'schedule' && '-nightly' || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 # Job names are the check names a ruleset requires: keep them stable.
+#
+# Runners come from the repository variables LINUX_RUNNER and MACOS_RUNNER,
+# so the owner can move a job to a larger (billed) runner without a code
+# change; unset, each job takes GitHub's standard runner.
+#
+# Time limits by lane: the full lane in the merge queue gets 15 minutes;
+# main and the nightly run also build the release binary, so 30. The fast
+# lane gets 10, not the 6 its 3-minute target suggests, because building
+# cargo-nextest when the job's cache misses takes minutes on a standard
+# runner (scripts/install-ci-tools.sh).
 jobs:
   linux:
     name: Linux
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    runs-on: ${{ vars.LINUX_RUNNER || 'ubuntu-24.04' }}
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 10 || github.event_name == 'merge_group' && 15 || 30 }}
     permissions:
       contents: read
     outputs:
@@ -98,33 +117,47 @@ jobs:
       - name: Name the tests that passed only on retry
         id: flaky
         if: always() && steps.changes.outputs.code == 'true'
-        run: python3 -I -B scripts/flaky-tests.py target/nextest/ci/junit.xml
+        run: python3 -I -B scripts/flaky-tests.py "target/nextest/$NEXTEST_PROFILE/junit.xml"
       - name: Keep the JUnit report
         if: always() && steps.changes.outputs.code == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: junit-linux
-          path: target/nextest/ci/junit.xml
+          path: target/nextest/${{ env.NEXTEST_PROFILE }}/junit.xml
           if-no-files-found: warn
           retention-days: 14
-  # The same check on Apple silicon. `macos-26` is GitHub's current arm64
-  # image (`macos-latest` points at it); a pinned label, so an image change
-  # is a deliberate edit here. It starts with Linux, not after it, and
-  # decides what the change touches for itself, the same way.
+  # The same check on Apple silicon, in the full lane only. `macos-26` is
+  # GitHub's current arm64 image (`macos-latest` points at it); a pinned
+  # label, so an image change is a deliberate edit here. It starts with
+  # Linux, not after it, and decides what the change touches for itself,
+  # the same way.
+  #
+  # On a pull request the job passes at once on a standard Linux runner and
+  # says why: the required check reports in seconds, no macOS runner is
+  # started, and the full macOS run happens on the merge-queue commit. It
+  # passes rather than skips, so the ruleset sees a success either way.
   macos:
     name: macOS
-    runs-on: macos-26
-    timeout-minutes: 40
+    runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-24.04' || vars.MACOS_RUNNER || 'macos-26' }}
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 10 || github.event_name == 'merge_group' && 15 || 30 }}
     permissions:
       contents: read
     outputs:
       flaky: ${{ steps.flaky.outputs.flaky }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Pass a pull request at once
+        if: github.event_name == 'pull_request'
+        run: |
+          line="Pull request: the full macOS run happens in the merge queue, on the commit that would merge."
+          echo "$line"
+          echo "$line" >> "$GITHUB_STEP_SUMMARY"
+      - if: github.event_name != 'pull_request'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: ${{ github.event_name != 'merge_group' && 2 || 0 }}
-      - name: Decide what the change touches
+      - if: github.event_name != 'pull_request'
+        name: Decide what the change touches
         id: changes
         env:
           EVENT: ${{ github.event_name }}
@@ -155,13 +188,13 @@ jobs:
       - name: Name the tests that passed only on retry
         id: flaky
         if: always() && steps.changes.outputs.code == 'true'
-        run: python3 -I -B scripts/flaky-tests.py target/nextest/ci/junit.xml
+        run: python3 -I -B scripts/flaky-tests.py "target/nextest/$NEXTEST_PROFILE/junit.xml"
       - name: Keep the JUnit report
         if: always() && steps.changes.outputs.code == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: junit-macos
-          path: target/nextest/ci/junit.xml
+          path: target/nextest/${{ env.NEXTEST_PROFILE }}/junit.xml
           if-no-files-found: warn
           retention-days: 14
   # A test that passed only on retry on main opens one issue, or comments

@@ -31,5 +31,23 @@ slow-timeout = { period = "120s", terminate-after = 4 }
 
 [profile.ci]
 failure-output = "immediate-final"
-# target/nextest/ci/junit.xml, read by scripts/flaky-tests.py.
+# target/nextest/<profile>/junit.xml, read by scripts/flaky-tests.py.
 junit.path = "junit.xml"
+
+# A pull request's fast lane: every unit test, every test of the two pure
+# crates, and the integration tests of wire formats, stored data, workflows
+# and docs, none of which starts a coordinator. Measured on an Apple
+# M-series laptop with 4 test threads: 1,103 tests in 15 s, against 1,866
+# in about 113 s with one thread per core for the whole suite. The rest run
+# in the merge queue, on main and nightly (the `ci` profile, no filter).
+[profile.ci-fast]
+inherits = "ci"
+default-filter = """
+kind(lib) | kind(bin)
+| package(langspan-core) | package(langspan-graph)
+| binary_id(langspan::protocol) | binary_id(langspan::store)
+| binary_id(langspan::git_output) | binary_id(langspan::mcp_frame)
+| binary_id(langspan::ci_workflows)
+| binary_id(langspan::readme_and_agent_docs)
+| binary_id(langspan::tool_count_in_docs)
+"""
