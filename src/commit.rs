@@ -1965,7 +1965,7 @@ fn git_bounded(
     if status.success() && errors.is_empty() {
         return Ok(bytes);
     }
-    let command: String = crate::hook::redact(&args.join(" "))
+    let command: String = crate::text::redact::redact(&args.join(" "))
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .take(SHOWN_COMMAND)

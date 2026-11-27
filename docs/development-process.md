@@ -200,7 +200,7 @@ the event (`LANGSPAN_CHECK_LANE`):
   (`tests/cli_transcript.rs`, `tests/cli_golden.rs`), so that output that
   differs on Linux shows on the pull request. The `macOS` check passes at once and says that the
   full run happens in the merge queue. Target: a result **under 3
-  minutes** from push. The job stops at 10 minutes.
+  minutes** from push. The job stops at 6 minutes.
 - **The full lane: a merge-queue commit, a push to `main`, the nightly run
   and a manual run.** On Linux and macOS side by side: everything in the
   fast lane, every other test (the `ci` profile, which leaves none out),
@@ -227,8 +227,13 @@ the event (`LANGSPAN_CHECK_LANE`):
   shards' flaky and failed tests for the issues below. Four shards come
   from the measured test time
   ([evidence](evidence/ci/shards.md)). Target: **under 8 minutes** in the
-  merge queue. A build job stops at 35 minutes there and at 30 on `main`
-  and nightly, and a shard at 15. Only the
+  merge queue. A build job stops at 15 minutes there and at 30 on `main`
+  and nightly, and a shard at 15. A build that restores no cache takes
+  longer than 6 minutes and can take longer than 15, so a pull request
+  that changes `rust-toolchain.toml` or a tool version in
+  `scripts/install-ci-tools.sh` raises both limits in `check.yml`, and the
+  next pull request lowers them once `main` has saved the new cache
+  ([evidence](evidence/ci/lanes.md)). Only the
   nightly run also builds the release binary and runs the demonstration on
   it; nothing else reads it, and the release workflow builds its own. The queue
   merges a pull request only when its full Linux lane passes, so nothing
@@ -444,12 +449,17 @@ changed the event set or the schema. As for the frozen list below, the
 version being released counts only once its `v` tag exists, since its stores
 are built from the tag.
 
-Add its frozen event-type list in the same pull request: copy the sorted
-`type` of each `fixtures/*-event-v10.json` at the new tag into
+Add its frozen event-type list in the first pull request after the tag,
+since the release pull request can't hold it: copy the sorted `type` of each
+`fixtures/*-event-v10.json` at the new tag into
 `fixtures/event-types/VERSION.txt`, add its row to `RELEASES` in
 `tests/protocol.rs` with the capabilities its requests name, and run
 `python3 scripts/gen-docs.py`. `every_published_release_has_a_frozen_list`
-fails for a changelog version without one.
+fails for a changelog version without one. The version being released counts
+only once its `v` tag exists, so the release pull request passes; from the
+tag on, the test fails locally and in the merge queue, which fetch the tags,
+until the list lands. A pull request run has no tags, and checks that version
+from the next release on.
 
 Before 1.0, a breaking change (`feat!:`) raises the minor version.
 [CONTRIBUTING.md](../CONTRIBUTING.md) lists how each title type affects the

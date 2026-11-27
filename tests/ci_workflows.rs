@@ -478,7 +478,7 @@ fn a_pull_request_runs_the_fast_lane_and_a_queued_commit_every_test() {
     for id in ["linux", "macos"] {
         assert!(
             job(&text, id).contains(
-                "\n    timeout-minutes: ${{ github.event_name == 'pull_request' && 10 || github.event_name == 'merge_group' && 35 || 30 }}\n"
+                "\n    timeout-minutes: ${{ github.event_name == 'pull_request' && 6 || github.event_name == 'merge_group' && 15 || 30 }}\n"
             ),
             "the {id} job has no time limit by lane"
         );

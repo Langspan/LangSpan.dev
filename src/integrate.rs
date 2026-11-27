@@ -203,7 +203,7 @@ pub fn changed_files(
             Some(b'T') => "type_changed",
             _ => "modified",
         };
-        let text: String = crate::hook::redact(&String::from_utf8_lossy(path))
+        let text: String = crate::text::redact::redact(&String::from_utf8_lossy(path))
             .chars()
             .map(|c| if c.is_control() { ' ' } else { c })
             .take(MAX_CHANGED_PATH)
