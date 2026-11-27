@@ -1620,7 +1620,10 @@ mod review_regressions {
     /// good file: it still gets its in-flight entry.
     #[test]
     fn failing_head_blobs_beyond_the_pass_budget_do_not_starve_a_later_file() {
-        let paths: Vec<String> = (0..=FILES_PER_PASS)
+        // Two files a pass, so three failing files are one more than a pass
+        // reads, as 201 are at the product's `FILES_PER_PASS`.
+        const PER_PASS: usize = 2;
+        let paths: Vec<String> = (0..=PER_PASS)
             .map(|n| format!("src/a{n:03}.rs"))
             .chain(["src/zz.rs".into()])
             .collect();
@@ -1644,6 +1647,8 @@ mod review_regressions {
             .map(|(path, bytes)| (path.as_str(), bytes.as_slice()))
             .collect();
         let (dir, mut index) = repo("head-starve", &committed);
+        assert_eq!(index.files_per_pass, FILES_PER_PASS);
+        index.set_files_per_pass(PER_PASS);
         for (n, path) in paths.iter().enumerate() {
             if n % 2 == 1 && n != last {
                 hide_head_blob(&dir, path);
