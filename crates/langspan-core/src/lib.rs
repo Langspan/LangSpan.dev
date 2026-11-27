@@ -150,852 +150,915 @@ pub use write_check::{
     write_check_request,
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct Workspace {
-    pub workspace_id: String,
-    pub root: String,
-    /// Existing workspace IDs whose distinct nested worktree boundary was
-    /// verified by the filesystem adapter when this workspace was registered.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub verified_overlaps: Vec<String>,
-}
+// ---- domain: messages ----
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct Session {
-    pub session_id: String,
-    pub workspace_id: String,
-    pub generation: u64,
-    /// The session that started this one, for a host subagent: it shares the
-    /// parent's conversation, so the two are related, not strangers.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent: Option<String>,
-    /// Started without a person at the terminal (`claude -p`). A headless
-    /// session takes a handoff only under the rule in `takes_handoff`.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub headless: bool,
-}
-
-/// An OS process incarnation, not merely a recyclable process number. The
-/// adapter's start token includes both OS boot and process start identity.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ProcessIdentity {
-    pub pid: u32,
-    pub start_token: String,
-}
-
+/// When an event that has no time of its own was decided: the daemon's
+/// clock and the generation it belongs to.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum LivenessStatus {
-    Alive,
-    Exited,
-    Unknown,
-}
-
-/// Point-in-time process evidence. It neither reattaches a session nor changes
-/// its admission authority. The timestamp is meaningful within its generation.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct SessionLiveness {
-    pub session_id: String,
-    pub process: ProcessIdentity,
-    pub status: LivenessStatus,
-    pub observed_at_ms: u64,
-    pub generation: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct Intent {
-    pub session_id: String,
-    pub workspace_id: String,
-    pub paths: Vec<String>,
-    pub summary: String,
-    pub generation: u64,
-}
-
-/// Immutable identity of one native tool call. The adapter hashes canonical
-/// semantic input so receipts can reject changed content without storing it.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ToolIdentity {
-    pub operation_id: String,
-    pub source: String,
-    pub tool: String,
-    pub input_digest: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct Lease {
-    pub lease_id: String,
-    pub session_id: String,
-    pub workspace_id: String,
-    pub paths: Vec<String>,
-    pub generation: u64,
-    pub expires_at_ms: u64,
-    pub status: LeaseStatus,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub operation: Option<ToolIdentity>,
-    /// Admitted paths whose source version could not be compared with what
-    /// the session last read, because no read of them was recorded. The
-    /// admission is not evidence that the session's view of them is current.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub base_unknown: Vec<String>,
-    /// Where in each file the edit was located. A path with no entry is held
-    /// whole, which is also how a lease recorded before regions replays.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub regions: Vec<PathRegions>,
-}
-
-/// Part of one file an edit was located in, by the hook, from the file as it
-/// was on disk. Lines are one-based and inclusive.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-pub enum Region {
-    /// A definition found by the source parser. `key` is its name and the
-    /// names of the definitions enclosing it, outermost first. `digest` is
-    /// the SHA-256 of the definition's text with line endings and trailing
-    /// whitespace normalized: the symbol's own version. The lines say where it
-    /// was, for people; admission compares keys, not lines.
-    Symbol {
-        key: Vec<String>,
-        digest: String,
-        start_line: u32,
-        end_line: u32,
-    },
-    /// A line range, for a file whose language is not parsed. Comparable only
-    /// with ranges located in the same version of the file.
-    Lines { start_line: u32, end_line: u32 },
-}
-
-/// The regions of one admitted path and the version of the file (`digest`,
-/// SHA-256 of its bytes) they were located in.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct PathRegions {
-    pub path: String,
-    pub digest: String,
-    pub regions: Vec<Region>,
-}
-
-/// One-based, inclusive.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(deny_unknown_fields)]
-pub struct LineRange {
-    pub start_line: u32,
-    pub end_line: u32,
-}
-
-/// Lines of `path` that session `session_id` wrote `age_ms` ago and that an
-/// edit would change, numbered in the file as it is now; `lines` is empty
-/// when they could not be placed in it. The hook finds them in the line
-/// journal ([ADR 0028](../../../docs/adr/0028-line-ownership.md)).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct WrittenLines {
-    pub path: String,
-    pub session_id: String,
-    pub lines: Vec<LineRange>,
-    pub age_ms: u64,
-}
-
-/// At most this many written-lines entries in one admission.
-pub const MAX_WRITTEN: usize = 64;
-/// Line ranges per entry, at most.
-pub const MAX_WRITTEN_RANGES: usize = 32;
-/// Another session's lines count this long after it wrote them.
-pub const LINE_HORIZON_MS: u64 = 30 * 60 * 1000;
-
-/// At most this many regions in one admission, over all its paths.
-pub const MAX_REGIONS: usize = 64;
-/// No region line beyond this: far past the line count of a 1 MiB file.
-pub const MAX_REGION_LINE: u32 = 2_000_000;
-/// A symbol key names at most this many nested definitions.
-pub const MAX_KEY_DEPTH: usize = 8;
-const MAX_KEY_NAME_BYTES: usize = 128;
-
-/// A file version as an adapter saw it on disk.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ObservedFile {
-    pub path: String,
-    pub state: FileState,
-}
-
-/// How a session came to know a file version.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum SourceOrigin {
-    /// The host reported that the session read the file.
-    Read,
-    /// The host reported that the session's own write succeeded.
-    Write,
-    /// The session was refused an edit and told the file had changed. It has
-    /// been informed of this version; it has not necessarily read it.
-    Refused,
-    /// The session was about to edit a file it had no recorded version of,
-    /// on a host that reports no reads (Codex). This is the file as it was on
-    /// disk at that moment, so later edits are compared with it. The session
-    /// has not necessarily read it ([ADR 0027](../../../docs/adr/0027-turn-and-batch-events.md)).
-    Snapshot,
-}
-
-/// The version of a file a session last read or wrote. `at_ms` is zero for a
-/// version carried over from an earlier daemon generation.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct KnownVersion {
-    pub path: String,
-    pub state: FileState,
+pub struct Stamp {
     pub at_ms: u64,
+    pub generation: u64,
 }
 
-/// A file whose version on disk differs from the one the session last read.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct StaleFile {
-    pub path: String,
-    pub read: FileState,
-    pub current: FileState,
-    /// The other session in this workspace that most recently reported
-    /// editing the path, when there is one. A correlation, not proof.
-    pub changed_by: Option<String>,
-}
-
-/// A file the asking session read that a peer has since reported editing.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct StaleRead {
-    pub path: String,
-    pub session_id: String,
-    pub age_ms: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum LeaseStatus {
-    Active,
-    Completed,
-    Expired,
-    Invalidated,
-}
-
-/// What the host reported about a tool call after it ran.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ToolResult {
-    Succeeded,
-    Failed,
-    Interrupted,
-}
-
-/// How an observation relates to the admission it names, judged when the
-/// observation is recorded. `Expired` and `Invalidated` are late observations.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum LeaseRelation {
-    Current,
-    Completed,
-    Expired,
-    Invalidated,
-    NotAdmitted,
-    /// The reported paths include a resource that the named admission did not
-    /// cover. This classification takes precedence over the lease's age.
-    ScopeMismatch,
-    /// The reported tool identity does not match the named admission. A legacy
-    /// observation cannot bypass the input check on a typed admission.
-    InputMismatch,
-}
-
-/// Evidence of a reported tool result. It is never authority: recording it does
-/// not grant, renew, complete or reactivate any admission.
+/// Something a person or an agent asked LangSpan to remember about a
+/// repository. It outlives sessions and daemon restarts until forgotten.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct Observation {
-    pub observation_id: String,
-    pub session_id: String,
+pub struct Note {
+    pub note_id: String,
     pub workspace_id: String,
-    pub operation_id: String,
-    pub source: String,
-    pub tool: String,
+    /// The session that recorded it, when one did.
+    pub author: Option<String>,
+    pub text: String,
+    /// Files it is about. Empty means the whole workspace.
     pub paths: Vec<String>,
-    pub result: ToolResult,
-    pub lease_id: Option<String>,
-    pub lease_relation: LeaseRelation,
-    pub concurrent_holders: Vec<Conflict>,
-    pub observed_at_ms: u64,
-    pub generation: u64,
-}
-
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum FileKind {
-    #[default]
-    Regular,
-    Symlink,
-}
-
-impl FileKind {
-    fn is_regular(&self) -> bool {
-        *self == Self::Regular
-    }
-}
-
-/// A successfully observed file state. Read failures are not `Missing`; adapters
-/// report them as incomplete scans without inventing a deletion observation.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-pub enum FileState {
-    Missing,
-    Present {
-        digest: String,
-        #[serde(default, skip_serializing_if = "FileKind::is_regular")]
-        kind: FileKind,
-    },
-}
-
-// As with Command::Status, use an empty struct for strict unit-variant decoding.
-#[derive(Deserialize)]
-#[serde(
-    remote = "FileState",
-    tag = "type",
-    rename_all = "snake_case",
-    deny_unknown_fields
-)]
-enum FileStateWire {
-    Missing {},
-    Present {
-        digest: String,
-        #[serde(default)]
-        kind: FileKind,
-    },
-}
-
-impl<'de> Deserialize<'de> for FileState {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        FileStateWire::deserialize(deserializer)
-    }
-}
-
-/// One disk fact. `before: None` means no prior baseline, not a created file.
-/// Related operation IDs are unverified correlations, never causal attribution.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct DiskObservation {
-    pub observation_id: String,
-    pub workspace_id: String,
-    pub path: String,
-    pub before: Option<FileState>,
-    pub after: FileState,
-    pub related_operation_ids: Vec<String>,
-    pub observed_at_ms: u64,
-    pub generation: u64,
-}
-
-/// A local ref fact. Both OIDs are absent for an unborn HEAD or missing branch.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct BranchObservation {
-    pub observation_id: String,
-    pub workspace_id: String,
-    pub branch_ref: String,
-    pub head_oid: Option<String>,
-    pub tree_oid: Option<String>,
-    pub observed_at_ms: u64,
-    pub generation: u64,
-}
-
-/// Bounded metadata for the store's most recent completed workspace scan. A
-/// missing summary means no baseline, distinct from a scan with zero files.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ScanSummary {
-    pub workspace_id: String,
-    pub observed_at_ms: u64,
-    pub generation: u64,
-    pub file_count: u64,
-    pub branch_count: u64,
-    pub head_oid: Option<String>,
-    pub branch_ref: Option<String>,
-    /// What the scan did not version. Absent when it versioned every file.
+    /// The definition it is about (roadmap E1). Absent for a note about
+    /// files or the workspace, and for every note recorded before anchors.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub coverage: Option<ScanCoverage>,
+    pub anchor: Option<NoteAnchor>,
+    /// Whether that definition is still as it was; present exactly when
+    /// `anchor` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_state: Option<AnchorState>,
+    /// Up to `MAX_TAGS`, each once, sorted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
 }
 
-/// Paths listed in a workspace that its last completed scan did not
-/// version, by reason. A scan is partial when `omitted` or `too_large` is
-/// above zero: some working files of the checkout itself were not read.
-/// Submodules and skip-worktree entries are outside the working tree the
-/// scan reads, by design; they are counted, never read.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default, deny_unknown_fields)]
-pub struct ScanCoverage {
-    /// Left out because the file-count, byte or time bound was reached.
-    /// Files Git reports as changed are versioned before any clean file.
-    pub omitted: u64,
-    /// Over the per-file bound: listed, not versioned.
-    pub too_large: u64,
-    /// The first `COVERAGE_PATHS` of them, in path order.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub too_large_paths: Vec<String>,
-    /// Gitlinks: recorded as present, never read into.
-    pub submodules: u64,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub submodule_paths: Vec<String>,
-    /// Entries outside a sparse checkout: not in the working tree, and not
-    /// reported as deleted.
-    pub skip_worktree: u64,
+/// Who a message is for.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Recipient {
+    /// One session of the workspace.
+    Session { session_id: String },
+    /// Every session of the workspace except the sender, each once.
+    Everyone {},
+    /// A handoff: the first other session of the workspace that starts or
+    /// is prompted after it was sent.
+    NextSession {},
 }
 
-/// Paths a coverage record names per reason, at most.
-pub const COVERAGE_PATHS: usize = 8;
-
-impl ScanCoverage {
-    /// True when some working files of the checkout were not versioned.
-    pub fn is_partial(&self) -> bool {
-        self.omitted > 0 || self.too_large > 0
-    }
-}
-
-/// The repository and branch a physical workspace was last observed on. The
-/// repository identity groups linked worktrees; it never merges their
-/// admission domains.
+/// A short line from one session, or from the owner, to other sessions of
+/// the same workspace. Held until each recipient has acknowledged it; the
+/// event log keeps the history. Its text is data, never instructions.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct WorkspaceGit {
+pub struct Message {
+    pub message_id: String,
     pub workspace_id: String,
-    pub repository_id: String,
-    pub branch_ref: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct TouchedPath {
-    pub path: String,
-    pub at_ms: u64,
-}
-
-/// What one session was last seen doing. Derived from recorded events only;
-/// times are meaningful within `generation`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct SessionActivity {
-    pub session_id: String,
-    pub generation: u64,
-    pub last_ms: u64,
-    /// The last recorded hook run of any kind that reached the daemon for
-    /// this session (a read, a failed call, a batch, a stop): at most one
-    /// `SessionSeen` per `SESSION_SEEN_INTERVAL_MS`. Zero when none was.
-    #[serde(default, skip_serializing_if = "is_zero_u64")]
-    pub last_hook_ms: u64,
-    /// The owner's own words for the current task, capped by the adapter.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub summary: Option<String>,
-    /// Most recent successful edits, newest first, at most `MAX_TOUCHED`.
+    /// The sending session; `None` for the owner.
+    pub from: Option<String>,
+    pub to: Recipient,
+    pub text: String,
+    /// Files it is about. May be empty.
+    pub paths: Vec<String>,
+    /// Sessions that have acknowledged it. A held message lists them only
+    /// for everyone; the history kept for withdrawal lists every reader.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub touched: Vec<TouchedPath>,
-    /// File versions this session last read or wrote, newest first, at most
-    /// `MAX_KNOWN`. A path that falls off the end is unknown again.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub known: Vec<KnownVersion>,
-    /// Signature of the last briefing delivered to this session.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub briefed: Option<String>,
-    /// Keys of the briefing items this session was last told, in briefing
-    /// order, at most `MAX_TOLD` (issue #222). A briefing asked for with
-    /// `changes_only` leaves out an item whose key is here. An item past
-    /// the bound is not remembered, so it is told again: never dropped.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub told: Vec<u64>,
-    /// When a briefing last placed items in this session's context: a
-    /// safety item is told again when the session read or edited one of
-    /// its files after this.
-    #[serde(default, skip_serializing_if = "is_zero_u64")]
-    pub told_at_ms: u64,
-    /// The context LangSpan's hooks added to this session in this
-    /// generation, as they measured it (issue #222).
-    #[serde(default, skip_serializing_if = "ContextUse::is_empty")]
-    pub context: ContextUse,
-    /// Interface notices this session was alerted to at a write, newest
-    /// first, at most `MAX_ALERTED`. Each is alerted once (ADR 0029).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub alerted: Vec<String>,
-    /// Interface notices told to this session by a briefing or between
-    /// steps, newest first, at most `MAX_TOLD_NOTICES` (issue #214).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub notices_told: Vec<ToldNotice>,
-    /// Replies the session finished in this generation: a between-step
-    /// watcher started in one turn stops once this moves (issue #214).
-    #[serde(default, skip_serializing_if = "is_zero_u64")]
-    pub stops: u64,
-    /// The host's IDs of the prompts whose replies finished in this
-    /// generation, newest first, at most `MAX_STOPPED_PROMPTS`: a watcher
-    /// started for one of them has no turn left (issue #214).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub stopped_prompts: Vec<String>,
-    /// In-flight signatures told to this session, newest first, at most
-    /// `MAX_INFLIGHT_TOLD` (roadmap C7).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub inflight_told: Vec<String>,
-    /// The host reported the session over. Its recent edits stay relevant to
-    /// peers until they age out; they are labelled as a finished session's.
+    pub acknowledged: Vec<String>,
+    /// Withdrawn by its sender or the owner: no longer delivered, and each
+    /// session that had received it is told once to disregard it.
     #[serde(default, skip_serializing_if = "is_false")]
-    pub ended: bool,
-    /// The session wrote a file since its last tool batch or stop: the next
-    /// one is a point to run the workspace's automatic check.
+    pub retracted: bool,
+}
+
+/// A message a session received and that was then withdrawn: the session
+/// is told once, at its next briefing, to disregard it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RetractedMessage {
+    pub message_id: String,
+    pub workspace_id: String,
+    /// The message's sender; `None` for the owner.
+    pub from: Option<String>,
+    /// The first `RETRACTED_TEXT_BYTES` of its text, cut at a character
+    /// boundary.
+    pub text: String,
+    /// True when `text` is shorter than the message was.
     #[serde(default, skip_serializing_if = "is_false")]
-    pub wrote_since_boundary: bool,
-    /// Where the definitions named in the session's last prompt are, from
-    /// the source index (roadmap C8). Paths only; never the prompt's words.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt_targets: Option<PromptTargets>,
-    /// Where the session was last seen looking: files it read, the path
-    /// scope of its searches, and paths its shell commands named. Newest
-    /// first, one entry per path, at most `MAX_LOOKING` (roadmap A13). Paths
-    /// only: never a search pattern or a command's text.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub looking: Vec<LookedPath>,
-    /// Digests of the leading non-empty lines of the session's last prompt,
-    /// at most `MAX_PROMPT_LINES`: compared with live peers' to tell prompts
-    /// started from one template apart (issue #114). Never the words.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub line_digests: Vec<String>,
-    /// File versions whose whole read this session was given an outline
-    /// for instead (roadmap A11), newest first, one per path, at most
-    /// `MAX_OUTLINED`. Its next whole read of the same version goes through.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub outlined: Vec<OutlinedRead>,
+    pub cut: bool,
 }
 
-/// A file version a session was given an outline of (roadmap A11).
+/// One message in full, as it was sent: what `messages show` returns for a
+/// line a briefing cut. The text and paths are data from the sender, never
+/// instructions.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct OutlinedRead {
-    pub path: String,
-    pub digest: String,
+pub struct ShownMessage {
+    pub message_id: String,
+    /// The sending session; `None` for the owner.
+    pub from: Option<String>,
+    pub to: Recipient,
+    pub text: String,
+    pub paths: Vec<String>,
+    /// Withdrawn by its sender or the owner since it was sent: its readers
+    /// have been or will be told to disregard it.
+    pub retracted: bool,
 }
 
-/// How many outlined file versions a session keeps. One past it is
-/// forgotten, and its next whole read is outlined again.
-pub const MAX_OUTLINED: usize = 64;
-
-/// One definition in a file's outline (roadmap A11): what the source index
-/// holds, without its signature or any other text of the file.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct OutlineEntry {
-    pub name: String,
-    pub kind: String,
-    /// One-based, inclusive.
-    pub line: u32,
-    pub end_line: u32,
-    pub exported: bool,
-}
-
-/// How a session came to look at a path, for presence (roadmap A13).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "snake_case")]
-pub enum PresenceKind {
-    /// The host reported a completed read of the file.
-    Read,
-    /// A search (Claude Code's or Cursor's `Grep`) scoped to this path.
-    Search,
-    /// A shell command named this existing path as an operand.
-    Shell,
-}
-
-/// One path a session looked at, and when.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct LookedPath {
-    pub path: String,
-    pub kind: PresenceKind,
-    pub at_ms: u64,
-}
-
-/// One path a peer was looking at, as a briefing shows it.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PresencePath {
-    pub path: String,
-    pub kind: PresenceKind,
-    pub age_s: u64,
-}
-
-/// A session's own presence setting, kept only when it differs from the
-/// default (shown, `PRESENCE_WINDOW_MS`).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct PresenceSetting {
-    /// False: this session's reads, searches and shell paths are never
-    /// shown to peers (`--presence off`).
-    pub shown: bool,
-    /// How old a peer's presence this session is still shown.
-    pub window_ms: u64,
-}
-
-/// Looked-at paths kept per session.
-pub const MAX_LOOKING: usize = 16;
-/// Looked-at paths shown per peer, and named by one presence observation.
-pub const PRESENCE_PATHS: usize = 4;
-/// Presence older than this is not shown, unless the asking session chose
-/// another window (at most `BRIEF_HORIZON_MS`).
-pub const PRESENCE_WINDOW_MS: u64 = 10 * 60 * 1000;
-/// The shortest presence window a session can choose.
-pub const MIN_PRESENCE_WINDOW_MS: u64 = 60 * 1000;
-
-/// Briefing item keys remembered per session, at most.
-pub const MAX_TOLD: usize = 256;
-
-/// The context a session's hooks added to it: every briefing, code section
-/// and mid-turn note, in bytes of text placed in its context.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ContextUse {
-    /// Turns: a session start or resume, and each prompt.
-    pub turns: u64,
-    /// Bytes added over those turns, mid-turn notes included.
-    pub bytes: u64,
-    /// The most one turn added, its own context and the notes after it.
-    #[serde(default)]
-    pub largest_turn_bytes: u64,
-    /// Bytes added since the current turn began.
-    #[serde(default)]
-    pub turn_bytes: u64,
-}
-
-/// Bytes of text per token, for an estimate only: English prose and code
-/// average about four bytes per token in current models' tokenizers.
-pub const BYTES_PER_TOKEN: u64 = 4;
-
-/// The most one context record may name: far above any hook's cap.
-pub const MAX_CONTEXT_RECORD_BYTES: u64 = 1024 * 1024;
-
-impl ContextUse {
-    pub fn is_empty(&self) -> bool {
-        self.turns == 0 && self.bytes == 0
-    }
-    /// Count `bytes` added, at the start of a new turn when `turn`.
-    fn add(&mut self, bytes: u64, turn: bool) {
-        if turn {
-            self.turns = self.turns.saturating_add(1);
-            self.turn_bytes = 0;
+impl From<Message> for ShownMessage {
+    fn from(message: Message) -> Self {
+        Self {
+            message_id: message.message_id,
+            from: message.from,
+            to: message.to,
+            text: message.text,
+            paths: message.paths,
+            retracted: message.retracted,
         }
-        self.bytes = self.bytes.saturating_add(bytes);
-        self.turn_bytes = self.turn_bytes.saturating_add(bytes);
-        self.largest_turn_bytes = self.largest_turn_bytes.max(self.turn_bytes);
-    }
-    /// Bytes per turn on average, rounded down; zero before the first turn.
-    pub fn bytes_per_turn(&self) -> u64 {
-        self.bytes.checked_div(self.turns).unwrap_or(0)
-    }
-    /// An estimate of `bytes` in tokens (`BYTES_PER_TOKEN`), rounded up.
-    pub fn estimated_tokens(bytes: u64) -> u64 {
-        bytes.div_ceil(BYTES_PER_TOKEN)
     }
 }
 
-impl SessionActivity {
-    /// When the session was last known to be working: its newest edit,
-    /// prompt or recorded hook run. Whether it is current compares this, not
-    /// `last_ms` alone, with `BRIEF_HORIZON_MS` (roadmap J12).
-    pub fn last_seen_ms(&self) -> u64 {
-        self.last_ms.max(self.last_hook_ms)
-    }
+/// How a message reached a session's context (roadmap E12).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Delivery {
+    /// A briefing a hook placed at session start or at a prompt.
+    Briefing,
+    /// A briefing a hook placed after a completed tool call, mid-turn.
+    MidTurn,
+    /// The session's own call to the MCP tool `langspan_brief`.
+    McpBrief,
+    /// `langspan ack` or its operation: marked seen without a briefing.
+    Ack,
 }
 
-/// A hook run is recorded as `SessionSeen` at most this often per session,
-/// so a burst of tool calls writes one event, not one per call.
-pub const SESSION_SEEN_INTERVAL_MS: u64 = 30 * 1000;
-
-/// The session a request is made on behalf of, when it is that session at
-/// work: every request a hook run sends for it, and the same requests from
-/// the CLI or MCP. A look from outside (`Brief` without `deliver`, a status
-/// read) and the end of a session are not. The daemon records a
-/// `SessionSeen` after each such request (roadmap J12).
-pub fn acting_session(command: &Command) -> Option<&str> {
-    match command {
-        Command::SessionRegister { session_id, .. }
-        | Command::ObserveSessionLiveness { session_id, .. }
-        | Command::IntentSet { session_id, .. }
-        | Command::IntentEnd { session_id }
-        | Command::Admit { session_id, .. }
-        | Command::AdmitTool { session_id, .. }
-        | Command::ObserveSource { session_id, .. }
-        | Command::ObservePresence { session_id, .. }
-        | Command::SetPresence { session_id, .. }
-        | Command::AckMessage { session_id, .. }
-        | Command::Handoff { session_id, .. }
-        | Command::RecordRefusal { session_id, .. }
-        | Command::RecordWait { session_id, .. }
-        | Command::CheckCalls { session_id, .. }
-        | Command::Complete { session_id, .. }
-        | Command::Observe { session_id, .. }
-        | Command::ObserveTool { session_id, .. }
-        | Command::SessionPrompt { session_id, .. }
-        | Command::SetPromptTargets { session_id, .. }
-        | Command::SessionStop { session_id, .. }
-        | Command::ObserveToolBatch { session_id, .. }
-        | Command::Adopt { session_id, .. }
-        | Command::Brief {
-            session_id,
-            deliver: true,
-            ..
-        } => Some(session_id),
-        _ => None,
-    }
+/// Where a sent message stands as a whole.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageState {
+    /// Still held: some recipient may yet be given it.
+    Pending,
+    /// Every session it was owed to was given it; nothing more is sent.
+    Done,
+    /// Withdrawn by its sender or the owner.
+    Retracted,
+    /// Pushed out, unread, by newer messages past the `MAX_MESSAGES` held.
+    Dropped,
 }
 
-/// Whether a hook run of `session_id` at `now_ms` is recorded: the session
-/// is current and its last record is at least `SESSION_SEEN_INTERVAL_MS`
-/// old, or there is none in this generation.
-pub fn session_seen_due(state: &State, session_id: &str, now_ms: u64) -> bool {
-    if current_session(state, session_id).is_err() {
-        return false;
-    }
-    let last = state
-        .activity
-        .get(session_id)
-        .filter(|activity| activity.generation == state.generation)
-        .map_or(0, |activity| activity.last_hook_ms);
-    last == 0 || now_ms.saturating_sub(last) >= SESSION_SEEN_INTERVAL_MS
+/// Where a message stands for one recipient.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RecipientState {
+    /// Placed in the session's context. Not a sign the model acted on it.
+    Delivered,
+    /// Not yet placed in the session's context.
+    Pending,
+    /// The session ended before it was given the message.
+    Ended,
 }
 
-/// At most this many leading prompt lines are compared by digest.
-pub const MAX_PROMPT_LINES: usize = 32;
-/// Hex characters in one prompt line digest, at most.
-pub const MAX_PROMPT_LINE_DIGEST: usize = 64;
-
-/// The definition paths a prompt's code briefing found, and when. Compared
-/// with other sessions' targets and work while within `BRIEF_HORIZON_MS`;
-/// never a hold, an admission or a publication.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct PromptTargets {
-    pub paths: Vec<String>,
-    pub at_ms: u64,
-}
-
-/// At most this many prompt target paths: every definition a code briefing
-/// can find, `CONTEXT_DEFINITIONS` for each of `CONTEXT_NAMES` names.
-pub const MAX_PROMPT_TARGETS: usize = CONTEXT_NAMES * CONTEXT_DEFINITIONS as usize;
-
-fn is_zero(value: &u32) -> bool {
-    *value == 0
-}
-
-fn is_zero_u64(value: &u64) -> bool {
-    *value == 0
-}
-
-pub(crate) fn is_false(value: &bool) -> bool {
-    !*value
-}
-
-fn one() -> u32 {
-    1
-}
-
-fn default_path_hops() -> u32 {
-    DEFAULT_PATH_HOPS
-}
-
-fn is_one(value: &u32) -> bool {
-    *value == 1
-}
-
-/// The signature of a briefing with nothing in it.
-const EMPTY_SIGNATURE: &str = "cbf29ce484222325";
-/// A briefing outcome stays well inside one 64 KiB transport frame.
-const BRIEF_BYTES: usize = 40 * 1024;
-
-/// FNV-1a, 64 bits. It only tells one briefing from the next for the same
-/// session; a collision would withhold one repeat briefing and nothing else.
-fn fingerprint(text: &str) -> String {
-    format!("{:016x}", fingerprint_u64(text))
-}
-
-fn fingerprint_u64(text: &str) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in text.bytes() {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    hash
-}
-
-pub const MAX_TOUCHED: usize = 32;
-pub const MAX_KNOWN: usize = 128;
-pub const MAX_BRIEF_PEERS: u32 = 16;
-pub const BRIEF_PATHS: usize = 8;
-/// Activity older than this, within one generation, is left out of briefings.
-pub const BRIEF_HORIZON_MS: u64 = 30 * 60 * 1000;
-
+/// One recipient of a message and whether it was given it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RecentPath {
-    pub path: String,
-    pub age_ms: u64,
-}
-
-/// One other session's relevant work, as shown to the asking session.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PeerWork {
+pub struct RecipientStatus {
     pub session_id: String,
-    pub workspace_id: String,
-    pub workspace_root: String,
-    /// False for a linked worktree of the same repository: overlap there is
-    /// logical, and no admission in one blocks the other.
-    pub same_workspace: bool,
-    pub branch_ref: Option<String>,
-    pub liveness: Option<LivenessStatus>,
-    /// The host reported this session over; `recent` is what it left behind.
+    pub status: RecipientState,
+    /// Since delivery, on this daemon's clock; `None` before delivery or
+    /// when it was recorded before the daemon last started or before
+    /// roadmap E12.
+    pub age_ms: Option<u64>,
+    /// `None` before delivery or in a record from before roadmap E12.
+    pub via: Option<Delivery>,
+}
+
+/// Recipients a status lists at most; the rest are counted.
+pub const STATUS_RECIPIENTS: usize = 64;
+
+/// What `delivered` means, carried in every status reply.
+pub const DELIVERED_MEANS: &str =
+    "Delivered means placed in the session's context, not that it acted on it.";
+
+/// Who was given a sent message: what `messages status` answers its sender
+/// (roadmap E12). Read-only: asking records nothing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MessageStatus {
+    pub message_id: String,
+    /// The sending session; `None` for the owner.
+    pub from: Option<String>,
+    pub to: Recipient,
+    /// Since it was sent, on this daemon's clock; `None` when that is not
+    /// known (sent before the daemon last started, or the record is gone).
+    pub sent_age_ms: Option<u64>,
+    pub state: MessageState,
+    /// Delivered sessions first, in delivery order, then the rest by ID; at
+    /// most `STATUS_RECIPIENTS`. A pending handoff has none: no session has
+    /// taken it.
+    pub recipients: Vec<RecipientStatus>,
+    /// Recipients past `STATUS_RECIPIENTS`, counted and not listed.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub more_recipients: u64,
+    /// Part of the message's record is no longer in the event log
+    /// (retention removed it): the answer is what remains.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub partial: bool,
+    /// `DELIVERED_MEANS`.
+    pub delivered_means: String,
+}
+
+/// A message's sent record as the event log holds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SentRecord {
+    pub message: Message,
+    pub at_ms: Option<u64>,
+    pub generation: Option<u64>,
+}
+
+/// One `message_acknowledged` record from the event log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AckRecord {
+    pub session_id: String,
+    pub via: Option<Delivery>,
+    pub at_ms: Option<u64>,
+    pub generation: Option<u64>,
+}
+
+/// The message `message_id` of the workspace, or with no ID the newest one
+/// `from` sent (the owner's when `from` is `None`), for a status query. The
+/// workspace and IDs are validated here; the message's own records are
+/// read from the event log by the caller.
+pub fn status_message_id(
+    state: &State,
+    workspace_id: &str,
+    from: Option<&str>,
+    message_id: Option<&str>,
+) -> Result<String, CoreError> {
+    validate_known_workspace(state, workspace_id)?;
+    if let Some(from) = from {
+        validate_id(from, "session ID")?;
+    }
+    match message_id {
+        Some(id) => {
+            validate_request_id(id)?;
+            Ok(id.to_owned())
+        }
+        None => sent_message(state, workspace_id, from, None)
+            .map(|message| message.message_id.clone())
+            .ok_or_else(|| {
+                error(
+                    "unknown_message",
+                    "This sender has none of the latest 64 messages sent in this workspace; ask about an older one by its ID",
+                )
+            }),
+    }
+}
+
+/// Who was given message `message_id`: from the state's held messages and
+/// history, and from its records in the event log, `sent` (absent when not
+/// kept) and `acks` (in log order, after `sent`). `retracted` says a later
+/// `message_retracted` record exists. `None` when neither the state nor
+/// the log knows the message.
+pub fn message_status(
+    state: &State,
+    workspace_id: &str,
+    message_id: &str,
+    sent: Option<&SentRecord>,
+    acks: &[AckRecord],
+    retracted: bool,
+    now_ms: u64,
+) -> Option<MessageStatus> {
+    fn find<'a>(
+        lists: &'a BTreeMap<String, Vec<Message>>,
+        workspace_id: &str,
+        message_id: &str,
+    ) -> Option<&'a Message> {
+        lists
+            .get(workspace_id)
+            .and_then(|list| list.iter().find(|message| message.message_id == message_id))
+    }
+    let held = find(&state.messages, workspace_id, message_id);
+    let record = find(&state.message_history, workspace_id, message_id);
+    let message = sent.map(|sent| &sent.message).or(record).or(held)?.clone();
+    let age = |at_ms: Option<u64>, generation: Option<u64>| match (at_ms, generation) {
+        (Some(at_ms), Some(generation)) if generation == state.generation => {
+            Some(now_ms.saturating_sub(at_ms))
+        }
+        _ => None,
+    };
+    // Every reader the log and the state know, first delivery first.
+    let mut delivered: Vec<RecipientStatus> = Vec::new();
+    for ack in acks {
+        if !delivered
+            .iter()
+            .any(|seen| seen.session_id == ack.session_id)
+        {
+            delivered.push(RecipientStatus {
+                session_id: ack.session_id.clone(),
+                status: RecipientState::Delivered,
+                age_ms: age(ack.at_ms, ack.generation),
+                via: ack.via,
+            });
+        }
+    }
+    for reader in record
+        .into_iter()
+        .chain(held)
+        .flat_map(|message| &message.acknowledged)
+    {
+        if !delivered.iter().any(|seen| &seen.session_id == reader) {
+            delivered.push(RecipientStatus {
+                session_id: reader.clone(),
+                status: RecipientState::Delivered,
+                age_ms: None,
+                via: None,
+            });
+        }
+    }
+    let dropped = state
+        .dropped_messages
+        .get(workspace_id)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let mut partial = sent.is_none();
+    let message_state = if retracted || record.is_some_and(|record| record.retracted) {
+        MessageState::Retracted
+    } else if held.is_some() {
+        MessageState::Pending
+    } else if record.is_some() {
+        // The history outlasts every drop: a message the cap pushed out of
+        // the held list was already out of the history.
+        MessageState::Done
+    } else if dropped.iter().any(|id| id == message_id) {
+        MessageState::Dropped
+    } else {
+        match message.to {
+            // These leave the held list only when taken, withdrawn or dropped.
+            Recipient::Session { .. } | Recipient::NextSession {} => {
+                if delivered.is_empty() {
+                    MessageState::Dropped
+                } else {
+                    MessageState::Done
+                }
+            }
+            Recipient::Everyone {} => {
+                // The drop list keeps the latest `MAX_MESSAGES` drops; once
+                // full, an older drop cannot be told from a completion.
+                if dropped.len() >= MAX_MESSAGES {
+                    partial = true;
+                }
+                MessageState::Done
+            }
+        }
+    };
+    let ended = |session_id: &str| {
+        state
+            .activity
+            .get(session_id)
+            .is_some_and(|activity| activity.ended)
+    };
+    let mut waiting: Vec<RecipientStatus> = Vec::new();
+    let mut not_given = |session_id: &str| {
+        if !delivered.iter().any(|seen| seen.session_id == session_id) {
+            waiting.push(RecipientStatus {
+                session_id: session_id.to_owned(),
+                status: if ended(session_id) {
+                    RecipientState::Ended
+                } else {
+                    RecipientState::Pending
+                },
+                age_ms: None,
+                via: None,
+            });
+        }
+    };
+    match &message.to {
+        Recipient::Session { session_id } => not_given(session_id),
+        // Each current session it is still owed to. Once done, a session
+        // that joined later was never owed it.
+        Recipient::Everyone {} if message_state != MessageState::Done => {
+            for session in state.sessions.values() {
+                if session.workspace_id == workspace_id
+                    && session.generation == state.generation
+                    && message.from.as_deref() != Some(session.session_id.as_str())
+                {
+                    not_given(&session.session_id);
+                }
+            }
+        }
+        Recipient::Everyone {} | Recipient::NextSession {} => {}
+    }
+    waiting.sort_by(|left, right| left.session_id.cmp(&right.session_id));
+    let mut recipients = delivered;
+    recipients.append(&mut waiting);
+    let more_recipients = recipients.len().saturating_sub(STATUS_RECIPIENTS) as u64;
+    recipients.truncate(STATUS_RECIPIENTS);
+    Some(MessageStatus {
+        message_id: message.message_id,
+        from: message.from,
+        to: message.to,
+        sent_age_ms: sent.and_then(|sent| age(sent.at_ms, sent.generation)),
+        state: message_state,
+        recipients,
+        more_recipients,
+        partial,
+        delivered_means: DELIVERED_MEANS.into(),
+    })
+}
+
+/// One session in a recap: what it is and what it last did.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecapSession {
+    pub session_id: String,
+    /// Registered since the daemon last started.
+    pub current: bool,
     pub ended: bool,
+    pub liveness: Option<LivenessStatus>,
     pub summary: Option<String>,
     pub intent: Option<String>,
     pub editing: Vec<String>,
     pub recent: Vec<RecentPath>,
-    /// Paths this peer shares with the asking session's own work. The
-    /// asking session's prompt targets count as its work here.
-    pub overlap: Vec<String>,
-    /// Paths this peer's last prompt points at (its prompt targets) that the
-    /// asking session works on or its own prompt points at, and that are not
-    /// already in `overlap`. Advisory: it never holds a write (roadmap C8).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub target_overlap: Vec<String>,
-    /// How this peer is related to the asking session through a host
-    /// subagent; absent for an unrelated session.
+    /// The session that took over this ended session's uncommitted work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub relation: Option<PeerRelation>,
-    /// Where this peer was recently looking (presence, roadmap A13): at most
-    /// `PRESENCE_PATHS`, newest first, none it is editing or edited, within
-    /// the asking session's presence window. Advisory: it never holds,
-    /// refuses or delays anything.
+    pub adopted_by: Option<String>,
+    /// Ended sessions whose uncommitted work this session took over, at
+    /// most `RECAP_ITEMS`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub looking: Vec<PresencePath>,
+    pub adopted: Vec<String>,
 }
 
-/// A peer that belongs to the same host conversation as the asking session.
-/// A subagent's own parent is never a peer in its briefing (ADR 0004).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum PeerRelation {
-    /// The session that started the asking subagent. No new briefing names
-    /// it; it stays so briefing receipts stored before that change still read.
-    Parent,
-    /// A subagent the asking session started.
-    Subagent,
-    /// Another subagent of the asking subagent's parent.
-    Sibling,
+/// A bounded account of one workspace: who is here, what changed, what is
+/// remembered, what evidence exists and what LangSpan cannot currently see.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Recap {
+    pub workspace_id: String,
+    pub root: String,
+    pub branch_ref: Option<String>,
+    pub sessions: Vec<RecapSession>,
+    pub omitted_sessions: u32,
+    /// Items left out after the per-list caps so the whole recap fits one
+    /// transport frame. Counted, never silently dropped.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub omitted_items: u32,
+    pub interface_changes: Vec<InterfaceNotice>,
+    pub checks: Vec<CheckRecord>,
+    pub landings: Vec<Landing>,
+    pub notes: Vec<Note>,
+    /// Messages still owed to at least one session, newest first, then
+    /// recently withdrawn ones (`retracted`), newest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub messages: Vec<Message>,
+    /// The newest trails ended sessions left here, at most `RECAP_TRAILS`
+    /// (roadmap C9), whether or not a session was told them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trails: Vec<TrailView>,
+    pub teammates: Vec<RemotePeer>,
+    pub publishing: Option<RemoteLink>,
+    /// Present when the last scan attempt failed.
+    pub scan_failure: Option<ScanFailure>,
+    /// Present when the last completed scan left something unversioned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scan_coverage: Option<ScanCoverage>,
+    /// Asked for with `since` (roadmap C10): what happened after that point.
+    /// Absent when asked for "since away" and no such gap was found.
+    /// Capability `recap_since`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<Since>,
 }
 
-/// How `peer` is related to `me` through a host subagent, if at all.
-fn relation(me: &Session, peer: &Session) -> Option<PeerRelation> {
-    if peer.parent.as_deref() == Some(me.session_id.as_str()) {
-        Some(PeerRelation::Subagent)
-    } else if me.parent.is_some() && me.parent == peer.parent {
-        Some(PeerRelation::Sibling)
-    } else {
-        None
+pub const MAX_NOTES: usize = 64;
+pub const NOTE_BYTES: usize = 400;
+pub const RECAP_SESSIONS: usize = 16;
+const RECAP_ITEMS: usize = 8;
+/// Trails in a recap; `langspan trail` lists up to `MAX_TRAILS`.
+pub const RECAP_TRAILS: usize = 4;
+
+/// Unacknowledged messages held per workspace; the oldest go first.
+pub const MAX_MESSAGES: usize = 64;
+pub const MESSAGE_BYTES: usize = 400;
+/// Messages one briefing carries at most.
+pub const BRIEF_MESSAGES: usize = 4;
+/// The longest line an adapter renders for one message, before its
+/// ellipsis. Selection below assumes adapters cut there.
+pub const MESSAGE_LINE_LIMIT: usize = 700;
+/// Rendered bytes the messages of one briefing may take together, so that
+/// every message selected for a briefing fits its text and none is
+/// acknowledged without being shown.
+pub const MESSAGE_BRIEF_BYTES: usize = 1500;
+
+/// Bytes of a withdrawn message's text quoted when its readers are told.
+pub const RETRACTED_TEXT_BYTES: usize = 120;
+
+fn validate_note(note: &Note) -> Result<(), CoreError> {
+    validate_request_id(&note.note_id)?;
+    if note.text.trim().is_empty()
+        || note.text.len() > NOTE_BYTES
+        || note.text.chars().any(char::is_control)
+        || note.paths.len() > BRIEF_PATHS
+        || !anchors::valid_note_anchor(note)
+    {
+        return Err(error(
+            "invalid_note",
+            "A note is one line of 1 to 400 bytes about at most 8 files",
+        ));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sent(
+    request_id: &str,
+    now_ms: u64,
+    generation: u64,
+    workspace_id: &str,
+    from: Option<String>,
+    to: Recipient,
+    text: &str,
+    paths: &[String],
+) -> Result<Decision, CoreError> {
+    let message = Message {
+        message_id: request_id.into(),
+        workspace_id: workspace_id.into(),
+        from,
+        to,
+        text: text.into(),
+        paths: if paths.is_empty() {
+            Vec::new()
+        } else {
+            normalized_paths(paths)?
+        },
+        acknowledged: Vec::new(),
+        retracted: false,
+    };
+    validate_message(&message)?;
+    Ok(Decision {
+        events: vec![Event::MessageSent {
+            message: message.clone(),
+            at_ms: Some(now_ms),
+            generation: Some(generation),
+        }],
+        outcome: Outcome::MessageSent { message },
+    })
+}
+
+/// The sent message `message_id` of the workspace, or with no ID the newest
+/// one `from` sent. The history is the latest messages sent, newest first,
+/// and lists every reader, so it answers first. A message older than the
+/// history but still held is found by its ID only: the sender's newest
+/// message is in the history if any of its messages is, so `last` never
+/// reaches past a newer message that was dropped.
+fn sent_message<'a>(
+    state: &'a State,
+    workspace_id: &str,
+    from: Option<&str>,
+    message_id: Option<&str>,
+) -> Option<&'a Message> {
+    let list = |lists: &'a BTreeMap<String, Vec<Message>>| {
+        lists.get(workspace_id).map(Vec::as_slice).unwrap_or(&[])
+    };
+    match message_id {
+        Some(id) => list(&state.message_history)
+            .iter()
+            .chain(list(&state.messages))
+            .find(|message| message.message_id == id),
+        None => list(&state.message_history)
+            .iter()
+            .find(|message| message.from.as_deref() == from),
     }
 }
+
+fn retract(
+    state: &State,
+    workspace_id: &str,
+    from: Option<&str>,
+    message_id: Option<&str>,
+) -> Result<Decision, CoreError> {
+    validate_known_workspace(state, workspace_id)?;
+    if let Some(id) = message_id {
+        validate_request_id(id)?;
+    }
+    if let Some(from) = from
+        && known_session(state, from)?.workspace_id != workspace_id
+    {
+        return Err(error(
+            "sender_not_in_workspace",
+            "The withdrawing session belongs to another workspace; withdraw from the session that sent it, or leave out the sender to withdraw as the owner",
+        ));
+    }
+    let Some(message) = sent_message(state, workspace_id, from, message_id) else {
+        return Err(error(
+            "unknown_message",
+            match message_id {
+                Some(_) => {
+                    "No such message in this workspace: unknown, or dropped as the oldest of more than 64; `langspan recap WORKSPACE` lists those held"
+                }
+                None => {
+                    "This sender has none of the latest 64 messages sent in this workspace; withdraw an older one still held by its ID"
+                }
+            },
+        ));
+    };
+    if from.is_some() && message.from.as_deref() != from {
+        return Err(error(
+            "not_sender",
+            "Only the session that sent a message, or the owner (without a session), may withdraw it",
+        ));
+    }
+    if message.retracted {
+        return Err(error(
+            "already_retracted",
+            "That message was already withdrawn; its readers have been or will be told",
+        ));
+    }
+    let held = state.messages.get(workspace_id).and_then(|messages| {
+        messages
+            .iter()
+            .find(|held| held.message_id == message.message_id)
+    });
+    let withdrawn_unread: Vec<String> = match held.map(|held| (held, &held.to)) {
+        Some((_, Recipient::Session { session_id })) => vec![session_id.clone()],
+        Some((held, Recipient::Everyone {})) => state
+            .sessions
+            .values()
+            .filter(|session| {
+                session.workspace_id == workspace_id
+                    && session.generation == state.generation
+                    && owed_to(held, &session.session_id, false)
+            })
+            .map(|session| session.session_id.clone())
+            .collect(),
+        Some((_, Recipient::NextSession {})) | None => Vec::new(),
+    };
+    Ok(Decision {
+        events: vec![Event::MessageRetracted {
+            workspace_id: workspace_id.into(),
+            message_id: message.message_id.clone(),
+            by: from.map(str::to_owned),
+        }],
+        outcome: Outcome::MessageRetracted {
+            message_id: message.message_id.clone(),
+            withdrawn_unread,
+            told_to_disregard: readers(state, workspace_id, &message.message_id),
+        },
+    })
+}
+
+/// Every session that received the message, in ID order.
+fn readers(state: &State, workspace_id: &str, message_id: &str) -> Vec<String> {
+    let mut readers: Vec<String> = sent_message(state, workspace_id, None, Some(message_id))
+        .map(|message| message.acknowledged.clone())
+        .unwrap_or_default();
+    readers.sort();
+    readers.dedup();
+    readers
+}
+
+/// The first `RETRACTED_TEXT_BYTES` of `text`, at a character boundary, and
+/// whether anything was left out.
+fn retracted_text(text: &str) -> (String, bool) {
+    let mut end = text.len().min(RETRACTED_TEXT_BYTES);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (text[..end].to_owned(), end < text.len())
+}
+
+/// An upper bound on the bytes an adapter renders to tell a session to
+/// disregard a withdrawn message, counted like `message_cost`.
+fn retracted_cost(retracted: &RetractedMessage) -> usize {
+    (192 + 4 * retracted.text.len()).min(MESSAGE_LINE_LIMIT + 4)
+}
+
+fn validate_message(message: &Message) -> Result<(), CoreError> {
+    validate_request_id(&message.message_id)?;
+    if message.text.trim().is_empty()
+        || message.text.len() > MESSAGE_BYTES
+        || message.text.chars().any(char::is_control)
+        || message.paths.len() > BRIEF_PATHS
+    {
+        return Err(error(
+            "invalid_message",
+            "A message is one line of 1 to 400 bytes about at most 8 files",
+        ));
+    }
+    for path in &message.paths {
+        validate_relative_path(path)?;
+    }
+    if let Some(from) = &message.from {
+        validate_id(from, "session ID")?;
+    }
+    if let Recipient::Session { session_id } = &message.to {
+        validate_id(session_id, "session ID")?;
+    }
+    Ok(())
+}
+
+/// Whether `me` may take `message` if it is a handoff. A handoff is meant
+/// for the next session a person works in, so a headless session (`claude
+/// -p`) takes one only when a headless session wrote it: then the next
+/// headless run is the kind of session that will carry the work on, as in a
+/// scripted pipeline. A person's handoff waits for an interactive session,
+/// however many scripted runs start first. A subagent never takes one: it
+/// works for its parent, which takes it if it is owed.
+fn takes_handoff(state: &State, me: &Session, message: &Message) -> bool {
+    if !matches!(message.to, Recipient::NextSession {}) {
+        return true;
+    }
+    if me.parent.is_some() {
+        return false;
+    }
+    !me.headless
+        || message
+            .from
+            .as_deref()
+            .and_then(|from| state.sessions.get(from))
+            .is_some_and(|sender| sender.headless)
+}
+
+/// An upper bound on the bytes an adapter renders for one message: a label
+/// of under 192 bytes (a session ID is at most 128), then text and paths
+/// that quoting can grow at most fourfold, cut within `MESSAGE_LINE_LIMIT`
+/// (ellipsis and `messages show` pointer included) plus its newline.
+fn message_cost(message: &Message) -> usize {
+    let raw = message.text.len()
+        + message
+            .paths
+            .iter()
+            .map(|path| path.len() + 4)
+            .sum::<usize>();
+    (192 + 4 * raw).min(MESSAGE_LINE_LIMIT + 4)
+}
+
+/// A bounded account of one workspace, from projected state only.
+fn recap(state: &State, workspace_id: &str, tag: Option<&str>, now_ms: u64) -> Recap {
+    let mut sessions: Vec<(u64, RecapSession)> = state
+        .sessions
+        .values()
+        .filter(|session| session.workspace_id == workspace_id)
+        .map(|session| {
+            let activity = state.activity.get(&session.session_id);
+            let in_generation = activity.filter(|activity| activity.generation == state.generation);
+            let editing: Vec<String> = state
+                .leases
+                .values()
+                .filter(|lease| {
+                    lease.session_id == session.session_id && live_lease(state, lease, now_ms)
+                })
+                .flat_map(|lease| lease.paths.iter().cloned())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .take(RECAP_ITEMS)
+                .collect();
+            (
+                in_generation
+                    .map(SessionActivity::last_seen_ms)
+                    .unwrap_or(0),
+                RecapSession {
+                    session_id: session.session_id.clone(),
+                    current: session.generation == state.generation,
+                    ended: activity.is_some_and(|activity| activity.ended),
+                    liveness: state
+                        .session_liveness
+                        .get(&session.session_id)
+                        .map(|liveness| liveness.status),
+                    summary: activity.and_then(|activity| activity.summary.clone()),
+                    intent: state
+                        .intents
+                        .get(&session.session_id)
+                        .map(|intent| intent.summary.clone()),
+                    editing,
+                    recent: in_generation
+                        .map(|activity| {
+                            activity
+                                .touched
+                                .iter()
+                                .take(RECAP_ITEMS)
+                                .map(|touch| RecentPath {
+                                    path: touch.path.clone(),
+                                    age_ms: now_ms.saturating_sub(touch.at_ms),
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    adopted_by: state
+                        .adoptions
+                        .get(&session.session_id)
+                        .map(|adoption| adoption.session_id.clone()),
+                    adopted: state
+                        .adoptions
+                        .values()
+                        .filter(|adoption| adoption.session_id == session.session_id)
+                        .take(RECAP_ITEMS)
+                        .map(|adoption| adoption.from.clone())
+                        .collect(),
+                },
+            )
+        })
+        .collect();
+    // Sessions that are here now first, then by most recent activity.
+    sessions.sort_by(|a, b| {
+        (!a.1.current, a.1.ended, u64::MAX - a.0, &a.1.session_id).cmp(&(
+            !b.1.current,
+            b.1.ended,
+            u64::MAX - b.0,
+            &b.1.session_id,
+        ))
+    });
+    let total = sessions.len();
+    let first = |items: Option<&Vec<_>>| -> Vec<_> {
+        items
+            .map(|items| items.iter().take(RECAP_ITEMS).cloned().collect())
+            .unwrap_or_default()
+    };
+    Recap {
+        workspace_id: workspace_id.into(),
+        root: state
+            .workspaces
+            .get(workspace_id)
+            .map(|workspace| workspace.root.clone())
+            .unwrap_or_default(),
+        branch_ref: state
+            .workspace_git
+            .get(workspace_id)
+            .and_then(|git| git.branch_ref.clone()),
+        omitted_sessions: u32::try_from(total.saturating_sub(RECAP_SESSIONS)).unwrap_or(u32::MAX),
+        omitted_items: 0,
+        sessions: sessions
+            .into_iter()
+            .take(RECAP_SESSIONS)
+            .map(|(_, session)| session)
+            .collect(),
+        interface_changes: state
+            .interface_notices
+            .get(workspace_id)
+            .map(|notices| notices.iter().take(RECAP_ITEMS).cloned().collect())
+            .unwrap_or_default(),
+        checks: first(state.checks.get(workspace_id)),
+        landings: state
+            .landings
+            .get(workspace_id)
+            .map(|landings| landings.iter().take(RECAP_ITEMS).cloned().collect())
+            .unwrap_or_default(),
+        notes: state
+            .notes
+            .get(workspace_id)
+            .map(|notes| {
+                notes
+                    .iter()
+                    .filter(|note| tag.is_none_or(|tag| note.tags.iter().any(|held| held == tag)))
+                    .take(RECAP_SESSIONS)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default(),
+        messages: state
+            .messages
+            .get(workspace_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+            .iter()
+            .take(RECAP_SESSIONS)
+            .chain(
+                state
+                    .message_history
+                    .get(workspace_id)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[])
+                    .iter()
+                    .filter(|message| message.retracted)
+                    .take(RECAP_ITEMS),
+            )
+            .cloned()
+            .collect(),
+        trails: trail::listed(state, workspace_id, RECAP_TRAILS, now_ms),
+        teammates: state
+            .remote_peers
+            .values()
+            .filter(|peer| peer.workspace_id == workspace_id)
+            .take(RECAP_ITEMS)
+            .cloned()
+            .collect(),
+        publishing: state.remote_links.get(workspace_id).cloned(),
+        scan_failure: state.scan_failures.get(workspace_id).cloned(),
+        scan_coverage: state.scan_coverage.get(workspace_id).cloned(),
+        since: None,
+    }
+}
+
+impl Recap {
+    /// Drop items, newest-last lists first, until `fits` says the recap is
+    /// small enough. Each drop is counted in `omitted_items`; what was
+    /// asked for with `since` goes last, counted in its own `omitted`.
+    pub fn shrink_until(&mut self, mut fits: impl FnMut(&Recap) -> bool) {
+        while !fits(self) {
+            let dropped = self.notes.pop().is_some()
+                || self.trails.pop().is_some()
+                || self.teammates.pop().is_some()
+                || self.checks.pop().is_some()
+                || self.landings.pop().is_some()
+                || self.interface_changes.pop().is_some()
+                || self.sessions.pop().is_some();
+            if dropped {
+                self.omitted_items = self.omitted_items.saturating_add(1);
+            } else if !self.since.as_mut().is_some_and(Since::pop) {
+                return;
+            }
+        }
+    }
+}
+
+// ---- end domain: messages ----
+
+// ---- domain: remote ----
 
 /// One session's work as its owner's daemon publishes it to teammates.
 /// Paths are repository-relative. Everything here crosses a machine boundary
@@ -1122,6 +1185,219 @@ pub struct RemotePeerWork {
     /// Time since this daemon last received a new publication from them.
     pub received_age_ms: u64,
 }
+
+pub const REMOTE_WORK: usize = 8;
+/// A teammate not heard from for this long is treated as disconnected.
+pub const REMOTE_HORIZON_MS: u64 = 10 * 60 * 1000;
+
+fn remote_key(workspace_id: &str, participant: &str) -> String {
+    format!("{workspace_id}:{participant}")
+}
+
+fn remote_link<'a>(state: &'a State, workspace_id: &str) -> Result<&'a RemoteLink, CoreError> {
+    validate_id(workspace_id, "workspace ID")?;
+    state
+        .remote_links
+        .get(workspace_id)
+        .filter(|link| link.enabled)
+        .ok_or_else(|| {
+            error(
+                "remote_not_enabled",
+                "This workspace does not publish; enable it with `langspan remote enable`",
+            )
+        })
+}
+
+fn validate_remote_link(state: &State, link: &RemoteLink) -> Result<(), CoreError> {
+    validate_id(&link.workspace_id, "workspace ID")?;
+    if !state.workspaces.contains_key(&link.workspace_id) {
+        return Err(error(
+            "workspace_not_found",
+            "Register the workspace before enabling publication",
+        ));
+    }
+    validate_id(&link.remote, "Git remote name")?;
+    if link.remote.starts_with(['-', '.']) {
+        return Err(error(
+            "invalid_remote",
+            "A Git remote name starts with a letter, digit or underscore",
+        ));
+    }
+    validate_participant(&link.participant, &link.name)?;
+    if link.remote.len() > 64 || link.signature.len() > 64 {
+        return Err(error(
+            "invalid_remote",
+            "A Git remote name is at most 64 characters",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_participant(participant: &str, name: &str) -> Result<(), CoreError> {
+    if !is_hex_digest(participant, 32) || participant.bytes().any(|b| b.is_ascii_uppercase()) {
+        return Err(error(
+            "invalid_participant",
+            "A participant ID is 32 lowercase hexadecimal characters",
+        ));
+    }
+    if name.is_empty() || name.len() > 64 || name.chars().any(char::is_control) {
+        return Err(error(
+            "invalid_participant",
+            "A participant name is 1 to 64 bytes without control characters",
+        ));
+    }
+    Ok(())
+}
+
+/// Everything in a publication came from another machine. Reject the whole
+/// publication rather than keep part of one.
+fn validate_publication(publication: &Publication) -> Result<(), CoreError> {
+    validate_participant(&publication.participant, &publication.name)?;
+    if publication.withdrawn && !publication.work.is_empty() {
+        return Err(error(
+            "invalid_publication",
+            "A withdrawn publication lists no sessions",
+        ));
+    }
+    if publication.work.len() > REMOTE_WORK {
+        return Err(error(
+            "invalid_publication",
+            "A publication lists at most 8 sessions",
+        ));
+    }
+    for work in &publication.work {
+        validate_id(&work.host, "host name")?;
+        validate_id(&work.session, "session label")?;
+        if work.host.len() > 32
+            || work.session.len() > 16
+            || work.editing.len() > BRIEF_PATHS
+            || work.recent.len() > BRIEF_PATHS
+        {
+            return Err(error(
+                "invalid_publication",
+                "A published session exceeds its size bounds",
+            ));
+        }
+        for path in work.editing.iter().chain(&work.recent) {
+            validate_relative_path(path)?;
+        }
+        if let Some(summary) = &work.summary {
+            validate_prompt_summary(summary)?;
+        }
+        if let Some(reference) = &work.branch_ref
+            && (reference.len() > 512
+                || reference.chars().any(char::is_control)
+                || !reference
+                    .strip_prefix("refs/heads/")
+                    .is_some_and(|name| !name.is_empty()))
+        {
+            return Err(error(
+                "invalid_branch_ref",
+                "A published branch is a refs/heads/ name without control characters",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// What a workspace's owner publishes now: the current work of every local
+/// session in the repository, bounded, with task lines only if the owner
+/// chose to share them. Returns it with a fingerprint of its content.
+fn publication(state: &State, link: &RemoteLink, now_ms: u64) -> (Publication, String) {
+    let mut work = Vec::new();
+    for session in state.sessions.values() {
+        if session.generation != state.generation
+            || !related_workspace(state, &link.workspace_id, &session.workspace_id)
+            || state
+                .session_liveness
+                .get(&session.session_id)
+                .is_some_and(|liveness| liveness.status == LivenessStatus::Exited)
+        {
+            continue;
+        }
+        let editing: Vec<String> = state
+            .leases
+            .values()
+            .filter(|lease| {
+                lease.session_id == session.session_id && live_lease(state, lease, now_ms)
+            })
+            .flat_map(|lease| lease.paths.iter().cloned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .take(BRIEF_PATHS)
+            .collect();
+        let activity = state
+            .activity
+            .get(&session.session_id)
+            .filter(|activity| activity.generation == state.generation);
+        let recent: Vec<String> = activity
+            .map(|activity| {
+                activity
+                    .touched
+                    .iter()
+                    .filter(|touch| now_ms.saturating_sub(touch.at_ms) <= BRIEF_HORIZON_MS)
+                    .map(|touch| touch.path.clone())
+                    .take(BRIEF_PATHS)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let ended = activity.is_some_and(|activity| activity.ended);
+        let summary = activity
+            .filter(|activity| {
+                link.share_task
+                    && !activity.ended
+                    && now_ms.saturating_sub(activity.last_seen_ms()) <= BRIEF_HORIZON_MS
+            })
+            .and_then(|activity| activity.summary.clone());
+        if editing.is_empty() && recent.is_empty() && (summary.is_none() || ended) {
+            continue;
+        }
+        let (host, id) = session
+            .session_id
+            .split_once('.')
+            .unwrap_or(("agent", &session.session_id));
+        work.push(RemoteWork {
+            host: host.chars().take(32).collect(),
+            session: id.chars().take(8).collect(),
+            branch_ref: state
+                .workspace_git
+                .get(&session.workspace_id)
+                .and_then(|git| git.branch_ref.clone()),
+            summary,
+            editing,
+            recent,
+        });
+        if work.len() == REMOTE_WORK {
+            break;
+        }
+    }
+    let mut text = String::new();
+    for item in &work {
+        text.push_str(&format!(
+            "{}|{}|{}|{}|{}|{}\n",
+            item.host,
+            item.session,
+            item.branch_ref.as_deref().unwrap_or(""),
+            item.summary.as_deref().unwrap_or(""),
+            item.editing.join(","),
+            item.recent.join(",")
+        ));
+    }
+    (
+        Publication {
+            participant: link.participant.clone(),
+            name: link.name.clone(),
+            sequence: link.sequence + 1,
+            work,
+            withdrawn: false,
+        },
+        fingerprint(&text),
+    )
+}
+
+// ---- end domain: remote ----
+
+// ---- domain: checks ----
 
 /// What a check command reported, bound to the inputs it ran on.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1369,10 +1645,7 @@ pub const MAX_AUTO_CHECK_TIMEOUT_S: u32 = 3600;
 pub const MAX_CHECK_TAIL_BYTES: usize = 2048;
 /// Bytes in a check record's one-line command.
 pub const MAX_CHECK_COMMAND_BYTES: usize = 512;
-/// Bytes in a session's prompt summary.
-pub const MAX_PROMPT_SUMMARY_BYTES: usize = 512;
-/// Bytes in an intent's summary.
-pub const MAX_INTENT_SUMMARY_BYTES: usize = 2048;
+
 pub const MAX_CHECK_REPORT_SESSIONS: usize = 16;
 /// Undelivered results kept per session.
 pub const MAX_CHECK_NOTICES: usize = 4;
@@ -1591,6 +1864,1090 @@ pub struct LandingAttempt {
     pub commit_oid: Option<String>,
     pub result: AttemptResult,
 }
+
+pub const MAX_CHECKS: usize = 64;
+pub const MAX_LANDINGS: usize = 32;
+/// The longest a push turn may be held without being released.
+pub const MAX_TURN_TTL_MS: u64 = 4 * 60 * 60 * 1000;
+/// Tries at landing within one turn, when the target keeps moving.
+pub const MAX_LANDING_ATTEMPTS: usize = 3;
+/// Commits one landing may rebase, and adapt, at most (roadmap F5).
+pub const MAX_REWRITTEN: usize = 64;
+/// Landings waiting for one target's push turn, at most.
+pub const MAX_TURN_QUEUE: usize = 8;
+/// The longest a landing may wait for the push turn.
+pub const MAX_TURN_WAIT_MS: u64 = 60 * 60 * 1000;
+/// A waiting landing that has not asked again for this long has stopped
+/// waiting, and leaves the queue.
+pub const TURN_WAITER_SILENCE_MS: u64 = 15_000;
+
+fn validate_oid(oid: &str) -> Result<(), CoreError> {
+    if !is_hex_digest(oid, 40) && !is_hex_digest(oid, 64) {
+        return Err(error(
+            "invalid_git_oid",
+            "A Git object ID is 40 or 64 hexadecimal characters",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_inputs(inputs: &[String]) -> Result<(), CoreError> {
+    if inputs.len() > 16 {
+        return Err(error(
+            "too_many_inputs",
+            "A check or landing combines at most 16 commits",
+        ));
+    }
+    inputs.iter().try_for_each(|oid| validate_oid(oid))
+}
+
+fn validate_check(state: &State, check: &CheckRecord) -> Result<(), CoreError> {
+    validate_request_id(&check.check_id)?;
+    validate_known_workspace(state, &check.workspace_id)?;
+    validate_id(&check.name, "check name")?;
+    if check.name.len() > 64
+        || check.command.is_empty()
+        || check.command.len() > MAX_CHECK_COMMAND_BYTES
+        || check.command.chars().any(char::is_control)
+    {
+        return Err(error(
+            "invalid_check",
+            &format!(
+                "A check has a name of at most 64 characters and a one-line command of 1 to {MAX_CHECK_COMMAND_BYTES} bytes"
+            ),
+        ));
+    }
+    validate_oid(&check.tree_oid)?;
+    if let Some(head) = &check.head_oid {
+        validate_oid(head)?;
+    }
+    validate_inputs(&check.inputs)?;
+    validate_symbol_findings(check)?;
+    if check.generation != state.generation {
+        return Err(error(
+            "invalid_event",
+            "A check record belongs to the current daemon generation",
+        ));
+    }
+    Ok(())
+}
+
+/// The newest record named `name` for exactly `tree_oid` decides. A pass
+/// on any other tree is not evidence about this one.
+fn readiness(
+    state: &State,
+    workspace_id: &str,
+    name: &str,
+    tree_oid: &str,
+) -> (bool, String, Option<CheckRecord>) {
+    let records = state
+        .checks
+        .get(workspace_id)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    match records
+        .iter()
+        .find(|record| record.name == name && record.tree_oid == tree_oid)
+    {
+        Some(record) => match &record.result {
+            CheckResult::Passed {} => (
+                true,
+                "a passing check exists for exactly this tree".into(),
+                Some(record.clone()),
+            ),
+            CheckResult::Failed { exit_code } => (
+                false,
+                format!("the check failed on exactly this tree (exit {exit_code})"),
+                Some(record.clone()),
+            ),
+            CheckResult::Inconclusive {} => (
+                false,
+                "the check on this tree was inconclusive; run it again".into(),
+                Some(record.clone()),
+            ),
+        },
+        None if records.iter().any(|record| record.name == name) => (
+            false,
+            "the check has only run on other trees; its results do not apply to this one".into(),
+            None,
+        ),
+        None => (
+            false,
+            "no check of that name has been recorded".into(),
+            None,
+        ),
+    }
+}
+
+fn validate_landing(state: &State, landing: &Landing) -> Result<(), CoreError> {
+    validate_request_id(&landing.landing_id)?;
+    validate_known_workspace(state, &landing.workspace_id)?;
+    validate_oid(&landing.commit_oid)?;
+    validate_oid(&landing.tree_oid)?;
+    validate_inputs(&landing.inputs)?;
+    if landing.rebased.len() > MAX_REWRITTEN || landing.adapted.len() > MAX_REWRITTEN {
+        return Err(error(
+            "invalid_landing",
+            "A landing records at most 64 rebased and 64 adapted commits",
+        ));
+    }
+    for oid in landing
+        .rebased
+        .iter()
+        .flat_map(|rewritten| [&rewritten.from, &rewritten.to])
+        .chain(&landing.adapted)
+    {
+        validate_oid(oid)?;
+    }
+    validate_request_id(&landing.check_id)?;
+    validate_branch_name(&landing.onto)?;
+    // A landing is recorded only on the evidence the core itself holds.
+    let evidence = state.checks.get(&landing.workspace_id).and_then(|records| {
+        records
+            .iter()
+            .find(|record| record.check_id == landing.check_id)
+    });
+    match evidence {
+        Some(record)
+            if record.tree_oid == landing.tree_oid && record.result == (CheckResult::Passed {}) =>
+        {
+            Ok(())
+        }
+        _ => Err(error(
+            "no_current_evidence",
+            "A landing must name a passing check recorded for exactly the landed tree",
+        )),
+    }
+}
+
+fn validate_branch_name(onto: &str) -> Result<(), CoreError> {
+    if onto.is_empty() || onto.len() > 255 || onto.chars().any(|c| c.is_control() || c == ' ') {
+        return Err(error(
+            "invalid_branch_ref",
+            "A landing names its target branch",
+        ));
+    }
+    Ok(())
+}
+
+/// Whether `waiter` is still in line at `now_ms`.
+fn still_waiting(waiter: &TurnWaiter, generation: u64, now_ms: u64) -> bool {
+    waiter.generation == generation && waiter.deadline_ms > now_ms && waiter.seen_until_ms > now_ms
+}
+
+/// The landings in line for `key` at `now_ms`, first first.
+pub(crate) fn waiting_for(state: &State, key: &str, now_ms: u64) -> Vec<TurnWaiter> {
+    state
+        .turn_queues
+        .get(key)
+        .into_iter()
+        .flatten()
+        .filter(|waiter| still_waiting(waiter, state.generation, now_ms))
+        .cloned()
+        .collect()
+}
+
+/// The line as callers see it.
+pub(crate) fn line(waiting: &[TurnWaiter], now_ms: u64) -> Vec<QueuedLanding> {
+    waiting
+        .iter()
+        .enumerate()
+        .map(|(index, waiter)| QueuedLanding {
+            ticket: waiter.ticket.clone(),
+            session_id: waiter.session_id.clone(),
+            position: u32::try_from(index + 1).unwrap_or(u32::MAX),
+            waited_ms: now_ms.saturating_sub(waiter.joined_ms),
+            wait_left_ms: waiter.deadline_ms.saturating_sub(now_ms),
+        })
+        .collect()
+}
+
+/// `TakeTurn` with a queue: take the turn if it is free and this landing is
+/// first in line (or nobody is), otherwise join the line or stay in it.
+fn queue_for_turn(
+    state: &State,
+    workspace_id: &str,
+    onto: &str,
+    session_id: &Option<String>,
+    expires_at_ms: u64,
+    queueing: &TurnQueueing,
+    now_ms: u64,
+) -> Result<Decision, CoreError> {
+    let TurnQueueing {
+        ticket,
+        wait_ms,
+        joined,
+    } = queueing;
+    validate_request_id(ticket)?;
+    if !(1..=MAX_TURN_WAIT_MS).contains(wait_ms) {
+        return Err(error(
+            "invalid_wait",
+            "A landing waits 1 ms to 1 hour for the push turn",
+        ));
+    }
+    let key = turn_key(workspace_id, onto);
+    let held = state
+        .turns
+        .get(&key)
+        .filter(|held| held.expires_at_ms > now_ms);
+    if let Some(held) = held.filter(|held| held.turn_id == *ticket) {
+        return Ok(Decision {
+            events: Vec::new(),
+            outcome: Outcome::Turn { turn: held.clone() },
+        });
+    }
+    let mut events = Vec::new();
+    // Waiters past their time leave before anyone is placed.
+    for waiter in state.turn_queues.get(&key).into_iter().flatten() {
+        if !still_waiting(waiter, state.generation, now_ms) {
+            events.push(Event::TurnQueueLeft {
+                workspace_id: workspace_id.into(),
+                onto: onto.into(),
+                ticket: waiter.ticket.clone(),
+                reason: if waiter.deadline_ms <= now_ms {
+                    LeftQueue::TimedOut
+                } else {
+                    LeftQueue::Stopped
+                },
+            });
+        }
+    }
+    let mut waiting = waiting_for(state, &key, now_ms);
+    let place = waiting.iter().position(|waiter| waiter.ticket == *ticket);
+    // A landing taken out of line (cancelled, silent too long, or the
+    // coordinator restarted) is told so, even when the turn is free: a
+    // cancelled landing never goes on to push.
+    if *joined && place.is_none() {
+        return Err(error(
+            "not_queued",
+            "This landing is no longer waiting for the push turn: it was cancelled, it did not ask again within 15 s, or the coordinator restarted. Nothing was fetched or pushed; start the landing again to wait again",
+        ));
+    }
+    if held.is_none() && waiting.first().is_none_or(|first| first.ticket == *ticket) {
+        if let Some(expired) = state.turns.get(&key) {
+            events.push(Event::TurnExpired {
+                workspace_id: workspace_id.into(),
+                onto: onto.into(),
+                turn_id: expired.turn_id.clone(),
+            });
+        }
+        let turn = Turn {
+            turn_id: ticket.clone(),
+            workspace_id: workspace_id.into(),
+            onto: onto.into(),
+            session_id: session_id.clone(),
+            taken_ms: now_ms,
+            expires_at_ms,
+            generation: state.generation,
+        };
+        events.push(Event::TurnTaken { turn: turn.clone() });
+        return Ok(Decision {
+            events,
+            outcome: Outcome::Turn { turn },
+        });
+    }
+    let holder = held.cloned();
+    let held_ms = held.map(|held| now_ms.saturating_sub(held.taken_ms));
+    let seen_until_ms = now_ms.saturating_add(TURN_WAITER_SILENCE_MS);
+    let position = match place {
+        Some(index) => {
+            // Asked again: refreshed once half its silence allowance is used,
+            // so a waiting landing writes an event every few seconds, not on
+            // every ask.
+            let waiter = &mut waiting[index];
+            if waiter.seen_until_ms.saturating_sub(now_ms) < TURN_WAITER_SILENCE_MS / 2 {
+                waiter.seen_until_ms = seen_until_ms;
+                events.push(Event::TurnQueueSeen {
+                    workspace_id: workspace_id.into(),
+                    onto: onto.into(),
+                    ticket: ticket.clone(),
+                    seen_until_ms,
+                });
+            }
+            index + 1
+        }
+        None if waiting.len() >= MAX_TURN_QUEUE => {
+            return Ok(Decision {
+                events,
+                outcome: Outcome::TurnUnavailable {
+                    holder,
+                    held_ms,
+                    waiting: line(&waiting, now_ms),
+                    queue_full: true,
+                },
+            });
+        }
+        None => {
+            let waiter = TurnWaiter {
+                ticket: ticket.clone(),
+                workspace_id: workspace_id.into(),
+                onto: onto.into(),
+                session_id: session_id.clone(),
+                joined_ms: now_ms,
+                deadline_ms: now_ms.saturating_add(*wait_ms),
+                seen_until_ms,
+                generation: state.generation,
+            };
+            events.push(Event::TurnQueueJoined {
+                waiter: waiter.clone(),
+            });
+            waiting.push(waiter);
+            waiting.len()
+        }
+    };
+    Ok(Decision {
+        events,
+        outcome: Outcome::TurnWaiting {
+            position: u32::try_from(position).unwrap_or(u32::MAX),
+            holder,
+            held_ms,
+            waiting: line(&waiting, now_ms),
+        },
+    })
+}
+
+/// Workspace IDs contain no colon, so the key is unambiguous.
+fn turn_key(workspace_id: &str, onto: &str) -> String {
+    format!("{workspace_id}:{onto}")
+}
+
+fn validate_attempts(attempts: &[LandingAttempt]) -> Result<(), CoreError> {
+    if attempts.len() > MAX_LANDING_ATTEMPTS {
+        return Err(error(
+            "too_many_attempts",
+            "A turn records at most 3 landing attempts",
+        ));
+    }
+    attempts
+        .iter()
+        .flat_map(|attempt| [&attempt.target_oid, &attempt.commit_oid])
+        .flatten()
+        .try_for_each(|oid| validate_oid(oid))
+}
+
+fn validate_auto_check(state: &State, check: &AutoCheck) -> Result<(), CoreError> {
+    validate_known_workspace(state, &check.workspace_id)?;
+    validate_check_command(&check.name, &check.argv, check.timeout_s)?;
+    if let Some(wider) = &check.on_interface_change {
+        validate_check_command(&wider.name, &wider.argv, wider.timeout_s)?;
+        if wider.name == check.name {
+            return Err(error(
+                "invalid_check",
+                "The wider check has a name of its own: its records are told apart from the regular check's by name",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// One automatic command's name, arguments and time limit.
+fn validate_check_command(name: &str, argv: &[String], timeout_s: u32) -> Result<(), CoreError> {
+    validate_id(name, "check name")?;
+    if name.len() > 64
+        || argv.is_empty()
+        || argv.len() > MAX_AUTO_CHECK_ARGS
+        || argv[0].is_empty()
+        || argv.iter().any(|arg| {
+            arg.is_empty()
+                || arg.len() > MAX_AUTO_CHECK_ARG_BYTES
+                || arg.chars().any(char::is_control)
+        })
+    {
+        return Err(error(
+            "invalid_check",
+            &format!(
+                "An automatic check has a name of at most 64 characters and a command of 1 to {MAX_AUTO_CHECK_ARGS} arguments, each 1 to {MAX_AUTO_CHECK_ARG_BYTES} bytes without control characters"
+            ),
+        ));
+    }
+    if !(1..=MAX_AUTO_CHECK_TIMEOUT_S).contains(&timeout_s) {
+        return Err(error(
+            "invalid_limit",
+            &format!("An automatic check's time limit is 1 to {MAX_AUTO_CHECK_TIMEOUT_S} seconds"),
+        ));
+    }
+    Ok(())
+}
+
+/// A report's mentioning files come only with an interface change, are
+/// valid paths and number at most [`MAX_REPORT_DEPENDENT_PATHS`].
+fn validate_dependent_paths(report: &CheckReport) -> Result<(), CoreError> {
+    if report.dependent_paths.is_empty() {
+        return Ok(());
+    }
+    if report.interface.is_none() || report.dependent_paths.len() > MAX_REPORT_DEPENDENT_PATHS {
+        return Err(error(
+            "invalid_check_report",
+            &format!(
+                "A check report names mentioning files only for an interface change, at most {MAX_REPORT_DEPENDENT_PATHS}"
+            ),
+        ));
+    }
+    for path in &report.dependent_paths {
+        validate_relative_path(path)?;
+    }
+    Ok(())
+}
+
+/// A wider check's cause names one valid change, a valid path and at most
+/// [`MAX_CAUSE_DEPENDENTS`] valid mentioning files.
+fn validate_interface_cause(cause: &InterfaceCause) -> Result<(), CoreError> {
+    validate_relative_path(&cause.path)?;
+    if cause.dependents.is_empty() || cause.dependents.len() > MAX_CAUSE_DEPENDENTS {
+        return Err(error(
+            "invalid_check_report",
+            &format!(
+                "A wider check's interface change names 1 to {MAX_CAUSE_DEPENDENTS} files that mention it"
+            ),
+        ));
+    }
+    for path in &cause.dependents {
+        validate_relative_path(path)?;
+    }
+    // The change itself is shaped as in an interface notice.
+    validate_notice(&InterfaceNotice {
+        notice_id: "cause".into(),
+        workspace_id: String::new(),
+        path: cause.path.clone(),
+        changes: vec![cause.change.clone()],
+        dependents: Vec::new(),
+        elsewhere: Vec::new(),
+        by_session: None,
+        at_ms: 0,
+        generation: 0,
+    })
+}
+
+/// The running sessions of the workspace, in this daemon's lifetime, that
+/// work on or have read one of `paths`, as a briefing counts them.
+fn concerned_sessions(
+    state: &State,
+    workspace_id: &str,
+    paths: &[String],
+    now_ms: u64,
+) -> Vec<String> {
+    state
+        .sessions
+        .values()
+        .filter(|session| {
+            session.workspace_id == workspace_id && session.generation == state.generation
+        })
+        .filter(|session| {
+            state
+                .activity
+                .get(&session.session_id)
+                .is_some_and(|activity| !activity.ended)
+        })
+        .filter(|session| {
+            let concerned = concerned_paths(state, &session.session_id, now_ms);
+            paths.iter().any(|path| concerned.contains(path))
+        })
+        .map(|session| session.session_id.clone())
+        .collect()
+}
+
+/// The sessions are this workspace's, the tail is bounded, and the notice
+/// names a record of that workspace.
+fn validate_check_report(
+    state: &State,
+    workspace_id: &str,
+    event: &Event,
+) -> Result<(), CoreError> {
+    let Event::CheckReported {
+        session_ids,
+        notice,
+    } = event
+    else {
+        return Err(error("invalid_event", "Not a check report"));
+    };
+    if session_ids.is_empty() || session_ids.len() > MAX_CHECK_REPORT_SESSIONS {
+        return Err(error(
+            "invalid_check_report",
+            &format!("A check report names 1 to {MAX_CHECK_REPORT_SESSIONS} sessions"),
+        ));
+    }
+    for session_id in session_ids {
+        if known_session(state, session_id)?.workspace_id != workspace_id {
+            return Err(error(
+                "invalid_check_report",
+                "A check report names only sessions of the checked workspace",
+            ));
+        }
+    }
+    if notice.tail.len() > MAX_CHECK_TAIL_BYTES || notice.tail.contains('\0') {
+        return Err(error(
+            "invalid_check_report",
+            &format!("A check's output tail is at most {MAX_CHECK_TAIL_BYTES} bytes without NUL"),
+        ));
+    }
+    validate_request_id(&notice.check_id)?;
+    validate_oid(&notice.tree_oid)?;
+    // A comparison (issue #69) is whole: a baseline, and a class for every
+    // failure, or neither.
+    let compared = notice.baseline_check_id.is_some();
+    if let Some(baseline) = &notice.baseline_check_id {
+        validate_request_id(baseline)?;
+    }
+    let names_ok = notice.fixed.len() <= MAX_FIXED_NAMED
+        && notice.fixed.iter().all(|test| {
+            !test.is_empty()
+                && test.len() <= MAX_TEST_NAME_BYTES
+                && !test.chars().any(char::is_control)
+        });
+    if !names_ok
+        || notice.writers.len() > MAX_WRITERS_NAMED
+        || (!compared && !(notice.fixed.is_empty() && notice.writers.is_empty()))
+        || notice
+            .failures
+            .iter()
+            .any(|failure| failure.class.is_some() != compared)
+    {
+        return Err(error(
+            "invalid_check_report",
+            &format!(
+                "A check report compared with a baseline classes every failure and names at most {MAX_FIXED_NAMED} fixed tests and {MAX_WRITERS_NAMED} writers; one not compared has none of them"
+            ),
+        ));
+    }
+    for writer in &notice.writers {
+        validate_id(writer, "session ID")?;
+    }
+    if let Some(cause) = &notice.interface {
+        validate_interface_cause(cause)?;
+    }
+    // A grade is the wider check's result, and only a wider check has one.
+    if notice.interface_grade != interface_grade(notice.interface.as_deref(), &notice.result) {
+        return Err(error(
+            "invalid_check_report",
+            "An interface grade is kept for a passed wider check and broke for a failed one",
+        ));
+    }
+    Ok(())
+}
+
+/// The grade of a wider check with `interface`, from its result.
+fn interface_grade(
+    interface: Option<&InterfaceCause>,
+    result: &CheckResult,
+) -> Option<InterfaceGrade> {
+    match (interface, result) {
+        (Some(_), CheckResult::Passed {}) => Some(InterfaceGrade::Kept),
+        (Some(_), CheckResult::Failed { .. }) => Some(InterfaceGrade::Broke),
+        _ => None,
+    }
+}
+
+fn validate_forget_flaky(name: Option<&str>, test: &str) -> Result<(), CoreError> {
+    if let Some(name) = name {
+        validate_id(name, "check name")?;
+    }
+    if test.is_empty()
+        || test.len() > MAX_TEST_NAME_BYTES
+        || test.trim() != test
+        || test.chars().any(char::is_control)
+    {
+        return Err(error(
+            "invalid_test_name",
+            &format!(
+                "A test name is 1 to {MAX_TEST_NAME_BYTES} bytes on one line without surrounding spaces"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+// ---- end domain: checks ----
+
+// ---- domain: observation ----
+
+/// One disk fact. `before: None` means no prior baseline, not a created file.
+/// Related operation IDs are unverified correlations, never causal attribution.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DiskObservation {
+    pub observation_id: String,
+    pub workspace_id: String,
+    pub path: String,
+    pub before: Option<FileState>,
+    pub after: FileState,
+    pub related_operation_ids: Vec<String>,
+    pub observed_at_ms: u64,
+    pub generation: u64,
+}
+
+/// A local ref fact. Both OIDs are absent for an unborn HEAD or missing branch.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BranchObservation {
+    pub observation_id: String,
+    pub workspace_id: String,
+    pub branch_ref: String,
+    pub head_oid: Option<String>,
+    pub tree_oid: Option<String>,
+    pub observed_at_ms: u64,
+    pub generation: u64,
+}
+
+/// Bounded metadata for the store's most recent completed workspace scan. A
+/// missing summary means no baseline, distinct from a scan with zero files.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScanSummary {
+    pub workspace_id: String,
+    pub observed_at_ms: u64,
+    pub generation: u64,
+    pub file_count: u64,
+    pub branch_count: u64,
+    pub head_oid: Option<String>,
+    pub branch_ref: Option<String>,
+    /// What the scan did not version. Absent when it versioned every file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<ScanCoverage>,
+}
+
+/// Paths listed in a workspace that its last completed scan did not
+/// version, by reason. A scan is partial when `omitted` or `too_large` is
+/// above zero: some working files of the checkout itself were not read.
+/// Submodules and skip-worktree entries are outside the working tree the
+/// scan reads, by design; they are counted, never read.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ScanCoverage {
+    /// Left out because the file-count, byte or time bound was reached.
+    /// Files Git reports as changed are versioned before any clean file.
+    pub omitted: u64,
+    /// Over the per-file bound: listed, not versioned.
+    pub too_large: u64,
+    /// The first `COVERAGE_PATHS` of them, in path order.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub too_large_paths: Vec<String>,
+    /// Gitlinks: recorded as present, never read into.
+    pub submodules: u64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub submodule_paths: Vec<String>,
+    /// Entries outside a sparse checkout: not in the working tree, and not
+    /// reported as deleted.
+    pub skip_worktree: u64,
+}
+
+/// Paths a coverage record names per reason, at most.
+pub const COVERAGE_PATHS: usize = 8;
+
+impl ScanCoverage {
+    /// True when some working files of the checkout were not versioned.
+    pub fn is_partial(&self) -> bool {
+        self.omitted > 0 || self.too_large > 0
+    }
+}
+
+/// The repository and branch a physical workspace was last observed on. The
+/// repository identity groups linked worktrees; it never merges their
+/// admission domains.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceGit {
+    pub workspace_id: String,
+    pub repository_id: String,
+    pub branch_ref: Option<String>,
+}
+
+/// The observer could not complete a scan of a workspace. Until one
+/// completes, disk facts, check staleness marks and the index are as of the
+/// last complete scan.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ScanFailure {
+    pub workspace_id: String,
+    pub detail: String,
+    pub at_ms: u64,
+    pub generation: u64,
+}
+
+/// The longest line an adapter renders for an uncoordinated change, before
+/// its ellipsis. A briefing that carries one takes this line, plus its
+/// ellipsis and newline, out of `MESSAGE_BRIEF_BYTES`: both are delivered
+/// once, so every message and withdrawal selected beside it must still be
+/// shown.
+pub const UNCOORDINATED_LINE_LIMIT: usize = 700;
+
+/// Checkout changes kept per workspace.
+pub const MAX_CHECKOUTS: usize = 4;
+
+/// Host names one host check may report.
+pub const MAX_HOSTS: usize = 16;
+
+/// An agent host whose configuration directory exists on this machine but
+/// which no LangSpan install covers: no user-level install, and no project
+/// install in a registered workspace. Only its name is kept; what the owner
+/// can run is derived from it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct UninstalledHost {
+    pub host: String,
+    /// When the daemon first saw it so, by its own clock.
+    pub at_ms: u64,
+    pub generation: u64,
+}
+
+/// The checkout of one physical workspace changed under the sessions in it:
+/// its branch changed, its HEAD moved and files changed with it, or several
+/// changed files went back to their committed version at once (`git
+/// checkout`, `switch`, `reset --hard`, `stash`, `pull`). Built from the
+/// scan's branch observation. Who did it is not known, unless a session's
+/// shell command explains it (`CheckoutRun`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CheckoutChange {
+    pub change_id: String,
+    pub workspace_id: String,
+    pub from_branch: Option<String>,
+    pub to_branch: Option<String>,
+    pub from_head: Option<String>,
+    pub to_head: Option<String>,
+    /// Files whose content changed in the same scan.
+    pub files: u32,
+    pub at_ms: u64,
+    pub generation: u64,
+}
+
+/// Uncoordinated changes kept per workspace.
+pub const MAX_UNCOORDINATED: usize = 4;
+/// Changed files one uncoordinated change keeps, at most.
+pub const MAX_UNCOORDINATED_FILES: usize = 8;
+/// Codex sessions one uncoordinated change names, at most.
+pub const MAX_UNCOORDINATED_SESSIONS: usize = 2;
+/// Changed files one scan reports for comparison, at most.
+pub const MAX_UNCOORDINATED_OBSERVED: usize = 256;
+/// The host name that starts a Codex session's ID (`codex.<host session>`).
+pub const CODEX_HOST: &str = "codex";
+/// The host names that start the other hooked hosts' session IDs.
+pub const CLAUDE_CODE_HOST: &str = "claude-code";
+pub const CURSOR_HOST: &str = "cursor";
+pub const ANTIGRAVITY_HOST: &str = "antigravity";
+/// The tool name of a shell call on every host, as the hooks record it.
+pub const SHELL_TOOL: &str = "Bash";
+
+/// Files a scan saw change in one physical workspace that no session of it
+/// reported, while Codex sessions are registered there (issue #129). Codex
+/// trusts project hooks by the exact path of their file, so a session resumed
+/// under another path for the same directory runs none of them. The sessions
+/// named are the likely cause, not a proven author: a hand edit looks the same.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct UncoordinatedChange {
+    pub change_id: String,
+    pub workspace_id: String,
+    /// The Codex sessions registered here, most recently active first.
+    pub sessions: Vec<String>,
+    /// The versions the scan saw, sorted by path.
+    pub files: Vec<ObservedFile>,
+    pub at_ms: u64,
+    pub generation: u64,
+    /// Sessions this change was delivered to.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delivered: Vec<String>,
+}
+
+/// An uncoordinated change as one session's briefing carries it: the files
+/// still at a version no session has reported.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UncoordinatedNotice {
+    pub sessions: Vec<String>,
+    pub paths: Vec<String>,
+    pub age_ms: u64,
+}
+
+/// A checkout change as one session's briefing carries it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CheckoutNotice {
+    pub from_branch: Option<String>,
+    pub to_branch: Option<String>,
+    pub from_head: Option<String>,
+    pub to_head: Option<String>,
+    pub files: u32,
+    pub age_ms: u64,
+    /// The other session whose shell command explains the change, when one
+    /// does (`CheckoutRun`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by_session: Option<String>,
+    /// That command's line, redacted and capped by its hook.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+}
+
+/// Shell runs that moved a checkout, kept per workspace.
+pub const MAX_CHECKOUT_RUNS: usize = 8;
+/// A checkout change first observed up to this long after a run finished,
+/// at the state the run left, is the run's: the observer scans every few
+/// seconds and may see the change only after the run's hook reported it.
+pub const CHECKOUT_RUN_GRACE_MS: u64 = 60_000;
+/// The longest a checkout run is taken to have run: a shell call's
+/// supported lifetime, two hours.
+pub const MAX_CHECKOUT_RUN_MS: u64 = 2 * 60 * 60 * 1000;
+/// The command text a checkout run keeps, at most, in bytes.
+pub const MAX_CHECKOUT_COMMAND_BYTES: usize = 256;
+
+/// One session's shell command ran a Git operation that changes the
+/// checkout (`git merge`, `pull`, `rebase`, `reset`, `checkout`, `switch`,
+/// `stash` and the like) and the checkout changed while it ran: reported by
+/// that session's post-tool hook. A checkout change it explains is not news
+/// to that session, and other sessions are told whose command it was.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CheckoutRun {
+    pub run_id: String,
+    pub workspace_id: String,
+    pub session_id: String,
+    /// The command line, redacted and capped by the hook.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// The checkout the command left.
+    pub to_branch: Option<String>,
+    pub to_head: Option<String>,
+    /// When the command started and finished on the daemon's clock, placed
+    /// back from the report's arrival by the durations its hook measured
+    /// (never after the arrival), whenever it is reported.
+    pub started_ms: u64,
+    pub finished_ms: u64,
+    pub generation: u64,
+    /// The command changed no file's content: it moved HEAD or the branch
+    /// only, as a commit does. Absent from an earlier record.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub files_unchanged: bool,
+}
+
+impl CheckoutRun {
+    /// Whether this run explains `change`: observed while the command ran,
+    /// or the first change observed after it finished, within
+    /// `CHECKOUT_RUN_GRACE_MS`, at the checkout the command left, unless a
+    /// change while it ran already showed that checkout or the command
+    /// changed no file and the change left branch and HEAD in place.
+    /// `changes` are the workspace's changes, to find the first.
+    pub fn explains(&self, change: &CheckoutChange, changes: &[CheckoutChange]) -> bool {
+        if change.workspace_id != self.workspace_id
+            || change.generation != self.generation
+            || change.at_ms < self.started_ms
+        {
+            return false;
+        }
+        if change.at_ms <= self.finished_ms {
+            return true;
+        }
+        let left = |other: &CheckoutChange| {
+            other.to_head == self.to_head && other.to_branch == self.to_branch
+        };
+        // A run that changed no file (a commit) explains no later change
+        // with branch and HEAD in place (a restore): the scan records no
+        // change for such a run, so that one came after it.
+        let moved = change.from_head != change.to_head || change.from_branch != change.to_branch;
+        change.at_ms <= self.finished_ms.saturating_add(CHECKOUT_RUN_GRACE_MS)
+            && left(change)
+            && (moved || !self.files_unchanged)
+            && !changes.iter().any(|other| {
+                other.change_id != change.change_id
+                    && other.workspace_id == self.workspace_id
+                    && other.generation == self.generation
+                    && other.at_ms < change.at_ms
+                    // Another change after the run came first; one while it
+                    // ran at the state it left already showed its result.
+                    && (other.at_ms > self.finished_ms
+                        || (other.at_ms >= self.started_ms && left(other)))
+            })
+    }
+}
+
+/// Whether an active, unexpired lease of this workspace holds `path`.
+fn leased(state: &State, workspace_id: &str, path: &str, now_ms: u64) -> bool {
+    state.leases.values().any(|lease| {
+        lease.workspace_id == workspace_id
+            && lease.status == LeaseStatus::Active
+            && lease.generation == state.generation
+            && lease.expires_at_ms > now_ms
+            && lease.paths.iter().any(|held| held == path)
+    })
+}
+
+/// Whether a session of this workspace reported reading or writing the file
+/// at this version.
+fn explained(state: &State, workspace_id: &str, file: &ObservedFile) -> bool {
+    state
+        .sessions
+        .values()
+        .filter(|session| session.workspace_id == workspace_id)
+        .filter_map(|session| state.activity.get(&session.session_id))
+        .any(|activity| {
+            activity
+                .known
+                .iter()
+                .any(|known| known.path == file.path && known.state == file.state)
+        })
+}
+
+/// Whether a session of this workspace reported reading or writing the file
+/// at or after `from_ms`, at any version.
+fn reported_since(state: &State, workspace_id: &str, path: &str, from_ms: u64) -> bool {
+    state
+        .sessions
+        .values()
+        .filter(|session| session.workspace_id == workspace_id)
+        .filter_map(|session| state.activity.get(&session.session_id))
+        .any(|activity| {
+            activity
+                .known
+                .iter()
+                .any(|known| known.path == path && known.at_ms >= from_ms)
+        })
+}
+
+/// The Codex sessions registered in this workspace in this generation, most
+/// recently active first. An ended or exited one is kept: Codex reports no
+/// session end, and a resumed session is a new process.
+fn codex_sessions(state: &State, workspace_id: &str) -> Vec<String> {
+    let mut sessions: Vec<(u64, &str)> = state
+        .sessions
+        .values()
+        .filter(|session| {
+            session.workspace_id == workspace_id
+                && session.generation == state.generation
+                && session
+                    .session_id
+                    .split_once('.')
+                    .is_some_and(|(host, _)| host == CODEX_HOST)
+        })
+        .map(|session| {
+            let last = state
+                .activity
+                .get(&session.session_id)
+                .filter(|activity| activity.generation == state.generation)
+                .map_or(0, |activity| activity.last_ms);
+            (last, session.session_id.as_str())
+        })
+        .collect();
+    sessions.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
+    sessions.into_iter().map(|(_, id)| id.to_owned()).collect()
+}
+
+/// The files of an uncoordinated change that are still at a version no
+/// session of its workspace reported: a report arriving after the scan
+/// explains the rest.
+fn still_unexplained(state: &State, change: &UncoordinatedChange) -> Vec<String> {
+    change
+        .files
+        .iter()
+        .filter(|file| !explained(state, &change.workspace_id, file))
+        .map(|file| file.path.clone())
+        .collect()
+}
+
+/// This workspace's uncoordinated changes of this generation, within the
+/// briefing horizon, with a file still unexplained. Newest first.
+fn held_uncoordinated<'a>(
+    state: &'a State,
+    workspace_id: &str,
+    now_ms: u64,
+) -> impl Iterator<Item = &'a UncoordinatedChange> {
+    state
+        .uncoordinated
+        .get(workspace_id)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+        .iter()
+        .filter(move |change| {
+            change.generation == state.generation
+                && now_ms.saturating_sub(change.at_ms) <= BRIEF_HORIZON_MS
+                && !still_unexplained(state, change).is_empty()
+        })
+}
+
+/// The uncoordinated change owed to this session's next briefing, the
+/// newest, with the notice it carries: one always fits the rendered text, and
+/// each is delivered once, so the rest follow at the next briefings.
+fn uncoordinated_owed<'a>(
+    state: &'a State,
+    session_id: &'a str,
+    now_ms: u64,
+) -> impl Iterator<Item = (&'a UncoordinatedChange, UncoordinatedNotice)> {
+    let workspace = state
+        .sessions
+        .get(session_id)
+        .map_or("", |session| session.workspace_id.as_str());
+    held_uncoordinated(state, workspace, now_ms)
+        .filter(move |change| !change.delivered.iter().any(|held| held == session_id))
+        .take(1)
+        .map(move |change| {
+            (
+                change,
+                UncoordinatedNotice {
+                    sessions: change.sessions.clone(),
+                    paths: still_unexplained(state, change),
+                    age_ms: now_ms.saturating_sub(change.at_ms),
+                },
+            )
+        })
+}
+
+fn validate_uncoordinated(state: &State, change: &UncoordinatedChange) -> Result<(), CoreError> {
+    validate_fact_header(
+        state,
+        &change.change_id,
+        &change.workspace_id,
+        change.generation,
+    )?;
+    if change.files.is_empty()
+        || change.files.len() > MAX_UNCOORDINATED_FILES
+        || normalized_files(&change.files)? != change.files
+        || change.sessions.is_empty()
+        || change.sessions.len() > MAX_UNCOORDINATED_SESSIONS
+        || change.sessions.iter().any(|session| {
+            state
+                .sessions
+                .get(session)
+                .is_none_or(|known| known.workspace_id != change.workspace_id)
+        })
+    {
+        return Err(error(
+            "invalid_event",
+            &format!(
+                "An uncoordinated change names 1 to {MAX_UNCOORDINATED_FILES} sorted, unique files and 1 to {MAX_UNCOORDINATED_SESSIONS} sessions of its workspace"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// A write was recorded in the workspace: its write generation moves on, so
+/// no check result is compared with one from before it to learn which tests
+/// flip.
+fn wrote_in(state: &mut State, workspace_id: &str, session_id: Option<&str>) {
+    classes::wrote(state, workspace_id, session_id);
+}
+
+fn validate_workspace_git(state: &State, git: &WorkspaceGit) -> Result<(), CoreError> {
+    validate_id(&git.workspace_id, "workspace ID")?;
+    validate_id(&git.repository_id, "repository ID")?;
+    if !state.workspaces.contains_key(&git.workspace_id) {
+        return Err(error(
+            "workspace_not_found",
+            "Register the workspace before recording its repository",
+        ));
+    }
+    if let Some(reference) = &git.branch_ref
+        && (reference.len() > 512
+            || reference.chars().any(char::is_control)
+            || !reference
+                .strip_prefix("refs/heads/")
+                .is_some_and(|name| !name.is_empty()))
+    {
+        return Err(error(
+            "invalid_branch_ref",
+            "A workspace branch is a nonempty refs/heads/ name, at most 512 bytes without control characters",
+        ));
+    }
+    Ok(())
+}
+
+// ---- end domain: observation ----
+
+// ---- domain: notices ----
 
 /// A symbol definition found by structural indexing. `digest` is the content
 /// of the file it was read from; a match is by name and kind only.
@@ -2194,15 +3551,6 @@ pub fn inflight_cost(notice: &InflightNotice) -> usize {
     (200 + raw).min(INFLIGHT_BYTES)
 }
 
-/// One in-flight signature, as remembered once told to a session: a change
-/// of signature is a new key, so it is told again.
-fn inflight_key(item: &InflightSymbol) -> String {
-    fingerprint(&format!(
-        "{}\n{}\n{}\n{}\n{}",
-        item.workspace_id, item.path, item.kind, item.name, item.signature
-    ))
-}
-
 /// Whether this signature of `item` was already told to `session_id`.
 pub fn inflight_told(state: &State, session_id: &str, item: &InflightSymbol) -> bool {
     state
@@ -2246,91 +3594,948 @@ pub fn inflight_notice(state: &State, item: &InflightSymbol) -> Option<InflightN
     })
 }
 
-/// What a briefing of `session_id` compares in-flight work with: the
-/// session's workspace, and the files it works on or has read. `None` for
-/// a session that is not current.
-pub fn briefing_concern(
-    state: &State,
-    session_id: &str,
-    now_ms: u64,
-) -> Option<(String, BTreeSet<String>)> {
-    let me = current_session(state, session_id).ok()?;
-    Some((
-        me.workspace_id.clone(),
-        concerned_paths(state, session_id, now_ms),
-    ))
+pub const MAX_NOTICES: usize = 32;
+pub const NOTICE_CHANGES: usize = 16;
+pub const NOTICE_DEPENDENTS: usize = 32;
+
+/// A code-context query names at most this many identifiers.
+pub const CONTEXT_NAMES: usize = 12;
+/// Definitions returned per name, at most.
+pub const CONTEXT_DEFINITIONS: u32 = 3;
+/// Distinct files that mention a name, returned per name, at most.
+pub const CONTEXT_FILES: u32 = 5;
+
+/// One name asked about in a code-context query, with where it is defined
+/// and which files mention it. A name match, not a resolved symbol.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NameContext {
+    pub name: String,
+    pub definitions: Vec<SymbolRef>,
+    /// Distinct paths, in path order.
+    pub mentioned_in: Vec<String>,
+    /// True when more definitions or mentioning files exist than are listed.
+    pub truncated: bool,
+    /// In a ranked answer, how many definitions the name has: those listed
+    /// and those left out (roadmap C2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition_count: Option<u32>,
 }
 
-/// When an event that has no time of its own was decided: the daemon's
-/// clock and the generation it belongs to.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+/// What a notice's renames and moves change in the state (roadmap D7). A
+/// rename is remembered under its old name and kind, replacing an earlier
+/// rename of that name and kind; a name that comes back as the
+/// same kind (added, or the new name of another rename) is forgotten as
+/// renamed. A file moved
+/// whole takes its notes along: each note about the old path is about the
+/// new one instead.
+fn follow_renames(state: &mut State, notice: &InterfaceNotice) {
+    for change in &notice.changes {
+        let moved = change.evidence.as_deref() == Some(FILE_MOVED);
+        let renames = state
+            .renames
+            .entry(notice.workspace_id.clone())
+            .or_default();
+        let back = match (change.change.as_str(), &change.after_name) {
+            ("added", _) => Some(&change.name),
+            ("renamed", Some(to)) if !moved => Some(to),
+            _ => None,
+        };
+        if let Some(back) = back {
+            // Only a definition of the renamed one's kind takes its name
+            // back, as the lookup's own check does.
+            renames.retain(|rename| rename.name != *back || rename.kind != change.kind);
+        }
+        if let ("renamed", Some(to), false) = (change.change.as_str(), &change.after_name, moved) {
+            renames.retain(|rename| rename.name != change.name || rename.kind != change.kind);
+            renames.insert(
+                0,
+                Rename {
+                    name: change.name.clone(),
+                    after_name: to.clone(),
+                    kind: change.kind.clone(),
+                    path: notice.path.clone(),
+                    evidence: change.evidence.clone(),
+                    after: change.after.clone().unwrap_or_default(),
+                },
+            );
+            renames.truncate(MAX_RENAMES);
+        }
+        if renames.is_empty() {
+            state.renames.remove(&notice.workspace_id);
+        }
+        let Some(from) = change.before_path.as_ref().filter(|_| moved) else {
+            continue;
+        };
+        for note in state
+            .notes
+            .get_mut(&notice.workspace_id)
+            .into_iter()
+            .flatten()
+        {
+            // Sorted and once each, as a note's paths are recorded.
+            if let Some(at) = note.paths.iter().position(|path| path == from) {
+                note.paths[at].clone_from(&notice.path);
+                note.paths.sort();
+                note.paths.dedup();
+            }
+        }
+    }
+}
+
+/// What links a rename's two names (roadmap D7).
+pub const RENAME_EVIDENCE: [&str; 3] = ["same_body", "same_signature", FILE_MOVED];
+/// The evidence of a definition that moved with its whole file.
+pub const FILE_MOVED: &str = "file_moved";
+
+/// A rename's evidence in words, as a notice ends its rename: ` (same
+/// body)`, ` (same signature)`, or nothing for a rename recorded before its
+/// evidence was kept and for a moved file, whose text says so itself.
+pub fn rename_evidence_words(evidence: Option<&str>) -> &'static str {
+    match evidence {
+        Some("same_body") => " (same body)",
+        Some("same_signature") => " (same signature)",
+        _ => "",
+    }
+}
+
+/// A rename's old name, evidence and old path (roadmap D7): each only on a
+/// rename, the old name always `name`, and an old path exactly when the
+/// file moved, other than the notice's path. A rename without them was
+/// recorded before they were kept and is read as it was.
+fn validate_rename_record(
+    notice: &InterfaceNotice,
+    change: &InterfaceChange,
+) -> Result<(), CoreError> {
+    let renamed = change.change == "renamed";
+    let moved = change.evidence.as_deref() == Some(FILE_MOVED);
+    let shaped = change
+        .before_name
+        .as_ref()
+        .is_none_or(|name| renamed && *name == change.name)
+        && change
+            .evidence
+            .as_deref()
+            .is_none_or(|evidence| renamed && RENAME_EVIDENCE.contains(&evidence))
+        && match &change.before_path {
+            Some(path) => moved && *path != notice.path,
+            None => !moved,
+        }
+        && (!change.private || moved);
+    if !shaped {
+        return Err(error(
+            "invalid_notice",
+            "A rename's `before_name` is its name, its `evidence` is `same_body`, `same_signature` or `file_moved`, and only `file_moved` has a `before_path`, another file than the notice's, or is `private`",
+        ));
+    }
+    if let Some(path) = &change.before_path {
+        validate_relative_path(path)?;
+    }
+    Ok(())
+}
+
+/// The identifier grammar the index is asked about: an ASCII letter or
+/// underscore, then 2 to 63 ASCII letters, digits or underscores.
+pub fn is_graph_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    (3..=64).contains(&bytes.len())
+        && (bytes[0].is_ascii_alphabetic() || bytes[0] == b'_')
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+}
+
+/// Bounds of a code-context query: 1 to `CONTEXT_NAMES` distinct names in
+/// the identifier grammar, and 1 to `CONTEXT_DEFINITIONS` definitions each.
+pub fn validate_graph_context(names: &[String], limit: u32) -> Result<(), CoreError> {
+    let distinct: BTreeSet<&String> = names.iter().collect();
+    if names.is_empty()
+        || names.len() > CONTEXT_NAMES
+        || distinct.len() != names.len()
+        || !names.iter().all(|name| is_graph_name(name))
+        || !(1..=CONTEXT_DEFINITIONS).contains(&limit)
+    {
+        return Err(error(
+            "invalid_graph_context",
+            "Ask about 1 to 12 distinct names, each 3 to 64 ASCII letters, digits or underscores not starting with a digit, with a limit of 1 to 3 definitions per name",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_alerted(notice_ids: &[String]) -> Result<(), CoreError> {
+    if notice_ids.is_empty() || notice_ids.len() > MAX_CALL_BREAKS {
+        return Err(error(
+            "invalid_alert",
+            "An interface alert names 1 to 8 notices",
+        ));
+    }
+    notice_ids.iter().try_for_each(|id| validate_request_id(id))
+}
+
+/// The notices one briefing or one between-step delivery told: 1 to
+/// `BRIEF_INTERFACE_NOTICES` valid IDs (issue #214).
+fn validate_outlined(path: &str, digest: &str) -> Result<(), CoreError> {
+    validate_relative_path(path)?;
+    if !is_hex_digest(digest, 64) {
+        return Err(error(
+            "invalid_digest",
+            "A file digest must contain exactly 64 hexadecimal characters",
+        ));
+    }
+    Ok(())
+}
+
+/// Whether the session was given the outline of this file version
+/// (roadmap A11).
+pub fn was_outlined(state: &State, session_id: &str, path: &str, digest: &str) -> bool {
+    state.activity.get(session_id).is_some_and(|activity| {
+        activity
+            .outlined
+            .iter()
+            .any(|held| held.path == path && held.digest == digest)
+    })
+}
+
+fn validate_told(notice_ids: &[String]) -> Result<(), CoreError> {
+    if notice_ids.is_empty() || notice_ids.len() > BRIEF_INTERFACE_NOTICES {
+        return Err(error(
+            "invalid_told",
+            "A delivery tells 1 to 4 interface notices",
+        ));
+    }
+    notice_ids.iter().try_for_each(|id| validate_request_id(id))
+}
+
+fn validate_arity(arity: &Arity) -> Result<(), CoreError> {
+    if arity.min > MAX_ARITY
+        || arity
+            .max
+            .is_some_and(|max| max < arity.min || max > MAX_ARITY)
+    {
+        return Err(error(
+            "invalid_notice",
+            "A parameter count is at most 255, and its minimum is at most its maximum",
+        ));
+    }
+    Ok(())
+}
+
+/// The calls of one write check: 1 to `MAX_CALL_SITES`, each in a relative
+/// path, on a line from 1 to 2,000,000, naming 1 to 128 bytes without
+/// control characters, with at most `MAX_ARITY` arguments.
+pub fn validate_calls(calls: &[CallSite]) -> Result<(), CoreError> {
+    let invalid = || {
+        error(
+            "invalid_calls",
+            "A write check names 1 to 64 calls, each in a workspace-relative path, on a line from 1 to 2000000, a name of 1 to 128 bytes without control characters, and at most 255 arguments",
+        )
+    };
+    if calls.is_empty() || calls.len() > MAX_CALL_SITES {
+        return Err(invalid());
+    }
+    for call in calls {
+        validate_relative_path(&call.path).map_err(|_| invalid())?;
+        if !(1..=2_000_000).contains(&call.line)
+            || call.name.is_empty()
+            || call.name.len() > 128
+            || call.name.chars().any(char::is_control)
+            || call.args > MAX_ARITY
+        {
+            return Err(invalid());
+        }
+    }
+    Ok(())
+}
+
+/// Where a notice of another worktree stands against the asking session's
+/// checkout, as Git answers it (issue #217).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Standing {
+    /// The notice's file differs from its worktree's `HEAD`: not committed.
+    Uncommitted,
+    /// Committed on its worktree's branch, in a commit the asking
+    /// checkout's `HEAD` does not contain.
+    Unmerged,
+    /// The asking checkout's `HEAD` contains the commit.
+    Merged,
+}
+
+/// Standings by `(workspace ID, notice ID)`. A notice missing from it, such
+/// as one Git could not answer for in time, keeps the uncommitted rules.
+pub type Standings = BTreeMap<(String, String), Standing>;
+
+/// Notices of other worktrees whose standing one write check asks Git for,
+/// at most.
+pub const MAX_STANDING_QUESTIONS: usize = 8;
+
+/// A notice of another worktree whose standing a write check asks Git for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StandingQuestion {
+    pub workspace_id: String,
+    pub notice_id: String,
+    /// The notice's file, relative to that worktree's root.
+    pub path: String,
+}
+
+/// The notices of other worktrees that `calls` could be alerted to if they
+/// were committed and not merged: those the uncommitted rules would also
+/// keep, and those they leave out only because the change is older than the
+/// briefing horizon or its session has ended. At most
+/// `MAX_STANDING_QUESTIONS`, each workspace's newest first. Usually none, and
+/// then Git is not asked.
+pub fn standing_questions(
+    state: &State,
+    session_id: &str,
+    calls: &[CallSite],
+    now_ms: u64,
+) -> Result<Vec<StandingQuestion>, CoreError> {
+    validate_calls(calls)?;
+    let own = &current_session(state, session_id)?.workspace_id;
+    let mut questions: Vec<StandingQuestion> = Vec::new();
+    for (notice, change, _) in alertable(state, session_id, now_ms, None)? {
+        let asked = questions.iter().any(|question| {
+            question.workspace_id == notice.workspace_id && question.notice_id == notice.notice_id
+        });
+        if notice.workspace_id == *own
+            || asked
+            || !calls.iter().any(|call| call.name == change.name)
+        {
+            continue;
+        }
+        if questions.len() == MAX_STANDING_QUESTIONS {
+            break;
+        }
+        questions.push(StandingQuestion {
+            workspace_id: notice.workspace_id.clone(),
+            notice_id: notice.notice_id.clone(),
+            path: notice.path.clone(),
+        });
+    }
+    Ok(questions)
+}
+
+/// Changes to functions that another session made in this session's
+/// workspace or in another worktree of its repository (issue #194), in this
+/// generation, that this session has not been alerted to: `(notice, change,
+/// the peer)`. A signature change counts only with the new parameter count;
+/// a rename and a removal always count. The session's own workspace first,
+/// each workspace's newest notice first.
+///
+/// An uncommitted change counts within the briefing horizon while its
+/// session is live. Another worktree's change that `standings` says is
+/// committed and not merged into this session's checkout counts whatever
+/// its age and whether or not its session has ended, and one it says is
+/// merged never counts (issue #217). With `standings` `None` (asking which
+/// notices Git should answer for), every other worktree's change counts
+/// as if committed and not merged.
+fn alertable<'a>(
+    state: &'a State,
+    session_id: &str,
+    now_ms: u64,
+    standings: Option<&Standings>,
+) -> Result<Vec<(&'a InterfaceNotice, &'a InterfaceChange, &'a str)>, CoreError> {
+    let me = current_session(state, session_id)?;
+    let alerted = state
+        .activity
+        .get(session_id)
+        .filter(|activity| activity.generation == state.generation)
+        .map(|activity| activity.alerted.as_slice())
+        .unwrap_or(&[]);
+    let live = |peer: &str| {
+        state
+            .sessions
+            .get(peer)
+            .is_some_and(|session| session.generation == state.generation)
+            && state
+                .session_liveness
+                .get(peer)
+                .is_none_or(|liveness| liveness.status != LivenessStatus::Exited)
+            && state
+                .activity
+                .get(peer)
+                .is_none_or(|activity| !activity.ended)
+    };
+    let mut found = Vec::new();
+    let own = state.interface_notices.get(&me.workspace_id);
+    let others = state
+        .interface_notices
+        .iter()
+        .filter(|(workspace_id, _)| {
+            **workspace_id != me.workspace_id
+                && related_workspace(state, &me.workspace_id, workspace_id)
+        })
+        .map(|(_, notices)| notices);
+    for notice in own.into_iter().chain(others).flatten() {
+        let Some(peer) = notice.by_session.as_deref() else {
+            continue;
+        };
+        let standing = if notice.workspace_id == me.workspace_id {
+            Some(Standing::Uncommitted)
+        } else {
+            match standings {
+                None => Some(Standing::Unmerged),
+                Some(standings) => standings
+                    .get(&(notice.workspace_id.clone(), notice.notice_id.clone()))
+                    .copied(),
+            }
+        };
+        let committed = match standing {
+            Some(Standing::Merged) => continue,
+            Some(Standing::Unmerged) => true,
+            Some(Standing::Uncommitted) | None => false,
+        };
+        if notice.generation != state.generation
+            || peer == session_id
+            || alerted.contains(&notice.notice_id)
+            || (!committed
+                && (now_ms.saturating_sub(notice.at_ms) > BRIEF_HORIZON_MS || !live(peer)))
+        {
+            continue;
+        }
+        for change in &notice.changes {
+            let alerts = match change.change.as_str() {
+                "signature_changed" => change.after_arity.is_some(),
+                "renamed" => change.after_name.is_some(),
+                "removed" => true,
+                _ => false,
+            };
+            if alerts && matches!(change.kind.as_str(), "function" | "method") {
+                found.push((notice, change, peer));
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// The names among `calls` that a write check must look up in the index,
+/// by the workspace whose index holds the change: those of a change it
+/// could alert to, and a renamed function's new name. `standings` holds
+/// Git's answers for `standing_questions`. Usually none, and then nothing
+/// is looked up.
+pub fn call_candidates(
+    state: &State,
+    session_id: &str,
+    calls: &[CallSite],
+    standings: &Standings,
+    now_ms: u64,
+) -> Result<BTreeMap<String, BTreeSet<String>>, CoreError> {
+    validate_calls(calls)?;
+    let mut candidates: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (notice, change, _) in alertable(state, session_id, now_ms, Some(standings))? {
+        if calls.iter().any(|call| call.name == change.name) {
+            candidates
+                .entry(notice.workspace_id.clone())
+                .or_default()
+                .extend(
+                    [&change.name]
+                        .into_iter()
+                        .chain(&change.after_name)
+                        .cloned(),
+                );
+        }
+    }
+    Ok(candidates)
+}
+
+/// What one workspace's index holds of a write check's candidate names.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IndexedNames {
+    /// Every definition of a candidate name.
+    pub definitions: Vec<SymbolRef>,
+    /// The index reads every supported file of the workspace at its current
+    /// content (`GraphCoverage::blind_in_scope` is zero).
+    pub complete: bool,
+}
+
+/// The calls a peer's recent change makes wrong, at most `MAX_CALL_BREAKS`,
+/// from notices this session was not alerted to. `current` holds, by
+/// workspace, the index's definitions of every candidate name
+/// (`call_candidates`), and a change counts only while it is still true in
+/// the index of the workspace it was made in, so a notice the index has
+/// moved past is never used, and a notice of a workspace missing from
+/// `current` is not used at all:
+///
+/// - a signature change, while its file holds the new signature; a call
+///   whose count does not fit it breaks;
+/// - a rename, while its file holds the new name's signature and no
+///   definition of the old name is left anywhere; every call of the old
+///   name breaks;
+/// - a removal, while no definition of the name is left anywhere; every
+///   call of it breaks.
+///
+/// "No definition left anywhere" is read from that workspace's index, so a
+/// rename or a removal counts only when it is `complete`. A name moved into
+/// a file not indexed yet, partial or too large is otherwise missing from
+/// `current` without being gone. A change made in another worktree is
+/// judged in that worktree: the session's own checkout still defines the
+/// old name until the branches meet, which is the break being told.
+///
+/// A same-count change is not alerted: calls are matched by name, and
+/// without the argument types at a call site nothing tells a right call
+/// from a wrong one (ADR 0029). `standings` is as for `call_candidates`.
+/// Pure; the caller records the alert.
+pub fn call_breaks(
+    state: &State,
+    session_id: &str,
+    calls: &[CallSite],
+    standings: &Standings,
+    current: &BTreeMap<String, IndexedNames>,
+    now_ms: u64,
+) -> Result<Vec<CallBreak>, CoreError> {
+    validate_calls(calls)?;
+    let own_workspace = &current_session(state, session_id)?.workspace_id;
+    let mut breaks = Vec::new();
+    for (notice, change, peer) in alertable(state, session_id, now_ms, Some(standings))? {
+        let Some(indexed) = current.get(&notice.workspace_id) else {
+            continue;
+        };
+        let gone = |name: &str| {
+            indexed.complete && !indexed.definitions.iter().any(|symbol| symbol.name == name)
+        };
+        let holds = |path: &str, name: &str, signature: &str| {
+            indexed.definitions.iter().any(|symbol| {
+                symbol.path == path && symbol.name == name && symbol.signature == signature
+            })
+        };
+        let worktree = (notice.workspace_id != *own_workspace)
+            .then(|| state.workspaces.get(&notice.workspace_id))
+            .flatten()
+            .map(|workspace| workspace.root.clone());
+        let after = change.after.as_deref().unwrap_or("");
+        // `Some`: a call breaks when its count does not fit; `None`: every
+        // call of the name breaks.
+        let fit: Option<Arity> = match change.change.as_str() {
+            "signature_changed" => match change.after_arity {
+                Some(arity) if holds(&notice.path, &change.name, after) => Some(arity),
+                _ => continue,
+            },
+            "renamed" => match &change.after_name {
+                Some(to) if holds(&notice.path, to, after) && gone(&change.name) => None,
+                _ => continue,
+            },
+            "removed" if gone(&change.name) => None,
+            _ => continue,
+        };
+        for call in calls.iter().filter(|call| {
+            call.name == change.name && fit.is_none_or(|arity| !arity.fits(call.args, call.member))
+        }) {
+            if breaks.len() == MAX_CALL_BREAKS {
+                return Ok(breaks);
+            }
+            breaks.push(CallBreak {
+                notice_id: notice.notice_id.clone(),
+                call: call.clone(),
+                change: change.change.clone(),
+                defined_in: notice.path.clone(),
+                worktree: worktree.clone(),
+                by_session: peer.to_owned(),
+                before: change.before.clone().unwrap_or_default(),
+                after: after.to_owned(),
+                after_name: change.after_name.clone(),
+                before_arity: change.before_arity,
+                after_arity: change.after_arity,
+                age_ms: now_ms.saturating_sub(notice.at_ms),
+            });
+        }
+    }
+    Ok(breaks)
+}
+
+// ---- end domain: notices ----
+
+// ---- domain: sessions ----
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct Stamp {
-    pub at_ms: u64,
+pub struct Workspace {
+    pub workspace_id: String,
+    pub root: String,
+    /// Existing workspace IDs whose distinct nested worktree boundary was
+    /// verified by the filesystem adapter when this workspace was registered.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub verified_overlaps: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Session {
+    pub session_id: String,
+    pub workspace_id: String,
+    pub generation: u64,
+    /// The session that started this one, for a host subagent: it shares the
+    /// parent's conversation, so the two are related, not strangers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    /// Started without a person at the terminal (`claude -p`). A headless
+    /// session takes a handoff only under the rule in `takes_handoff`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub headless: bool,
+}
+
+/// An OS process incarnation, not merely a recyclable process number. The
+/// adapter's start token includes both OS boot and process start identity.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessIdentity {
+    pub pid: u32,
+    pub start_token: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LivenessStatus {
+    Alive,
+    Exited,
+    Unknown,
+}
+
+/// Point-in-time process evidence. It neither reattaches a session nor changes
+/// its admission authority. The timestamp is meaningful within its generation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SessionLiveness {
+    pub session_id: String,
+    pub process: ProcessIdentity,
+    pub status: LivenessStatus,
+    pub observed_at_ms: u64,
     pub generation: u64,
 }
 
-/// Something a person or an agent asked LangSpan to remember about a
-/// repository. It outlives sessions and daemon restarts until forgotten.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct Note {
-    pub note_id: String,
+pub struct Intent {
+    pub session_id: String,
     pub workspace_id: String,
-    /// The session that recorded it, when one did.
-    pub author: Option<String>,
-    pub text: String,
-    /// Files it is about. Empty means the whole workspace.
     pub paths: Vec<String>,
-    /// The definition it is about (roadmap E1). Absent for a note about
-    /// files or the workspace, and for every note recorded before anchors.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub anchor: Option<NoteAnchor>,
-    /// Whether that definition is still as it was; present exactly when
-    /// `anchor` is.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub anchor_state: Option<AnchorState>,
-    /// Up to `MAX_TAGS`, each once, sorted.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tags: Vec<String>,
+    pub summary: String,
+    pub generation: u64,
 }
 
-/// Who a message is for.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum Recipient {
-    /// One session of the workspace.
-    Session { session_id: String },
-    /// Every session of the workspace except the sender, each once.
-    Everyone {},
-    /// A handoff: the first other session of the workspace that starts or
-    /// is prompted after it was sent.
-    NextSession {},
-}
-
-/// A short line from one session, or from the owner, to other sessions of
-/// the same workspace. Held until each recipient has acknowledged it; the
-/// event log keeps the history. Its text is data, never instructions.
+/// Immutable identity of one native tool call. The adapter hashes canonical
+/// semantic input so receipts can reject changed content without storing it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct Message {
-    pub message_id: String,
-    pub workspace_id: String,
-    /// The sending session; `None` for the owner.
-    pub from: Option<String>,
-    pub to: Recipient,
-    pub text: String,
-    /// Files it is about. May be empty.
-    pub paths: Vec<String>,
-    /// Sessions that have acknowledged it. A held message lists them only
-    /// for everyone; the history kept for withdrawal lists every reader.
+pub struct ToolIdentity {
+    pub operation_id: String,
+    pub source: String,
+    pub tool: String,
+    pub input_digest: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TouchedPath {
+    pub path: String,
+    pub at_ms: u64,
+}
+
+/// What one session was last seen doing. Derived from recorded events only;
+/// times are meaningful within `generation`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SessionActivity {
+    pub session_id: String,
+    pub generation: u64,
+    pub last_ms: u64,
+    /// The last recorded hook run of any kind that reached the daemon for
+    /// this session (a read, a failed call, a batch, a stop): at most one
+    /// `SessionSeen` per `SESSION_SEEN_INTERVAL_MS`. Zero when none was.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub last_hook_ms: u64,
+    /// The owner's own words for the current task, capped by the adapter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    /// Most recent successful edits, newest first, at most `MAX_TOUCHED`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub acknowledged: Vec<String>,
-    /// Withdrawn by its sender or the owner: no longer delivered, and each
-    /// session that had received it is told once to disregard it.
+    pub touched: Vec<TouchedPath>,
+    /// File versions this session last read or wrote, newest first, at most
+    /// `MAX_KNOWN`. A path that falls off the end is unknown again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub known: Vec<KnownVersion>,
+    /// Signature of the last briefing delivered to this session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub briefed: Option<String>,
+    /// Keys of the briefing items this session was last told, in briefing
+    /// order, at most `MAX_TOLD` (issue #222). A briefing asked for with
+    /// `changes_only` leaves out an item whose key is here. An item past
+    /// the bound is not remembered, so it is told again: never dropped.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub told: Vec<u64>,
+    /// When a briefing last placed items in this session's context: a
+    /// safety item is told again when the session read or edited one of
+    /// its files after this.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub told_at_ms: u64,
+    /// The context LangSpan's hooks added to this session in this
+    /// generation, as they measured it (issue #222).
+    #[serde(default, skip_serializing_if = "ContextUse::is_empty")]
+    pub context: ContextUse,
+    /// Interface notices this session was alerted to at a write, newest
+    /// first, at most `MAX_ALERTED`. Each is alerted once (ADR 0029).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alerted: Vec<String>,
+    /// Interface notices told to this session by a briefing or between
+    /// steps, newest first, at most `MAX_TOLD_NOTICES` (issue #214).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notices_told: Vec<ToldNotice>,
+    /// Replies the session finished in this generation: a between-step
+    /// watcher started in one turn stops once this moves (issue #214).
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub stops: u64,
+    /// The host's IDs of the prompts whose replies finished in this
+    /// generation, newest first, at most `MAX_STOPPED_PROMPTS`: a watcher
+    /// started for one of them has no turn left (issue #214).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stopped_prompts: Vec<String>,
+    /// In-flight signatures told to this session, newest first, at most
+    /// `MAX_INFLIGHT_TOLD` (roadmap C7).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inflight_told: Vec<String>,
+    /// The host reported the session over. Its recent edits stay relevant to
+    /// peers until they age out; they are labelled as a finished session's.
     #[serde(default, skip_serializing_if = "is_false")]
-    pub retracted: bool,
+    pub ended: bool,
+    /// The session wrote a file since its last tool batch or stop: the next
+    /// one is a point to run the workspace's automatic check.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub wrote_since_boundary: bool,
+    /// Where the definitions named in the session's last prompt are, from
+    /// the source index (roadmap C8). Paths only; never the prompt's words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_targets: Option<PromptTargets>,
+    /// Where the session was last seen looking: files it read, the path
+    /// scope of its searches, and paths its shell commands named. Newest
+    /// first, one entry per path, at most `MAX_LOOKING` (roadmap A13). Paths
+    /// only: never a search pattern or a command's text.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub looking: Vec<LookedPath>,
+    /// Digests of the leading non-empty lines of the session's last prompt,
+    /// at most `MAX_PROMPT_LINES`: compared with live peers' to tell prompts
+    /// started from one template apart (issue #114). Never the words.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub line_digests: Vec<String>,
+    /// File versions whose whole read this session was given an outline
+    /// for instead (roadmap A11), newest first, one per path, at most
+    /// `MAX_OUTLINED`. Its next whole read of the same version goes through.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outlined: Vec<OutlinedRead>,
 }
+
+/// A file version a session was given an outline of (roadmap A11).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct OutlinedRead {
+    pub path: String,
+    pub digest: String,
+}
+
+/// How many outlined file versions a session keeps. One past it is
+/// forgotten, and its next whole read is outlined again.
+pub const MAX_OUTLINED: usize = 64;
+
+/// One definition in a file's outline (roadmap A11): what the source index
+/// holds, without its signature or any other text of the file.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OutlineEntry {
+    pub name: String,
+    pub kind: String,
+    /// One-based, inclusive.
+    pub line: u32,
+    pub end_line: u32,
+    pub exported: bool,
+}
+
+/// How a session came to look at a path, for presence (roadmap A13).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum PresenceKind {
+    /// The host reported a completed read of the file.
+    Read,
+    /// A search (Claude Code's or Cursor's `Grep`) scoped to this path.
+    Search,
+    /// A shell command named this existing path as an operand.
+    Shell,
+}
+
+/// One path a session looked at, and when.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LookedPath {
+    pub path: String,
+    pub kind: PresenceKind,
+    pub at_ms: u64,
+}
+
+/// One path a peer was looking at, as a briefing shows it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PresencePath {
+    pub path: String,
+    pub kind: PresenceKind,
+    pub age_s: u64,
+}
+
+/// A session's own presence setting, kept only when it differs from the
+/// default (shown, `PRESENCE_WINDOW_MS`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PresenceSetting {
+    /// False: this session's reads, searches and shell paths are never
+    /// shown to peers (`--presence off`).
+    pub shown: bool,
+    /// How old a peer's presence this session is still shown.
+    pub window_ms: u64,
+}
+
+/// Looked-at paths kept per session.
+pub const MAX_LOOKING: usize = 16;
+/// Looked-at paths shown per peer, and named by one presence observation.
+pub const PRESENCE_PATHS: usize = 4;
+/// Presence older than this is not shown, unless the asking session chose
+/// another window (at most `BRIEF_HORIZON_MS`).
+pub const PRESENCE_WINDOW_MS: u64 = 10 * 60 * 1000;
+/// The shortest presence window a session can choose.
+pub const MIN_PRESENCE_WINDOW_MS: u64 = 60 * 1000;
+
+/// Briefing item keys remembered per session, at most.
+pub const MAX_TOLD: usize = 256;
+
+/// The context a session's hooks added to it: every briefing, code section
+/// and mid-turn note, in bytes of text placed in its context.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ContextUse {
+    /// Turns: a session start or resume, and each prompt.
+    pub turns: u64,
+    /// Bytes added over those turns, mid-turn notes included.
+    pub bytes: u64,
+    /// The most one turn added, its own context and the notes after it.
+    #[serde(default)]
+    pub largest_turn_bytes: u64,
+    /// Bytes added since the current turn began.
+    #[serde(default)]
+    pub turn_bytes: u64,
+}
+
+/// Bytes of text per token, for an estimate only: English prose and code
+/// average about four bytes per token in current models' tokenizers.
+pub const BYTES_PER_TOKEN: u64 = 4;
+
+/// The most one context record may name: far above any hook's cap.
+pub const MAX_CONTEXT_RECORD_BYTES: u64 = 1024 * 1024;
+
+impl ContextUse {
+    pub fn is_empty(&self) -> bool {
+        self.turns == 0 && self.bytes == 0
+    }
+    /// Count `bytes` added, at the start of a new turn when `turn`.
+    fn add(&mut self, bytes: u64, turn: bool) {
+        if turn {
+            self.turns = self.turns.saturating_add(1);
+            self.turn_bytes = 0;
+        }
+        self.bytes = self.bytes.saturating_add(bytes);
+        self.turn_bytes = self.turn_bytes.saturating_add(bytes);
+        self.largest_turn_bytes = self.largest_turn_bytes.max(self.turn_bytes);
+    }
+    /// Bytes per turn on average, rounded down; zero before the first turn.
+    pub fn bytes_per_turn(&self) -> u64 {
+        self.bytes.checked_div(self.turns).unwrap_or(0)
+    }
+    /// An estimate of `bytes` in tokens (`BYTES_PER_TOKEN`), rounded up.
+    pub fn estimated_tokens(bytes: u64) -> u64 {
+        bytes.div_ceil(BYTES_PER_TOKEN)
+    }
+}
+
+impl SessionActivity {
+    /// When the session was last known to be working: its newest edit,
+    /// prompt or recorded hook run. Whether it is current compares this, not
+    /// `last_ms` alone, with `BRIEF_HORIZON_MS` (roadmap J12).
+    pub fn last_seen_ms(&self) -> u64 {
+        self.last_ms.max(self.last_hook_ms)
+    }
+}
+
+/// A hook run is recorded as `SessionSeen` at most this often per session,
+/// so a burst of tool calls writes one event, not one per call.
+pub const SESSION_SEEN_INTERVAL_MS: u64 = 30 * 1000;
+
+/// The session a request is made on behalf of, when it is that session at
+/// work: every request a hook run sends for it, and the same requests from
+/// the CLI or MCP. A look from outside (`Brief` without `deliver`, a status
+/// read) and the end of a session are not. The daemon records a
+/// `SessionSeen` after each such request (roadmap J12).
+pub fn acting_session(command: &Command) -> Option<&str> {
+    match command {
+        Command::SessionRegister { session_id, .. }
+        | Command::ObserveSessionLiveness { session_id, .. }
+        | Command::IntentSet { session_id, .. }
+        | Command::IntentEnd { session_id }
+        | Command::Admit { session_id, .. }
+        | Command::AdmitTool { session_id, .. }
+        | Command::ObserveSource { session_id, .. }
+        | Command::ObservePresence { session_id, .. }
+        | Command::SetPresence { session_id, .. }
+        | Command::AckMessage { session_id, .. }
+        | Command::Handoff { session_id, .. }
+        | Command::RecordRefusal { session_id, .. }
+        | Command::RecordWait { session_id, .. }
+        | Command::CheckCalls { session_id, .. }
+        | Command::Complete { session_id, .. }
+        | Command::Observe { session_id, .. }
+        | Command::ObserveTool { session_id, .. }
+        | Command::SessionPrompt { session_id, .. }
+        | Command::SetPromptTargets { session_id, .. }
+        | Command::SessionStop { session_id, .. }
+        | Command::ObserveToolBatch { session_id, .. }
+        | Command::Adopt { session_id, .. }
+        | Command::Brief {
+            session_id,
+            deliver: true,
+            ..
+        } => Some(session_id),
+        _ => None,
+    }
+}
+
+/// Whether a hook run of `session_id` at `now_ms` is recorded: the session
+/// is current and its last record is at least `SESSION_SEEN_INTERVAL_MS`
+/// old, or there is none in this generation.
+pub fn session_seen_due(state: &State, session_id: &str, now_ms: u64) -> bool {
+    if current_session(state, session_id).is_err() {
+        return false;
+    }
+    let last = state
+        .activity
+        .get(session_id)
+        .filter(|activity| activity.generation == state.generation)
+        .map_or(0, |activity| activity.last_hook_ms);
+    last == 0 || now_ms.saturating_sub(last) >= SESSION_SEEN_INTERVAL_MS
+}
+
+/// At most this many leading prompt lines are compared by digest.
+pub const MAX_PROMPT_LINES: usize = 32;
+/// Hex characters in one prompt line digest, at most.
+pub const MAX_PROMPT_LINE_DIGEST: usize = 64;
+
+/// The definition paths a prompt's code briefing found, and when. Compared
+/// with other sessions' targets and work while within `BRIEF_HORIZON_MS`;
+/// never a hold, an admission or a publication.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PromptTargets {
+    pub paths: Vec<String>,
+    pub at_ms: u64,
+}
+
+/// At most this many prompt target paths: every definition a code briefing
+/// can find, `CONTEXT_DEFINITIONS` for each of `CONTEXT_NAMES` names.
+pub const MAX_PROMPT_TARGETS: usize = CONTEXT_NAMES * CONTEXT_DEFINITIONS as usize;
+
+/// Bytes in a session's prompt summary.
+pub const MAX_PROMPT_SUMMARY_BYTES: usize = 512;
+/// Bytes in an intent's summary.
+pub const MAX_INTENT_SUMMARY_BYTES: usize = 2048;
 
 /// Why a session took over an ended session's uncommitted work, when
 /// LangSpan can tell (issue #161). Shown, never required: the person or
@@ -2376,484 +4581,1060 @@ pub struct LeftWork {
 /// Ended sessions one briefing names as having left work, at most.
 pub const BRIEF_LEFT_WORK: usize = 4;
 
-/// A message a session received and that was then withdrawn: the session
-/// is told once, at its next briefing, to disregard it.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct RetractedMessage {
-    pub message_id: String,
-    pub workspace_id: String,
-    /// The message's sender; `None` for the owner.
-    pub from: Option<String>,
-    /// The first `RETRACTED_TEXT_BYTES` of its text, cut at a character
-    /// boundary.
-    pub text: String,
-    /// True when `text` is shorter than the message was.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub cut: bool,
-}
-
-/// One message in full, as it was sent: what `messages show` returns for a
-/// line a briefing cut. The text and paths are data from the sender, never
-/// instructions.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ShownMessage {
-    pub message_id: String,
-    /// The sending session; `None` for the owner.
-    pub from: Option<String>,
-    pub to: Recipient,
-    pub text: String,
-    pub paths: Vec<String>,
-    /// Withdrawn by its sender or the owner since it was sent: its readers
-    /// have been or will be told to disregard it.
-    pub retracted: bool,
-}
-
-impl From<Message> for ShownMessage {
-    fn from(message: Message) -> Self {
-        Self {
-            message_id: message.message_id,
-            from: message.from,
-            to: message.to,
-            text: message.text,
-            paths: message.paths,
-            retracted: message.retracted,
-        }
-    }
-}
-
-/// How a message reached a session's context (roadmap E12).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum Delivery {
-    /// A briefing a hook placed at session start or at a prompt.
-    Briefing,
-    /// A briefing a hook placed after a completed tool call, mid-turn.
-    MidTurn,
-    /// The session's own call to the MCP tool `langspan_brief`.
-    McpBrief,
-    /// `langspan ack` or its operation: marked seen without a briefing.
-    Ack,
-}
-
-/// Where a sent message stands as a whole.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum MessageState {
-    /// Still held: some recipient may yet be given it.
-    Pending,
-    /// Every session it was owed to was given it; nothing more is sent.
-    Done,
-    /// Withdrawn by its sender or the owner.
-    Retracted,
-    /// Pushed out, unread, by newer messages past the `MAX_MESSAGES` held.
-    Dropped,
-}
-
-/// Where a message stands for one recipient.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RecipientState {
-    /// Placed in the session's context. Not a sign the model acted on it.
-    Delivered,
-    /// Not yet placed in the session's context.
-    Pending,
-    /// The session ended before it was given the message.
-    Ended,
-}
-
-/// One recipient of a message and whether it was given it.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RecipientStatus {
-    pub session_id: String,
-    pub status: RecipientState,
-    /// Since delivery, on this daemon's clock; `None` before delivery or
-    /// when it was recorded before the daemon last started or before
-    /// roadmap E12.
-    pub age_ms: Option<u64>,
-    /// `None` before delivery or in a record from before roadmap E12.
-    pub via: Option<Delivery>,
-}
-
-/// Recipients a status lists at most; the rest are counted.
-pub const STATUS_RECIPIENTS: usize = 64;
-
-/// What `delivered` means, carried in every status reply.
-pub const DELIVERED_MEANS: &str =
-    "Delivered means placed in the session's context, not that it acted on it.";
-
-/// Who was given a sent message: what `messages status` answers its sender
-/// (roadmap E12). Read-only: asking records nothing.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct MessageStatus {
-    pub message_id: String,
-    /// The sending session; `None` for the owner.
-    pub from: Option<String>,
-    pub to: Recipient,
-    /// Since it was sent, on this daemon's clock; `None` when that is not
-    /// known (sent before the daemon last started, or the record is gone).
-    pub sent_age_ms: Option<u64>,
-    pub state: MessageState,
-    /// Delivered sessions first, in delivery order, then the rest by ID; at
-    /// most `STATUS_RECIPIENTS`. A pending handoff has none: no session has
-    /// taken it.
-    pub recipients: Vec<RecipientStatus>,
-    /// Recipients past `STATUS_RECIPIENTS`, counted and not listed.
-    #[serde(default, skip_serializing_if = "is_zero_u64")]
-    pub more_recipients: u64,
-    /// Part of the message's record is no longer in the event log
-    /// (retention removed it): the answer is what remains.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub partial: bool,
-    /// `DELIVERED_MEANS`.
-    pub delivered_means: String,
-}
-
-/// A message's sent record as the event log holds it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SentRecord {
-    pub message: Message,
-    pub at_ms: Option<u64>,
-    pub generation: Option<u64>,
-}
-
-/// One `message_acknowledged` record from the event log.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AckRecord {
-    pub session_id: String,
-    pub via: Option<Delivery>,
-    pub at_ms: Option<u64>,
-    pub generation: Option<u64>,
-}
-
-/// The message `message_id` of the workspace, or with no ID the newest one
-/// `from` sent (the owner's when `from` is `None`), for a status query. The
-/// workspace and IDs are validated here; the message's own records are
-/// read from the event log by the caller.
-pub fn status_message_id(
-    state: &State,
-    workspace_id: &str,
-    from: Option<&str>,
-    message_id: Option<&str>,
-) -> Result<String, CoreError> {
-    validate_known_workspace(state, workspace_id)?;
-    if let Some(from) = from {
-        validate_id(from, "session ID")?;
-    }
-    match message_id {
-        Some(id) => {
-            validate_request_id(id)?;
-            Ok(id.to_owned())
-        }
-        None => sent_message(state, workspace_id, from, None)
-            .map(|message| message.message_id.clone())
-            .ok_or_else(|| {
-                error(
-                    "unknown_message",
-                    "This sender has none of the latest 64 messages sent in this workspace; ask about an older one by its ID",
-                )
-            }),
-    }
-}
-
-/// Who was given message `message_id`: from the state's held messages and
-/// history, and from its records in the event log, `sent` (absent when not
-/// kept) and `acks` (in log order, after `sent`). `retracted` says a later
-/// `message_retracted` record exists. `None` when neither the state nor
-/// the log knows the message.
-pub fn message_status(
-    state: &State,
-    workspace_id: &str,
-    message_id: &str,
-    sent: Option<&SentRecord>,
-    acks: &[AckRecord],
-    retracted: bool,
-    now_ms: u64,
-) -> Option<MessageStatus> {
-    fn find<'a>(
-        lists: &'a BTreeMap<String, Vec<Message>>,
-        workspace_id: &str,
-        message_id: &str,
-    ) -> Option<&'a Message> {
-        lists
-            .get(workspace_id)
-            .and_then(|list| list.iter().find(|message| message.message_id == message_id))
-    }
-    let held = find(&state.messages, workspace_id, message_id);
-    let record = find(&state.message_history, workspace_id, message_id);
-    let message = sent.map(|sent| &sent.message).or(record).or(held)?.clone();
-    let age = |at_ms: Option<u64>, generation: Option<u64>| match (at_ms, generation) {
-        (Some(at_ms), Some(generation)) if generation == state.generation => {
-            Some(now_ms.saturating_sub(at_ms))
-        }
-        _ => None,
-    };
-    // Every reader the log and the state know, first delivery first.
-    let mut delivered: Vec<RecipientStatus> = Vec::new();
-    for ack in acks {
-        if !delivered
-            .iter()
-            .any(|seen| seen.session_id == ack.session_id)
-        {
-            delivered.push(RecipientStatus {
-                session_id: ack.session_id.clone(),
-                status: RecipientState::Delivered,
-                age_ms: age(ack.at_ms, ack.generation),
-                via: ack.via,
-            });
-        }
-    }
-    for reader in record
-        .into_iter()
-        .chain(held)
-        .flat_map(|message| &message.acknowledged)
+fn validate_line_digests(digests: &[String]) -> Result<(), CoreError> {
+    if digests.len() > MAX_PROMPT_LINES
+        || digests.iter().any(|digest| {
+            digest.is_empty()
+                || digest.len() > MAX_PROMPT_LINE_DIGEST
+                || !digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
     {
-        if !delivered.iter().any(|seen| &seen.session_id == reader) {
-            delivered.push(RecipientStatus {
-                session_id: reader.clone(),
-                status: RecipientState::Delivered,
-                age_ms: None,
-                via: None,
-            });
-        }
+        return Err(error(
+            "invalid_line_digests",
+            &format!(
+                "Prompt line digests are at most {MAX_PROMPT_LINES} lower-case hex strings of 1 to {MAX_PROMPT_LINE_DIGEST} characters"
+            ),
+        ));
     }
-    let dropped = state
-        .dropped_messages
-        .get(workspace_id)
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
-    let mut partial = sent.is_none();
-    let message_state = if retracted || record.is_some_and(|record| record.retracted) {
-        MessageState::Retracted
-    } else if held.is_some() {
-        MessageState::Pending
-    } else if record.is_some() {
-        // The history outlasts every drop: a message the cap pushed out of
-        // the held list was already out of the history.
-        MessageState::Done
-    } else if dropped.iter().any(|id| id == message_id) {
-        MessageState::Dropped
-    } else {
-        match message.to {
-            // These leave the held list only when taken, withdrawn or dropped.
-            Recipient::Session { .. } | Recipient::NextSession {} => {
-                if delivered.is_empty() {
-                    MessageState::Dropped
-                } else {
-                    MessageState::Done
-                }
-            }
-            Recipient::Everyone {} => {
-                // The drop list keeps the latest `MAX_MESSAGES` drops; once
-                // full, an older drop cannot be told from a completion.
-                if dropped.len() >= MAX_MESSAGES {
-                    partial = true;
-                }
-                MessageState::Done
-            }
-        }
+    Ok(())
+}
+
+/// How many leading lines of `digests` the latest prompt of another live
+/// session in `session_id`'s checkout or repository begins with, at most:
+/// a session registered in this generation, not ended and not known to have
+/// exited. Zero when the session is unknown or nobody shares a line.
+fn shared_prompt_lines(state: &State, session_id: &str, digests: &[String]) -> u32 {
+    let Some(me) = state.sessions.get(session_id) else {
+        return 0;
     };
-    let ended = |session_id: &str| {
+    let repository = |workspace_id: &str| {
         state
-            .activity
+            .workspace_git
+            .get(workspace_id)
+            .map(|git| git.repository_id.as_str())
+    };
+    let mine = repository(&me.workspace_id);
+    state
+        .sessions
+        .values()
+        .filter(|peer| peer.session_id != session_id && peer.generation == state.generation)
+        .filter(|peer| {
+            peer.workspace_id == me.workspace_id
+                || (mine.is_some() && repository(&peer.workspace_id) == mine)
+        })
+        .filter(|peer| {
+            state
+                .session_liveness
+                .get(&peer.session_id)
+                .is_none_or(|liveness| liveness.status != LivenessStatus::Exited)
+        })
+        .filter_map(|peer| state.activity.get(&peer.session_id))
+        .filter(|activity| activity.generation == state.generation && !activity.ended)
+        .map(|activity| {
+            digests
+                .iter()
+                .zip(&activity.line_digests)
+                .take_while(|(mine, theirs)| mine == theirs)
+                .count()
+        })
+        .max()
+        .unwrap_or(0) as u32
+}
+
+/// Whether a registered session is over: the host reported it ended, or its
+/// process is known to have exited. A session LangSpan cannot tell is over
+/// (killed while its liveness was unknown) counts as live.
+pub(crate) fn finished(state: &State, session_id: &str) -> bool {
+    state
+        .activity
+        .get(session_id)
+        .is_some_and(|activity| activity.ended)
+        || state
+            .session_liveness
             .get(session_id)
-            .is_some_and(|activity| activity.ended)
-    };
-    let mut waiting: Vec<RecipientStatus> = Vec::new();
-    let mut not_given = |session_id: &str| {
-        if !delivered.iter().any(|seen| seen.session_id == session_id) {
-            waiting.push(RecipientStatus {
-                session_id: session_id.to_owned(),
-                status: if ended(session_id) {
-                    RecipientState::Ended
-                } else {
-                    RecipientState::Pending
-                },
-                age_ms: None,
-                via: None,
-            });
-        }
-    };
-    match &message.to {
-        Recipient::Session { session_id } => not_given(session_id),
-        // Each current session it is still owed to. Once done, a session
-        // that joined later was never owed it.
-        Recipient::Everyone {} if message_state != MessageState::Done => {
-            for session in state.sessions.values() {
-                if session.workspace_id == workspace_id
-                    && session.generation == state.generation
-                    && message.from.as_deref() != Some(session.session_id.as_str())
-                {
-                    not_given(&session.session_id);
-                }
-            }
-        }
-        Recipient::Everyone {} | Recipient::NextSession {} => {}
+            .is_some_and(|liveness| liveness.status == LivenessStatus::Exited)
+}
+
+/// Sessions a briefing's `left` may name, at most.
+pub const MAX_LEFT: usize = 64;
+
+/// `session_id` takes over `from`'s uncommitted work (issue #161).
+fn adopt(state: &State, session_id: &str, from: &str, now_ms: u64) -> Result<Decision, CoreError> {
+    // The adopter is the caller, at work: registered, perhaps not yet again
+    // since the coordinator restarted.
+    let me = known_session(state, session_id)?;
+    let theirs = known_session(state, from)?;
+    if session_id == from {
+        return Err(error(
+            "invalid_adoption",
+            "A session cannot adopt its own work; name the ended session whose work to take over",
+        ));
     }
-    waiting.sort_by(|left, right| left.session_id.cmp(&right.session_id));
-    let mut recipients = delivered;
-    recipients.append(&mut waiting);
-    let more_recipients = recipients.len().saturating_sub(STATUS_RECIPIENTS) as u64;
-    recipients.truncate(STATUS_RECIPIENTS);
-    Some(MessageStatus {
-        message_id: message.message_id,
-        from: message.from,
-        to: message.to,
-        sent_age_ms: sent.and_then(|sent| age(sent.at_ms, sent.generation)),
-        state: message_state,
-        recipients,
-        more_recipients,
-        partial,
-        delivered_means: DELIVERED_MEANS.into(),
+    if finished(state, session_id) {
+        return Err(error(
+            "session_ended",
+            "This session has ended; adopt from the session that continues the task",
+        ));
+    }
+    if theirs.workspace_id != me.workspace_id {
+        return Err(error(
+            "other_workspace",
+            &format!(
+                "That session worked in workspace {:?}, not this session's {:?}; only an ended session's work in the same checkout can be adopted",
+                theirs.workspace_id, me.workspace_id
+            ),
+        ));
+    }
+    if !finished(state, from) {
+        return Err(error(
+            "session_live",
+            "That session has not ended: LangSpan has neither its end nor its process's exit. Ask it to commit its own work, or adopt once it has ended",
+        ));
+    }
+    // An adopter that ended after its adoption was recorded, before its
+    // adapter credited the lines, leaves them under the session it adopted;
+    // that session cannot be adopted again. Passing the adoption on credits
+    // them too: every session whose adoptions lead to `from`. A session that
+    // has resumed since it was adopted owns what it writes again, so it is
+    // left out, and so is what its own adoptions lead to.
+    let mut earlier: Vec<String> = Vec::new();
+    let mut pending = vec![from.to_owned()];
+    while let Some(adopter) = pending.pop() {
+        for adoption in state.adoptions.values() {
+            if adoption.session_id != adopter
+                || adoption.workspace_id != me.workspace_id
+                || adoption.from == from
+                || earlier.contains(&adoption.from)
+                || !finished(state, &adoption.from)
+            {
+                continue;
+            }
+            if earlier.len() >= MAX_LEFT {
+                return Err(error(
+                    "adoption_chain",
+                    &format!(
+                        "More than {MAX_LEFT} earlier adoptions lead to that session; commit part of the work, then adopt again"
+                    ),
+                ));
+            }
+            earlier.push(adoption.from.clone());
+            pending.push(adoption.from.clone());
+        }
+    }
+    earlier.sort();
+    // Ending a session does not end its subagents: one still running keeps
+    // its lines.
+    let live: Vec<String> = state
+        .sessions
+        .values()
+        .filter(|session| {
+            session.workspace_id == me.workspace_id
+                && [from]
+                    .into_iter()
+                    .chain(earlier.iter().map(String::as_str))
+                    .any(|source| {
+                        session.parent.as_deref() == Some(source)
+                            || session
+                                .session_id
+                                .strip_prefix(source)
+                                .is_some_and(|rest| rest.starts_with('.'))
+                    })
+                && !finished(state, &session.session_id)
+        })
+        .map(|session| session.session_id.clone())
+        .collect();
+    if live.len() > MAX_LEFT {
+        return Err(error(
+            "session_live",
+            &format!(
+                "More than {MAX_LEFT} subagents of that session have not ended; adopt once they have"
+            ),
+        ));
+    }
+    // A subagent another session adopted is that session's to credit, even
+    // when its adapter has not yet rewritten the journal.
+    let mut kept: Vec<String> = state
+        .adoptions
+        .values()
+        .filter(|adoption| {
+            adoption.workspace_id == me.workspace_id
+                && adoption.session_id != session_id
+                && !earlier.contains(&adoption.from)
+                && [from]
+                    .into_iter()
+                    .chain(earlier.iter().map(String::as_str))
+                    .any(|source| {
+                        adoption
+                            .from
+                            .strip_prefix(source)
+                            .is_some_and(|rest| rest.starts_with('.'))
+                    })
+        })
+        .map(|adoption| adoption.from.clone())
+        .collect();
+    kept.sort();
+    if kept.len() > MAX_LEFT {
+        return Err(error(
+            "adoption_chain",
+            &format!(
+                "Other sessions adopted more than {MAX_LEFT} subagents of that session; commit part of the work, then adopt again"
+            ),
+        ));
+    }
+    let root = state
+        .workspaces
+        .get(&me.workspace_id)
+        .map(|workspace| workspace.root.clone())
+        .unwrap_or_default();
+    if let Some(adoption) = state.adoptions.get(from) {
+        if adoption.session_id != session_id {
+            return Err(error(
+                "already_adopted",
+                &format!(
+                    "Session {} already adopted that session's work; adopt from {} once it has ended",
+                    adoption.session_id, adoption.session_id
+                ),
+            ));
+        }
+        return Ok(Decision {
+            events: Vec::new(),
+            outcome: Outcome::Adopted {
+                adoption: adoption.clone(),
+                root,
+                recorded: false,
+                live,
+                earlier,
+                kept,
+            },
+        });
+    }
+    let adoption = Adoption {
+        from: from.to_owned(),
+        session_id: session_id.to_owned(),
+        workspace_id: me.workspace_id.clone(),
+        reason: adopt_reason(state, &me.workspace_id, session_id, from),
+        at_ms: now_ms,
+        generation: state.generation,
+    };
+    Ok(Decision {
+        events: vec![Event::SessionAdopted {
+            adoption: adoption.clone(),
+        }],
+        outcome: Outcome::Adopted {
+            adoption,
+            root,
+            recorded: true,
+            live,
+            earlier,
+            kept,
+        },
     })
 }
 
-/// The observer could not complete a scan of a workspace. Until one
-/// completes, disk facts, check staleness marks and the index are as of the
-/// last complete scan.
+/// Why `session_id` may be continuing `from`'s task, newest evidence
+/// first: a message `from` sent it (addressed to it, or a handoff it took),
+/// then the same task line.
+fn adopt_reason(
+    state: &State,
+    workspace_id: &str,
+    session_id: &str,
+    from: &str,
+) -> Option<AdoptReason> {
+    let held = state.messages.get(workspace_id).into_iter().flatten();
+    let history = state
+        .message_history
+        .get(workspace_id)
+        .into_iter()
+        .flatten();
+    let handoff = held.chain(history).find(|message| {
+        message.from.as_deref() == Some(from)
+            && !message.retracted
+            && match &message.to {
+                Recipient::Session { session_id: to } => to == session_id,
+                Recipient::NextSession {} => {
+                    message.acknowledged.iter().any(|taker| taker == session_id)
+                }
+                Recipient::Everyone {} => false,
+            }
+    });
+    if let Some(message) = handoff {
+        return Some(AdoptReason::Handoff {
+            message_id: message.message_id.clone(),
+        });
+    }
+    let task = |id: &str| {
+        state
+            .activity
+            .get(id)
+            .and_then(|activity| activity.summary.as_deref())
+    };
+    (task(from).is_some() && task(from) == task(session_id)).then_some(AdoptReason::SameTask {})
+}
+
+/// Of `left`, the sessions a briefing names as having left uncommitted
+/// work: of `session_id`'s workspace, over, not adopted, and neither the
+/// session nor one of its own subagents.
+fn left_work(state: &State, session_id: &str, left: &[String]) -> Result<Vec<LeftWork>, CoreError> {
+    if left.len() > MAX_LEFT {
+        return Err(error(
+            "invalid_left",
+            &format!("A briefing names at most {MAX_LEFT} sessions that left work"),
+        ));
+    }
+    for id in left {
+        validate_id(id, "session ID")?;
+    }
+    if left.is_empty() {
+        return Ok(Vec::new());
+    }
+    let me = known_session(state, session_id)?;
+    let mut found: Vec<LeftWork> = Vec::new();
+    for id in left {
+        let Some(session) = state.sessions.get(id) else {
+            continue;
+        };
+        if id == session_id
+            || session.parent.as_deref() == Some(session_id)
+            || session.workspace_id != me.workspace_id
+            || !finished(state, id)
+            || state.adoptions.contains_key(id)
+            || found.iter().any(|work| &work.session_id == id)
+        {
+            continue;
+        }
+        found.push(LeftWork {
+            session_id: id.clone(),
+            summary: state
+                .activity
+                .get(id)
+                .and_then(|activity| activity.summary.clone()),
+        });
+        if found.len() == BRIEF_LEFT_WORK {
+            break;
+        }
+    }
+    Ok(found)
+}
+
+impl Default for PresenceSetting {
+    fn default() -> Self {
+        Self {
+            shown: true,
+            window_ms: PRESENCE_WINDOW_MS,
+        }
+    }
+}
+
+// ---- end domain: sessions ----
+
+// ---- domain: admission ----
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct ScanFailure {
+pub struct Lease {
+    pub lease_id: String,
+    pub session_id: String,
     pub workspace_id: String,
-    pub detail: String,
+    pub paths: Vec<String>,
+    pub generation: u64,
+    pub expires_at_ms: u64,
+    pub status: LeaseStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<ToolIdentity>,
+    /// Admitted paths whose source version could not be compared with what
+    /// the session last read, because no read of them was recorded. The
+    /// admission is not evidence that the session's view of them is current.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub base_unknown: Vec<String>,
+    /// Where in each file the edit was located. A path with no entry is held
+    /// whole, which is also how a lease recorded before regions replays.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub regions: Vec<PathRegions>,
+}
+
+/// Part of one file an edit was located in, by the hook, from the file as it
+/// was on disk. Lines are one-based and inclusive.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Region {
+    /// A definition found by the source parser. `key` is its name and the
+    /// names of the definitions enclosing it, outermost first. `digest` is
+    /// the SHA-256 of the definition's text with line endings and trailing
+    /// whitespace normalized: the symbol's own version. The lines say where it
+    /// was, for people; admission compares keys, not lines.
+    Symbol {
+        key: Vec<String>,
+        digest: String,
+        start_line: u32,
+        end_line: u32,
+    },
+    /// A line range, for a file whose language is not parsed. Comparable only
+    /// with ranges located in the same version of the file.
+    Lines { start_line: u32, end_line: u32 },
+}
+
+/// The regions of one admitted path and the version of the file (`digest`,
+/// SHA-256 of its bytes) they were located in.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PathRegions {
+    pub path: String,
+    pub digest: String,
+    pub regions: Vec<Region>,
+}
+
+/// One-based, inclusive.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+pub struct LineRange {
+    pub start_line: u32,
+    pub end_line: u32,
+}
+
+/// Lines of `path` that session `session_id` wrote `age_ms` ago and that an
+/// edit would change, numbered in the file as it is now; `lines` is empty
+/// when they could not be placed in it. The hook finds them in the line
+/// journal ([ADR 0028](../../../docs/adr/0028-line-ownership.md)).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WrittenLines {
+    pub path: String,
+    pub session_id: String,
+    pub lines: Vec<LineRange>,
+    pub age_ms: u64,
+}
+
+/// At most this many written-lines entries in one admission.
+pub const MAX_WRITTEN: usize = 64;
+/// Line ranges per entry, at most.
+pub const MAX_WRITTEN_RANGES: usize = 32;
+/// Another session's lines count this long after it wrote them.
+pub const LINE_HORIZON_MS: u64 = 30 * 60 * 1000;
+
+/// At most this many regions in one admission, over all its paths.
+pub const MAX_REGIONS: usize = 64;
+/// No region line beyond this: far past the line count of a 1 MiB file.
+pub const MAX_REGION_LINE: u32 = 2_000_000;
+/// A symbol key names at most this many nested definitions.
+pub const MAX_KEY_DEPTH: usize = 8;
+const MAX_KEY_NAME_BYTES: usize = 128;
+
+/// A file version as an adapter saw it on disk.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ObservedFile {
+    pub path: String,
+    pub state: FileState,
+}
+
+/// How a session came to know a file version.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceOrigin {
+    /// The host reported that the session read the file.
+    Read,
+    /// The host reported that the session's own write succeeded.
+    Write,
+    /// The session was refused an edit and told the file had changed. It has
+    /// been informed of this version; it has not necessarily read it.
+    Refused,
+    /// The session was about to edit a file it had no recorded version of,
+    /// on a host that reports no reads (Codex). This is the file as it was on
+    /// disk at that moment, so later edits are compared with it. The session
+    /// has not necessarily read it ([ADR 0027](../../../docs/adr/0027-turn-and-batch-events.md)).
+    Snapshot,
+}
+
+/// The version of a file a session last read or wrote. `at_ms` is zero for a
+/// version carried over from an earlier daemon generation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct KnownVersion {
+    pub path: String,
+    pub state: FileState,
     pub at_ms: u64,
+}
+
+/// A file whose version on disk differs from the one the session last read.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StaleFile {
+    pub path: String,
+    pub read: FileState,
+    pub current: FileState,
+    /// The other session in this workspace that most recently reported
+    /// editing the path, when there is one. A correlation, not proof.
+    pub changed_by: Option<String>,
+}
+
+/// A file the asking session read that a peer has since reported editing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StaleRead {
+    pub path: String,
+    pub session_id: String,
+    pub age_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LeaseStatus {
+    Active,
+    Completed,
+    Expired,
+    Invalidated,
+}
+
+/// What the host reported about a tool call after it ran.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolResult {
+    Succeeded,
+    Failed,
+    Interrupted,
+}
+
+/// How an observation relates to the admission it names, judged when the
+/// observation is recorded. `Expired` and `Invalidated` are late observations.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LeaseRelation {
+    Current,
+    Completed,
+    Expired,
+    Invalidated,
+    NotAdmitted,
+    /// The reported paths include a resource that the named admission did not
+    /// cover. This classification takes precedence over the lease's age.
+    ScopeMismatch,
+    /// The reported tool identity does not match the named admission. A legacy
+    /// observation cannot bypass the input check on a typed admission.
+    InputMismatch,
+}
+
+/// Evidence of a reported tool result. It is never authority: recording it does
+/// not grant, renew, complete or reactivate any admission.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Observation {
+    pub observation_id: String,
+    pub session_id: String,
+    pub workspace_id: String,
+    pub operation_id: String,
+    pub source: String,
+    pub tool: String,
+    pub paths: Vec<String>,
+    pub result: ToolResult,
+    pub lease_id: Option<String>,
+    pub lease_relation: LeaseRelation,
+    pub concurrent_holders: Vec<Conflict>,
+    pub observed_at_ms: u64,
     pub generation: u64,
 }
 
-/// One session in a recap: what it is and what it last did.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FileKind {
+    #[default]
+    Regular,
+    Symlink,
+}
+
+impl FileKind {
+    fn is_regular(&self) -> bool {
+        *self == Self::Regular
+    }
+}
+
+/// A successfully observed file state. Read failures are not `Missing`; adapters
+/// report them as incomplete scans without inventing a deletion observation.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum FileState {
+    Missing,
+    Present {
+        digest: String,
+        #[serde(default, skip_serializing_if = "FileKind::is_regular")]
+        kind: FileKind,
+    },
+}
+
+// As with Command::Status, use an empty struct for strict unit-variant decoding.
+#[derive(Deserialize)]
+#[serde(
+    remote = "FileState",
+    tag = "type",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+enum FileStateWire {
+    Missing {},
+    Present {
+        digest: String,
+        #[serde(default)]
+        kind: FileKind,
+    },
+}
+
+impl<'de> Deserialize<'de> for FileState {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        FileStateWire::deserialize(deserializer)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RecapSession {
+#[serde(deny_unknown_fields)]
+pub struct Conflict {
+    pub lease_id: String,
     pub session_id: String,
-    /// Registered since the daemon last started.
-    pub current: bool,
-    pub ended: bool,
+    pub paths: Vec<String>,
+    /// The holder's regions in the conflicting paths it holds by region. A
+    /// conflicting path missing here is held whole.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub regions: Vec<PathRegions>,
+}
+
+/// Supplied files whose version differs from the one the session last read
+/// or wrote. A file the session has no recorded version of is not stale: it
+/// is unknown, and reported as such on the admission.
+fn stale_files(state: &State, session: &Session, base: &[ObservedFile]) -> Vec<StaleFile> {
+    let known = known_versions(state, &session.session_id);
+    base.iter()
+        .filter_map(|file| {
+            let version = known.iter().find(|version| version.path == file.path)?;
+            (version.state != file.state).then(|| StaleFile {
+                path: file.path.clone(),
+                read: version.state.clone(),
+                current: file.state.clone(),
+                // A peer whose own last version of the file is not what is
+                // on disk now did not make it so: after a checkout, reset or
+                // any other unreported change, it is not named.
+                changed_by: last_peer_edit(
+                    state,
+                    &session.session_id,
+                    &session.workspace_id,
+                    &file.path,
+                    version.at_ms,
+                )
+                .filter(|(peer, _)| {
+                    known_versions(state, peer)
+                        .iter()
+                        .find(|known| known.path == file.path)
+                        .is_none_or(|known| known.state == file.state)
+                })
+                .map(|(id, _)| id.to_owned()),
+            })
+        })
+        .collect()
+}
+
+struct ObservationInput<'a> {
+    session_id: &'a str,
+    operation_id: &'a str,
+    source: &'a str,
+    tool: &'a str,
+    paths: &'a [String],
+    result: ToolResult,
+    lease_id: Option<&'a str>,
+    operation: Option<&'a ToolIdentity>,
+}
+
+fn decide_observation(
+    state: &State,
+    input: ObservationInput<'_>,
+    request_id: &str,
+    now_ms: u64,
+) -> Result<Decision, CoreError> {
+    // A stale session may still report what happened before a restart.
+    let session = known_session(state, input.session_id)?;
+    if let Some(operation) = input.operation {
+        validate_tool_identity(operation)?;
+    } else {
+        validate_id(input.operation_id, "operation ID")?;
+        validate_id(input.source, "observation source")?;
+        validate_id(input.tool, "tool name")?;
+    }
+    let paths = normalized_paths(input.paths)?;
+    let mut scope: BTreeSet<String> = paths.iter().cloned().collect();
+    let lease_relation = match input.lease_id {
+        None => LeaseRelation::NotAdmitted,
+        Some(id) => {
+            validate_id(id, "lease ID")?;
+            match state.leases.get(id) {
+                None => LeaseRelation::NotAdmitted,
+                Some(lease) => {
+                    if lease.session_id != input.session_id {
+                        return Err(error(
+                            "not_holder",
+                            "An observation can name only its own session's admission",
+                        ));
+                    }
+                    scope.extend(lease.paths.iter().cloned());
+                    if lease.operation.as_ref() != input.operation {
+                        LeaseRelation::InputMismatch
+                    } else if paths
+                        .iter()
+                        .any(|path| lease.paths.binary_search(path).is_err())
+                    {
+                        LeaseRelation::ScopeMismatch
+                    } else {
+                        lease_relation(state, lease, now_ms)
+                    }
+                }
+            }
+        }
+    };
+    let scope: Vec<String> = scope.into_iter().collect();
+    // Judged as the named admission was: by its regions, if it had any.
+    let regions = input
+        .lease_id
+        .and_then(|id| state.leases.get(id))
+        .map(|lease| lease.regions.as_slice())
+        .unwrap_or_default();
+    let concurrent_holders = conflicts(state, &session.workspace_id, &scope, regions, now_ms)
+        .into_iter()
+        .filter(|holder| input.lease_id != Some(holder.lease_id.as_str()))
+        .collect();
+    let observation = Observation {
+        observation_id: request_id.into(),
+        session_id: input.session_id.into(),
+        workspace_id: session.workspace_id.clone(),
+        operation_id: input.operation_id.into(),
+        source: input.source.into(),
+        tool: input.tool.into(),
+        paths,
+        result: input.result,
+        lease_id: input.lease_id.map(str::to_owned),
+        lease_relation,
+        concurrent_holders,
+        observed_at_ms: now_ms,
+        generation: state.generation,
+    };
+    Ok(Decision {
+        events: vec![Event::OperationObserved {
+            observation: observation.clone(),
+        }],
+        outcome: Outcome::Observed { observation },
+    })
+}
+
+/// The regions of `regions` that name the version `base` gives for their
+/// path. Regions are trusted only for the version the hook saw on disk when
+/// it asked; any other path is held whole.
+fn trusted_regions<'a>(
+    regions: &[PathRegions],
+    paths: &[String],
+    base: impl Iterator<Item = &'a ObservedFile> + Clone,
+) -> Result<Vec<PathRegions>, CoreError> {
+    Ok(normalized_regions(regions, paths)?
+        .into_iter()
+        .filter(|located| {
+            base.clone().any(|file| {
+                file.path == located.path
+                    && matches!(&file.state, FileState::Present { digest, .. } if *digest == located.digest)
+            })
+        })
+        .collect())
+}
+
+/// The current admissions an admission of `paths` by `session_id` would
+/// meet. A host's tool call is never held back by an earlier tool call of
+/// the same session.
+fn holders_of(
+    state: &State,
+    session_id: &str,
+    workspace_id: &str,
+    paths: &[String],
+    regions: &[PathRegions],
+    tool_call: bool,
+    now_ms: u64,
+) -> Vec<Conflict> {
+    conflicts(state, workspace_id, paths, regions, now_ms)
+        .into_iter()
+        .filter(|holder| {
+            !(tool_call
+                && holder.session_id == session_id
+                && state
+                    .leases
+                    .get(&holder.lease_id)
+                    .is_some_and(|lease| lease.operation.is_some()))
+        })
+        .collect()
+}
+
+fn conflicts(
+    state: &State,
+    workspace_id: &str,
+    paths: &[String],
+    regions: &[PathRegions],
+    now_ms: u64,
+) -> Vec<Conflict> {
+    let located = |list: &'_ [PathRegions], path: &str| -> Option<PathRegions> {
+        list.iter().find(|entry| entry.path == path).cloned()
+    };
+    state
+        .leases
+        .values()
+        .filter_map(|lease| {
+            if lease.status != LeaseStatus::Active
+                || lease.generation != state.generation
+                || lease.expires_at_ms <= now_ms
+                || lease.workspace_id != workspace_id
+            {
+                return None;
+            }
+            let intersection: Vec<_> = paths
+                .iter()
+                .filter(|path| lease.paths.binary_search(path).is_ok())
+                .filter(|path| {
+                    !separate(
+                        located(regions, path).as_ref(),
+                        located(&lease.regions, path).as_ref(),
+                    )
+                })
+                .cloned()
+                .collect();
+            if intersection.is_empty() {
+                None
+            } else {
+                Some(Conflict {
+                    lease_id: lease.lease_id.clone(),
+                    session_id: lease.session_id.clone(),
+                    regions: intersection
+                        .iter()
+                        .filter_map(|path| located(&lease.regions, path))
+                        .collect(),
+                    paths: intersection,
+                })
+            }
+        })
+        .collect()
+}
+
+/// True only when two edits of one path cannot touch the same code: both were
+/// located, and either they name different symbols, neither inside the other,
+/// or they name disjoint line ranges of the same version of the file. Every
+/// other case, including a whole-file edit on either side and a mix of
+/// symbols and lines, is a conflict as before regions existed.
+fn separate(ours: Option<&PathRegions>, theirs: Option<&PathRegions>) -> bool {
+    let (Some(ours), Some(theirs)) = (ours, theirs) else {
+        return false;
+    };
+    ours.regions.iter().all(|a| {
+        theirs.regions.iter().all(|b| match (a, b) {
+            (Region::Symbol { key: a, .. }, Region::Symbol { key: b, .. }) => {
+                !(a.starts_with(b) || b.starts_with(a))
+            }
+            (
+                Region::Lines {
+                    start_line: a_start,
+                    end_line: a_end,
+                },
+                Region::Lines {
+                    start_line: b_start,
+                    end_line: b_end,
+                },
+            ) => ours.digest == theirs.digest && (a_end < b_start || b_end < a_start),
+            _ => false,
+        })
+    })
+}
+
+/// Validate regions against the admitted (normalized) paths and return them
+/// with each path's regions sorted and deduplicated.
+fn normalized_regions(
+    regions: &[PathRegions],
+    paths: &[String],
+) -> Result<Vec<PathRegions>, CoreError> {
+    let invalid = |message: &str| Err(error("invalid_regions", message));
+    let mut seen = BTreeSet::new();
+    let mut total = 0;
+    let mut normalized = Vec::with_capacity(regions.len());
+    for located in regions {
+        if paths.binary_search(&located.path).is_err() {
+            return invalid("Regions name a path this admission does not request");
+        }
+        if !seen.insert(located.path.as_str()) {
+            return invalid("Each path's regions may be given once");
+        }
+        if !is_hex_digest(&located.digest, 64) {
+            return invalid("A file version digest must contain exactly 64 hexadecimal characters");
+        }
+        if located.regions.is_empty() {
+            return invalid("Give at least one region, or leave the path out to hold it whole");
+        }
+        let symbols = located
+            .regions
+            .iter()
+            .filter(|region| matches!(region, Region::Symbol { .. }))
+            .count();
+        if symbols != 0 && symbols != located.regions.len() {
+            return invalid("One path's regions are all symbols or all line ranges");
+        }
+        for region in &located.regions {
+            let (start_line, end_line) = match region {
+                Region::Symbol {
+                    key,
+                    digest,
+                    start_line,
+                    end_line,
+                } => {
+                    if key.is_empty()
+                        || key.len() > MAX_KEY_DEPTH
+                        || key.iter().any(|name| {
+                            name.is_empty()
+                                || name.len() > MAX_KEY_NAME_BYTES
+                                || name.chars().any(char::is_control)
+                        })
+                    {
+                        return invalid(
+                            "A symbol key is 1 to 8 names of 1 to 128 bytes without control characters",
+                        );
+                    }
+                    if !is_hex_digest(digest, 64) {
+                        return invalid(
+                            "A symbol digest must contain exactly 64 hexadecimal characters",
+                        );
+                    }
+                    (*start_line, *end_line)
+                }
+                Region::Lines {
+                    start_line,
+                    end_line,
+                } => (*start_line, *end_line),
+            };
+            if start_line == 0 || start_line > end_line || end_line > MAX_REGION_LINE {
+                return invalid("Region lines are one-based, ordered and at most 2000000");
+            }
+        }
+        let mut sorted = located.regions.clone();
+        sorted.sort();
+        sorted.dedup();
+        total += sorted.len();
+        if total > MAX_REGIONS {
+            return invalid(
+                "An admission can name at most 64 distinct regions; leave paths out to hold them whole",
+            );
+        }
+        normalized.push(PathRegions {
+            path: located.path.clone(),
+            digest: located.digest.clone(),
+            regions: sorted,
+        });
+    }
+    normalized.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(normalized)
+}
+
+fn lease_relation(state: &State, lease: &Lease, now_ms: u64) -> LeaseRelation {
+    match lease.status {
+        LeaseStatus::Completed => LeaseRelation::Completed,
+        LeaseStatus::Invalidated => LeaseRelation::Invalidated,
+        _ if lease.generation != state.generation => LeaseRelation::Invalidated,
+        LeaseStatus::Expired => LeaseRelation::Expired,
+        LeaseStatus::Active if lease.expires_at_ms <= now_ms => LeaseRelation::Expired,
+        LeaseStatus::Active => LeaseRelation::Current,
+    }
+}
+
+// ---- end domain: admission ----
+
+// ---- domain: briefing ----
+
+/// The signature of a briefing with nothing in it.
+const EMPTY_SIGNATURE: &str = "cbf29ce484222325";
+/// A briefing outcome stays well inside one 64 KiB transport frame.
+const BRIEF_BYTES: usize = 40 * 1024;
+
+pub const MAX_TOUCHED: usize = 32;
+pub const MAX_KNOWN: usize = 128;
+pub const MAX_BRIEF_PEERS: u32 = 16;
+pub const BRIEF_PATHS: usize = 8;
+/// Activity older than this, within one generation, is left out of briefings.
+pub const BRIEF_HORIZON_MS: u64 = 30 * 60 * 1000;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecentPath {
+    pub path: String,
+    pub age_ms: u64,
+}
+
+/// One other session's relevant work, as shown to the asking session.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PeerWork {
+    pub session_id: String,
+    pub workspace_id: String,
+    pub workspace_root: String,
+    /// False for a linked worktree of the same repository: overlap there is
+    /// logical, and no admission in one blocks the other.
+    pub same_workspace: bool,
+    pub branch_ref: Option<String>,
     pub liveness: Option<LivenessStatus>,
+    /// The host reported this session over; `recent` is what it left behind.
+    pub ended: bool,
     pub summary: Option<String>,
     pub intent: Option<String>,
     pub editing: Vec<String>,
     pub recent: Vec<RecentPath>,
-    /// The session that took over this ended session's uncommitted work.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub adopted_by: Option<String>,
-    /// Ended sessions whose uncommitted work this session took over, at
-    /// most `RECAP_ITEMS`.
+    /// Paths this peer shares with the asking session's own work. The
+    /// asking session's prompt targets count as its work here.
+    pub overlap: Vec<String>,
+    /// Paths this peer's last prompt points at (its prompt targets) that the
+    /// asking session works on or its own prompt points at, and that are not
+    /// already in `overlap`. Advisory: it never holds a write (roadmap C8).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub adopted: Vec<String>,
+    pub target_overlap: Vec<String>,
+    /// How this peer is related to the asking session through a host
+    /// subagent; absent for an unrelated session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relation: Option<PeerRelation>,
+    /// Where this peer was recently looking (presence, roadmap A13): at most
+    /// `PRESENCE_PATHS`, newest first, none it is editing or edited, within
+    /// the asking session's presence window. Advisory: it never holds,
+    /// refuses or delays anything.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub looking: Vec<PresencePath>,
 }
 
-/// A bounded account of one workspace: who is here, what changed, what is
-/// remembered, what evidence exists and what LangSpan cannot currently see.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Recap {
-    pub workspace_id: String,
-    pub root: String,
-    pub branch_ref: Option<String>,
-    pub sessions: Vec<RecapSession>,
-    pub omitted_sessions: u32,
-    /// Items left out after the per-list caps so the whole recap fits one
-    /// transport frame. Counted, never silently dropped.
-    #[serde(default, skip_serializing_if = "is_zero")]
-    pub omitted_items: u32,
-    pub interface_changes: Vec<InterfaceNotice>,
-    pub checks: Vec<CheckRecord>,
-    pub landings: Vec<Landing>,
-    pub notes: Vec<Note>,
-    /// Messages still owed to at least one session, newest first, then
-    /// recently withdrawn ones (`retracted`), newest first.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub messages: Vec<Message>,
-    /// The newest trails ended sessions left here, at most `RECAP_TRAILS`
-    /// (roadmap C9), whether or not a session was told them.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub trails: Vec<TrailView>,
-    pub teammates: Vec<RemotePeer>,
-    pub publishing: Option<RemoteLink>,
-    /// Present when the last scan attempt failed.
-    pub scan_failure: Option<ScanFailure>,
-    /// Present when the last completed scan left something unversioned.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scan_coverage: Option<ScanCoverage>,
-    /// Asked for with `since` (roadmap C10): what happened after that point.
-    /// Absent when asked for "since away" and no such gap was found.
-    /// Capability `recap_since`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub since: Option<Since>,
+/// A peer that belongs to the same host conversation as the asking session.
+/// A subagent's own parent is never a peer in its briefing (ADR 0004).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PeerRelation {
+    /// The session that started the asking subagent. No new briefing names
+    /// it; it stays so briefing receipts stored before that change still read.
+    Parent,
+    /// A subagent the asking session started.
+    Subagent,
+    /// Another subagent of the asking subagent's parent.
+    Sibling,
 }
 
-pub const MAX_NOTES: usize = 64;
-pub const NOTE_BYTES: usize = 400;
-pub const RECAP_SESSIONS: usize = 16;
-const RECAP_ITEMS: usize = 8;
-/// Trails in a recap; `langspan trail` lists up to `MAX_TRAILS`.
-pub const RECAP_TRAILS: usize = 4;
-
-/// Unacknowledged messages held per workspace; the oldest go first.
-pub const MAX_MESSAGES: usize = 64;
-pub const MESSAGE_BYTES: usize = 400;
-/// Messages one briefing carries at most.
-pub const BRIEF_MESSAGES: usize = 4;
-/// The longest line an adapter renders for one message, before its
-/// ellipsis. Selection below assumes adapters cut there.
-pub const MESSAGE_LINE_LIMIT: usize = 700;
-/// Rendered bytes the messages of one briefing may take together, so that
-/// every message selected for a briefing fits its text and none is
-/// acknowledged without being shown.
-pub const MESSAGE_BRIEF_BYTES: usize = 1500;
-/// The longest line an adapter renders for an uncoordinated change, before
-/// its ellipsis. A briefing that carries one takes this line, plus its
-/// ellipsis and newline, out of `MESSAGE_BRIEF_BYTES`: both are delivered
-/// once, so every message and withdrawal selected beside it must still be
-/// shown.
-pub const UNCOORDINATED_LINE_LIMIT: usize = 700;
-/// Bytes of a withdrawn message's text quoted when its readers are told.
-pub const RETRACTED_TEXT_BYTES: usize = 120;
-
-pub const MAX_NOTICES: usize = 32;
-pub const NOTICE_CHANGES: usize = 16;
-pub const NOTICE_DEPENDENTS: usize = 32;
-
-/// A code-context query names at most this many identifiers.
-pub const CONTEXT_NAMES: usize = 12;
-/// Definitions returned per name, at most.
-pub const CONTEXT_DEFINITIONS: u32 = 3;
-/// Distinct files that mention a name, returned per name, at most.
-pub const CONTEXT_FILES: u32 = 5;
-
-/// One name asked about in a code-context query, with where it is defined
-/// and which files mention it. A name match, not a resolved symbol.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct NameContext {
-    pub name: String,
-    pub definitions: Vec<SymbolRef>,
-    /// Distinct paths, in path order.
-    pub mentioned_in: Vec<String>,
-    /// True when more definitions or mentioning files exist than are listed.
-    pub truncated: bool,
-    /// In a ranked answer, how many definitions the name has: those listed
-    /// and those left out (roadmap C2).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub definition_count: Option<u32>,
+/// How `peer` is related to `me` through a host subagent, if at all.
+fn relation(me: &Session, peer: &Session) -> Option<PeerRelation> {
+    if peer.parent.as_deref() == Some(me.session_id.as_str()) {
+        Some(PeerRelation::Subagent)
+    } else if me.parent.is_some() && me.parent == peer.parent {
+        Some(PeerRelation::Sibling)
+    } else {
+        None
+    }
 }
 
-pub const MAX_CHECKS: usize = 64;
-pub const MAX_LANDINGS: usize = 32;
-/// The longest a push turn may be held without being released.
-pub const MAX_TURN_TTL_MS: u64 = 4 * 60 * 60 * 1000;
-/// Tries at landing within one turn, when the target keeps moving.
-pub const MAX_LANDING_ATTEMPTS: usize = 3;
-/// Commits one landing may rebase, and adapt, at most (roadmap F5).
-pub const MAX_REWRITTEN: usize = 64;
-/// Landings waiting for one target's push turn, at most.
-pub const MAX_TURN_QUEUE: usize = 8;
-/// The longest a landing may wait for the push turn.
-pub const MAX_TURN_WAIT_MS: u64 = 60 * 60 * 1000;
-/// A waiting landing that has not asked again for this long has stopped
-/// waiting, and leaves the queue.
-pub const TURN_WAITER_SILENCE_MS: u64 = 15_000;
-
-pub const REMOTE_WORK: usize = 8;
-/// A teammate not heard from for this long is treated as disconnected.
-pub const REMOTE_HORIZON_MS: u64 = 10 * 60 * 1000;
+/// What a briefing of `session_id` compares in-flight work with: the
+/// session's workspace, and the files it works on or has read. `None` for
+/// a session that is not current.
+pub fn briefing_concern(
+    state: &State,
+    session_id: &str,
+    now_ms: u64,
+) -> Option<(String, BTreeSet<String>)> {
+    let me = current_session(state, session_id).ok()?;
+    Some((
+        me.workspace_id.clone(),
+        concerned_paths(state, session_id, now_ms),
+    ))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Briefing {
@@ -2940,6 +5721,1077 @@ pub struct Briefing {
     /// for at session start (roadmap C3). Never part of the signature.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recent: Option<RecentChanges>,
+}
+
+// Ties go to the lexically smallest session, so the result is deterministic.
+fn smallest_id_first(id: &str) -> core::cmp::Reverse<&str> {
+    core::cmp::Reverse(id)
+}
+
+/// Select the other sessions whose current work is relevant to `session_id`:
+/// same physical workspace or a worktree of the same repository, registered in
+/// this generation, not known to have exited, and active within the horizon.
+/// Returns the briefing and a signature that ignores ages, so an unchanged
+/// situation is not delivered twice.
+/// The signature leaves out messages: a delivered message is acknowledged,
+/// so its absence afterwards is not a change. Also returns the keys of the
+/// in-flight signatures it carries, to be remembered once delivered.
+fn brief(
+    state: &State,
+    session_id: &str,
+    max_peers: u32,
+    handoffs: bool,
+    now_ms: u64,
+    (inflight, mentioned): (&[InflightSymbol], &BTreeSet<String>),
+) -> Result<(Briefing, String, Vec<String>), CoreError> {
+    let me = current_session(state, session_id)?;
+    let repository = state
+        .workspace_git
+        .get(&me.workspace_id)
+        .map(|git| git.repository_id.as_str());
+    let work_paths = |id: &str| work_paths(state, id, now_ms);
+    // Where a running session's last prompt pointed, while it is recent.
+    let prompt_targets = |id: &str| -> BTreeSet<String> {
+        state
+            .activity
+            .get(id)
+            .filter(|activity| activity.generation == state.generation && !activity.ended)
+            .and_then(|activity| activity.prompt_targets.as_ref())
+            .filter(|targets| now_ms.saturating_sub(targets.at_ms) <= BRIEF_HORIZON_MS)
+            .map(|targets| targets.paths.iter().cloned().collect())
+            .unwrap_or_default()
+    };
+    // Where a running peer that shows its presence was recently looking,
+    // within this session's window: newest first, none it edits or edited.
+    let window_ms = presence_setting(state, session_id).window_ms;
+    let looking = |id: &str, edited: &BTreeSet<String>| -> Vec<PresencePath> {
+        if !presence_setting(state, id).shown {
+            return Vec::new();
+        }
+        state
+            .activity
+            .get(id)
+            .filter(|activity| activity.generation == state.generation && !activity.ended)
+            .map(|activity| {
+                activity
+                    .looking
+                    .iter()
+                    .filter(|looked| {
+                        now_ms.saturating_sub(looked.at_ms) <= window_ms
+                            && !edited.contains(&looked.path)
+                    })
+                    .take(PRESENCE_PATHS)
+                    .map(|looked| PresencePath {
+                        path: looked.path.clone(),
+                        kind: looked.kind,
+                        age_s: now_ms.saturating_sub(looked.at_ms) / 1000,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let (_, _, mine) = work_paths(session_id);
+    // What a peer's work or task is compared with: this session's work and
+    // the files its own task points at.
+    let mut mine_or_targeted = mine.clone();
+    mine_or_targeted.extend(prompt_targets(session_id));
+    let mut peers = Vec::new();
+    for peer in state.sessions.values() {
+        if peer.session_id == session_id || peer.generation != state.generation {
+            continue;
+        }
+        // A subagent's parent started it and knows its own task and files;
+        // told back to the subagent, they read as another session's. The
+        // parent's held files are still refused to it at admission, and its
+        // edits of files the subagent read are still stale reads.
+        if me.parent.as_deref() == Some(peer.session_id.as_str()) {
+            continue;
+        }
+        let same_workspace = peer.workspace_id == me.workspace_id;
+        let peer_git = state.workspace_git.get(&peer.workspace_id);
+        if !same_workspace
+            && !(repository.is_some()
+                && peer_git.map(|git| git.repository_id.as_str()) == repository)
+        {
+            continue;
+        }
+        let liveness = state
+            .session_liveness
+            .get(&peer.session_id)
+            .map(|liveness| liveness.status);
+        if liveness == Some(LivenessStatus::Exited) {
+            continue;
+        }
+        let (mut editing, mut recent, all) = work_paths(&peer.session_id);
+        let activity = state
+            .activity
+            .get(&peer.session_id)
+            .filter(|activity| activity.generation == state.generation);
+        // A session that only received briefings has shown no work of its own.
+        let fresh = activity.is_some_and(|activity| {
+            (activity.summary.is_some() || !activity.touched.is_empty())
+                && now_ms.saturating_sub(activity.last_seen_ms()) <= BRIEF_HORIZON_MS
+        });
+        let intent = state
+            .intents
+            .get(&peer.session_id)
+            .filter(|intent| intent.generation == state.generation);
+        let targets = prompt_targets(&peer.session_id);
+        // Every file the peer holds or edited within the horizon, not only
+        // those listed: such a file is shown as edited, never as looked at.
+        let mut edited: BTreeSet<String> = editing.iter().cloned().collect();
+        edited.extend(activity.into_iter().flat_map(|activity| {
+            activity
+                .touched
+                .iter()
+                .filter(|touch| now_ms.saturating_sub(touch.at_ms) <= BRIEF_HORIZON_MS)
+                .map(|touch| touch.path.clone())
+        }));
+        let looking = looking(&peer.session_id, &edited);
+        if editing.is_empty()
+            && intent.is_none()
+            && !fresh
+            && targets.is_empty()
+            && looking.is_empty()
+        {
+            continue;
+        }
+        // A finished session matters only for the edits it left behind.
+        if activity.is_some_and(|activity| activity.ended)
+            && editing.is_empty()
+            && recent.is_empty()
+        {
+            continue;
+        }
+        let Some(workspace) = state.workspaces.get(&peer.workspace_id) else {
+            continue;
+        };
+        let overlap: Vec<String> = all
+            .intersection(&mine_or_targeted)
+            .take(BRIEF_PATHS)
+            .cloned()
+            .collect();
+        editing.truncate(BRIEF_PATHS);
+        recent.truncate(BRIEF_PATHS);
+        let last_ms = activity.map(SessionActivity::last_seen_ms).unwrap_or(0);
+        let relation = relation(me, peer);
+        // A subagent's task is the asking parent's own request: its files
+        // are news to the parent, its task line and declared intent are not.
+        let task_known = relation == Some(PeerRelation::Subagent);
+        if task_known && editing.is_empty() && recent.is_empty() {
+            continue;
+        }
+        let target_overlap: Vec<String> = if task_known {
+            Vec::new()
+        } else {
+            targets
+                .intersection(&mine_or_targeted)
+                .filter(|path| !overlap.contains(*path))
+                .take(BRIEF_PATHS)
+                .cloned()
+                .collect()
+        };
+        // A peer without admissions, edits, intent or targets (one known by
+        // its task line or by where it looked) ranks after every peer with
+        // them, so presence never takes such a peer's place.
+        let no_work =
+            editing.is_empty() && recent.is_empty() && intent.is_none() && targets.is_empty();
+        peers.push((
+            (
+                overlap.is_empty() && target_overlap.is_empty(),
+                editing.is_empty(),
+                no_work,
+                u64::MAX - last_ms,
+            ),
+            PeerWork {
+                session_id: peer.session_id.clone(),
+                workspace_id: peer.workspace_id.clone(),
+                workspace_root: workspace.root.clone(),
+                same_workspace,
+                branch_ref: peer_git.and_then(|git| git.branch_ref.clone()),
+                liveness,
+                ended: activity.is_some_and(|activity| activity.ended),
+                // A declared intent is the session's own account of its
+                // task: it replaces the line taken from the prompt.
+                summary: activity
+                    .filter(|activity| fresh && !activity.ended && !task_known)
+                    .filter(|_| intent.is_none_or(|intent| intent.summary.is_empty()))
+                    .and_then(|activity| activity.summary.clone()),
+                intent: intent
+                    .filter(|_| !task_known)
+                    .map(|intent| intent.summary.clone()),
+                editing,
+                recent,
+                overlap,
+                target_overlap,
+                relation,
+                looking,
+            },
+        ));
+    }
+    // A peer known only by where it looked ranks after every other, so it
+    // never takes a slot from a peer with work or a task.
+    let rank = |(key, peer): &((bool, bool, bool, u64), PeerWork)| {
+        (key.0, key.1, key.2, presence_only(peer), key.3)
+    };
+    peers.sort_by(|a, b| (rank(a), &a.1.session_id).cmp(&(rank(b), &b.1.session_id)));
+    let total = peers.len();
+    // Peers are chosen by their work within the byte budget first; where
+    // they look is added after, in the space left, first peers first, so
+    // presence never takes the place of another peer's work. A trail this
+    // briefing may tell takes its encoding out of that budget, so the
+    // reply holds both within its frame.
+    let peer_bytes = BRIEF_BYTES
+        - trail::owed(state, me, handoffs).map_or(0, |trail| {
+            trail::json_cost(trail).min(trail::TRAIL_JSON_BYTES)
+        });
+    let mut bytes = 0;
+    let mut peers: Vec<PeerWork> = peers
+        .into_iter()
+        .map(|(_, peer)| peer)
+        .take(max_peers as usize)
+        .take_while(|peer| {
+            // Counted as encoded, escapes included, so quoted or control
+            // characters cannot push the reply past its frame.
+            let cost = 256
+                + recent::json_len(&peer.workspace_root)
+                + [&peer.summary, &peer.intent, &peer.branch_ref]
+                    .into_iter()
+                    .flatten()
+                    .map(|text| recent::json_len(text))
+                    .sum::<usize>()
+                + peer
+                    .editing
+                    .iter()
+                    .chain(&peer.overlap)
+                    .chain(&peer.target_overlap)
+                    .chain(peer.recent.iter().map(|recent| &recent.path))
+                    .map(|path| recent::json_len(path) + 32)
+                    .sum::<usize>();
+            bytes += cost;
+            if bytes > peer_bytes {
+                bytes -= cost;
+                return false;
+            }
+            true
+        })
+        .collect();
+    // A peer there only for where it looked, without room for that, is left
+    // out and counted.
+    peers.retain_mut(|peer| {
+        let presence: usize = peer
+            .looking
+            .iter()
+            .map(|looked| recent::json_len(&looked.path) + 32)
+            .sum();
+        if bytes + presence <= peer_bytes {
+            bytes += presence;
+            return true;
+        }
+        let only = presence_only(peer);
+        peer.looking.clear();
+        !only
+    });
+    let mut stale_reads: Vec<StaleRead> = known_versions(state, session_id)
+        .iter()
+        .filter_map(|version| {
+            let (peer, at_ms) = last_peer_edit(
+                state,
+                session_id,
+                &me.workspace_id,
+                &version.path,
+                version.at_ms,
+            )?;
+            Some(StaleRead {
+                path: version.path.clone(),
+                session_id: peer.to_owned(),
+                age_ms: now_ms.saturating_sub(at_ms),
+            })
+        })
+        .collect();
+    stale_reads.sort_by(|a, b| (a.age_ms, &a.path).cmp(&(b.age_ms, &b.path)));
+    stale_reads.truncate(BRIEF_PATHS);
+    let mut remote: Vec<RemotePeerWork> = state
+        .remote_peers
+        .values()
+        .filter(|peer| {
+            peer.generation == state.generation
+                && now_ms.saturating_sub(peer.received_ms) <= REMOTE_HORIZON_MS
+                && related_workspace(state, &me.workspace_id, &peer.workspace_id)
+        })
+        .flat_map(|peer| {
+            let mine = &mine;
+            peer.publication
+                .work
+                .iter()
+                .map(move |work| RemotePeerWork {
+                    name: peer.publication.name.clone(),
+                    overlap: work
+                        .editing
+                        .iter()
+                        .chain(&work.recent)
+                        .filter(|path| mine.contains(*path))
+                        .cloned()
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .collect(),
+                    work: work.clone(),
+                    received_age_ms: now_ms.saturating_sub(peer.received_ms),
+                })
+        })
+        .collect();
+    remote.sort_by(|a, b| {
+        (
+            a.overlap.is_empty(),
+            a.work.editing.is_empty(),
+            &a.name,
+            &a.work.session,
+        )
+            .cmp(&(
+                b.overlap.is_empty(),
+                b.work.editing.is_empty(),
+                &b.name,
+                &b.work.session,
+            ))
+    });
+    remote.truncate(BRIEF_PATHS);
+    let concerned = concerned_paths(state, session_id, now_ms);
+    // A notice already told between steps is not told again (issue #214).
+    let (notice_ids, interface_changes): (Vec<String>, Vec<InterfaceImpact>) =
+        interface_impacts(state, me, &concerned, now_ms)
+            .filter(|(id, _)| {
+                !told_notices(state, session_id)
+                    .any(|told| told.notice_id == *id && told.via == NoticeVia::BetweenSteps)
+            })
+            .take(BRIEF_INTERFACE_NOTICES)
+            .unzip();
+    // Notes about the whole workspace, or about a file this session works
+    // on; an anchored note, about its definition's file or a file that
+    // mentions its name (roadmap E1). What still holds is chosen first,
+    // each kind newest first.
+    let mut notes: Vec<&Note> = state
+        .notes
+        .get(&me.workspace_id)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+        .iter()
+        .filter(|note| {
+            note.author.as_deref() != Some(session_id)
+                && anchors::note_reaches(note, &concerned, mentioned)
+        })
+        .collect();
+    notes.sort_by_key(|note| AnchorState::rank(note.anchor_state));
+    let notes: Vec<Note> = notes.into_iter().take(4).cloned().collect();
+    // Withdrawals first, then messages owed to this session, each newest
+    // first, as many as the text of one briefing is sure to hold beside an
+    // owed uncoordinated change, whose line is reserved; the rest wait for
+    // the next one. The first always fits.
+    let uncoordinated: Vec<UncoordinatedNotice> = uncoordinated_owed(state, session_id, now_ms)
+        .map(|(_, notice)| notice)
+        .collect();
+    let message_bytes = if uncoordinated.is_empty() {
+        MESSAGE_BRIEF_BYTES
+    } else {
+        MESSAGE_BRIEF_BYTES - (UNCOORDINATED_LINE_LIMIT + 4)
+    };
+    let mut bytes = 0;
+    let retracted: Vec<RetractedMessage> = state
+        .retracted_notices
+        .get(session_id)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+        .iter()
+        .take(BRIEF_MESSAGES)
+        .take_while(|retracted| {
+            bytes += retracted_cost(retracted);
+            bytes <= message_bytes
+        })
+        .cloned()
+        .collect();
+    let messages: Vec<Message> = state
+        .messages
+        .get(&me.workspace_id)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+        .iter()
+        .filter(|message| {
+            owed_to(
+                message,
+                session_id,
+                handoffs && takes_handoff(state, me, message),
+            )
+        })
+        .take(BRIEF_MESSAGES)
+        .take_while(|message| {
+            bytes += message_cost(message);
+            bytes <= message_bytes
+        })
+        .map(|message| Message {
+            acknowledged: Vec::new(),
+            ..message.clone()
+        })
+        .collect();
+    // An ended session's trail (roadmap C9) shares the messages' room and
+    // follows that session's own handoff: while the handoff is owed here
+    // and waits for room, so does the trail.
+    let used = retracted.iter().map(retracted_cost).sum::<usize>()
+        + messages.iter().map(message_cost).sum::<usize>();
+    let trail = trail::owed(state, me, handoffs)
+        .filter(|_| used + TRAIL_BYTES < message_bytes)
+        .filter(|trail| {
+            state
+                .messages
+                .get(&me.workspace_id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[])
+                .iter()
+                .filter(|message| {
+                    message.from.as_deref() == Some(trail.session_id.as_str())
+                        && matches!(message.to, Recipient::NextSession {})
+                        && owed_to(message, session_id, takes_handoff(state, me, message))
+                })
+                .all(|handoff| {
+                    messages
+                        .iter()
+                        .any(|shown| shown.message_id == handoff.message_id)
+                })
+        })
+        .map(|trail| trail::view(state, trail, now_ms));
+    // A checkout change matters to a session that read or edited files
+    // here before it: what it knows may no longer be on disk.
+    // A change a session's own shell command explains is not news to it;
+    // others are told whose command it was.
+    let mut checkout_ids = Vec::new();
+    let changes = state
+        .checkouts
+        .get(&me.workspace_id)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let runs = state
+        .checkout_runs
+        .get(&me.workspace_id)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let explained_by =
+        |change: &CheckoutChange| runs.iter().find(|run| run.explains(change, changes));
+    let checkout_changes: Vec<CheckoutNotice> = changes
+        .iter()
+        .filter(|change| explained_by(change).is_none_or(|run| run.session_id != session_id))
+        .filter(|change| {
+            change.generation == state.generation
+                && now_ms.saturating_sub(change.at_ms) <= BRIEF_HORIZON_MS
+                && state
+                    .activity
+                    .get(session_id)
+                    .filter(|activity| activity.generation == state.generation)
+                    .is_some_and(|activity| {
+                        activity
+                            .known
+                            .iter()
+                            .any(|known| known.at_ms <= change.at_ms)
+                            || activity
+                                .touched
+                                .iter()
+                                .any(|touch| touch.at_ms <= change.at_ms)
+                    })
+        })
+        .take(2)
+        .map(|change| {
+            checkout_ids.push(change.change_id.clone());
+            let run = explained_by(change);
+            CheckoutNotice {
+                by_session: run.map(|run| run.session_id.clone()),
+                command: run.and_then(|run| run.command.clone()),
+                from_branch: change.from_branch.clone(),
+                to_branch: change.to_branch.clone(),
+                from_head: change.from_head.clone(),
+                to_head: change.to_head.clone(),
+                files: change.files,
+                age_ms: now_ms.saturating_sub(change.at_ms),
+            }
+        })
+        .collect();
+    // In-flight signatures from other worktrees of the repository (roadmap
+    // C7), each told once. Each line is delivered once, so it is chosen
+    // only for a briefing with nothing else used up on delivery, whose
+    // text is sure to hold it; otherwise every one is counted and waits.
+    let quiet = messages.is_empty()
+        && trail.is_none()
+        && retracted.is_empty()
+        && uncoordinated.is_empty()
+        && !state.check_notices.contains_key(session_id);
+    let owed: Vec<(String, InflightNotice)> = inflight
+        .iter()
+        .filter(|item| {
+            item.workspace_id != me.workspace_id
+                && related_workspace(state, &me.workspace_id, &item.workspace_id)
+                && !inflight_told(state, session_id, item)
+        })
+        .filter_map(|item| {
+            let key = inflight_key(item);
+            let mut notice = inflight_notice(state, item)?;
+            notice.mentioned_in.retain(|path| concerned.contains(path));
+            notice.mentioned_in.truncate(INFLIGHT_MENTIONS);
+            (!notice.mentioned_in.is_empty()).then_some((key, notice))
+        })
+        .collect();
+    let mut inflight_keys = Vec::new();
+    let mut inflight_notices = Vec::new();
+    let mut bytes = 0;
+    for (key, notice) in &owed {
+        bytes += inflight_cost(notice);
+        if !quiet || inflight_notices.len() == INFLIGHT_LINES || bytes > INFLIGHT_BYTES {
+            break;
+        }
+        inflight_keys.push(key.clone());
+        inflight_notices.push(notice.clone());
+    }
+    let mut signature = String::new();
+    for key in &inflight_keys {
+        signature.push_str(&format!("inflight|{key}\n"));
+    }
+    for id in &checkout_ids {
+        signature.push_str(&format!("checkout|{id}\n"));
+    }
+    // A note whose definition changed state is news again.
+    for note in &notes {
+        match note.anchor_state {
+            Some(held) => {
+                signature.push_str(&format!("note|{}|{}\n", note.note_id, held.as_str()));
+            }
+            None => signature.push_str(&format!("note|{}\n", note.note_id)),
+        }
+    }
+    for impact in &interface_changes {
+        signature.push_str(&format!("interface|{}|", impact.path));
+        for change in &impact.changes {
+            signature.push_str(&format!(
+                "{}:{}:{}|",
+                change.name,
+                change.change,
+                change.after.as_deref().unwrap_or("")
+            ));
+        }
+        signature.push_str(&impact.affected.join(","));
+        signature.push('\n');
+    }
+    for item in &remote {
+        signature.push_str(&format!(
+            "remote|{}|{}|{}|{}|{}|{}\n",
+            item.name,
+            item.work.session,
+            item.work.branch_ref.as_deref().unwrap_or(""),
+            item.work.summary.as_deref().unwrap_or(""),
+            item.work.editing.join(","),
+            item.work.recent.join(",")
+        ));
+    }
+    for stale in &stale_reads {
+        signature.push_str(&format!("stale|{}|{}\n", stale.path, stale.session_id));
+    }
+    // A peer listed only for where it looked is presence, not work.
+    for peer in peers.iter().filter(|peer| !presence_only(peer)) {
+        signature.push_str(&peer.session_id);
+        for part in [&peer.editing, &peer.overlap] {
+            signature.push('|');
+            signature.push_str(&part.join(","));
+        }
+        signature.push('|');
+        for recent in &peer.recent {
+            signature.push_str(&recent.path);
+            signature.push(',');
+        }
+        // A peer in this checkout is on this session's own branch, learned
+        // by the Git observer on its own thread, perhaps only after a
+        // briefing: not news. A change of that branch is a checkout change.
+        let branch = (!peer.same_workspace).then_some(&peer.branch_ref);
+        for text in [Some(&peer.summary), Some(&peer.intent), branch] {
+            signature.push('|');
+            signature.push_str(text.and_then(Option::as_deref).unwrap_or(""));
+        }
+        // Only when present, so a briefing without one keeps the signature
+        // it had before prompt targets existed and is not delivered again.
+        if !peer.target_overlap.is_empty() {
+            signature.push_str("|targets:");
+            signature.push_str(&peer.target_overlap.join(","));
+        }
+        signature.push_str(if peer.ended { "|ended\n" } else { "\n" });
+    }
+    // Presence has a signature part of its own: alone it makes a briefing
+    // new only at a session start or prompt, never mid-turn, so a peer's
+    // reads do not interrupt a turn. The part is a set of bits, one pair per
+    // peer and path (`presence_bits`), so that a briefing is news only for
+    // a path not shown before: a path that ages out, or is read again, or
+    // the same files read in another order, is not.
+    let presence = presence_bits(&peers);
+    // Without presence the signature is as it was before presence existed,
+    // so a briefing stored then is not delivered again.
+    let mut signature = fingerprint(&signature);
+    if let Some(bits) = presence {
+        signature.push('+');
+        for byte in bits {
+            signature.push_str(&format!("{byte:02x}"));
+        }
+    }
+    Ok((
+        Briefing {
+            session_id: session_id.into(),
+            changed: false,
+            omitted_peers: u32::try_from(total - peers.len()).unwrap_or(u32::MAX),
+            // Counted by `keep_changes` for a briefing of changes only.
+            unchanged: 0,
+            peers,
+            stale_reads,
+            remote,
+            interface_changes,
+            interface_notice_ids: notice_ids,
+            omitted_inflight: u32::try_from(owed.len() - inflight_notices.len())
+                .unwrap_or(u32::MAX),
+            inflight: inflight_notices,
+            // Set by the request that carries the index's answer.
+            inflight_partial: false,
+            notes,
+            messages,
+            retracted,
+            checkout_changes,
+            uncoordinated,
+            // Filled in by the request that names the sessions (`Brief::left`).
+            left_work: Vec::new(),
+            trail,
+            // One result per briefing, the newest: it always fits the
+            // rendered text, and each delivered one is removed, so the rest
+            // follow at the next briefings.
+            checks: state
+                .check_notices
+                .get(session_id)
+                .and_then(|notices| notices.first())
+                .cloned()
+                .into_iter()
+                .collect(),
+            recent: None,
+        },
+        signature,
+        inflight_keys,
+    ))
+}
+
+/// The key of one briefing item: what it says, without ages, so that the
+/// same item told again has the same key (issue #222).
+fn item_key(parts: &[&str]) -> u64 {
+    let mut text = String::new();
+    for part in parts {
+        text.push_str(part);
+        text.push('\u{1f}');
+    }
+    fingerprint_u64(&text)
+}
+
+/// A peer's own line without its files: who it is, where, its task and
+/// whether it is still running. A peer in this checkout is on this
+/// session's own branch, which the Git observer may learn only after a
+/// briefing (as in `brief`'s signature): not part of its key.
+fn peer_key(peer: &PeerWork) -> u64 {
+    let branch = (!peer.same_workspace)
+        .then_some(peer.branch_ref.as_deref())
+        .flatten();
+    let relation = peer.relation.map(|relation| format!("{relation:?}"));
+    item_key(&[
+        "peer",
+        &peer.session_id,
+        &peer.workspace_root,
+        branch.unwrap_or(""),
+        peer.summary.as_deref().unwrap_or(""),
+        peer.intent.as_deref().unwrap_or(""),
+        if peer.ended { "ended" } else { "" },
+        if peer.liveness == Some(LivenessStatus::Unknown) {
+            "unknown"
+        } else {
+            ""
+        },
+        relation.as_deref().unwrap_or(""),
+    ])
+}
+
+fn peer_path_key(peer: &PeerWork, kind: &str, path: &str) -> u64 {
+    item_key(&["peer", &peer.session_id, kind, path])
+}
+
+fn stale_key(stale: &StaleRead) -> u64 {
+    item_key(&["stale", &stale.path, &stale.session_id])
+}
+
+fn remote_work_key(remote: &RemotePeerWork) -> u64 {
+    let work = &remote.work;
+    item_key(&[
+        "remote",
+        &remote.name,
+        &work.session,
+        work.branch_ref.as_deref().unwrap_or(""),
+        work.summary.as_deref().unwrap_or(""),
+        &work.editing.join(","),
+        &work.recent.join(","),
+        &remote.overlap.join(","),
+    ])
+}
+
+fn interface_key(impact: &InterfaceImpact) -> u64 {
+    let changes: Vec<String> = impact
+        .changes
+        .iter()
+        .map(|change| {
+            // Everything that says what changed: a removal's signature and
+            // a count change's counts too (issue #270).
+            format!(
+                "{:?}",
+                (
+                    &change.name,
+                    &change.kind,
+                    &change.change,
+                    &change.before,
+                    &change.after,
+                    &change.after_name,
+                    change.before_count,
+                    change.after_count,
+                )
+            )
+        })
+        .collect();
+    item_key(&[
+        "interface",
+        &impact.path,
+        &changes.join("|"),
+        &impact.affected.join(","),
+    ])
+}
+
+/// A note and its anchor's state: an anchored note whose state changes is
+/// news again (roadmap E1).
+fn note_key(note: &Note) -> u64 {
+    item_key(&[
+        "note",
+        &note.note_id,
+        note.anchor_state.map_or("", AnchorState::as_str),
+    ])
+}
+
+fn checkout_key(change: &CheckoutNotice) -> u64 {
+    item_key(&[
+        "checkout",
+        change.from_branch.as_deref().unwrap_or(""),
+        change.to_branch.as_deref().unwrap_or(""),
+        change.from_head.as_deref().unwrap_or(""),
+        change.to_head.as_deref().unwrap_or(""),
+        change.by_session.as_deref().unwrap_or(""),
+        &change.files.to_string(),
+    ])
+}
+
+/// The kinds of a peer's listed paths, each with its own key.
+const PEER_LISTS: [&str; 5] = ["overlap", "target", "editing", "recent", "looking"];
+
+fn peer_paths<'a>(peer: &'a PeerWork, kind: &str) -> Vec<&'a str> {
+    match kind {
+        "overlap" => peer.overlap.iter().map(String::as_str).collect(),
+        "target" => peer.target_overlap.iter().map(String::as_str).collect(),
+        "editing" => peer.editing.iter().map(String::as_str).collect(),
+        "recent" => peer
+            .recent
+            .iter()
+            .map(|recent| recent.path.as_str())
+            .collect(),
+        _ => peer
+            .looking
+            .iter()
+            .map(|looked| looked.path.as_str())
+            .collect(),
+    }
+}
+
+/// Every item key of `briefing`, in the order a reader meets them. Messages,
+/// withdrawals, check results, in-flight signatures, uncoordinated changes
+/// and left work are not keyed: each is delivered once already. A hook
+/// names the keys of the items it could not place to `Command::ForgetTold`.
+pub fn briefing_keys(briefing: &Briefing) -> Vec<u64> {
+    let mut keys = Vec::new();
+    keys.extend(briefing.stale_reads.iter().map(stale_key));
+    keys.extend(briefing.checkout_changes.iter().map(checkout_key));
+    keys.extend(briefing.notes.iter().map(note_key));
+    keys.extend(briefing.interface_changes.iter().map(interface_key));
+    for peer in &briefing.peers {
+        keys.push(peer_key(peer));
+        for kind in PEER_LISTS {
+            keys.extend(
+                peer_paths(peer, kind)
+                    .into_iter()
+                    .map(|path| peer_path_key(peer, kind, path)),
+            );
+        }
+    }
+    keys.extend(briefing.remote.iter().map(remote_work_key));
+    keys
+}
+
+/// Leave in `briefing` only what `told` does not hold, count the rest in
+/// `unchanged`, and return the keys left in. A safety item stays in when
+/// `acted` says the session read or edited one of its files since it was
+/// last told: a peer's hold on a file this session works on, an interface
+/// change to names its files use, a file it read that a peer has since
+/// edited. Mid-turn, where a peer is looking is not news by itself
+/// (`once`: something delivered once is in the briefing); it waits, untold,
+/// for a briefing that has other news.
+fn keep_changes(
+    briefing: &mut Briefing,
+    told: &BTreeSet<u64>,
+    acted: &dyn Fn(&str) -> bool,
+    stale_again: &dyn Fn(&StaleRead) -> bool,
+    mid_turn: bool,
+    once: bool,
+) -> BTreeSet<u64> {
+    let mut shown = BTreeSet::new();
+    let mut unchanged = 0_usize;
+    let mut keep = |key: u64, safety: bool| {
+        let fresh = !told.contains(&key) || safety;
+        if fresh {
+            shown.insert(key);
+        } else {
+            unchanged += 1;
+        }
+        fresh
+    };
+    briefing
+        .stale_reads
+        .retain(|stale| keep(stale_key(stale), acted(&stale.path) || stale_again(stale)));
+    briefing
+        .checkout_changes
+        .retain(|change| keep(checkout_key(change), false));
+    briefing.notes.retain(|note| keep(note_key(note), false));
+    // Each notice's ID goes with its change, so the hook's report of what it
+    // showed names the right one (issue #269).
+    let mut ids = briefing.interface_notice_ids.clone().into_iter();
+    let mut kept_ids = Vec::new();
+    briefing.interface_changes.retain(|impact| {
+        let id = ids.next();
+        let fresh = keep(
+            interface_key(impact),
+            impact.affected.iter().any(|path| acted(path)),
+        );
+        if fresh {
+            kept_ids.extend(id);
+        }
+        fresh
+    });
+    briefing.interface_notice_ids = kept_ids;
+    // Presence counted apart: alone, mid-turn, it is held back.
+    let mut presence = Vec::new();
+    let mut work_news = false;
+    briefing.peers.retain_mut(|peer| {
+        let only_presence = presence_only(peer);
+        // A file this peer holds in this checkout that this session works
+        // on: refused to this session while held.
+        let held: BTreeSet<String> = peer
+            .overlap
+            .iter()
+            .filter(|path| peer.same_workspace && peer.editing.contains(path))
+            .cloned()
+            .collect();
+        let header = peer_key(peer);
+        let header_fresh = keep(header, false);
+        if header_fresh {
+            if only_presence {
+                presence.push(header);
+            } else {
+                work_news = true;
+            }
+        }
+        let mut any = false;
+        let id = peer.session_id.clone();
+        let mut list = |kind: &str, path: &str| {
+            let key = item_key(&["peer", &id, kind, path]);
+            let safety =
+                matches!(kind, "overlap" | "editing") && held.contains(path) && acted(path);
+            let fresh = keep(key, safety);
+            if fresh {
+                any = true;
+                if kind == "looking" {
+                    presence.push(key);
+                } else {
+                    work_news = true;
+                }
+            }
+            fresh
+        };
+        peer.overlap.retain(|path| list("overlap", path));
+        peer.target_overlap.retain(|path| list("target", path));
+        peer.editing.retain(|path| list("editing", path));
+        peer.recent.retain(|recent| list("recent", &recent.path));
+        peer.looking.retain(|looked| list("looking", &looked.path));
+        if !header_fresh {
+            // Its task was told: the line names the peer and what is new.
+            peer.summary = None;
+            peer.intent = None;
+        }
+        header_fresh || any
+    });
+    briefing
+        .remote
+        .retain(|remote| keep(remote_work_key(remote), false));
+    let other_news = work_news
+        || once
+        || !briefing.stale_reads.is_empty()
+        || !briefing.checkout_changes.is_empty()
+        || !briefing.notes.is_empty()
+        || !briefing.interface_changes.is_empty()
+        || !briefing.remote.is_empty()
+        || !briefing.inflight.is_empty();
+    if mid_turn && !other_news && !presence.is_empty() {
+        for key in &presence {
+            shown.remove(key);
+        }
+        // A peer is left in only for its own line, told here for the first
+        // time (and not only for where it looked), or for a file still in.
+        // A told line had its task cleared, so its key no longer matches.
+        briefing.peers.retain_mut(|peer| {
+            peer.looking.clear();
+            shown.contains(&peer_key(peer))
+                || !(peer.overlap.is_empty()
+                    && peer.target_overlap.is_empty()
+                    && peer.editing.is_empty()
+                    && peer.recent.is_empty())
+        });
+    }
+    briefing.unchanged = u32::try_from(unchanged).unwrap_or(u32::MAX);
+    shown
+}
+
+/// Whether a `changes_only` briefing still has an item to place in context.
+fn shown_anything(briefing: &Briefing) -> bool {
+    !briefing.peers.is_empty()
+        || !briefing.stale_reads.is_empty()
+        || !briefing.remote.is_empty()
+        || !briefing.interface_changes.is_empty()
+        || !briefing.inflight.is_empty()
+        || !briefing.notes.is_empty()
+        || !briefing.checkout_changes.is_empty()
+}
+
+/// Bytes in the presence part of a briefing signature: with the work
+/// fingerprint and its `+`, the signature stays within the 64 bytes an
+/// event holds.
+const PRESENCE_SIGNATURE_BYTES: usize = 23;
+
+/// The presence part of a briefing signature: for each peer and path it
+/// shows as presence, two bits set from that pair's fingerprint. None when
+/// it shows none. A path whose bits another pair already set is not news on
+/// its own; it is shown with the next briefing that is.
+fn presence_bits(peers: &[PeerWork]) -> Option<[u8; PRESENCE_SIGNATURE_BYTES]> {
+    const BITS: u64 = (PRESENCE_SIGNATURE_BYTES * 8) as u64;
+    let mut bits = [0u8; PRESENCE_SIGNATURE_BYTES];
+    let mut any = false;
+    for peer in peers {
+        for looked in &peer.looking {
+            let hash = fingerprint_u64(&format!("{}|{}", peer.session_id, looked.path));
+            for bit in [hash % BITS, (hash >> 32) % BITS] {
+                bits[(bit / 8) as usize] |= 1 << (bit % 8);
+            }
+            any = true;
+        }
+    }
+    any.then_some(bits)
+}
+
+/// Whether a briefing signature shows presence that `previous` did not:
+/// a bit set in its presence part that is clear in the previous one. A
+/// previous signature without a presence part, or from before this form,
+/// has shown none.
+fn new_presence(signature: &str, previous: &str) -> bool {
+    let bits = |signature: &str| -> Option<Vec<u8>> {
+        let (_, hex) = signature.split_once('+')?;
+        if hex.len() != PRESENCE_SIGNATURE_BYTES * 2 {
+            return None;
+        }
+        (0..hex.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(hex.get(at..at + 2)?, 16).ok())
+            .collect()
+    };
+    let Some(now) = bits(signature) else {
+        return false;
+    };
+    match bits(previous) {
+        Some(before) => now
+            .iter()
+            .zip(&before)
+            .any(|(now, before)| now & !before != 0),
+        None => true,
+    }
+}
+
+/// A briefing signature without its presence part.
+fn without_presence(signature: &str) -> &str {
+    signature
+        .split_once('+')
+        .map_or(signature, |(work, _)| work)
+}
+
+/// A peer in a briefing only for where it looked.
+fn presence_only(peer: &PeerWork) -> bool {
+    !peer.looking.is_empty()
+        && peer.editing.is_empty()
+        && peer.recent.is_empty()
+        && peer.overlap.is_empty()
+        && peer.target_overlap.is_empty()
+        && peer.summary.is_none()
+        && peer.intent.is_none()
+}
+
+// ---- end domain: briefing ----
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
+}
+
+pub(crate) fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+fn one() -> u32 {
+    1
+}
+
+fn default_path_hops() -> u32 {
+    DEFAULT_PATH_HOPS
+}
+
+fn is_one(value: &u32) -> bool {
+    *value == 1
+}
+
+/// FNV-1a, 64 bits. It only tells one briefing from the next for the same
+/// session; a collision would withhold one repeat briefing and nothing else.
+fn fingerprint(text: &str) -> String {
+    format!("{:016x}", fingerprint_u64(text))
+}
+
+fn fingerprint_u64(text: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in text.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// One in-flight signature, as remembered once told to a session: a change
+/// of signature is a new key, so it is told again.
+fn inflight_key(item: &InflightSymbol) -> String {
+    fingerprint(&format!(
+        "{}\n{}\n{}\n{}\n{}",
+        item.workspace_id, item.path, item.kind, item.name, item.signature
+    ))
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -3104,209 +6956,11 @@ pub struct State {
     pub unsettled: BTreeMap<String, Vec<UnsettledRefusal>>,
 }
 
-/// Checkout changes kept per workspace.
-pub const MAX_CHECKOUTS: usize = 4;
-
-/// Host names one host check may report.
-pub const MAX_HOSTS: usize = 16;
-
-/// An agent host whose configuration directory exists on this machine but
-/// which no LangSpan install covers: no user-level install, and no project
-/// install in a registered workspace. Only its name is kept; what the owner
-/// can run is derived from it.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct UninstalledHost {
-    pub host: String,
-    /// When the daemon first saw it so, by its own clock.
-    pub at_ms: u64,
-    pub generation: u64,
-}
-
-/// The checkout of one physical workspace changed under the sessions in it:
-/// its branch changed, its HEAD moved and files changed with it, or several
-/// changed files went back to their committed version at once (`git
-/// checkout`, `switch`, `reset --hard`, `stash`, `pull`). Built from the
-/// scan's branch observation. Who did it is not known, unless a session's
-/// shell command explains it (`CheckoutRun`).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CheckoutChange {
-    pub change_id: String,
-    pub workspace_id: String,
-    pub from_branch: Option<String>,
-    pub to_branch: Option<String>,
-    pub from_head: Option<String>,
-    pub to_head: Option<String>,
-    /// Files whose content changed in the same scan.
-    pub files: u32,
-    pub at_ms: u64,
-    pub generation: u64,
-}
-
-/// Uncoordinated changes kept per workspace.
-pub const MAX_UNCOORDINATED: usize = 4;
-/// Changed files one uncoordinated change keeps, at most.
-pub const MAX_UNCOORDINATED_FILES: usize = 8;
-/// Codex sessions one uncoordinated change names, at most.
-pub const MAX_UNCOORDINATED_SESSIONS: usize = 2;
-/// Changed files one scan reports for comparison, at most.
-pub const MAX_UNCOORDINATED_OBSERVED: usize = 256;
-/// The host name that starts a Codex session's ID (`codex.<host session>`).
-pub const CODEX_HOST: &str = "codex";
-/// The host names that start the other hooked hosts' session IDs.
-pub const CLAUDE_CODE_HOST: &str = "claude-code";
-pub const CURSOR_HOST: &str = "cursor";
-pub const ANTIGRAVITY_HOST: &str = "antigravity";
-/// The tool name of a shell call on every host, as the hooks record it.
-pub const SHELL_TOOL: &str = "Bash";
-
-/// Files a scan saw change in one physical workspace that no session of it
-/// reported, while Codex sessions are registered there (issue #129). Codex
-/// trusts project hooks by the exact path of their file, so a session resumed
-/// under another path for the same directory runs none of them. The sessions
-/// named are the likely cause, not a proven author: a hand edit looks the same.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct UncoordinatedChange {
-    pub change_id: String,
-    pub workspace_id: String,
-    /// The Codex sessions registered here, most recently active first.
-    pub sessions: Vec<String>,
-    /// The versions the scan saw, sorted by path.
-    pub files: Vec<ObservedFile>,
-    pub at_ms: u64,
-    pub generation: u64,
-    /// Sessions this change was delivered to.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub delivered: Vec<String>,
-}
-
-/// An uncoordinated change as one session's briefing carries it: the files
-/// still at a version no session has reported.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct UncoordinatedNotice {
-    pub sessions: Vec<String>,
-    pub paths: Vec<String>,
-    pub age_ms: u64,
-}
-
-/// A checkout change as one session's briefing carries it.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CheckoutNotice {
-    pub from_branch: Option<String>,
-    pub to_branch: Option<String>,
-    pub from_head: Option<String>,
-    pub to_head: Option<String>,
-    pub files: u32,
-    pub age_ms: u64,
-    /// The other session whose shell command explains the change, when one
-    /// does (`CheckoutRun`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub by_session: Option<String>,
-    /// That command's line, redacted and capped by its hook.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub command: Option<String>,
-}
-
-/// Shell runs that moved a checkout, kept per workspace.
-pub const MAX_CHECKOUT_RUNS: usize = 8;
-/// A checkout change first observed up to this long after a run finished,
-/// at the state the run left, is the run's: the observer scans every few
-/// seconds and may see the change only after the run's hook reported it.
-pub const CHECKOUT_RUN_GRACE_MS: u64 = 60_000;
-/// The longest a checkout run is taken to have run: a shell call's
-/// supported lifetime, two hours.
-pub const MAX_CHECKOUT_RUN_MS: u64 = 2 * 60 * 60 * 1000;
-/// The command text a checkout run keeps, at most, in bytes.
-pub const MAX_CHECKOUT_COMMAND_BYTES: usize = 256;
-
-/// One session's shell command ran a Git operation that changes the
-/// checkout (`git merge`, `pull`, `rebase`, `reset`, `checkout`, `switch`,
-/// `stash` and the like) and the checkout changed while it ran: reported by
-/// that session's post-tool hook. A checkout change it explains is not news
-/// to that session, and other sessions are told whose command it was.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CheckoutRun {
-    pub run_id: String,
-    pub workspace_id: String,
-    pub session_id: String,
-    /// The command line, redacted and capped by the hook.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub command: Option<String>,
-    /// The checkout the command left.
-    pub to_branch: Option<String>,
-    pub to_head: Option<String>,
-    /// When the command started and finished on the daemon's clock, placed
-    /// back from the report's arrival by the durations its hook measured
-    /// (never after the arrival), whenever it is reported.
-    pub started_ms: u64,
-    pub finished_ms: u64,
-    pub generation: u64,
-    /// The command changed no file's content: it moved HEAD or the branch
-    /// only, as a commit does. Absent from an earlier record.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub files_unchanged: bool,
-}
-
-impl CheckoutRun {
-    /// Whether this run explains `change`: observed while the command ran,
-    /// or the first change observed after it finished, within
-    /// `CHECKOUT_RUN_GRACE_MS`, at the checkout the command left, unless a
-    /// change while it ran already showed that checkout or the command
-    /// changed no file and the change left branch and HEAD in place.
-    /// `changes` are the workspace's changes, to find the first.
-    pub fn explains(&self, change: &CheckoutChange, changes: &[CheckoutChange]) -> bool {
-        if change.workspace_id != self.workspace_id
-            || change.generation != self.generation
-            || change.at_ms < self.started_ms
-        {
-            return false;
-        }
-        if change.at_ms <= self.finished_ms {
-            return true;
-        }
-        let left = |other: &CheckoutChange| {
-            other.to_head == self.to_head && other.to_branch == self.to_branch
-        };
-        // A run that changed no file (a commit) explains no later change
-        // with branch and HEAD in place (a restore): the scan records no
-        // change for such a run, so that one came after it.
-        let moved = change.from_head != change.to_head || change.from_branch != change.to_branch;
-        change.at_ms <= self.finished_ms.saturating_add(CHECKOUT_RUN_GRACE_MS)
-            && left(change)
-            && (moved || !self.files_unchanged)
-            && !changes.iter().any(|other| {
-                other.change_id != change.change_id
-                    && other.workspace_id == self.workspace_id
-                    && other.generation == self.generation
-                    && other.at_ms < change.at_ms
-                    // Another change after the run came first; one while it
-                    // ran at the state it left already showed its result.
-                    && (other.at_ms > self.finished_ms
-                        || (other.at_ms >= self.started_ms && left(other)))
-            })
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RecordedEvent {
     pub seq: u64,
     pub event: Event,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct Conflict {
-    pub lease_id: String,
-    pub session_id: String,
-    pub paths: Vec<String>,
-    /// The holder's regions in the conflicting paths it holds by region. A
-    /// conflicting path missing here is held whole.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub regions: Vec<PathRegions>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -6146,210 +9800,6 @@ fn decide_checked(
     }
 }
 
-fn validate_note(note: &Note) -> Result<(), CoreError> {
-    validate_request_id(&note.note_id)?;
-    if note.text.trim().is_empty()
-        || note.text.len() > NOTE_BYTES
-        || note.text.chars().any(char::is_control)
-        || note.paths.len() > BRIEF_PATHS
-        || !anchors::valid_note_anchor(note)
-    {
-        return Err(error(
-            "invalid_note",
-            "A note is one line of 1 to 400 bytes about at most 8 files",
-        ));
-    }
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn sent(
-    request_id: &str,
-    now_ms: u64,
-    generation: u64,
-    workspace_id: &str,
-    from: Option<String>,
-    to: Recipient,
-    text: &str,
-    paths: &[String],
-) -> Result<Decision, CoreError> {
-    let message = Message {
-        message_id: request_id.into(),
-        workspace_id: workspace_id.into(),
-        from,
-        to,
-        text: text.into(),
-        paths: if paths.is_empty() {
-            Vec::new()
-        } else {
-            normalized_paths(paths)?
-        },
-        acknowledged: Vec::new(),
-        retracted: false,
-    };
-    validate_message(&message)?;
-    Ok(Decision {
-        events: vec![Event::MessageSent {
-            message: message.clone(),
-            at_ms: Some(now_ms),
-            generation: Some(generation),
-        }],
-        outcome: Outcome::MessageSent { message },
-    })
-}
-
-/// The sent message `message_id` of the workspace, or with no ID the newest
-/// one `from` sent. The history is the latest messages sent, newest first,
-/// and lists every reader, so it answers first. A message older than the
-/// history but still held is found by its ID only: the sender's newest
-/// message is in the history if any of its messages is, so `last` never
-/// reaches past a newer message that was dropped.
-fn sent_message<'a>(
-    state: &'a State,
-    workspace_id: &str,
-    from: Option<&str>,
-    message_id: Option<&str>,
-) -> Option<&'a Message> {
-    let list = |lists: &'a BTreeMap<String, Vec<Message>>| {
-        lists.get(workspace_id).map(Vec::as_slice).unwrap_or(&[])
-    };
-    match message_id {
-        Some(id) => list(&state.message_history)
-            .iter()
-            .chain(list(&state.messages))
-            .find(|message| message.message_id == id),
-        None => list(&state.message_history)
-            .iter()
-            .find(|message| message.from.as_deref() == from),
-    }
-}
-
-fn retract(
-    state: &State,
-    workspace_id: &str,
-    from: Option<&str>,
-    message_id: Option<&str>,
-) -> Result<Decision, CoreError> {
-    validate_known_workspace(state, workspace_id)?;
-    if let Some(id) = message_id {
-        validate_request_id(id)?;
-    }
-    if let Some(from) = from
-        && known_session(state, from)?.workspace_id != workspace_id
-    {
-        return Err(error(
-            "sender_not_in_workspace",
-            "The withdrawing session belongs to another workspace; withdraw from the session that sent it, or leave out the sender to withdraw as the owner",
-        ));
-    }
-    let Some(message) = sent_message(state, workspace_id, from, message_id) else {
-        return Err(error(
-            "unknown_message",
-            match message_id {
-                Some(_) => {
-                    "No such message in this workspace: unknown, or dropped as the oldest of more than 64; `langspan recap WORKSPACE` lists those held"
-                }
-                None => {
-                    "This sender has none of the latest 64 messages sent in this workspace; withdraw an older one still held by its ID"
-                }
-            },
-        ));
-    };
-    if from.is_some() && message.from.as_deref() != from {
-        return Err(error(
-            "not_sender",
-            "Only the session that sent a message, or the owner (without a session), may withdraw it",
-        ));
-    }
-    if message.retracted {
-        return Err(error(
-            "already_retracted",
-            "That message was already withdrawn; its readers have been or will be told",
-        ));
-    }
-    let held = state.messages.get(workspace_id).and_then(|messages| {
-        messages
-            .iter()
-            .find(|held| held.message_id == message.message_id)
-    });
-    let withdrawn_unread: Vec<String> = match held.map(|held| (held, &held.to)) {
-        Some((_, Recipient::Session { session_id })) => vec![session_id.clone()],
-        Some((held, Recipient::Everyone {})) => state
-            .sessions
-            .values()
-            .filter(|session| {
-                session.workspace_id == workspace_id
-                    && session.generation == state.generation
-                    && owed_to(held, &session.session_id, false)
-            })
-            .map(|session| session.session_id.clone())
-            .collect(),
-        Some((_, Recipient::NextSession {})) | None => Vec::new(),
-    };
-    Ok(Decision {
-        events: vec![Event::MessageRetracted {
-            workspace_id: workspace_id.into(),
-            message_id: message.message_id.clone(),
-            by: from.map(str::to_owned),
-        }],
-        outcome: Outcome::MessageRetracted {
-            message_id: message.message_id.clone(),
-            withdrawn_unread,
-            told_to_disregard: readers(state, workspace_id, &message.message_id),
-        },
-    })
-}
-
-/// Every session that received the message, in ID order.
-fn readers(state: &State, workspace_id: &str, message_id: &str) -> Vec<String> {
-    let mut readers: Vec<String> = sent_message(state, workspace_id, None, Some(message_id))
-        .map(|message| message.acknowledged.clone())
-        .unwrap_or_default();
-    readers.sort();
-    readers.dedup();
-    readers
-}
-
-/// The first `RETRACTED_TEXT_BYTES` of `text`, at a character boundary, and
-/// whether anything was left out.
-fn retracted_text(text: &str) -> (String, bool) {
-    let mut end = text.len().min(RETRACTED_TEXT_BYTES);
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    (text[..end].to_owned(), end < text.len())
-}
-
-/// An upper bound on the bytes an adapter renders to tell a session to
-/// disregard a withdrawn message, counted like `message_cost`.
-fn retracted_cost(retracted: &RetractedMessage) -> usize {
-    (192 + 4 * retracted.text.len()).min(MESSAGE_LINE_LIMIT + 4)
-}
-
-fn validate_message(message: &Message) -> Result<(), CoreError> {
-    validate_request_id(&message.message_id)?;
-    if message.text.trim().is_empty()
-        || message.text.len() > MESSAGE_BYTES
-        || message.text.chars().any(char::is_control)
-        || message.paths.len() > BRIEF_PATHS
-    {
-        return Err(error(
-            "invalid_message",
-            "A message is one line of 1 to 400 bytes about at most 8 files",
-        ));
-    }
-    for path in &message.paths {
-        validate_relative_path(path)?;
-    }
-    if let Some(from) = &message.from {
-        validate_id(from, "session ID")?;
-    }
-    if let Recipient::Session { session_id } = &message.to {
-        validate_id(session_id, "session ID")?;
-    }
-    Ok(())
-}
-
 /// Whether `session_id` is still owed `message`. A handoff is owed to any
 /// other session until one takes it; `handoffs` is false mid-turn.
 fn owed_to(message: &Message, session_id: &str, handoffs: bool) -> bool {
@@ -6360,198 +9810,6 @@ fn owed_to(message: &Message, session_id: &str, handoffs: bool) -> bool {
             Recipient::Everyone {} => true,
             Recipient::NextSession {} => handoffs,
         }
-}
-
-/// Whether `me` may take `message` if it is a handoff. A handoff is meant
-/// for the next session a person works in, so a headless session (`claude
-/// -p`) takes one only when a headless session wrote it: then the next
-/// headless run is the kind of session that will carry the work on, as in a
-/// scripted pipeline. A person's handoff waits for an interactive session,
-/// however many scripted runs start first. A subagent never takes one: it
-/// works for its parent, which takes it if it is owed.
-fn takes_handoff(state: &State, me: &Session, message: &Message) -> bool {
-    if !matches!(message.to, Recipient::NextSession {}) {
-        return true;
-    }
-    if me.parent.is_some() {
-        return false;
-    }
-    !me.headless
-        || message
-            .from
-            .as_deref()
-            .and_then(|from| state.sessions.get(from))
-            .is_some_and(|sender| sender.headless)
-}
-
-/// An upper bound on the bytes an adapter renders for one message: a label
-/// of under 192 bytes (a session ID is at most 128), then text and paths
-/// that quoting can grow at most fourfold, cut within `MESSAGE_LINE_LIMIT`
-/// (ellipsis and `messages show` pointer included) plus its newline.
-fn message_cost(message: &Message) -> usize {
-    let raw = message.text.len()
-        + message
-            .paths
-            .iter()
-            .map(|path| path.len() + 4)
-            .sum::<usize>();
-    (192 + 4 * raw).min(MESSAGE_LINE_LIMIT + 4)
-}
-
-/// A bounded account of one workspace, from projected state only.
-fn recap(state: &State, workspace_id: &str, tag: Option<&str>, now_ms: u64) -> Recap {
-    let mut sessions: Vec<(u64, RecapSession)> = state
-        .sessions
-        .values()
-        .filter(|session| session.workspace_id == workspace_id)
-        .map(|session| {
-            let activity = state.activity.get(&session.session_id);
-            let in_generation = activity.filter(|activity| activity.generation == state.generation);
-            let editing: Vec<String> = state
-                .leases
-                .values()
-                .filter(|lease| {
-                    lease.session_id == session.session_id && live_lease(state, lease, now_ms)
-                })
-                .flat_map(|lease| lease.paths.iter().cloned())
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .take(RECAP_ITEMS)
-                .collect();
-            (
-                in_generation
-                    .map(SessionActivity::last_seen_ms)
-                    .unwrap_or(0),
-                RecapSession {
-                    session_id: session.session_id.clone(),
-                    current: session.generation == state.generation,
-                    ended: activity.is_some_and(|activity| activity.ended),
-                    liveness: state
-                        .session_liveness
-                        .get(&session.session_id)
-                        .map(|liveness| liveness.status),
-                    summary: activity.and_then(|activity| activity.summary.clone()),
-                    intent: state
-                        .intents
-                        .get(&session.session_id)
-                        .map(|intent| intent.summary.clone()),
-                    editing,
-                    recent: in_generation
-                        .map(|activity| {
-                            activity
-                                .touched
-                                .iter()
-                                .take(RECAP_ITEMS)
-                                .map(|touch| RecentPath {
-                                    path: touch.path.clone(),
-                                    age_ms: now_ms.saturating_sub(touch.at_ms),
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default(),
-                    adopted_by: state
-                        .adoptions
-                        .get(&session.session_id)
-                        .map(|adoption| adoption.session_id.clone()),
-                    adopted: state
-                        .adoptions
-                        .values()
-                        .filter(|adoption| adoption.session_id == session.session_id)
-                        .take(RECAP_ITEMS)
-                        .map(|adoption| adoption.from.clone())
-                        .collect(),
-                },
-            )
-        })
-        .collect();
-    // Sessions that are here now first, then by most recent activity.
-    sessions.sort_by(|a, b| {
-        (!a.1.current, a.1.ended, u64::MAX - a.0, &a.1.session_id).cmp(&(
-            !b.1.current,
-            b.1.ended,
-            u64::MAX - b.0,
-            &b.1.session_id,
-        ))
-    });
-    let total = sessions.len();
-    let first = |items: Option<&Vec<_>>| -> Vec<_> {
-        items
-            .map(|items| items.iter().take(RECAP_ITEMS).cloned().collect())
-            .unwrap_or_default()
-    };
-    Recap {
-        workspace_id: workspace_id.into(),
-        root: state
-            .workspaces
-            .get(workspace_id)
-            .map(|workspace| workspace.root.clone())
-            .unwrap_or_default(),
-        branch_ref: state
-            .workspace_git
-            .get(workspace_id)
-            .and_then(|git| git.branch_ref.clone()),
-        omitted_sessions: u32::try_from(total.saturating_sub(RECAP_SESSIONS)).unwrap_or(u32::MAX),
-        omitted_items: 0,
-        sessions: sessions
-            .into_iter()
-            .take(RECAP_SESSIONS)
-            .map(|(_, session)| session)
-            .collect(),
-        interface_changes: state
-            .interface_notices
-            .get(workspace_id)
-            .map(|notices| notices.iter().take(RECAP_ITEMS).cloned().collect())
-            .unwrap_or_default(),
-        checks: first(state.checks.get(workspace_id)),
-        landings: state
-            .landings
-            .get(workspace_id)
-            .map(|landings| landings.iter().take(RECAP_ITEMS).cloned().collect())
-            .unwrap_or_default(),
-        notes: state
-            .notes
-            .get(workspace_id)
-            .map(|notes| {
-                notes
-                    .iter()
-                    .filter(|note| tag.is_none_or(|tag| note.tags.iter().any(|held| held == tag)))
-                    .take(RECAP_SESSIONS)
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default(),
-        messages: state
-            .messages
-            .get(workspace_id)
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
-            .iter()
-            .take(RECAP_SESSIONS)
-            .chain(
-                state
-                    .message_history
-                    .get(workspace_id)
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[])
-                    .iter()
-                    .filter(|message| message.retracted)
-                    .take(RECAP_ITEMS),
-            )
-            .cloned()
-            .collect(),
-        trails: trail::listed(state, workspace_id, RECAP_TRAILS, now_ms),
-        teammates: state
-            .remote_peers
-            .values()
-            .filter(|peer| peer.workspace_id == workspace_id)
-            .take(RECAP_ITEMS)
-            .cloned()
-            .collect(),
-        publishing: state.remote_links.get(workspace_id).cloned(),
-        scan_failure: state.scan_failures.get(workspace_id).cloned(),
-        scan_coverage: state.scan_coverage.get(workspace_id).cloned(),
-        since: None,
-    }
 }
 
 fn validate_notice(notice: &InterfaceNotice) -> Result<(), CoreError> {
@@ -6650,118 +9908,6 @@ fn validate_notice(notice: &InterfaceNotice) -> Result<(), CoreError> {
     Ok(())
 }
 
-/// What a notice's renames and moves change in the state (roadmap D7). A
-/// rename is remembered under its old name and kind, replacing an earlier
-/// rename of that name and kind; a name that comes back as the
-/// same kind (added, or the new name of another rename) is forgotten as
-/// renamed. A file moved
-/// whole takes its notes along: each note about the old path is about the
-/// new one instead.
-fn follow_renames(state: &mut State, notice: &InterfaceNotice) {
-    for change in &notice.changes {
-        let moved = change.evidence.as_deref() == Some(FILE_MOVED);
-        let renames = state
-            .renames
-            .entry(notice.workspace_id.clone())
-            .or_default();
-        let back = match (change.change.as_str(), &change.after_name) {
-            ("added", _) => Some(&change.name),
-            ("renamed", Some(to)) if !moved => Some(to),
-            _ => None,
-        };
-        if let Some(back) = back {
-            // Only a definition of the renamed one's kind takes its name
-            // back, as the lookup's own check does.
-            renames.retain(|rename| rename.name != *back || rename.kind != change.kind);
-        }
-        if let ("renamed", Some(to), false) = (change.change.as_str(), &change.after_name, moved) {
-            renames.retain(|rename| rename.name != change.name || rename.kind != change.kind);
-            renames.insert(
-                0,
-                Rename {
-                    name: change.name.clone(),
-                    after_name: to.clone(),
-                    kind: change.kind.clone(),
-                    path: notice.path.clone(),
-                    evidence: change.evidence.clone(),
-                    after: change.after.clone().unwrap_or_default(),
-                },
-            );
-            renames.truncate(MAX_RENAMES);
-        }
-        if renames.is_empty() {
-            state.renames.remove(&notice.workspace_id);
-        }
-        let Some(from) = change.before_path.as_ref().filter(|_| moved) else {
-            continue;
-        };
-        for note in state
-            .notes
-            .get_mut(&notice.workspace_id)
-            .into_iter()
-            .flatten()
-        {
-            // Sorted and once each, as a note's paths are recorded.
-            if let Some(at) = note.paths.iter().position(|path| path == from) {
-                note.paths[at].clone_from(&notice.path);
-                note.paths.sort();
-                note.paths.dedup();
-            }
-        }
-    }
-}
-
-/// What links a rename's two names (roadmap D7).
-pub const RENAME_EVIDENCE: [&str; 3] = ["same_body", "same_signature", FILE_MOVED];
-/// The evidence of a definition that moved with its whole file.
-pub const FILE_MOVED: &str = "file_moved";
-
-/// A rename's evidence in words, as a notice ends its rename: ` (same
-/// body)`, ` (same signature)`, or nothing for a rename recorded before its
-/// evidence was kept and for a moved file, whose text says so itself.
-pub fn rename_evidence_words(evidence: Option<&str>) -> &'static str {
-    match evidence {
-        Some("same_body") => " (same body)",
-        Some("same_signature") => " (same signature)",
-        _ => "",
-    }
-}
-
-/// A rename's old name, evidence and old path (roadmap D7): each only on a
-/// rename, the old name always `name`, and an old path exactly when the
-/// file moved, other than the notice's path. A rename without them was
-/// recorded before they were kept and is read as it was.
-fn validate_rename_record(
-    notice: &InterfaceNotice,
-    change: &InterfaceChange,
-) -> Result<(), CoreError> {
-    let renamed = change.change == "renamed";
-    let moved = change.evidence.as_deref() == Some(FILE_MOVED);
-    let shaped = change
-        .before_name
-        .as_ref()
-        .is_none_or(|name| renamed && *name == change.name)
-        && change
-            .evidence
-            .as_deref()
-            .is_none_or(|evidence| renamed && RENAME_EVIDENCE.contains(&evidence))
-        && match &change.before_path {
-            Some(path) => moved && *path != notice.path,
-            None => !moved,
-        }
-        && (!change.private || moved);
-    if !shaped {
-        return Err(error(
-            "invalid_notice",
-            "A rename's `before_name` is its name, its `evidence` is `same_body`, `same_signature` or `file_moved`, and only `file_moved` has a `before_path`, another file than the notice's, or is `private`",
-        ));
-    }
-    if let Some(path) = &change.before_path {
-        validate_relative_path(path)?;
-    }
-    Ok(())
-}
-
 fn validate_known_workspace(state: &State, workspace_id: &str) -> Result<(), CoreError> {
     validate_id(workspace_id, "workspace ID")?;
     if !state.workspaces.contains_key(workspace_id) {
@@ -6769,460 +9915,6 @@ fn validate_known_workspace(state: &State, workspace_id: &str) -> Result<(), Cor
             "workspace_not_found",
             "Workspace is not registered; register it first",
         ));
-    }
-    Ok(())
-}
-
-fn validate_oid(oid: &str) -> Result<(), CoreError> {
-    if !is_hex_digest(oid, 40) && !is_hex_digest(oid, 64) {
-        return Err(error(
-            "invalid_git_oid",
-            "A Git object ID is 40 or 64 hexadecimal characters",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_inputs(inputs: &[String]) -> Result<(), CoreError> {
-    if inputs.len() > 16 {
-        return Err(error(
-            "too_many_inputs",
-            "A check or landing combines at most 16 commits",
-        ));
-    }
-    inputs.iter().try_for_each(|oid| validate_oid(oid))
-}
-
-fn validate_check(state: &State, check: &CheckRecord) -> Result<(), CoreError> {
-    validate_request_id(&check.check_id)?;
-    validate_known_workspace(state, &check.workspace_id)?;
-    validate_id(&check.name, "check name")?;
-    if check.name.len() > 64
-        || check.command.is_empty()
-        || check.command.len() > MAX_CHECK_COMMAND_BYTES
-        || check.command.chars().any(char::is_control)
-    {
-        return Err(error(
-            "invalid_check",
-            &format!(
-                "A check has a name of at most 64 characters and a one-line command of 1 to {MAX_CHECK_COMMAND_BYTES} bytes"
-            ),
-        ));
-    }
-    validate_oid(&check.tree_oid)?;
-    if let Some(head) = &check.head_oid {
-        validate_oid(head)?;
-    }
-    validate_inputs(&check.inputs)?;
-    validate_symbol_findings(check)?;
-    if check.generation != state.generation {
-        return Err(error(
-            "invalid_event",
-            "A check record belongs to the current daemon generation",
-        ));
-    }
-    Ok(())
-}
-
-/// The newest record named `name` for exactly `tree_oid` decides. A pass
-/// on any other tree is not evidence about this one.
-fn readiness(
-    state: &State,
-    workspace_id: &str,
-    name: &str,
-    tree_oid: &str,
-) -> (bool, String, Option<CheckRecord>) {
-    let records = state
-        .checks
-        .get(workspace_id)
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
-    match records
-        .iter()
-        .find(|record| record.name == name && record.tree_oid == tree_oid)
-    {
-        Some(record) => match &record.result {
-            CheckResult::Passed {} => (
-                true,
-                "a passing check exists for exactly this tree".into(),
-                Some(record.clone()),
-            ),
-            CheckResult::Failed { exit_code } => (
-                false,
-                format!("the check failed on exactly this tree (exit {exit_code})"),
-                Some(record.clone()),
-            ),
-            CheckResult::Inconclusive {} => (
-                false,
-                "the check on this tree was inconclusive; run it again".into(),
-                Some(record.clone()),
-            ),
-        },
-        None if records.iter().any(|record| record.name == name) => (
-            false,
-            "the check has only run on other trees; its results do not apply to this one".into(),
-            None,
-        ),
-        None => (
-            false,
-            "no check of that name has been recorded".into(),
-            None,
-        ),
-    }
-}
-
-fn validate_landing(state: &State, landing: &Landing) -> Result<(), CoreError> {
-    validate_request_id(&landing.landing_id)?;
-    validate_known_workspace(state, &landing.workspace_id)?;
-    validate_oid(&landing.commit_oid)?;
-    validate_oid(&landing.tree_oid)?;
-    validate_inputs(&landing.inputs)?;
-    if landing.rebased.len() > MAX_REWRITTEN || landing.adapted.len() > MAX_REWRITTEN {
-        return Err(error(
-            "invalid_landing",
-            "A landing records at most 64 rebased and 64 adapted commits",
-        ));
-    }
-    for oid in landing
-        .rebased
-        .iter()
-        .flat_map(|rewritten| [&rewritten.from, &rewritten.to])
-        .chain(&landing.adapted)
-    {
-        validate_oid(oid)?;
-    }
-    validate_request_id(&landing.check_id)?;
-    validate_branch_name(&landing.onto)?;
-    // A landing is recorded only on the evidence the core itself holds.
-    let evidence = state.checks.get(&landing.workspace_id).and_then(|records| {
-        records
-            .iter()
-            .find(|record| record.check_id == landing.check_id)
-    });
-    match evidence {
-        Some(record)
-            if record.tree_oid == landing.tree_oid && record.result == (CheckResult::Passed {}) =>
-        {
-            Ok(())
-        }
-        _ => Err(error(
-            "no_current_evidence",
-            "A landing must name a passing check recorded for exactly the landed tree",
-        )),
-    }
-}
-
-fn validate_branch_name(onto: &str) -> Result<(), CoreError> {
-    if onto.is_empty() || onto.len() > 255 || onto.chars().any(|c| c.is_control() || c == ' ') {
-        return Err(error(
-            "invalid_branch_ref",
-            "A landing names its target branch",
-        ));
-    }
-    Ok(())
-}
-
-/// Whether `waiter` is still in line at `now_ms`.
-fn still_waiting(waiter: &TurnWaiter, generation: u64, now_ms: u64) -> bool {
-    waiter.generation == generation && waiter.deadline_ms > now_ms && waiter.seen_until_ms > now_ms
-}
-
-/// The landings in line for `key` at `now_ms`, first first.
-pub(crate) fn waiting_for(state: &State, key: &str, now_ms: u64) -> Vec<TurnWaiter> {
-    state
-        .turn_queues
-        .get(key)
-        .into_iter()
-        .flatten()
-        .filter(|waiter| still_waiting(waiter, state.generation, now_ms))
-        .cloned()
-        .collect()
-}
-
-/// The line as callers see it.
-pub(crate) fn line(waiting: &[TurnWaiter], now_ms: u64) -> Vec<QueuedLanding> {
-    waiting
-        .iter()
-        .enumerate()
-        .map(|(index, waiter)| QueuedLanding {
-            ticket: waiter.ticket.clone(),
-            session_id: waiter.session_id.clone(),
-            position: u32::try_from(index + 1).unwrap_or(u32::MAX),
-            waited_ms: now_ms.saturating_sub(waiter.joined_ms),
-            wait_left_ms: waiter.deadline_ms.saturating_sub(now_ms),
-        })
-        .collect()
-}
-
-/// `TakeTurn` with a queue: take the turn if it is free and this landing is
-/// first in line (or nobody is), otherwise join the line or stay in it.
-fn queue_for_turn(
-    state: &State,
-    workspace_id: &str,
-    onto: &str,
-    session_id: &Option<String>,
-    expires_at_ms: u64,
-    queueing: &TurnQueueing,
-    now_ms: u64,
-) -> Result<Decision, CoreError> {
-    let TurnQueueing {
-        ticket,
-        wait_ms,
-        joined,
-    } = queueing;
-    validate_request_id(ticket)?;
-    if !(1..=MAX_TURN_WAIT_MS).contains(wait_ms) {
-        return Err(error(
-            "invalid_wait",
-            "A landing waits 1 ms to 1 hour for the push turn",
-        ));
-    }
-    let key = turn_key(workspace_id, onto);
-    let held = state
-        .turns
-        .get(&key)
-        .filter(|held| held.expires_at_ms > now_ms);
-    if let Some(held) = held.filter(|held| held.turn_id == *ticket) {
-        return Ok(Decision {
-            events: Vec::new(),
-            outcome: Outcome::Turn { turn: held.clone() },
-        });
-    }
-    let mut events = Vec::new();
-    // Waiters past their time leave before anyone is placed.
-    for waiter in state.turn_queues.get(&key).into_iter().flatten() {
-        if !still_waiting(waiter, state.generation, now_ms) {
-            events.push(Event::TurnQueueLeft {
-                workspace_id: workspace_id.into(),
-                onto: onto.into(),
-                ticket: waiter.ticket.clone(),
-                reason: if waiter.deadline_ms <= now_ms {
-                    LeftQueue::TimedOut
-                } else {
-                    LeftQueue::Stopped
-                },
-            });
-        }
-    }
-    let mut waiting = waiting_for(state, &key, now_ms);
-    let place = waiting.iter().position(|waiter| waiter.ticket == *ticket);
-    // A landing taken out of line (cancelled, silent too long, or the
-    // coordinator restarted) is told so, even when the turn is free: a
-    // cancelled landing never goes on to push.
-    if *joined && place.is_none() {
-        return Err(error(
-            "not_queued",
-            "This landing is no longer waiting for the push turn: it was cancelled, it did not ask again within 15 s, or the coordinator restarted. Nothing was fetched or pushed; start the landing again to wait again",
-        ));
-    }
-    if held.is_none() && waiting.first().is_none_or(|first| first.ticket == *ticket) {
-        if let Some(expired) = state.turns.get(&key) {
-            events.push(Event::TurnExpired {
-                workspace_id: workspace_id.into(),
-                onto: onto.into(),
-                turn_id: expired.turn_id.clone(),
-            });
-        }
-        let turn = Turn {
-            turn_id: ticket.clone(),
-            workspace_id: workspace_id.into(),
-            onto: onto.into(),
-            session_id: session_id.clone(),
-            taken_ms: now_ms,
-            expires_at_ms,
-            generation: state.generation,
-        };
-        events.push(Event::TurnTaken { turn: turn.clone() });
-        return Ok(Decision {
-            events,
-            outcome: Outcome::Turn { turn },
-        });
-    }
-    let holder = held.cloned();
-    let held_ms = held.map(|held| now_ms.saturating_sub(held.taken_ms));
-    let seen_until_ms = now_ms.saturating_add(TURN_WAITER_SILENCE_MS);
-    let position = match place {
-        Some(index) => {
-            // Asked again: refreshed once half its silence allowance is used,
-            // so a waiting landing writes an event every few seconds, not on
-            // every ask.
-            let waiter = &mut waiting[index];
-            if waiter.seen_until_ms.saturating_sub(now_ms) < TURN_WAITER_SILENCE_MS / 2 {
-                waiter.seen_until_ms = seen_until_ms;
-                events.push(Event::TurnQueueSeen {
-                    workspace_id: workspace_id.into(),
-                    onto: onto.into(),
-                    ticket: ticket.clone(),
-                    seen_until_ms,
-                });
-            }
-            index + 1
-        }
-        None if waiting.len() >= MAX_TURN_QUEUE => {
-            return Ok(Decision {
-                events,
-                outcome: Outcome::TurnUnavailable {
-                    holder,
-                    held_ms,
-                    waiting: line(&waiting, now_ms),
-                    queue_full: true,
-                },
-            });
-        }
-        None => {
-            let waiter = TurnWaiter {
-                ticket: ticket.clone(),
-                workspace_id: workspace_id.into(),
-                onto: onto.into(),
-                session_id: session_id.clone(),
-                joined_ms: now_ms,
-                deadline_ms: now_ms.saturating_add(*wait_ms),
-                seen_until_ms,
-                generation: state.generation,
-            };
-            events.push(Event::TurnQueueJoined {
-                waiter: waiter.clone(),
-            });
-            waiting.push(waiter);
-            waiting.len()
-        }
-    };
-    Ok(Decision {
-        events,
-        outcome: Outcome::TurnWaiting {
-            position: u32::try_from(position).unwrap_or(u32::MAX),
-            holder,
-            held_ms,
-            waiting: line(&waiting, now_ms),
-        },
-    })
-}
-
-/// Workspace IDs contain no colon, so the key is unambiguous.
-fn turn_key(workspace_id: &str, onto: &str) -> String {
-    format!("{workspace_id}:{onto}")
-}
-
-fn validate_attempts(attempts: &[LandingAttempt]) -> Result<(), CoreError> {
-    if attempts.len() > MAX_LANDING_ATTEMPTS {
-        return Err(error(
-            "too_many_attempts",
-            "A turn records at most 3 landing attempts",
-        ));
-    }
-    attempts
-        .iter()
-        .flat_map(|attempt| [&attempt.target_oid, &attempt.commit_oid])
-        .flatten()
-        .try_for_each(|oid| validate_oid(oid))
-}
-
-fn remote_key(workspace_id: &str, participant: &str) -> String {
-    format!("{workspace_id}:{participant}")
-}
-
-fn remote_link<'a>(state: &'a State, workspace_id: &str) -> Result<&'a RemoteLink, CoreError> {
-    validate_id(workspace_id, "workspace ID")?;
-    state
-        .remote_links
-        .get(workspace_id)
-        .filter(|link| link.enabled)
-        .ok_or_else(|| {
-            error(
-                "remote_not_enabled",
-                "This workspace does not publish; enable it with `langspan remote enable`",
-            )
-        })
-}
-
-fn validate_remote_link(state: &State, link: &RemoteLink) -> Result<(), CoreError> {
-    validate_id(&link.workspace_id, "workspace ID")?;
-    if !state.workspaces.contains_key(&link.workspace_id) {
-        return Err(error(
-            "workspace_not_found",
-            "Register the workspace before enabling publication",
-        ));
-    }
-    validate_id(&link.remote, "Git remote name")?;
-    if link.remote.starts_with(['-', '.']) {
-        return Err(error(
-            "invalid_remote",
-            "A Git remote name starts with a letter, digit or underscore",
-        ));
-    }
-    validate_participant(&link.participant, &link.name)?;
-    if link.remote.len() > 64 || link.signature.len() > 64 {
-        return Err(error(
-            "invalid_remote",
-            "A Git remote name is at most 64 characters",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_participant(participant: &str, name: &str) -> Result<(), CoreError> {
-    if !is_hex_digest(participant, 32) || participant.bytes().any(|b| b.is_ascii_uppercase()) {
-        return Err(error(
-            "invalid_participant",
-            "A participant ID is 32 lowercase hexadecimal characters",
-        ));
-    }
-    if name.is_empty() || name.len() > 64 || name.chars().any(char::is_control) {
-        return Err(error(
-            "invalid_participant",
-            "A participant name is 1 to 64 bytes without control characters",
-        ));
-    }
-    Ok(())
-}
-
-/// Everything in a publication came from another machine. Reject the whole
-/// publication rather than keep part of one.
-fn validate_publication(publication: &Publication) -> Result<(), CoreError> {
-    validate_participant(&publication.participant, &publication.name)?;
-    if publication.withdrawn && !publication.work.is_empty() {
-        return Err(error(
-            "invalid_publication",
-            "A withdrawn publication lists no sessions",
-        ));
-    }
-    if publication.work.len() > REMOTE_WORK {
-        return Err(error(
-            "invalid_publication",
-            "A publication lists at most 8 sessions",
-        ));
-    }
-    for work in &publication.work {
-        validate_id(&work.host, "host name")?;
-        validate_id(&work.session, "session label")?;
-        if work.host.len() > 32
-            || work.session.len() > 16
-            || work.editing.len() > BRIEF_PATHS
-            || work.recent.len() > BRIEF_PATHS
-        {
-            return Err(error(
-                "invalid_publication",
-                "A published session exceeds its size bounds",
-            ));
-        }
-        for path in work.editing.iter().chain(&work.recent) {
-            validate_relative_path(path)?;
-        }
-        if let Some(summary) = &work.summary {
-            validate_prompt_summary(summary)?;
-        }
-        if let Some(reference) = &work.branch_ref
-            && (reference.len() > 512
-                || reference.chars().any(char::is_control)
-                || !reference
-                    .strip_prefix("refs/heads/")
-                    .is_some_and(|name| !name.is_empty()))
-        {
-            return Err(error(
-                "invalid_branch_ref",
-                "A published branch is a refs/heads/ name without control characters",
-            ));
-        }
     }
     Ok(())
 }
@@ -7235,101 +9927,6 @@ fn related_workspace(state: &State, workspace_id: &str, other: &str) -> bool {
     }
     let repository = |id: &str| state.workspace_git.get(id).map(|git| &git.repository_id);
     repository(workspace_id).is_some() && repository(workspace_id) == repository(other)
-}
-
-/// What a workspace's owner publishes now: the current work of every local
-/// session in the repository, bounded, with task lines only if the owner
-/// chose to share them. Returns it with a fingerprint of its content.
-fn publication(state: &State, link: &RemoteLink, now_ms: u64) -> (Publication, String) {
-    let mut work = Vec::new();
-    for session in state.sessions.values() {
-        if session.generation != state.generation
-            || !related_workspace(state, &link.workspace_id, &session.workspace_id)
-            || state
-                .session_liveness
-                .get(&session.session_id)
-                .is_some_and(|liveness| liveness.status == LivenessStatus::Exited)
-        {
-            continue;
-        }
-        let editing: Vec<String> = state
-            .leases
-            .values()
-            .filter(|lease| {
-                lease.session_id == session.session_id && live_lease(state, lease, now_ms)
-            })
-            .flat_map(|lease| lease.paths.iter().cloned())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .take(BRIEF_PATHS)
-            .collect();
-        let activity = state
-            .activity
-            .get(&session.session_id)
-            .filter(|activity| activity.generation == state.generation);
-        let recent: Vec<String> = activity
-            .map(|activity| {
-                activity
-                    .touched
-                    .iter()
-                    .filter(|touch| now_ms.saturating_sub(touch.at_ms) <= BRIEF_HORIZON_MS)
-                    .map(|touch| touch.path.clone())
-                    .take(BRIEF_PATHS)
-                    .collect()
-            })
-            .unwrap_or_default();
-        let ended = activity.is_some_and(|activity| activity.ended);
-        let summary = activity
-            .filter(|activity| {
-                link.share_task
-                    && !activity.ended
-                    && now_ms.saturating_sub(activity.last_seen_ms()) <= BRIEF_HORIZON_MS
-            })
-            .and_then(|activity| activity.summary.clone());
-        if editing.is_empty() && recent.is_empty() && (summary.is_none() || ended) {
-            continue;
-        }
-        let (host, id) = session
-            .session_id
-            .split_once('.')
-            .unwrap_or(("agent", &session.session_id));
-        work.push(RemoteWork {
-            host: host.chars().take(32).collect(),
-            session: id.chars().take(8).collect(),
-            branch_ref: state
-                .workspace_git
-                .get(&session.workspace_id)
-                .and_then(|git| git.branch_ref.clone()),
-            summary,
-            editing,
-            recent,
-        });
-        if work.len() == REMOTE_WORK {
-            break;
-        }
-    }
-    let mut text = String::new();
-    for item in &work {
-        text.push_str(&format!(
-            "{}|{}|{}|{}|{}|{}\n",
-            item.host,
-            item.session,
-            item.branch_ref.as_deref().unwrap_or(""),
-            item.summary.as_deref().unwrap_or(""),
-            item.editing.join(","),
-            item.recent.join(",")
-        ));
-    }
-    (
-        Publication {
-            participant: link.participant.clone(),
-            name: link.name.clone(),
-            sequence: link.sequence + 1,
-            work,
-            withdrawn: false,
-        },
-        fingerprint(&text),
-    )
 }
 
 fn known_versions<'a>(state: &'a State, session_id: &str) -> &'a [KnownVersion] {
@@ -7370,45 +9967,6 @@ fn last_peer_edit<'a>(
         .max_by_key(|(id, at)| (*at, smallest_id_first(id)))
 }
 
-// Ties go to the lexically smallest session, so the result is deterministic.
-fn smallest_id_first(id: &str) -> core::cmp::Reverse<&str> {
-    core::cmp::Reverse(id)
-}
-
-/// Supplied files whose version differs from the one the session last read
-/// or wrote. A file the session has no recorded version of is not stale: it
-/// is unknown, and reported as such on the admission.
-fn stale_files(state: &State, session: &Session, base: &[ObservedFile]) -> Vec<StaleFile> {
-    let known = known_versions(state, &session.session_id);
-    base.iter()
-        .filter_map(|file| {
-            let version = known.iter().find(|version| version.path == file.path)?;
-            (version.state != file.state).then(|| StaleFile {
-                path: file.path.clone(),
-                read: version.state.clone(),
-                current: file.state.clone(),
-                // A peer whose own last version of the file is not what is
-                // on disk now did not make it so: after a checkout, reset or
-                // any other unreported change, it is not named.
-                changed_by: last_peer_edit(
-                    state,
-                    &session.session_id,
-                    &session.workspace_id,
-                    &file.path,
-                    version.at_ms,
-                )
-                .filter(|(peer, _)| {
-                    known_versions(state, peer)
-                        .iter()
-                        .find(|known| known.path == file.path)
-                        .is_none_or(|known| known.state == file.state)
-                })
-                .map(|(id, _)| id.to_owned()),
-            })
-        })
-        .collect()
-}
-
 fn normalized_files(files: &[ObservedFile]) -> Result<Vec<ObservedFile>, CoreError> {
     let mut unique = BTreeMap::new();
     for file in files {
@@ -7441,1280 +9999,12 @@ fn live_lease(state: &State, lease: &Lease, now_ms: u64) -> bool {
         && lease.expires_at_ms > now_ms
 }
 
-/// Select the other sessions whose current work is relevant to `session_id`:
-/// same physical workspace or a worktree of the same repository, registered in
-/// this generation, not known to have exited, and active within the horizon.
-/// Returns the briefing and a signature that ignores ages, so an unchanged
-/// situation is not delivered twice.
-/// The signature leaves out messages: a delivered message is acknowledged,
-/// so its absence afterwards is not a change. Also returns the keys of the
-/// in-flight signatures it carries, to be remembered once delivered.
-fn brief(
-    state: &State,
-    session_id: &str,
-    max_peers: u32,
-    handoffs: bool,
-    now_ms: u64,
-    (inflight, mentioned): (&[InflightSymbol], &BTreeSet<String>),
-) -> Result<(Briefing, String, Vec<String>), CoreError> {
-    let me = current_session(state, session_id)?;
-    let repository = state
-        .workspace_git
-        .get(&me.workspace_id)
-        .map(|git| git.repository_id.as_str());
-    let work_paths = |id: &str| work_paths(state, id, now_ms);
-    // Where a running session's last prompt pointed, while it is recent.
-    let prompt_targets = |id: &str| -> BTreeSet<String> {
-        state
-            .activity
-            .get(id)
-            .filter(|activity| activity.generation == state.generation && !activity.ended)
-            .and_then(|activity| activity.prompt_targets.as_ref())
-            .filter(|targets| now_ms.saturating_sub(targets.at_ms) <= BRIEF_HORIZON_MS)
-            .map(|targets| targets.paths.iter().cloned().collect())
-            .unwrap_or_default()
-    };
-    // Where a running peer that shows its presence was recently looking,
-    // within this session's window: newest first, none it edits or edited.
-    let window_ms = presence_setting(state, session_id).window_ms;
-    let looking = |id: &str, edited: &BTreeSet<String>| -> Vec<PresencePath> {
-        if !presence_setting(state, id).shown {
-            return Vec::new();
-        }
-        state
-            .activity
-            .get(id)
-            .filter(|activity| activity.generation == state.generation && !activity.ended)
-            .map(|activity| {
-                activity
-                    .looking
-                    .iter()
-                    .filter(|looked| {
-                        now_ms.saturating_sub(looked.at_ms) <= window_ms
-                            && !edited.contains(&looked.path)
-                    })
-                    .take(PRESENCE_PATHS)
-                    .map(|looked| PresencePath {
-                        path: looked.path.clone(),
-                        kind: looked.kind,
-                        age_s: now_ms.saturating_sub(looked.at_ms) / 1000,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    let (_, _, mine) = work_paths(session_id);
-    // What a peer's work or task is compared with: this session's work and
-    // the files its own task points at.
-    let mut mine_or_targeted = mine.clone();
-    mine_or_targeted.extend(prompt_targets(session_id));
-    let mut peers = Vec::new();
-    for peer in state.sessions.values() {
-        if peer.session_id == session_id || peer.generation != state.generation {
-            continue;
-        }
-        // A subagent's parent started it and knows its own task and files;
-        // told back to the subagent, they read as another session's. The
-        // parent's held files are still refused to it at admission, and its
-        // edits of files the subagent read are still stale reads.
-        if me.parent.as_deref() == Some(peer.session_id.as_str()) {
-            continue;
-        }
-        let same_workspace = peer.workspace_id == me.workspace_id;
-        let peer_git = state.workspace_git.get(&peer.workspace_id);
-        if !same_workspace
-            && !(repository.is_some()
-                && peer_git.map(|git| git.repository_id.as_str()) == repository)
-        {
-            continue;
-        }
-        let liveness = state
-            .session_liveness
-            .get(&peer.session_id)
-            .map(|liveness| liveness.status);
-        if liveness == Some(LivenessStatus::Exited) {
-            continue;
-        }
-        let (mut editing, mut recent, all) = work_paths(&peer.session_id);
-        let activity = state
-            .activity
-            .get(&peer.session_id)
-            .filter(|activity| activity.generation == state.generation);
-        // A session that only received briefings has shown no work of its own.
-        let fresh = activity.is_some_and(|activity| {
-            (activity.summary.is_some() || !activity.touched.is_empty())
-                && now_ms.saturating_sub(activity.last_seen_ms()) <= BRIEF_HORIZON_MS
-        });
-        let intent = state
-            .intents
-            .get(&peer.session_id)
-            .filter(|intent| intent.generation == state.generation);
-        let targets = prompt_targets(&peer.session_id);
-        // Every file the peer holds or edited within the horizon, not only
-        // those listed: such a file is shown as edited, never as looked at.
-        let mut edited: BTreeSet<String> = editing.iter().cloned().collect();
-        edited.extend(activity.into_iter().flat_map(|activity| {
-            activity
-                .touched
-                .iter()
-                .filter(|touch| now_ms.saturating_sub(touch.at_ms) <= BRIEF_HORIZON_MS)
-                .map(|touch| touch.path.clone())
-        }));
-        let looking = looking(&peer.session_id, &edited);
-        if editing.is_empty()
-            && intent.is_none()
-            && !fresh
-            && targets.is_empty()
-            && looking.is_empty()
-        {
-            continue;
-        }
-        // A finished session matters only for the edits it left behind.
-        if activity.is_some_and(|activity| activity.ended)
-            && editing.is_empty()
-            && recent.is_empty()
-        {
-            continue;
-        }
-        let Some(workspace) = state.workspaces.get(&peer.workspace_id) else {
-            continue;
-        };
-        let overlap: Vec<String> = all
-            .intersection(&mine_or_targeted)
-            .take(BRIEF_PATHS)
-            .cloned()
-            .collect();
-        editing.truncate(BRIEF_PATHS);
-        recent.truncate(BRIEF_PATHS);
-        let last_ms = activity.map(SessionActivity::last_seen_ms).unwrap_or(0);
-        let relation = relation(me, peer);
-        // A subagent's task is the asking parent's own request: its files
-        // are news to the parent, its task line and declared intent are not.
-        let task_known = relation == Some(PeerRelation::Subagent);
-        if task_known && editing.is_empty() && recent.is_empty() {
-            continue;
-        }
-        let target_overlap: Vec<String> = if task_known {
-            Vec::new()
-        } else {
-            targets
-                .intersection(&mine_or_targeted)
-                .filter(|path| !overlap.contains(*path))
-                .take(BRIEF_PATHS)
-                .cloned()
-                .collect()
-        };
-        // A peer without admissions, edits, intent or targets (one known by
-        // its task line or by where it looked) ranks after every peer with
-        // them, so presence never takes such a peer's place.
-        let no_work =
-            editing.is_empty() && recent.is_empty() && intent.is_none() && targets.is_empty();
-        peers.push((
-            (
-                overlap.is_empty() && target_overlap.is_empty(),
-                editing.is_empty(),
-                no_work,
-                u64::MAX - last_ms,
-            ),
-            PeerWork {
-                session_id: peer.session_id.clone(),
-                workspace_id: peer.workspace_id.clone(),
-                workspace_root: workspace.root.clone(),
-                same_workspace,
-                branch_ref: peer_git.and_then(|git| git.branch_ref.clone()),
-                liveness,
-                ended: activity.is_some_and(|activity| activity.ended),
-                // A declared intent is the session's own account of its
-                // task: it replaces the line taken from the prompt.
-                summary: activity
-                    .filter(|activity| fresh && !activity.ended && !task_known)
-                    .filter(|_| intent.is_none_or(|intent| intent.summary.is_empty()))
-                    .and_then(|activity| activity.summary.clone()),
-                intent: intent
-                    .filter(|_| !task_known)
-                    .map(|intent| intent.summary.clone()),
-                editing,
-                recent,
-                overlap,
-                target_overlap,
-                relation,
-                looking,
-            },
-        ));
-    }
-    // A peer known only by where it looked ranks after every other, so it
-    // never takes a slot from a peer with work or a task.
-    let rank = |(key, peer): &((bool, bool, bool, u64), PeerWork)| {
-        (key.0, key.1, key.2, presence_only(peer), key.3)
-    };
-    peers.sort_by(|a, b| (rank(a), &a.1.session_id).cmp(&(rank(b), &b.1.session_id)));
-    let total = peers.len();
-    // Peers are chosen by their work within the byte budget first; where
-    // they look is added after, in the space left, first peers first, so
-    // presence never takes the place of another peer's work. A trail this
-    // briefing may tell takes its encoding out of that budget, so the
-    // reply holds both within its frame.
-    let peer_bytes = BRIEF_BYTES
-        - trail::owed(state, me, handoffs).map_or(0, |trail| {
-            trail::json_cost(trail).min(trail::TRAIL_JSON_BYTES)
-        });
-    let mut bytes = 0;
-    let mut peers: Vec<PeerWork> = peers
-        .into_iter()
-        .map(|(_, peer)| peer)
-        .take(max_peers as usize)
-        .take_while(|peer| {
-            // Counted as encoded, escapes included, so quoted or control
-            // characters cannot push the reply past its frame.
-            let cost = 256
-                + recent::json_len(&peer.workspace_root)
-                + [&peer.summary, &peer.intent, &peer.branch_ref]
-                    .into_iter()
-                    .flatten()
-                    .map(|text| recent::json_len(text))
-                    .sum::<usize>()
-                + peer
-                    .editing
-                    .iter()
-                    .chain(&peer.overlap)
-                    .chain(&peer.target_overlap)
-                    .chain(peer.recent.iter().map(|recent| &recent.path))
-                    .map(|path| recent::json_len(path) + 32)
-                    .sum::<usize>();
-            bytes += cost;
-            if bytes > peer_bytes {
-                bytes -= cost;
-                return false;
-            }
-            true
-        })
-        .collect();
-    // A peer there only for where it looked, without room for that, is left
-    // out and counted.
-    peers.retain_mut(|peer| {
-        let presence: usize = peer
-            .looking
-            .iter()
-            .map(|looked| recent::json_len(&looked.path) + 32)
-            .sum();
-        if bytes + presence <= peer_bytes {
-            bytes += presence;
-            return true;
-        }
-        let only = presence_only(peer);
-        peer.looking.clear();
-        !only
-    });
-    let mut stale_reads: Vec<StaleRead> = known_versions(state, session_id)
-        .iter()
-        .filter_map(|version| {
-            let (peer, at_ms) = last_peer_edit(
-                state,
-                session_id,
-                &me.workspace_id,
-                &version.path,
-                version.at_ms,
-            )?;
-            Some(StaleRead {
-                path: version.path.clone(),
-                session_id: peer.to_owned(),
-                age_ms: now_ms.saturating_sub(at_ms),
-            })
-        })
-        .collect();
-    stale_reads.sort_by(|a, b| (a.age_ms, &a.path).cmp(&(b.age_ms, &b.path)));
-    stale_reads.truncate(BRIEF_PATHS);
-    let mut remote: Vec<RemotePeerWork> = state
-        .remote_peers
-        .values()
-        .filter(|peer| {
-            peer.generation == state.generation
-                && now_ms.saturating_sub(peer.received_ms) <= REMOTE_HORIZON_MS
-                && related_workspace(state, &me.workspace_id, &peer.workspace_id)
-        })
-        .flat_map(|peer| {
-            let mine = &mine;
-            peer.publication
-                .work
-                .iter()
-                .map(move |work| RemotePeerWork {
-                    name: peer.publication.name.clone(),
-                    overlap: work
-                        .editing
-                        .iter()
-                        .chain(&work.recent)
-                        .filter(|path| mine.contains(*path))
-                        .cloned()
-                        .collect::<BTreeSet<_>>()
-                        .into_iter()
-                        .collect(),
-                    work: work.clone(),
-                    received_age_ms: now_ms.saturating_sub(peer.received_ms),
-                })
-        })
-        .collect();
-    remote.sort_by(|a, b| {
-        (
-            a.overlap.is_empty(),
-            a.work.editing.is_empty(),
-            &a.name,
-            &a.work.session,
-        )
-            .cmp(&(
-                b.overlap.is_empty(),
-                b.work.editing.is_empty(),
-                &b.name,
-                &b.work.session,
-            ))
-    });
-    remote.truncate(BRIEF_PATHS);
-    let concerned = concerned_paths(state, session_id, now_ms);
-    // A notice already told between steps is not told again (issue #214).
-    let (notice_ids, interface_changes): (Vec<String>, Vec<InterfaceImpact>) =
-        interface_impacts(state, me, &concerned, now_ms)
-            .filter(|(id, _)| {
-                !told_notices(state, session_id)
-                    .any(|told| told.notice_id == *id && told.via == NoticeVia::BetweenSteps)
-            })
-            .take(BRIEF_INTERFACE_NOTICES)
-            .unzip();
-    // Notes about the whole workspace, or about a file this session works
-    // on; an anchored note, about its definition's file or a file that
-    // mentions its name (roadmap E1). What still holds is chosen first,
-    // each kind newest first.
-    let mut notes: Vec<&Note> = state
-        .notes
-        .get(&me.workspace_id)
-        .map(Vec::as_slice)
-        .unwrap_or(&[])
-        .iter()
-        .filter(|note| {
-            note.author.as_deref() != Some(session_id)
-                && anchors::note_reaches(note, &concerned, mentioned)
-        })
-        .collect();
-    notes.sort_by_key(|note| AnchorState::rank(note.anchor_state));
-    let notes: Vec<Note> = notes.into_iter().take(4).cloned().collect();
-    // Withdrawals first, then messages owed to this session, each newest
-    // first, as many as the text of one briefing is sure to hold beside an
-    // owed uncoordinated change, whose line is reserved; the rest wait for
-    // the next one. The first always fits.
-    let uncoordinated: Vec<UncoordinatedNotice> = uncoordinated_owed(state, session_id, now_ms)
-        .map(|(_, notice)| notice)
-        .collect();
-    let message_bytes = if uncoordinated.is_empty() {
-        MESSAGE_BRIEF_BYTES
-    } else {
-        MESSAGE_BRIEF_BYTES - (UNCOORDINATED_LINE_LIMIT + 4)
-    };
-    let mut bytes = 0;
-    let retracted: Vec<RetractedMessage> = state
-        .retracted_notices
-        .get(session_id)
-        .map(Vec::as_slice)
-        .unwrap_or(&[])
-        .iter()
-        .take(BRIEF_MESSAGES)
-        .take_while(|retracted| {
-            bytes += retracted_cost(retracted);
-            bytes <= message_bytes
-        })
-        .cloned()
-        .collect();
-    let messages: Vec<Message> = state
-        .messages
-        .get(&me.workspace_id)
-        .map(Vec::as_slice)
-        .unwrap_or(&[])
-        .iter()
-        .filter(|message| {
-            owed_to(
-                message,
-                session_id,
-                handoffs && takes_handoff(state, me, message),
-            )
-        })
-        .take(BRIEF_MESSAGES)
-        .take_while(|message| {
-            bytes += message_cost(message);
-            bytes <= message_bytes
-        })
-        .map(|message| Message {
-            acknowledged: Vec::new(),
-            ..message.clone()
-        })
-        .collect();
-    // An ended session's trail (roadmap C9) shares the messages' room and
-    // follows that session's own handoff: while the handoff is owed here
-    // and waits for room, so does the trail.
-    let used = retracted.iter().map(retracted_cost).sum::<usize>()
-        + messages.iter().map(message_cost).sum::<usize>();
-    let trail = trail::owed(state, me, handoffs)
-        .filter(|_| used + TRAIL_BYTES < message_bytes)
-        .filter(|trail| {
-            state
-                .messages
-                .get(&me.workspace_id)
-                .map(Vec::as_slice)
-                .unwrap_or(&[])
-                .iter()
-                .filter(|message| {
-                    message.from.as_deref() == Some(trail.session_id.as_str())
-                        && matches!(message.to, Recipient::NextSession {})
-                        && owed_to(message, session_id, takes_handoff(state, me, message))
-                })
-                .all(|handoff| {
-                    messages
-                        .iter()
-                        .any(|shown| shown.message_id == handoff.message_id)
-                })
-        })
-        .map(|trail| trail::view(state, trail, now_ms));
-    // A checkout change matters to a session that read or edited files
-    // here before it: what it knows may no longer be on disk.
-    // A change a session's own shell command explains is not news to it;
-    // others are told whose command it was.
-    let mut checkout_ids = Vec::new();
-    let changes = state
-        .checkouts
-        .get(&me.workspace_id)
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
-    let runs = state
-        .checkout_runs
-        .get(&me.workspace_id)
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
-    let explained_by =
-        |change: &CheckoutChange| runs.iter().find(|run| run.explains(change, changes));
-    let checkout_changes: Vec<CheckoutNotice> = changes
-        .iter()
-        .filter(|change| explained_by(change).is_none_or(|run| run.session_id != session_id))
-        .filter(|change| {
-            change.generation == state.generation
-                && now_ms.saturating_sub(change.at_ms) <= BRIEF_HORIZON_MS
-                && state
-                    .activity
-                    .get(session_id)
-                    .filter(|activity| activity.generation == state.generation)
-                    .is_some_and(|activity| {
-                        activity
-                            .known
-                            .iter()
-                            .any(|known| known.at_ms <= change.at_ms)
-                            || activity
-                                .touched
-                                .iter()
-                                .any(|touch| touch.at_ms <= change.at_ms)
-                    })
-        })
-        .take(2)
-        .map(|change| {
-            checkout_ids.push(change.change_id.clone());
-            let run = explained_by(change);
-            CheckoutNotice {
-                by_session: run.map(|run| run.session_id.clone()),
-                command: run.and_then(|run| run.command.clone()),
-                from_branch: change.from_branch.clone(),
-                to_branch: change.to_branch.clone(),
-                from_head: change.from_head.clone(),
-                to_head: change.to_head.clone(),
-                files: change.files,
-                age_ms: now_ms.saturating_sub(change.at_ms),
-            }
-        })
-        .collect();
-    // In-flight signatures from other worktrees of the repository (roadmap
-    // C7), each told once. Each line is delivered once, so it is chosen
-    // only for a briefing with nothing else used up on delivery, whose
-    // text is sure to hold it; otherwise every one is counted and waits.
-    let quiet = messages.is_empty()
-        && trail.is_none()
-        && retracted.is_empty()
-        && uncoordinated.is_empty()
-        && !state.check_notices.contains_key(session_id);
-    let owed: Vec<(String, InflightNotice)> = inflight
-        .iter()
-        .filter(|item| {
-            item.workspace_id != me.workspace_id
-                && related_workspace(state, &me.workspace_id, &item.workspace_id)
-                && !inflight_told(state, session_id, item)
-        })
-        .filter_map(|item| {
-            let key = inflight_key(item);
-            let mut notice = inflight_notice(state, item)?;
-            notice.mentioned_in.retain(|path| concerned.contains(path));
-            notice.mentioned_in.truncate(INFLIGHT_MENTIONS);
-            (!notice.mentioned_in.is_empty()).then_some((key, notice))
-        })
-        .collect();
-    let mut inflight_keys = Vec::new();
-    let mut inflight_notices = Vec::new();
-    let mut bytes = 0;
-    for (key, notice) in &owed {
-        bytes += inflight_cost(notice);
-        if !quiet || inflight_notices.len() == INFLIGHT_LINES || bytes > INFLIGHT_BYTES {
-            break;
-        }
-        inflight_keys.push(key.clone());
-        inflight_notices.push(notice.clone());
-    }
-    let mut signature = String::new();
-    for key in &inflight_keys {
-        signature.push_str(&format!("inflight|{key}\n"));
-    }
-    for id in &checkout_ids {
-        signature.push_str(&format!("checkout|{id}\n"));
-    }
-    // A note whose definition changed state is news again.
-    for note in &notes {
-        match note.anchor_state {
-            Some(held) => {
-                signature.push_str(&format!("note|{}|{}\n", note.note_id, held.as_str()));
-            }
-            None => signature.push_str(&format!("note|{}\n", note.note_id)),
-        }
-    }
-    for impact in &interface_changes {
-        signature.push_str(&format!("interface|{}|", impact.path));
-        for change in &impact.changes {
-            signature.push_str(&format!(
-                "{}:{}:{}|",
-                change.name,
-                change.change,
-                change.after.as_deref().unwrap_or("")
-            ));
-        }
-        signature.push_str(&impact.affected.join(","));
-        signature.push('\n');
-    }
-    for item in &remote {
-        signature.push_str(&format!(
-            "remote|{}|{}|{}|{}|{}|{}\n",
-            item.name,
-            item.work.session,
-            item.work.branch_ref.as_deref().unwrap_or(""),
-            item.work.summary.as_deref().unwrap_or(""),
-            item.work.editing.join(","),
-            item.work.recent.join(",")
-        ));
-    }
-    for stale in &stale_reads {
-        signature.push_str(&format!("stale|{}|{}\n", stale.path, stale.session_id));
-    }
-    // A peer listed only for where it looked is presence, not work.
-    for peer in peers.iter().filter(|peer| !presence_only(peer)) {
-        signature.push_str(&peer.session_id);
-        for part in [&peer.editing, &peer.overlap] {
-            signature.push('|');
-            signature.push_str(&part.join(","));
-        }
-        signature.push('|');
-        for recent in &peer.recent {
-            signature.push_str(&recent.path);
-            signature.push(',');
-        }
-        // A peer in this checkout is on this session's own branch, learned
-        // by the Git observer on its own thread, perhaps only after a
-        // briefing: not news. A change of that branch is a checkout change.
-        let branch = (!peer.same_workspace).then_some(&peer.branch_ref);
-        for text in [Some(&peer.summary), Some(&peer.intent), branch] {
-            signature.push('|');
-            signature.push_str(text.and_then(Option::as_deref).unwrap_or(""));
-        }
-        // Only when present, so a briefing without one keeps the signature
-        // it had before prompt targets existed and is not delivered again.
-        if !peer.target_overlap.is_empty() {
-            signature.push_str("|targets:");
-            signature.push_str(&peer.target_overlap.join(","));
-        }
-        signature.push_str(if peer.ended { "|ended\n" } else { "\n" });
-    }
-    // Presence has a signature part of its own: alone it makes a briefing
-    // new only at a session start or prompt, never mid-turn, so a peer's
-    // reads do not interrupt a turn. The part is a set of bits, one pair per
-    // peer and path (`presence_bits`), so that a briefing is news only for
-    // a path not shown before: a path that ages out, or is read again, or
-    // the same files read in another order, is not.
-    let presence = presence_bits(&peers);
-    // Without presence the signature is as it was before presence existed,
-    // so a briefing stored then is not delivered again.
-    let mut signature = fingerprint(&signature);
-    if let Some(bits) = presence {
-        signature.push('+');
-        for byte in bits {
-            signature.push_str(&format!("{byte:02x}"));
-        }
-    }
-    Ok((
-        Briefing {
-            session_id: session_id.into(),
-            changed: false,
-            omitted_peers: u32::try_from(total - peers.len()).unwrap_or(u32::MAX),
-            // Counted by `keep_changes` for a briefing of changes only.
-            unchanged: 0,
-            peers,
-            stale_reads,
-            remote,
-            interface_changes,
-            interface_notice_ids: notice_ids,
-            omitted_inflight: u32::try_from(owed.len() - inflight_notices.len())
-                .unwrap_or(u32::MAX),
-            inflight: inflight_notices,
-            // Set by the request that carries the index's answer.
-            inflight_partial: false,
-            notes,
-            messages,
-            retracted,
-            checkout_changes,
-            uncoordinated,
-            // Filled in by the request that names the sessions (`Brief::left`).
-            left_work: Vec::new(),
-            trail,
-            // One result per briefing, the newest: it always fits the
-            // rendered text, and each delivered one is removed, so the rest
-            // follow at the next briefings.
-            checks: state
-                .check_notices
-                .get(session_id)
-                .and_then(|notices| notices.first())
-                .cloned()
-                .into_iter()
-                .collect(),
-            recent: None,
-        },
-        signature,
-        inflight_keys,
-    ))
-}
-
-/// The key of one briefing item: what it says, without ages, so that the
-/// same item told again has the same key (issue #222).
-fn item_key(parts: &[&str]) -> u64 {
-    let mut text = String::new();
-    for part in parts {
-        text.push_str(part);
-        text.push('\u{1f}');
-    }
-    fingerprint_u64(&text)
-}
-
-/// A peer's own line without its files: who it is, where, its task and
-/// whether it is still running. A peer in this checkout is on this
-/// session's own branch, which the Git observer may learn only after a
-/// briefing (as in `brief`'s signature): not part of its key.
-fn peer_key(peer: &PeerWork) -> u64 {
-    let branch = (!peer.same_workspace)
-        .then_some(peer.branch_ref.as_deref())
-        .flatten();
-    let relation = peer.relation.map(|relation| format!("{relation:?}"));
-    item_key(&[
-        "peer",
-        &peer.session_id,
-        &peer.workspace_root,
-        branch.unwrap_or(""),
-        peer.summary.as_deref().unwrap_or(""),
-        peer.intent.as_deref().unwrap_or(""),
-        if peer.ended { "ended" } else { "" },
-        if peer.liveness == Some(LivenessStatus::Unknown) {
-            "unknown"
-        } else {
-            ""
-        },
-        relation.as_deref().unwrap_or(""),
-    ])
-}
-
-fn peer_path_key(peer: &PeerWork, kind: &str, path: &str) -> u64 {
-    item_key(&["peer", &peer.session_id, kind, path])
-}
-
-fn stale_key(stale: &StaleRead) -> u64 {
-    item_key(&["stale", &stale.path, &stale.session_id])
-}
-
-fn remote_work_key(remote: &RemotePeerWork) -> u64 {
-    let work = &remote.work;
-    item_key(&[
-        "remote",
-        &remote.name,
-        &work.session,
-        work.branch_ref.as_deref().unwrap_or(""),
-        work.summary.as_deref().unwrap_or(""),
-        &work.editing.join(","),
-        &work.recent.join(","),
-        &remote.overlap.join(","),
-    ])
-}
-
-fn interface_key(impact: &InterfaceImpact) -> u64 {
-    let changes: Vec<String> = impact
-        .changes
-        .iter()
-        .map(|change| {
-            // Everything that says what changed: a removal's signature and
-            // a count change's counts too (issue #270).
-            format!(
-                "{:?}",
-                (
-                    &change.name,
-                    &change.kind,
-                    &change.change,
-                    &change.before,
-                    &change.after,
-                    &change.after_name,
-                    change.before_count,
-                    change.after_count,
-                )
-            )
-        })
-        .collect();
-    item_key(&[
-        "interface",
-        &impact.path,
-        &changes.join("|"),
-        &impact.affected.join(","),
-    ])
-}
-
-/// A note and its anchor's state: an anchored note whose state changes is
-/// news again (roadmap E1).
-fn note_key(note: &Note) -> u64 {
-    item_key(&[
-        "note",
-        &note.note_id,
-        note.anchor_state.map_or("", AnchorState::as_str),
-    ])
-}
-
-fn checkout_key(change: &CheckoutNotice) -> u64 {
-    item_key(&[
-        "checkout",
-        change.from_branch.as_deref().unwrap_or(""),
-        change.to_branch.as_deref().unwrap_or(""),
-        change.from_head.as_deref().unwrap_or(""),
-        change.to_head.as_deref().unwrap_or(""),
-        change.by_session.as_deref().unwrap_or(""),
-        &change.files.to_string(),
-    ])
-}
-
-/// The kinds of a peer's listed paths, each with its own key.
-const PEER_LISTS: [&str; 5] = ["overlap", "target", "editing", "recent", "looking"];
-
-fn peer_paths<'a>(peer: &'a PeerWork, kind: &str) -> Vec<&'a str> {
-    match kind {
-        "overlap" => peer.overlap.iter().map(String::as_str).collect(),
-        "target" => peer.target_overlap.iter().map(String::as_str).collect(),
-        "editing" => peer.editing.iter().map(String::as_str).collect(),
-        "recent" => peer
-            .recent
-            .iter()
-            .map(|recent| recent.path.as_str())
-            .collect(),
-        _ => peer
-            .looking
-            .iter()
-            .map(|looked| looked.path.as_str())
-            .collect(),
-    }
-}
-
-/// Every item key of `briefing`, in the order a reader meets them. Messages,
-/// withdrawals, check results, in-flight signatures, uncoordinated changes
-/// and left work are not keyed: each is delivered once already. A hook
-/// names the keys of the items it could not place to `Command::ForgetTold`.
-pub fn briefing_keys(briefing: &Briefing) -> Vec<u64> {
-    let mut keys = Vec::new();
-    keys.extend(briefing.stale_reads.iter().map(stale_key));
-    keys.extend(briefing.checkout_changes.iter().map(checkout_key));
-    keys.extend(briefing.notes.iter().map(note_key));
-    keys.extend(briefing.interface_changes.iter().map(interface_key));
-    for peer in &briefing.peers {
-        keys.push(peer_key(peer));
-        for kind in PEER_LISTS {
-            keys.extend(
-                peer_paths(peer, kind)
-                    .into_iter()
-                    .map(|path| peer_path_key(peer, kind, path)),
-            );
-        }
-    }
-    keys.extend(briefing.remote.iter().map(remote_work_key));
-    keys
-}
-
-/// Leave in `briefing` only what `told` does not hold, count the rest in
-/// `unchanged`, and return the keys left in. A safety item stays in when
-/// `acted` says the session read or edited one of its files since it was
-/// last told: a peer's hold on a file this session works on, an interface
-/// change to names its files use, a file it read that a peer has since
-/// edited. Mid-turn, where a peer is looking is not news by itself
-/// (`once`: something delivered once is in the briefing); it waits, untold,
-/// for a briefing that has other news.
-fn keep_changes(
-    briefing: &mut Briefing,
-    told: &BTreeSet<u64>,
-    acted: &dyn Fn(&str) -> bool,
-    stale_again: &dyn Fn(&StaleRead) -> bool,
-    mid_turn: bool,
-    once: bool,
-) -> BTreeSet<u64> {
-    let mut shown = BTreeSet::new();
-    let mut unchanged = 0_usize;
-    let mut keep = |key: u64, safety: bool| {
-        let fresh = !told.contains(&key) || safety;
-        if fresh {
-            shown.insert(key);
-        } else {
-            unchanged += 1;
-        }
-        fresh
-    };
-    briefing
-        .stale_reads
-        .retain(|stale| keep(stale_key(stale), acted(&stale.path) || stale_again(stale)));
-    briefing
-        .checkout_changes
-        .retain(|change| keep(checkout_key(change), false));
-    briefing.notes.retain(|note| keep(note_key(note), false));
-    // Each notice's ID goes with its change, so the hook's report of what it
-    // showed names the right one (issue #269).
-    let mut ids = briefing.interface_notice_ids.clone().into_iter();
-    let mut kept_ids = Vec::new();
-    briefing.interface_changes.retain(|impact| {
-        let id = ids.next();
-        let fresh = keep(
-            interface_key(impact),
-            impact.affected.iter().any(|path| acted(path)),
-        );
-        if fresh {
-            kept_ids.extend(id);
-        }
-        fresh
-    });
-    briefing.interface_notice_ids = kept_ids;
-    // Presence counted apart: alone, mid-turn, it is held back.
-    let mut presence = Vec::new();
-    let mut work_news = false;
-    briefing.peers.retain_mut(|peer| {
-        let only_presence = presence_only(peer);
-        // A file this peer holds in this checkout that this session works
-        // on: refused to this session while held.
-        let held: BTreeSet<String> = peer
-            .overlap
-            .iter()
-            .filter(|path| peer.same_workspace && peer.editing.contains(path))
-            .cloned()
-            .collect();
-        let header = peer_key(peer);
-        let header_fresh = keep(header, false);
-        if header_fresh {
-            if only_presence {
-                presence.push(header);
-            } else {
-                work_news = true;
-            }
-        }
-        let mut any = false;
-        let id = peer.session_id.clone();
-        let mut list = |kind: &str, path: &str| {
-            let key = item_key(&["peer", &id, kind, path]);
-            let safety =
-                matches!(kind, "overlap" | "editing") && held.contains(path) && acted(path);
-            let fresh = keep(key, safety);
-            if fresh {
-                any = true;
-                if kind == "looking" {
-                    presence.push(key);
-                } else {
-                    work_news = true;
-                }
-            }
-            fresh
-        };
-        peer.overlap.retain(|path| list("overlap", path));
-        peer.target_overlap.retain(|path| list("target", path));
-        peer.editing.retain(|path| list("editing", path));
-        peer.recent.retain(|recent| list("recent", &recent.path));
-        peer.looking.retain(|looked| list("looking", &looked.path));
-        if !header_fresh {
-            // Its task was told: the line names the peer and what is new.
-            peer.summary = None;
-            peer.intent = None;
-        }
-        header_fresh || any
-    });
-    briefing
-        .remote
-        .retain(|remote| keep(remote_work_key(remote), false));
-    let other_news = work_news
-        || once
-        || !briefing.stale_reads.is_empty()
-        || !briefing.checkout_changes.is_empty()
-        || !briefing.notes.is_empty()
-        || !briefing.interface_changes.is_empty()
-        || !briefing.remote.is_empty()
-        || !briefing.inflight.is_empty();
-    if mid_turn && !other_news && !presence.is_empty() {
-        for key in &presence {
-            shown.remove(key);
-        }
-        // A peer is left in only for its own line, told here for the first
-        // time (and not only for where it looked), or for a file still in.
-        // A told line had its task cleared, so its key no longer matches.
-        briefing.peers.retain_mut(|peer| {
-            peer.looking.clear();
-            shown.contains(&peer_key(peer))
-                || !(peer.overlap.is_empty()
-                    && peer.target_overlap.is_empty()
-                    && peer.editing.is_empty()
-                    && peer.recent.is_empty())
-        });
-    }
-    briefing.unchanged = u32::try_from(unchanged).unwrap_or(u32::MAX);
-    shown
-}
-
-/// Whether a `changes_only` briefing still has an item to place in context.
-fn shown_anything(briefing: &Briefing) -> bool {
-    !briefing.peers.is_empty()
-        || !briefing.stale_reads.is_empty()
-        || !briefing.remote.is_empty()
-        || !briefing.interface_changes.is_empty()
-        || !briefing.inflight.is_empty()
-        || !briefing.notes.is_empty()
-        || !briefing.checkout_changes.is_empty()
-}
-
-/// Bytes in the presence part of a briefing signature: with the work
-/// fingerprint and its `+`, the signature stays within the 64 bytes an
-/// event holds.
-const PRESENCE_SIGNATURE_BYTES: usize = 23;
-
-/// The presence part of a briefing signature: for each peer and path it
-/// shows as presence, two bits set from that pair's fingerprint. None when
-/// it shows none. A path whose bits another pair already set is not news on
-/// its own; it is shown with the next briefing that is.
-fn presence_bits(peers: &[PeerWork]) -> Option<[u8; PRESENCE_SIGNATURE_BYTES]> {
-    const BITS: u64 = (PRESENCE_SIGNATURE_BYTES * 8) as u64;
-    let mut bits = [0u8; PRESENCE_SIGNATURE_BYTES];
-    let mut any = false;
-    for peer in peers {
-        for looked in &peer.looking {
-            let hash = fingerprint_u64(&format!("{}|{}", peer.session_id, looked.path));
-            for bit in [hash % BITS, (hash >> 32) % BITS] {
-                bits[(bit / 8) as usize] |= 1 << (bit % 8);
-            }
-            any = true;
-        }
-    }
-    any.then_some(bits)
-}
-
-/// Whether a briefing signature shows presence that `previous` did not:
-/// a bit set in its presence part that is clear in the previous one. A
-/// previous signature without a presence part, or from before this form,
-/// has shown none.
-fn new_presence(signature: &str, previous: &str) -> bool {
-    let bits = |signature: &str| -> Option<Vec<u8>> {
-        let (_, hex) = signature.split_once('+')?;
-        if hex.len() != PRESENCE_SIGNATURE_BYTES * 2 {
-            return None;
-        }
-        (0..hex.len())
-            .step_by(2)
-            .map(|at| u8::from_str_radix(hex.get(at..at + 2)?, 16).ok())
-            .collect()
-    };
-    let Some(now) = bits(signature) else {
-        return false;
-    };
-    match bits(previous) {
-        Some(before) => now
-            .iter()
-            .zip(&before)
-            .any(|(now, before)| now & !before != 0),
-        None => true,
-    }
-}
-
-/// A briefing signature without its presence part.
-fn without_presence(signature: &str) -> &str {
-    signature
-        .split_once('+')
-        .map_or(signature, |(work, _)| work)
-}
-
-/// A peer in a briefing only for where it looked.
-fn presence_only(peer: &PeerWork) -> bool {
-    !peer.looking.is_empty()
-        && peer.editing.is_empty()
-        && peer.recent.is_empty()
-        && peer.overlap.is_empty()
-        && peer.target_overlap.is_empty()
-        && peer.summary.is_none()
-        && peer.intent.is_none()
-}
-
-/// Whether an active, unexpired lease of this workspace holds `path`.
-fn leased(state: &State, workspace_id: &str, path: &str, now_ms: u64) -> bool {
-    state.leases.values().any(|lease| {
-        lease.workspace_id == workspace_id
-            && lease.status == LeaseStatus::Active
-            && lease.generation == state.generation
-            && lease.expires_at_ms > now_ms
-            && lease.paths.iter().any(|held| held == path)
-    })
-}
-
-/// Whether a session of this workspace reported reading or writing the file
-/// at this version.
-fn explained(state: &State, workspace_id: &str, file: &ObservedFile) -> bool {
-    state
-        .sessions
-        .values()
-        .filter(|session| session.workspace_id == workspace_id)
-        .filter_map(|session| state.activity.get(&session.session_id))
-        .any(|activity| {
-            activity
-                .known
-                .iter()
-                .any(|known| known.path == file.path && known.state == file.state)
-        })
-}
-
-/// Whether a session of this workspace reported reading or writing the file
-/// at or after `from_ms`, at any version.
-fn reported_since(state: &State, workspace_id: &str, path: &str, from_ms: u64) -> bool {
-    state
-        .sessions
-        .values()
-        .filter(|session| session.workspace_id == workspace_id)
-        .filter_map(|session| state.activity.get(&session.session_id))
-        .any(|activity| {
-            activity
-                .known
-                .iter()
-                .any(|known| known.path == path && known.at_ms >= from_ms)
-        })
-}
-
-/// The Codex sessions registered in this workspace in this generation, most
-/// recently active first. An ended or exited one is kept: Codex reports no
-/// session end, and a resumed session is a new process.
-fn codex_sessions(state: &State, workspace_id: &str) -> Vec<String> {
-    let mut sessions: Vec<(u64, &str)> = state
-        .sessions
-        .values()
-        .filter(|session| {
-            session.workspace_id == workspace_id
-                && session.generation == state.generation
-                && session
-                    .session_id
-                    .split_once('.')
-                    .is_some_and(|(host, _)| host == CODEX_HOST)
-        })
-        .map(|session| {
-            let last = state
-                .activity
-                .get(&session.session_id)
-                .filter(|activity| activity.generation == state.generation)
-                .map_or(0, |activity| activity.last_ms);
-            (last, session.session_id.as_str())
-        })
-        .collect();
-    sessions.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
-    sessions.into_iter().map(|(_, id)| id.to_owned()).collect()
-}
-
-/// The files of an uncoordinated change that are still at a version no
-/// session of its workspace reported: a report arriving after the scan
-/// explains the rest.
-fn still_unexplained(state: &State, change: &UncoordinatedChange) -> Vec<String> {
-    change
-        .files
-        .iter()
-        .filter(|file| !explained(state, &change.workspace_id, file))
-        .map(|file| file.path.clone())
-        .collect()
-}
-
-/// This workspace's uncoordinated changes of this generation, within the
-/// briefing horizon, with a file still unexplained. Newest first.
-fn held_uncoordinated<'a>(
-    state: &'a State,
-    workspace_id: &str,
-    now_ms: u64,
-) -> impl Iterator<Item = &'a UncoordinatedChange> {
-    state
-        .uncoordinated
-        .get(workspace_id)
-        .map(Vec::as_slice)
-        .unwrap_or(&[])
-        .iter()
-        .filter(move |change| {
-            change.generation == state.generation
-                && now_ms.saturating_sub(change.at_ms) <= BRIEF_HORIZON_MS
-                && !still_unexplained(state, change).is_empty()
-        })
-}
-
-/// The uncoordinated change owed to this session's next briefing, the
-/// newest, with the notice it carries: one always fits the rendered text, and
-/// each is delivered once, so the rest follow at the next briefings.
-fn uncoordinated_owed<'a>(
-    state: &'a State,
-    session_id: &'a str,
-    now_ms: u64,
-) -> impl Iterator<Item = (&'a UncoordinatedChange, UncoordinatedNotice)> {
-    let workspace = state
-        .sessions
-        .get(session_id)
-        .map_or("", |session| session.workspace_id.as_str());
-    held_uncoordinated(state, workspace, now_ms)
-        .filter(move |change| !change.delivered.iter().any(|held| held == session_id))
-        .take(1)
-        .map(move |change| {
-            (
-                change,
-                UncoordinatedNotice {
-                    sessions: change.sessions.clone(),
-                    paths: still_unexplained(state, change),
-                    age_ms: now_ms.saturating_sub(change.at_ms),
-                },
-            )
-        })
-}
-
-fn validate_uncoordinated(state: &State, change: &UncoordinatedChange) -> Result<(), CoreError> {
-    validate_fact_header(
-        state,
-        &change.change_id,
-        &change.workspace_id,
-        change.generation,
-    )?;
-    if change.files.is_empty()
-        || change.files.len() > MAX_UNCOORDINATED_FILES
-        || normalized_files(&change.files)? != change.files
-        || change.sessions.is_empty()
-        || change.sessions.len() > MAX_UNCOORDINATED_SESSIONS
-        || change.sessions.iter().any(|session| {
-            state
-                .sessions
-                .get(session)
-                .is_none_or(|known| known.workspace_id != change.workspace_id)
-        })
-    {
-        return Err(error(
-            "invalid_event",
-            &format!(
-                "An uncoordinated change names 1 to {MAX_UNCOORDINATED_FILES} sorted, unique files and 1 to {MAX_UNCOORDINATED_SESSIONS} sessions of its workspace"
-            ),
-        ));
-    }
-    Ok(())
-}
-
 /// Whether the session wrote a file since its last tool batch or stop.
 fn wrote_since_boundary(state: &State, session_id: &str) -> bool {
     state
         .activity
         .get(session_id)
         .is_some_and(|activity| activity.wrote_since_boundary)
-}
-
-fn validate_auto_check(state: &State, check: &AutoCheck) -> Result<(), CoreError> {
-    validate_known_workspace(state, &check.workspace_id)?;
-    validate_check_command(&check.name, &check.argv, check.timeout_s)?;
-    if let Some(wider) = &check.on_interface_change {
-        validate_check_command(&wider.name, &wider.argv, wider.timeout_s)?;
-        if wider.name == check.name {
-            return Err(error(
-                "invalid_check",
-                "The wider check has a name of its own: its records are told apart from the regular check's by name",
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// One automatic command's name, arguments and time limit.
-fn validate_check_command(name: &str, argv: &[String], timeout_s: u32) -> Result<(), CoreError> {
-    validate_id(name, "check name")?;
-    if name.len() > 64
-        || argv.is_empty()
-        || argv.len() > MAX_AUTO_CHECK_ARGS
-        || argv[0].is_empty()
-        || argv.iter().any(|arg| {
-            arg.is_empty()
-                || arg.len() > MAX_AUTO_CHECK_ARG_BYTES
-                || arg.chars().any(char::is_control)
-        })
-    {
-        return Err(error(
-            "invalid_check",
-            &format!(
-                "An automatic check has a name of at most 64 characters and a command of 1 to {MAX_AUTO_CHECK_ARGS} arguments, each 1 to {MAX_AUTO_CHECK_ARG_BYTES} bytes without control characters"
-            ),
-        ));
-    }
-    if !(1..=MAX_AUTO_CHECK_TIMEOUT_S).contains(&timeout_s) {
-        return Err(error(
-            "invalid_limit",
-            &format!("An automatic check's time limit is 1 to {MAX_AUTO_CHECK_TIMEOUT_S} seconds"),
-        ));
-    }
-    Ok(())
-}
-
-/// A report's mentioning files come only with an interface change, are
-/// valid paths and number at most [`MAX_REPORT_DEPENDENT_PATHS`].
-fn validate_dependent_paths(report: &CheckReport) -> Result<(), CoreError> {
-    if report.dependent_paths.is_empty() {
-        return Ok(());
-    }
-    if report.interface.is_none() || report.dependent_paths.len() > MAX_REPORT_DEPENDENT_PATHS {
-        return Err(error(
-            "invalid_check_report",
-            &format!(
-                "A check report names mentioning files only for an interface change, at most {MAX_REPORT_DEPENDENT_PATHS}"
-            ),
-        ));
-    }
-    for path in &report.dependent_paths {
-        validate_relative_path(path)?;
-    }
-    Ok(())
-}
-
-/// A wider check's cause names one valid change, a valid path and at most
-/// [`MAX_CAUSE_DEPENDENTS`] valid mentioning files.
-fn validate_interface_cause(cause: &InterfaceCause) -> Result<(), CoreError> {
-    validate_relative_path(&cause.path)?;
-    if cause.dependents.is_empty() || cause.dependents.len() > MAX_CAUSE_DEPENDENTS {
-        return Err(error(
-            "invalid_check_report",
-            &format!(
-                "A wider check's interface change names 1 to {MAX_CAUSE_DEPENDENTS} files that mention it"
-            ),
-        ));
-    }
-    for path in &cause.dependents {
-        validate_relative_path(path)?;
-    }
-    // The change itself is shaped as in an interface notice.
-    validate_notice(&InterfaceNotice {
-        notice_id: "cause".into(),
-        workspace_id: String::new(),
-        path: cause.path.clone(),
-        changes: vec![cause.change.clone()],
-        dependents: Vec::new(),
-        elsewhere: Vec::new(),
-        by_session: None,
-        at_ms: 0,
-        generation: 0,
-    })
 }
 
 /// What session `id` works on: the paths its live leases hold, the files it
@@ -8829,151 +10119,6 @@ fn told_notices<'a>(state: &'a State, session_id: &str) -> impl Iterator<Item = 
         .flat_map(|activity| &activity.notices_told)
 }
 
-/// The running sessions of the workspace, in this daemon's lifetime, that
-/// work on or have read one of `paths`, as a briefing counts them.
-fn concerned_sessions(
-    state: &State,
-    workspace_id: &str,
-    paths: &[String],
-    now_ms: u64,
-) -> Vec<String> {
-    state
-        .sessions
-        .values()
-        .filter(|session| {
-            session.workspace_id == workspace_id && session.generation == state.generation
-        })
-        .filter(|session| {
-            state
-                .activity
-                .get(&session.session_id)
-                .is_some_and(|activity| !activity.ended)
-        })
-        .filter(|session| {
-            let concerned = concerned_paths(state, &session.session_id, now_ms);
-            paths.iter().any(|path| concerned.contains(path))
-        })
-        .map(|session| session.session_id.clone())
-        .collect()
-}
-
-/// The sessions are this workspace's, the tail is bounded, and the notice
-/// names a record of that workspace.
-fn validate_check_report(
-    state: &State,
-    workspace_id: &str,
-    event: &Event,
-) -> Result<(), CoreError> {
-    let Event::CheckReported {
-        session_ids,
-        notice,
-    } = event
-    else {
-        return Err(error("invalid_event", "Not a check report"));
-    };
-    if session_ids.is_empty() || session_ids.len() > MAX_CHECK_REPORT_SESSIONS {
-        return Err(error(
-            "invalid_check_report",
-            &format!("A check report names 1 to {MAX_CHECK_REPORT_SESSIONS} sessions"),
-        ));
-    }
-    for session_id in session_ids {
-        if known_session(state, session_id)?.workspace_id != workspace_id {
-            return Err(error(
-                "invalid_check_report",
-                "A check report names only sessions of the checked workspace",
-            ));
-        }
-    }
-    if notice.tail.len() > MAX_CHECK_TAIL_BYTES || notice.tail.contains('\0') {
-        return Err(error(
-            "invalid_check_report",
-            &format!("A check's output tail is at most {MAX_CHECK_TAIL_BYTES} bytes without NUL"),
-        ));
-    }
-    validate_request_id(&notice.check_id)?;
-    validate_oid(&notice.tree_oid)?;
-    // A comparison (issue #69) is whole: a baseline, and a class for every
-    // failure, or neither.
-    let compared = notice.baseline_check_id.is_some();
-    if let Some(baseline) = &notice.baseline_check_id {
-        validate_request_id(baseline)?;
-    }
-    let names_ok = notice.fixed.len() <= MAX_FIXED_NAMED
-        && notice.fixed.iter().all(|test| {
-            !test.is_empty()
-                && test.len() <= MAX_TEST_NAME_BYTES
-                && !test.chars().any(char::is_control)
-        });
-    if !names_ok
-        || notice.writers.len() > MAX_WRITERS_NAMED
-        || (!compared && !(notice.fixed.is_empty() && notice.writers.is_empty()))
-        || notice
-            .failures
-            .iter()
-            .any(|failure| failure.class.is_some() != compared)
-    {
-        return Err(error(
-            "invalid_check_report",
-            &format!(
-                "A check report compared with a baseline classes every failure and names at most {MAX_FIXED_NAMED} fixed tests and {MAX_WRITERS_NAMED} writers; one not compared has none of them"
-            ),
-        ));
-    }
-    for writer in &notice.writers {
-        validate_id(writer, "session ID")?;
-    }
-    if let Some(cause) = &notice.interface {
-        validate_interface_cause(cause)?;
-    }
-    // A grade is the wider check's result, and only a wider check has one.
-    if notice.interface_grade != interface_grade(notice.interface.as_deref(), &notice.result) {
-        return Err(error(
-            "invalid_check_report",
-            "An interface grade is kept for a passed wider check and broke for a failed one",
-        ));
-    }
-    Ok(())
-}
-
-/// The grade of a wider check with `interface`, from its result.
-fn interface_grade(
-    interface: Option<&InterfaceCause>,
-    result: &CheckResult,
-) -> Option<InterfaceGrade> {
-    match (interface, result) {
-        (Some(_), CheckResult::Passed {}) => Some(InterfaceGrade::Kept),
-        (Some(_), CheckResult::Failed { .. }) => Some(InterfaceGrade::Broke),
-        _ => None,
-    }
-}
-
-/// A write was recorded in the workspace: its write generation moves on, so
-/// no check result is compared with one from before it to learn which tests
-/// flip.
-fn wrote_in(state: &mut State, workspace_id: &str, session_id: Option<&str>) {
-    classes::wrote(state, workspace_id, session_id);
-}
-
-fn validate_forget_flaky(name: Option<&str>, test: &str) -> Result<(), CoreError> {
-    if let Some(name) = name {
-        validate_id(name, "check name")?;
-    }
-    if test.is_empty()
-        || test.len() > MAX_TEST_NAME_BYTES
-        || test.trim() != test
-        || test.chars().any(char::is_control)
-    {
-        return Err(error(
-            "invalid_test_name",
-            &format!(
-                "A test name is 1 to {MAX_TEST_NAME_BYTES} bytes on one line without surrounding spaces"
-            ),
-        ));
-    }
-    Ok(())
-}
-
 fn validate_prompt_summary(summary: &str) -> Result<(), CoreError> {
     if summary.is_empty()
         || summary.len() > MAX_PROMPT_SUMMARY_BYTES
@@ -8984,367 +10129,6 @@ fn validate_prompt_summary(summary: &str) -> Result<(), CoreError> {
             &format!(
                 "A prompt summary is one line of 1 to {MAX_PROMPT_SUMMARY_BYTES} UTF-8 bytes without control characters"
             ),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_line_digests(digests: &[String]) -> Result<(), CoreError> {
-    if digests.len() > MAX_PROMPT_LINES
-        || digests.iter().any(|digest| {
-            digest.is_empty()
-                || digest.len() > MAX_PROMPT_LINE_DIGEST
-                || !digest
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        })
-    {
-        return Err(error(
-            "invalid_line_digests",
-            &format!(
-                "Prompt line digests are at most {MAX_PROMPT_LINES} lower-case hex strings of 1 to {MAX_PROMPT_LINE_DIGEST} characters"
-            ),
-        ));
-    }
-    Ok(())
-}
-
-/// How many leading lines of `digests` the latest prompt of another live
-/// session in `session_id`'s checkout or repository begins with, at most:
-/// a session registered in this generation, not ended and not known to have
-/// exited. Zero when the session is unknown or nobody shares a line.
-fn shared_prompt_lines(state: &State, session_id: &str, digests: &[String]) -> u32 {
-    let Some(me) = state.sessions.get(session_id) else {
-        return 0;
-    };
-    let repository = |workspace_id: &str| {
-        state
-            .workspace_git
-            .get(workspace_id)
-            .map(|git| git.repository_id.as_str())
-    };
-    let mine = repository(&me.workspace_id);
-    state
-        .sessions
-        .values()
-        .filter(|peer| peer.session_id != session_id && peer.generation == state.generation)
-        .filter(|peer| {
-            peer.workspace_id == me.workspace_id
-                || (mine.is_some() && repository(&peer.workspace_id) == mine)
-        })
-        .filter(|peer| {
-            state
-                .session_liveness
-                .get(&peer.session_id)
-                .is_none_or(|liveness| liveness.status != LivenessStatus::Exited)
-        })
-        .filter_map(|peer| state.activity.get(&peer.session_id))
-        .filter(|activity| activity.generation == state.generation && !activity.ended)
-        .map(|activity| {
-            digests
-                .iter()
-                .zip(&activity.line_digests)
-                .take_while(|(mine, theirs)| mine == theirs)
-                .count()
-        })
-        .max()
-        .unwrap_or(0) as u32
-}
-
-/// Whether a registered session is over: the host reported it ended, or its
-/// process is known to have exited. A session LangSpan cannot tell is over
-/// (killed while its liveness was unknown) counts as live.
-pub(crate) fn finished(state: &State, session_id: &str) -> bool {
-    state
-        .activity
-        .get(session_id)
-        .is_some_and(|activity| activity.ended)
-        || state
-            .session_liveness
-            .get(session_id)
-            .is_some_and(|liveness| liveness.status == LivenessStatus::Exited)
-}
-
-/// Sessions a briefing's `left` may name, at most.
-pub const MAX_LEFT: usize = 64;
-
-/// `session_id` takes over `from`'s uncommitted work (issue #161).
-fn adopt(state: &State, session_id: &str, from: &str, now_ms: u64) -> Result<Decision, CoreError> {
-    // The adopter is the caller, at work: registered, perhaps not yet again
-    // since the coordinator restarted.
-    let me = known_session(state, session_id)?;
-    let theirs = known_session(state, from)?;
-    if session_id == from {
-        return Err(error(
-            "invalid_adoption",
-            "A session cannot adopt its own work; name the ended session whose work to take over",
-        ));
-    }
-    if finished(state, session_id) {
-        return Err(error(
-            "session_ended",
-            "This session has ended; adopt from the session that continues the task",
-        ));
-    }
-    if theirs.workspace_id != me.workspace_id {
-        return Err(error(
-            "other_workspace",
-            &format!(
-                "That session worked in workspace {:?}, not this session's {:?}; only an ended session's work in the same checkout can be adopted",
-                theirs.workspace_id, me.workspace_id
-            ),
-        ));
-    }
-    if !finished(state, from) {
-        return Err(error(
-            "session_live",
-            "That session has not ended: LangSpan has neither its end nor its process's exit. Ask it to commit its own work, or adopt once it has ended",
-        ));
-    }
-    // An adopter that ended after its adoption was recorded, before its
-    // adapter credited the lines, leaves them under the session it adopted;
-    // that session cannot be adopted again. Passing the adoption on credits
-    // them too: every session whose adoptions lead to `from`. A session that
-    // has resumed since it was adopted owns what it writes again, so it is
-    // left out, and so is what its own adoptions lead to.
-    let mut earlier: Vec<String> = Vec::new();
-    let mut pending = vec![from.to_owned()];
-    while let Some(adopter) = pending.pop() {
-        for adoption in state.adoptions.values() {
-            if adoption.session_id != adopter
-                || adoption.workspace_id != me.workspace_id
-                || adoption.from == from
-                || earlier.contains(&adoption.from)
-                || !finished(state, &adoption.from)
-            {
-                continue;
-            }
-            if earlier.len() >= MAX_LEFT {
-                return Err(error(
-                    "adoption_chain",
-                    &format!(
-                        "More than {MAX_LEFT} earlier adoptions lead to that session; commit part of the work, then adopt again"
-                    ),
-                ));
-            }
-            earlier.push(adoption.from.clone());
-            pending.push(adoption.from.clone());
-        }
-    }
-    earlier.sort();
-    // Ending a session does not end its subagents: one still running keeps
-    // its lines.
-    let live: Vec<String> = state
-        .sessions
-        .values()
-        .filter(|session| {
-            session.workspace_id == me.workspace_id
-                && [from]
-                    .into_iter()
-                    .chain(earlier.iter().map(String::as_str))
-                    .any(|source| {
-                        session.parent.as_deref() == Some(source)
-                            || session
-                                .session_id
-                                .strip_prefix(source)
-                                .is_some_and(|rest| rest.starts_with('.'))
-                    })
-                && !finished(state, &session.session_id)
-        })
-        .map(|session| session.session_id.clone())
-        .collect();
-    if live.len() > MAX_LEFT {
-        return Err(error(
-            "session_live",
-            &format!(
-                "More than {MAX_LEFT} subagents of that session have not ended; adopt once they have"
-            ),
-        ));
-    }
-    // A subagent another session adopted is that session's to credit, even
-    // when its adapter has not yet rewritten the journal.
-    let mut kept: Vec<String> = state
-        .adoptions
-        .values()
-        .filter(|adoption| {
-            adoption.workspace_id == me.workspace_id
-                && adoption.session_id != session_id
-                && !earlier.contains(&adoption.from)
-                && [from]
-                    .into_iter()
-                    .chain(earlier.iter().map(String::as_str))
-                    .any(|source| {
-                        adoption
-                            .from
-                            .strip_prefix(source)
-                            .is_some_and(|rest| rest.starts_with('.'))
-                    })
-        })
-        .map(|adoption| adoption.from.clone())
-        .collect();
-    kept.sort();
-    if kept.len() > MAX_LEFT {
-        return Err(error(
-            "adoption_chain",
-            &format!(
-                "Other sessions adopted more than {MAX_LEFT} subagents of that session; commit part of the work, then adopt again"
-            ),
-        ));
-    }
-    let root = state
-        .workspaces
-        .get(&me.workspace_id)
-        .map(|workspace| workspace.root.clone())
-        .unwrap_or_default();
-    if let Some(adoption) = state.adoptions.get(from) {
-        if adoption.session_id != session_id {
-            return Err(error(
-                "already_adopted",
-                &format!(
-                    "Session {} already adopted that session's work; adopt from {} once it has ended",
-                    adoption.session_id, adoption.session_id
-                ),
-            ));
-        }
-        return Ok(Decision {
-            events: Vec::new(),
-            outcome: Outcome::Adopted {
-                adoption: adoption.clone(),
-                root,
-                recorded: false,
-                live,
-                earlier,
-                kept,
-            },
-        });
-    }
-    let adoption = Adoption {
-        from: from.to_owned(),
-        session_id: session_id.to_owned(),
-        workspace_id: me.workspace_id.clone(),
-        reason: adopt_reason(state, &me.workspace_id, session_id, from),
-        at_ms: now_ms,
-        generation: state.generation,
-    };
-    Ok(Decision {
-        events: vec![Event::SessionAdopted {
-            adoption: adoption.clone(),
-        }],
-        outcome: Outcome::Adopted {
-            adoption,
-            root,
-            recorded: true,
-            live,
-            earlier,
-            kept,
-        },
-    })
-}
-
-/// Why `session_id` may be continuing `from`'s task, newest evidence
-/// first: a message `from` sent it (addressed to it, or a handoff it took),
-/// then the same task line.
-fn adopt_reason(
-    state: &State,
-    workspace_id: &str,
-    session_id: &str,
-    from: &str,
-) -> Option<AdoptReason> {
-    let held = state.messages.get(workspace_id).into_iter().flatten();
-    let history = state
-        .message_history
-        .get(workspace_id)
-        .into_iter()
-        .flatten();
-    let handoff = held.chain(history).find(|message| {
-        message.from.as_deref() == Some(from)
-            && !message.retracted
-            && match &message.to {
-                Recipient::Session { session_id: to } => to == session_id,
-                Recipient::NextSession {} => {
-                    message.acknowledged.iter().any(|taker| taker == session_id)
-                }
-                Recipient::Everyone {} => false,
-            }
-    });
-    if let Some(message) = handoff {
-        return Some(AdoptReason::Handoff {
-            message_id: message.message_id.clone(),
-        });
-    }
-    let task = |id: &str| {
-        state
-            .activity
-            .get(id)
-            .and_then(|activity| activity.summary.as_deref())
-    };
-    (task(from).is_some() && task(from) == task(session_id)).then_some(AdoptReason::SameTask {})
-}
-
-/// Of `left`, the sessions a briefing names as having left uncommitted
-/// work: of `session_id`'s workspace, over, not adopted, and neither the
-/// session nor one of its own subagents.
-fn left_work(state: &State, session_id: &str, left: &[String]) -> Result<Vec<LeftWork>, CoreError> {
-    if left.len() > MAX_LEFT {
-        return Err(error(
-            "invalid_left",
-            &format!("A briefing names at most {MAX_LEFT} sessions that left work"),
-        ));
-    }
-    for id in left {
-        validate_id(id, "session ID")?;
-    }
-    if left.is_empty() {
-        return Ok(Vec::new());
-    }
-    let me = known_session(state, session_id)?;
-    let mut found: Vec<LeftWork> = Vec::new();
-    for id in left {
-        let Some(session) = state.sessions.get(id) else {
-            continue;
-        };
-        if id == session_id
-            || session.parent.as_deref() == Some(session_id)
-            || session.workspace_id != me.workspace_id
-            || !finished(state, id)
-            || state.adoptions.contains_key(id)
-            || found.iter().any(|work| &work.session_id == id)
-        {
-            continue;
-        }
-        found.push(LeftWork {
-            session_id: id.clone(),
-            summary: state
-                .activity
-                .get(id)
-                .and_then(|activity| activity.summary.clone()),
-        });
-        if found.len() == BRIEF_LEFT_WORK {
-            break;
-        }
-    }
-    Ok(found)
-}
-
-fn validate_workspace_git(state: &State, git: &WorkspaceGit) -> Result<(), CoreError> {
-    validate_id(&git.workspace_id, "workspace ID")?;
-    validate_id(&git.repository_id, "repository ID")?;
-    if !state.workspaces.contains_key(&git.workspace_id) {
-        return Err(error(
-            "workspace_not_found",
-            "Register the workspace before recording its repository",
-        ));
-    }
-    if let Some(reference) = &git.branch_ref
-        && (reference.len() > 512
-            || reference.chars().any(char::is_control)
-            || !reference
-                .strip_prefix("refs/heads/")
-                .is_some_and(|name| !name.is_empty()))
-    {
-        return Err(error(
-            "invalid_branch_ref",
-            "A workspace branch is a nonempty refs/heads/ name, at most 512 bytes without control characters",
         ));
     }
     Ok(())
@@ -9381,304 +10165,6 @@ fn activity_mut<'a>(state: &'a mut State, session_id: &str) -> &'a mut SessionAc
 
 fn take_all<T: Default>(value: &mut T) -> T {
     core::mem::take(value)
-}
-
-struct ObservationInput<'a> {
-    session_id: &'a str,
-    operation_id: &'a str,
-    source: &'a str,
-    tool: &'a str,
-    paths: &'a [String],
-    result: ToolResult,
-    lease_id: Option<&'a str>,
-    operation: Option<&'a ToolIdentity>,
-}
-
-fn decide_observation(
-    state: &State,
-    input: ObservationInput<'_>,
-    request_id: &str,
-    now_ms: u64,
-) -> Result<Decision, CoreError> {
-    // A stale session may still report what happened before a restart.
-    let session = known_session(state, input.session_id)?;
-    if let Some(operation) = input.operation {
-        validate_tool_identity(operation)?;
-    } else {
-        validate_id(input.operation_id, "operation ID")?;
-        validate_id(input.source, "observation source")?;
-        validate_id(input.tool, "tool name")?;
-    }
-    let paths = normalized_paths(input.paths)?;
-    let mut scope: BTreeSet<String> = paths.iter().cloned().collect();
-    let lease_relation = match input.lease_id {
-        None => LeaseRelation::NotAdmitted,
-        Some(id) => {
-            validate_id(id, "lease ID")?;
-            match state.leases.get(id) {
-                None => LeaseRelation::NotAdmitted,
-                Some(lease) => {
-                    if lease.session_id != input.session_id {
-                        return Err(error(
-                            "not_holder",
-                            "An observation can name only its own session's admission",
-                        ));
-                    }
-                    scope.extend(lease.paths.iter().cloned());
-                    if lease.operation.as_ref() != input.operation {
-                        LeaseRelation::InputMismatch
-                    } else if paths
-                        .iter()
-                        .any(|path| lease.paths.binary_search(path).is_err())
-                    {
-                        LeaseRelation::ScopeMismatch
-                    } else {
-                        lease_relation(state, lease, now_ms)
-                    }
-                }
-            }
-        }
-    };
-    let scope: Vec<String> = scope.into_iter().collect();
-    // Judged as the named admission was: by its regions, if it had any.
-    let regions = input
-        .lease_id
-        .and_then(|id| state.leases.get(id))
-        .map(|lease| lease.regions.as_slice())
-        .unwrap_or_default();
-    let concurrent_holders = conflicts(state, &session.workspace_id, &scope, regions, now_ms)
-        .into_iter()
-        .filter(|holder| input.lease_id != Some(holder.lease_id.as_str()))
-        .collect();
-    let observation = Observation {
-        observation_id: request_id.into(),
-        session_id: input.session_id.into(),
-        workspace_id: session.workspace_id.clone(),
-        operation_id: input.operation_id.into(),
-        source: input.source.into(),
-        tool: input.tool.into(),
-        paths,
-        result: input.result,
-        lease_id: input.lease_id.map(str::to_owned),
-        lease_relation,
-        concurrent_holders,
-        observed_at_ms: now_ms,
-        generation: state.generation,
-    };
-    Ok(Decision {
-        events: vec![Event::OperationObserved {
-            observation: observation.clone(),
-        }],
-        outcome: Outcome::Observed { observation },
-    })
-}
-
-/// The regions of `regions` that name the version `base` gives for their
-/// path. Regions are trusted only for the version the hook saw on disk when
-/// it asked; any other path is held whole.
-fn trusted_regions<'a>(
-    regions: &[PathRegions],
-    paths: &[String],
-    base: impl Iterator<Item = &'a ObservedFile> + Clone,
-) -> Result<Vec<PathRegions>, CoreError> {
-    Ok(normalized_regions(regions, paths)?
-        .into_iter()
-        .filter(|located| {
-            base.clone().any(|file| {
-                file.path == located.path
-                    && matches!(&file.state, FileState::Present { digest, .. } if *digest == located.digest)
-            })
-        })
-        .collect())
-}
-
-/// The current admissions an admission of `paths` by `session_id` would
-/// meet. A host's tool call is never held back by an earlier tool call of
-/// the same session.
-fn holders_of(
-    state: &State,
-    session_id: &str,
-    workspace_id: &str,
-    paths: &[String],
-    regions: &[PathRegions],
-    tool_call: bool,
-    now_ms: u64,
-) -> Vec<Conflict> {
-    conflicts(state, workspace_id, paths, regions, now_ms)
-        .into_iter()
-        .filter(|holder| {
-            !(tool_call
-                && holder.session_id == session_id
-                && state
-                    .leases
-                    .get(&holder.lease_id)
-                    .is_some_and(|lease| lease.operation.is_some()))
-        })
-        .collect()
-}
-
-fn conflicts(
-    state: &State,
-    workspace_id: &str,
-    paths: &[String],
-    regions: &[PathRegions],
-    now_ms: u64,
-) -> Vec<Conflict> {
-    let located = |list: &'_ [PathRegions], path: &str| -> Option<PathRegions> {
-        list.iter().find(|entry| entry.path == path).cloned()
-    };
-    state
-        .leases
-        .values()
-        .filter_map(|lease| {
-            if lease.status != LeaseStatus::Active
-                || lease.generation != state.generation
-                || lease.expires_at_ms <= now_ms
-                || lease.workspace_id != workspace_id
-            {
-                return None;
-            }
-            let intersection: Vec<_> = paths
-                .iter()
-                .filter(|path| lease.paths.binary_search(path).is_ok())
-                .filter(|path| {
-                    !separate(
-                        located(regions, path).as_ref(),
-                        located(&lease.regions, path).as_ref(),
-                    )
-                })
-                .cloned()
-                .collect();
-            if intersection.is_empty() {
-                None
-            } else {
-                Some(Conflict {
-                    lease_id: lease.lease_id.clone(),
-                    session_id: lease.session_id.clone(),
-                    regions: intersection
-                        .iter()
-                        .filter_map(|path| located(&lease.regions, path))
-                        .collect(),
-                    paths: intersection,
-                })
-            }
-        })
-        .collect()
-}
-
-/// True only when two edits of one path cannot touch the same code: both were
-/// located, and either they name different symbols, neither inside the other,
-/// or they name disjoint line ranges of the same version of the file. Every
-/// other case, including a whole-file edit on either side and a mix of
-/// symbols and lines, is a conflict as before regions existed.
-fn separate(ours: Option<&PathRegions>, theirs: Option<&PathRegions>) -> bool {
-    let (Some(ours), Some(theirs)) = (ours, theirs) else {
-        return false;
-    };
-    ours.regions.iter().all(|a| {
-        theirs.regions.iter().all(|b| match (a, b) {
-            (Region::Symbol { key: a, .. }, Region::Symbol { key: b, .. }) => {
-                !(a.starts_with(b) || b.starts_with(a))
-            }
-            (
-                Region::Lines {
-                    start_line: a_start,
-                    end_line: a_end,
-                },
-                Region::Lines {
-                    start_line: b_start,
-                    end_line: b_end,
-                },
-            ) => ours.digest == theirs.digest && (a_end < b_start || b_end < a_start),
-            _ => false,
-        })
-    })
-}
-
-/// Validate regions against the admitted (normalized) paths and return them
-/// with each path's regions sorted and deduplicated.
-fn normalized_regions(
-    regions: &[PathRegions],
-    paths: &[String],
-) -> Result<Vec<PathRegions>, CoreError> {
-    let invalid = |message: &str| Err(error("invalid_regions", message));
-    let mut seen = BTreeSet::new();
-    let mut total = 0;
-    let mut normalized = Vec::with_capacity(regions.len());
-    for located in regions {
-        if paths.binary_search(&located.path).is_err() {
-            return invalid("Regions name a path this admission does not request");
-        }
-        if !seen.insert(located.path.as_str()) {
-            return invalid("Each path's regions may be given once");
-        }
-        if !is_hex_digest(&located.digest, 64) {
-            return invalid("A file version digest must contain exactly 64 hexadecimal characters");
-        }
-        if located.regions.is_empty() {
-            return invalid("Give at least one region, or leave the path out to hold it whole");
-        }
-        let symbols = located
-            .regions
-            .iter()
-            .filter(|region| matches!(region, Region::Symbol { .. }))
-            .count();
-        if symbols != 0 && symbols != located.regions.len() {
-            return invalid("One path's regions are all symbols or all line ranges");
-        }
-        for region in &located.regions {
-            let (start_line, end_line) = match region {
-                Region::Symbol {
-                    key,
-                    digest,
-                    start_line,
-                    end_line,
-                } => {
-                    if key.is_empty()
-                        || key.len() > MAX_KEY_DEPTH
-                        || key.iter().any(|name| {
-                            name.is_empty()
-                                || name.len() > MAX_KEY_NAME_BYTES
-                                || name.chars().any(char::is_control)
-                        })
-                    {
-                        return invalid(
-                            "A symbol key is 1 to 8 names of 1 to 128 bytes without control characters",
-                        );
-                    }
-                    if !is_hex_digest(digest, 64) {
-                        return invalid(
-                            "A symbol digest must contain exactly 64 hexadecimal characters",
-                        );
-                    }
-                    (*start_line, *end_line)
-                }
-                Region::Lines {
-                    start_line,
-                    end_line,
-                } => (*start_line, *end_line),
-            };
-            if start_line == 0 || start_line > end_line || end_line > MAX_REGION_LINE {
-                return invalid("Region lines are one-based, ordered and at most 2000000");
-            }
-        }
-        let mut sorted = located.regions.clone();
-        sorted.sort();
-        sorted.dedup();
-        total += sorted.len();
-        if total > MAX_REGIONS {
-            return invalid(
-                "An admission can name at most 64 distinct regions; leave paths out to hold them whole",
-            );
-        }
-        normalized.push(PathRegions {
-            path: located.path.clone(),
-            digest: located.digest.clone(),
-            regions: sorted,
-        });
-    }
-    normalized.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok(normalized)
 }
 
 /// Replay an event, rejecting invalid references or transitions before mutation.
@@ -11159,423 +11645,6 @@ pub fn expiry_events(state: &State, now_ms: u64) -> Vec<Event> {
         .collect()
 }
 
-/// The identifier grammar the index is asked about: an ASCII letter or
-/// underscore, then 2 to 63 ASCII letters, digits or underscores.
-pub fn is_graph_name(name: &str) -> bool {
-    let bytes = name.as_bytes();
-    (3..=64).contains(&bytes.len())
-        && (bytes[0].is_ascii_alphabetic() || bytes[0] == b'_')
-        && bytes
-            .iter()
-            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
-}
-
-/// Bounds of a code-context query: 1 to `CONTEXT_NAMES` distinct names in
-/// the identifier grammar, and 1 to `CONTEXT_DEFINITIONS` definitions each.
-pub fn validate_graph_context(names: &[String], limit: u32) -> Result<(), CoreError> {
-    let distinct: BTreeSet<&String> = names.iter().collect();
-    if names.is_empty()
-        || names.len() > CONTEXT_NAMES
-        || distinct.len() != names.len()
-        || !names.iter().all(|name| is_graph_name(name))
-        || !(1..=CONTEXT_DEFINITIONS).contains(&limit)
-    {
-        return Err(error(
-            "invalid_graph_context",
-            "Ask about 1 to 12 distinct names, each 3 to 64 ASCII letters, digits or underscores not starting with a digit, with a limit of 1 to 3 definitions per name",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_alerted(notice_ids: &[String]) -> Result<(), CoreError> {
-    if notice_ids.is_empty() || notice_ids.len() > MAX_CALL_BREAKS {
-        return Err(error(
-            "invalid_alert",
-            "An interface alert names 1 to 8 notices",
-        ));
-    }
-    notice_ids.iter().try_for_each(|id| validate_request_id(id))
-}
-
-/// The notices one briefing or one between-step delivery told: 1 to
-/// `BRIEF_INTERFACE_NOTICES` valid IDs (issue #214).
-fn validate_outlined(path: &str, digest: &str) -> Result<(), CoreError> {
-    validate_relative_path(path)?;
-    if !is_hex_digest(digest, 64) {
-        return Err(error(
-            "invalid_digest",
-            "A file digest must contain exactly 64 hexadecimal characters",
-        ));
-    }
-    Ok(())
-}
-
-/// Whether the session was given the outline of this file version
-/// (roadmap A11).
-pub fn was_outlined(state: &State, session_id: &str, path: &str, digest: &str) -> bool {
-    state.activity.get(session_id).is_some_and(|activity| {
-        activity
-            .outlined
-            .iter()
-            .any(|held| held.path == path && held.digest == digest)
-    })
-}
-
-fn validate_told(notice_ids: &[String]) -> Result<(), CoreError> {
-    if notice_ids.is_empty() || notice_ids.len() > BRIEF_INTERFACE_NOTICES {
-        return Err(error(
-            "invalid_told",
-            "A delivery tells 1 to 4 interface notices",
-        ));
-    }
-    notice_ids.iter().try_for_each(|id| validate_request_id(id))
-}
-
-fn validate_arity(arity: &Arity) -> Result<(), CoreError> {
-    if arity.min > MAX_ARITY
-        || arity
-            .max
-            .is_some_and(|max| max < arity.min || max > MAX_ARITY)
-    {
-        return Err(error(
-            "invalid_notice",
-            "A parameter count is at most 255, and its minimum is at most its maximum",
-        ));
-    }
-    Ok(())
-}
-
-/// The calls of one write check: 1 to `MAX_CALL_SITES`, each in a relative
-/// path, on a line from 1 to 2,000,000, naming 1 to 128 bytes without
-/// control characters, with at most `MAX_ARITY` arguments.
-pub fn validate_calls(calls: &[CallSite]) -> Result<(), CoreError> {
-    let invalid = || {
-        error(
-            "invalid_calls",
-            "A write check names 1 to 64 calls, each in a workspace-relative path, on a line from 1 to 2000000, a name of 1 to 128 bytes without control characters, and at most 255 arguments",
-        )
-    };
-    if calls.is_empty() || calls.len() > MAX_CALL_SITES {
-        return Err(invalid());
-    }
-    for call in calls {
-        validate_relative_path(&call.path).map_err(|_| invalid())?;
-        if !(1..=2_000_000).contains(&call.line)
-            || call.name.is_empty()
-            || call.name.len() > 128
-            || call.name.chars().any(char::is_control)
-            || call.args > MAX_ARITY
-        {
-            return Err(invalid());
-        }
-    }
-    Ok(())
-}
-
-/// Where a notice of another worktree stands against the asking session's
-/// checkout, as Git answers it (issue #217).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Standing {
-    /// The notice's file differs from its worktree's `HEAD`: not committed.
-    Uncommitted,
-    /// Committed on its worktree's branch, in a commit the asking
-    /// checkout's `HEAD` does not contain.
-    Unmerged,
-    /// The asking checkout's `HEAD` contains the commit.
-    Merged,
-}
-
-/// Standings by `(workspace ID, notice ID)`. A notice missing from it, such
-/// as one Git could not answer for in time, keeps the uncommitted rules.
-pub type Standings = BTreeMap<(String, String), Standing>;
-
-/// Notices of other worktrees whose standing one write check asks Git for,
-/// at most.
-pub const MAX_STANDING_QUESTIONS: usize = 8;
-
-/// A notice of another worktree whose standing a write check asks Git for.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StandingQuestion {
-    pub workspace_id: String,
-    pub notice_id: String,
-    /// The notice's file, relative to that worktree's root.
-    pub path: String,
-}
-
-/// The notices of other worktrees that `calls` could be alerted to if they
-/// were committed and not merged: those the uncommitted rules would also
-/// keep, and those they leave out only because the change is older than the
-/// briefing horizon or its session has ended. At most
-/// `MAX_STANDING_QUESTIONS`, each workspace's newest first. Usually none, and
-/// then Git is not asked.
-pub fn standing_questions(
-    state: &State,
-    session_id: &str,
-    calls: &[CallSite],
-    now_ms: u64,
-) -> Result<Vec<StandingQuestion>, CoreError> {
-    validate_calls(calls)?;
-    let own = &current_session(state, session_id)?.workspace_id;
-    let mut questions: Vec<StandingQuestion> = Vec::new();
-    for (notice, change, _) in alertable(state, session_id, now_ms, None)? {
-        let asked = questions.iter().any(|question| {
-            question.workspace_id == notice.workspace_id && question.notice_id == notice.notice_id
-        });
-        if notice.workspace_id == *own
-            || asked
-            || !calls.iter().any(|call| call.name == change.name)
-        {
-            continue;
-        }
-        if questions.len() == MAX_STANDING_QUESTIONS {
-            break;
-        }
-        questions.push(StandingQuestion {
-            workspace_id: notice.workspace_id.clone(),
-            notice_id: notice.notice_id.clone(),
-            path: notice.path.clone(),
-        });
-    }
-    Ok(questions)
-}
-
-/// Changes to functions that another session made in this session's
-/// workspace or in another worktree of its repository (issue #194), in this
-/// generation, that this session has not been alerted to: `(notice, change,
-/// the peer)`. A signature change counts only with the new parameter count;
-/// a rename and a removal always count. The session's own workspace first,
-/// each workspace's newest notice first.
-///
-/// An uncommitted change counts within the briefing horizon while its
-/// session is live. Another worktree's change that `standings` says is
-/// committed and not merged into this session's checkout counts whatever
-/// its age and whether or not its session has ended, and one it says is
-/// merged never counts (issue #217). With `standings` `None` (asking which
-/// notices Git should answer for), every other worktree's change counts
-/// as if committed and not merged.
-fn alertable<'a>(
-    state: &'a State,
-    session_id: &str,
-    now_ms: u64,
-    standings: Option<&Standings>,
-) -> Result<Vec<(&'a InterfaceNotice, &'a InterfaceChange, &'a str)>, CoreError> {
-    let me = current_session(state, session_id)?;
-    let alerted = state
-        .activity
-        .get(session_id)
-        .filter(|activity| activity.generation == state.generation)
-        .map(|activity| activity.alerted.as_slice())
-        .unwrap_or(&[]);
-    let live = |peer: &str| {
-        state
-            .sessions
-            .get(peer)
-            .is_some_and(|session| session.generation == state.generation)
-            && state
-                .session_liveness
-                .get(peer)
-                .is_none_or(|liveness| liveness.status != LivenessStatus::Exited)
-            && state
-                .activity
-                .get(peer)
-                .is_none_or(|activity| !activity.ended)
-    };
-    let mut found = Vec::new();
-    let own = state.interface_notices.get(&me.workspace_id);
-    let others = state
-        .interface_notices
-        .iter()
-        .filter(|(workspace_id, _)| {
-            **workspace_id != me.workspace_id
-                && related_workspace(state, &me.workspace_id, workspace_id)
-        })
-        .map(|(_, notices)| notices);
-    for notice in own.into_iter().chain(others).flatten() {
-        let Some(peer) = notice.by_session.as_deref() else {
-            continue;
-        };
-        let standing = if notice.workspace_id == me.workspace_id {
-            Some(Standing::Uncommitted)
-        } else {
-            match standings {
-                None => Some(Standing::Unmerged),
-                Some(standings) => standings
-                    .get(&(notice.workspace_id.clone(), notice.notice_id.clone()))
-                    .copied(),
-            }
-        };
-        let committed = match standing {
-            Some(Standing::Merged) => continue,
-            Some(Standing::Unmerged) => true,
-            Some(Standing::Uncommitted) | None => false,
-        };
-        if notice.generation != state.generation
-            || peer == session_id
-            || alerted.contains(&notice.notice_id)
-            || (!committed
-                && (now_ms.saturating_sub(notice.at_ms) > BRIEF_HORIZON_MS || !live(peer)))
-        {
-            continue;
-        }
-        for change in &notice.changes {
-            let alerts = match change.change.as_str() {
-                "signature_changed" => change.after_arity.is_some(),
-                "renamed" => change.after_name.is_some(),
-                "removed" => true,
-                _ => false,
-            };
-            if alerts && matches!(change.kind.as_str(), "function" | "method") {
-                found.push((notice, change, peer));
-            }
-        }
-    }
-    Ok(found)
-}
-
-/// The names among `calls` that a write check must look up in the index,
-/// by the workspace whose index holds the change: those of a change it
-/// could alert to, and a renamed function's new name. `standings` holds
-/// Git's answers for `standing_questions`. Usually none, and then nothing
-/// is looked up.
-pub fn call_candidates(
-    state: &State,
-    session_id: &str,
-    calls: &[CallSite],
-    standings: &Standings,
-    now_ms: u64,
-) -> Result<BTreeMap<String, BTreeSet<String>>, CoreError> {
-    validate_calls(calls)?;
-    let mut candidates: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for (notice, change, _) in alertable(state, session_id, now_ms, Some(standings))? {
-        if calls.iter().any(|call| call.name == change.name) {
-            candidates
-                .entry(notice.workspace_id.clone())
-                .or_default()
-                .extend(
-                    [&change.name]
-                        .into_iter()
-                        .chain(&change.after_name)
-                        .cloned(),
-                );
-        }
-    }
-    Ok(candidates)
-}
-
-/// What one workspace's index holds of a write check's candidate names.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct IndexedNames {
-    /// Every definition of a candidate name.
-    pub definitions: Vec<SymbolRef>,
-    /// The index reads every supported file of the workspace at its current
-    /// content (`GraphCoverage::blind_in_scope` is zero).
-    pub complete: bool,
-}
-
-/// The calls a peer's recent change makes wrong, at most `MAX_CALL_BREAKS`,
-/// from notices this session was not alerted to. `current` holds, by
-/// workspace, the index's definitions of every candidate name
-/// (`call_candidates`), and a change counts only while it is still true in
-/// the index of the workspace it was made in, so a notice the index has
-/// moved past is never used, and a notice of a workspace missing from
-/// `current` is not used at all:
-///
-/// - a signature change, while its file holds the new signature; a call
-///   whose count does not fit it breaks;
-/// - a rename, while its file holds the new name's signature and no
-///   definition of the old name is left anywhere; every call of the old
-///   name breaks;
-/// - a removal, while no definition of the name is left anywhere; every
-///   call of it breaks.
-///
-/// "No definition left anywhere" is read from that workspace's index, so a
-/// rename or a removal counts only when it is `complete`. A name moved into
-/// a file not indexed yet, partial or too large is otherwise missing from
-/// `current` without being gone. A change made in another worktree is
-/// judged in that worktree: the session's own checkout still defines the
-/// old name until the branches meet, which is the break being told.
-///
-/// A same-count change is not alerted: calls are matched by name, and
-/// without the argument types at a call site nothing tells a right call
-/// from a wrong one (ADR 0029). `standings` is as for `call_candidates`.
-/// Pure; the caller records the alert.
-pub fn call_breaks(
-    state: &State,
-    session_id: &str,
-    calls: &[CallSite],
-    standings: &Standings,
-    current: &BTreeMap<String, IndexedNames>,
-    now_ms: u64,
-) -> Result<Vec<CallBreak>, CoreError> {
-    validate_calls(calls)?;
-    let own_workspace = &current_session(state, session_id)?.workspace_id;
-    let mut breaks = Vec::new();
-    for (notice, change, peer) in alertable(state, session_id, now_ms, Some(standings))? {
-        let Some(indexed) = current.get(&notice.workspace_id) else {
-            continue;
-        };
-        let gone = |name: &str| {
-            indexed.complete && !indexed.definitions.iter().any(|symbol| symbol.name == name)
-        };
-        let holds = |path: &str, name: &str, signature: &str| {
-            indexed.definitions.iter().any(|symbol| {
-                symbol.path == path && symbol.name == name && symbol.signature == signature
-            })
-        };
-        let worktree = (notice.workspace_id != *own_workspace)
-            .then(|| state.workspaces.get(&notice.workspace_id))
-            .flatten()
-            .map(|workspace| workspace.root.clone());
-        let after = change.after.as_deref().unwrap_or("");
-        // `Some`: a call breaks when its count does not fit; `None`: every
-        // call of the name breaks.
-        let fit: Option<Arity> = match change.change.as_str() {
-            "signature_changed" => match change.after_arity {
-                Some(arity) if holds(&notice.path, &change.name, after) => Some(arity),
-                _ => continue,
-            },
-            "renamed" => match &change.after_name {
-                Some(to) if holds(&notice.path, to, after) && gone(&change.name) => None,
-                _ => continue,
-            },
-            "removed" if gone(&change.name) => None,
-            _ => continue,
-        };
-        for call in calls.iter().filter(|call| {
-            call.name == change.name && fit.is_none_or(|arity| !arity.fits(call.args, call.member))
-        }) {
-            if breaks.len() == MAX_CALL_BREAKS {
-                return Ok(breaks);
-            }
-            breaks.push(CallBreak {
-                notice_id: notice.notice_id.clone(),
-                call: call.clone(),
-                change: change.change.clone(),
-                defined_in: notice.path.clone(),
-                worktree: worktree.clone(),
-                by_session: peer.to_owned(),
-                before: change.before.clone().unwrap_or_default(),
-                after: after.to_owned(),
-                after_name: change.after_name.clone(),
-                before_arity: change.before_arity,
-                after_arity: change.after_arity,
-                age_ms: now_ms.saturating_sub(notice.at_ms),
-            });
-        }
-    }
-    Ok(breaks)
-}
-
-impl Default for PresenceSetting {
-    fn default() -> Self {
-        Self {
-            shown: true,
-            window_ms: PRESENCE_WINDOW_MS,
-        }
-    }
-}
-
 /// A session's presence setting: its own, or the default.
 fn presence_setting(state: &State, session_id: &str) -> PresenceSetting {
     state.presence.get(session_id).copied().unwrap_or_default()
@@ -11595,37 +11664,4 @@ fn look(activity: &mut SessionActivity, kind: PresenceKind, paths: &[String], at
         );
     }
     activity.looking.truncate(MAX_LOOKING);
-}
-
-fn lease_relation(state: &State, lease: &Lease, now_ms: u64) -> LeaseRelation {
-    match lease.status {
-        LeaseStatus::Completed => LeaseRelation::Completed,
-        LeaseStatus::Invalidated => LeaseRelation::Invalidated,
-        _ if lease.generation != state.generation => LeaseRelation::Invalidated,
-        LeaseStatus::Expired => LeaseRelation::Expired,
-        LeaseStatus::Active if lease.expires_at_ms <= now_ms => LeaseRelation::Expired,
-        LeaseStatus::Active => LeaseRelation::Current,
-    }
-}
-
-impl Recap {
-    /// Drop items, newest-last lists first, until `fits` says the recap is
-    /// small enough. Each drop is counted in `omitted_items`; what was
-    /// asked for with `since` goes last, counted in its own `omitted`.
-    pub fn shrink_until(&mut self, mut fits: impl FnMut(&Recap) -> bool) {
-        while !fits(self) {
-            let dropped = self.notes.pop().is_some()
-                || self.trails.pop().is_some()
-                || self.teammates.pop().is_some()
-                || self.checks.pop().is_some()
-                || self.landings.pop().is_some()
-                || self.interface_changes.pop().is_some()
-                || self.sessions.pop().is_some();
-            if dropped {
-                self.omitted_items = self.omitted_items.saturating_add(1);
-            } else if !self.since.as_mut().is_some_and(Since::pop) {
-                return;
-            }
-        }
-    }
 }
