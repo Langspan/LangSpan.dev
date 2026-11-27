@@ -6,8 +6,9 @@ tests. This script assigns them from the times in scripts/ci-test-times.tsv
 and prints a nextest filterset for one shard.
 
   record --platform P JUNIT...  Replace platform P's rows of the times file
-                                with the times in a full run's JUnit reports
-                                (one per shard). Record from a run with the
+                                with the times in full runs' JUnit reports
+                                (one per shard); a test in several runs gets
+                                its mean. Record from runs with the
                                 benchmark dry runs on.
   assign [--platform P] --shard K/N LIST_JSON
                                 Print shard K's expected test count, then its
@@ -57,8 +58,9 @@ HEADER = """\
 # Measured test time per CI platform, read by scripts/ci-shards.py to
 # balance the full lane's shards. Columns: platform, nextest binary id,
 # test name (* for the binary's other tests), seconds, tests. Rewrite a
-# platform's rows from a full run's JUnit reports, dry runs on:
-#   python3 -I -B scripts/ci-shards.py record --platform linux junit-linux-*/junit.xml
+# platform's rows from full runs' JUnit reports, dry runs on (a test in
+# several runs gets its mean):
+#   python3 -I -B scripts/ci-shards.py record --platform linux run-*/junit-linux-*/junit.xml
 """
 
 
@@ -111,22 +113,29 @@ def read_times(path, platform=None):
 
 def record(args):
     times = read_times(args.times)
-    binaries = {}
+    # Each test's times over every report, so several runs' reports give
+    # each test its mean.
+    seen = {}
     for path in args.junit:
         root = ET.fromstring(read_bounded(path, MAX_JUNIT_BYTES))
         for suite in root.iter("testsuite"):
             binary = checked(suite.get("name", ""), "binary id")
-            rows = binaries.setdefault(binary, {})
             for case in suite.iter("testcase"):
-                seconds = float(case.get("time", "0"))
                 test = checked(case.get("name", ""), "test name")
-                if seconds >= SINGLE_SECONDS:
-                    rows[test] = (seconds, 1)
-                else:
-                    total, tests = rows.get(REST, (0.0, 0))
-                    rows[REST] = (total + seconds, tests + 1)
-    if not binaries:
+                seen.setdefault(binary, {}).setdefault(test, []).append(float(case.get("time", "0")))
+    if not seen:
         raise Refused("the JUnit reports hold no tests")
+    binaries = {}
+    for binary, tests in seen.items():
+        rows = binaries[binary] = {}
+        for test, runs in tests.items():
+            seconds = sum(runs) / len(runs)
+            # To the millisecond JUnit gives, so a mean isn't split by float error.
+            if round(seconds, 3) >= SINGLE_SECONDS:
+                rows[test] = (seconds, 1)
+            else:
+                total, count = rows.get(REST, (0.0, 0))
+                rows[REST] = (total + seconds, count + 1)
     times[args.platform] = binaries
     lines = [HEADER]
     for platform in PLATFORMS:

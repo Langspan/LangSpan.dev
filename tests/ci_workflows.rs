@@ -911,30 +911,45 @@ fn measured_times_are_recorded_from_a_runs_junit_reports() {
     let one = junit(
         "1.xml",
         "<testsuite name=\"langspan::a\"><testcase name=\"slow\" time=\"12.34\"/>\
-         <testcase name=\"quick\" time=\"0.5\"/><testcase name=\"quicker\" time=\"0.25\"/></testsuite>",
+         <testcase name=\"quick\" time=\"0.5\"/><testcase name=\"quicker\" time=\"0.3\"/></testsuite>",
     );
     let two = junit(
         "2.xml",
         "<testsuite name=\"langspan\"><testcase name=\"m::tests::t\" time=\"1.999\"/></testsuite>\
          <testsuite name=\"langspan::a\"><testcase name=\"edge\" time=\"2.0\"/></testsuite>",
     );
-    let (ok, _, stderr) = ci_shards(&[
-        "--times".as_ref(),
-        times.as_os_str(),
-        "record".as_ref(),
-        "--platform".as_ref(),
-        "linux".as_ref(),
-        one.as_os_str(),
-        two.as_os_str(),
-    ]);
-    assert!(ok, "{stderr}");
-    let text = fs::read_to_string(&times).unwrap();
-    let _ = fs::remove_dir_all(&dir);
+    // A second run's report: a test seen in both is weighed at its mean.
+    let again = junit(
+        "3.xml",
+        "<testsuite name=\"langspan::a\"><testcase name=\"slow\" time=\"7.66\"/>\
+         <testcase name=\"quick\" time=\"1.5\"/></testsuite>\
+         <testsuite name=\"langspan\"><testcase name=\"m::tests::t\" time=\"2.001\"/></testsuite>",
+    );
+    let record = |reports: &[&std::path::Path]| {
+        let mut args: Vec<&std::ffi::OsStr> = vec![
+            "--times".as_ref(),
+            times.as_os_str(),
+            "record".as_ref(),
+            "--platform".as_ref(),
+            "linux".as_ref(),
+        ];
+        args.extend(reports.iter().map(|r| r.as_os_str()));
+        let (ok, _, stderr) = ci_shards(&args);
+        assert!(ok, "{stderr}");
+        let text = fs::read_to_string(&times).unwrap();
+        assert!(
+            text.starts_with("# Measured test time per CI platform"),
+            "{text}"
+        );
+        text.lines()
+            .filter(|l| !l.starts_with('#'))
+            .map(String::from)
+            .collect::<Vec<_>>()
+    };
     // The platform's old rows go; the other platform's stay. A test of 2 s
     // or more has a row of its own; the rest of its binary are summed.
-    let rows: Vec<&str> = text.lines().filter(|l| !l.starts_with('#')).collect();
     assert_eq!(
-        rows,
+        record(&[&one, &two]),
         [
             "linux\tlangspan\t*\t2.0\t1",
             "linux\tlangspan::a\t*\t0.8\t2",
@@ -943,9 +958,19 @@ fn measured_times_are_recorded_from_a_runs_junit_reports() {
             "macos\tlangspan::a\t*\t3.0\t2",
         ]
     );
-    assert!(
-        text.starts_with("# Measured test time per CI platform"),
-        "{text}"
+    // Over two runs: slow (12.34 + 7.66) / 2, quick (0.5 + 1.5) / 2 plus
+    // quicker 0.3, and m::tests::t's mean of 2.0 earns a row of its own.
+    let rows = record(&[&one, &two, &again]);
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(
+        rows,
+        [
+            "linux\tlangspan\tm::tests::t\t2.0\t1",
+            "linux\tlangspan::a\t*\t1.3\t2",
+            "linux\tlangspan::a\tedge\t2.0\t1",
+            "linux\tlangspan::a\tslow\t10.0\t1",
+            "macos\tlangspan::a\t*\t3.0\t2",
+        ]
     );
 }
 
