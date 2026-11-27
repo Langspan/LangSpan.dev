@@ -232,13 +232,23 @@ jobs:
           path: dist
           pattern: "*-*-*"
           merge-multiple: true
+      # The install script from the tag (docs/install.md#use-the-install-script).
+      # Only the file is read; nothing from the checkout runs.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.TAG }}
+          path: source
+          sparse-checkout: scripts/install.sh
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
       - name: Checksums
         working-directory: dist
         run: |
           set -eu
+          cp ../source/scripts/install.sh install.sh
           set -- langspan-*.tar.gz
           [ "$#" -eq 4 ] || { echo "expected 4 archives, found $#: $*" >&2; exit 1; }
-          sha256sum langspan-*.tar.gz langspan-*.cdx.json > SHA256SUMS
+          sha256sum langspan-*.tar.gz langspan-*.cdx.json install.sh > SHA256SUMS
           cat SHA256SUMS
       - id: provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
@@ -250,6 +260,6 @@ jobs:
         run: |
           set -euo pipefail
           cp "$BUNDLE" "dist/langspan-$TAG.sigstore.json"
-          gh release upload "$TAG" dist/langspan-*.tar.gz dist/langspan-*.cdx.json dist/SHA256SUMS \
+          gh release upload "$TAG" dist/langspan-*.tar.gz dist/langspan-*.cdx.json dist/install.sh dist/SHA256SUMS \
             "dist/langspan-$TAG.sigstore.json"
           gh release edit "$TAG" --draft=false --latest
