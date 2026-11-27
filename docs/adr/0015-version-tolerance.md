@@ -41,6 +41,11 @@ must open them (`stores_written_by_earlier_releases_still_open`). Renaming the
 format adds a directory of its own stores; earlier ones are never replaced.
 Event types the demonstration does not produce (for example `scan_failed`,
 `message_sent`, `checkout_changed`) are not covered by these fixtures.
+Each store's events, folded by the core's `apply`, must also give the state
+committed beside it, `<store>.state.json`
+(`every_golden_store_replays_to_its_committed_state`, `tests/golden_stores.rs`).
+A synthetic log in the core's suite applies every event type
+(`crates/langspan-core/tests/replay.rs`, issue #317).
 
 **Peers' publications ignore fields this build does not know.** The receiving
 side parses into its own structures without `deny_unknown_fields` and keeps

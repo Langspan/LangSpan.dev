@@ -1,0 +1,127 @@
+# The command script behind events.jsonl (tests/replay.rs). One step per
+# line: {"id", "at_ms", "command"} is decided as the store decides it, and
+# {"event"} is recorded without a command. Lines starting with # are notes.
+# Two developers' sessions, alice and bob, share the workspace `work`; erin
+# works in `tree`, another worktree of the same repository; a Codex session
+# works in `work` without reporting its writes.
+#
+# The store records these two as it opens. The other {"event"} lines need
+# what only the daemon prepares: the source index's in-flight symbols
+# (inflight_delivered) and its definitions (note_anchor_changed).
+{"event":{"type":"booted","generation":1}}
+{"event":{"type":"clock_anchored","anchor":{"generation":1,"clock_ms":0,"wall_ms":1795000000000}}}
+#
+# Workspaces and sessions.
+{"id":"reg-work","at_ms":10,"command":{"op":"workspace_register","workspace_id":"work","root":"/repos/work"}}
+{"id":"reg-tree","at_ms":10,"command":{"op":"workspace_register","workspace_id":"tree","root":"/repos/tree"}}
+{"id":"reg-spare","at_ms":10,"command":{"op":"workspace_register","workspace_id":"spare","root":"/repos/spare"}}
+{"id":"git-work","at_ms":11,"command":{"op":"observe_workspace_git","workspace_id":"work","repository_id":"repo","branch_ref":"refs/heads/main"}}
+{"id":"git-tree","at_ms":11,"command":{"op":"observe_workspace_git","workspace_id":"tree","repository_id":"repo","branch_ref":"refs/heads/feature"}}
+{"id":"ses-alice","at_ms":20,"command":{"op":"session_register","session_id":"alice","workspace_id":"work"}}
+{"id":"ses-bob","at_ms":20,"command":{"op":"session_register","session_id":"bob","workspace_id":"work"}}
+{"id":"ses-erin","at_ms":20,"command":{"op":"session_register","session_id":"erin","workspace_id":"tree"}}
+{"id":"ses-codex","at_ms":20,"command":{"op":"session_register","session_id":"codex.0198c0de-0000-7000-8000-000000000001","workspace_id":"work"}}
+{"id":"live-alice","at_ms":21,"command":{"op":"observe_session_liveness","session_id":"alice","process":{"pid":4,"start_token":"t"},"status":"alive"}}
+{"id":"seen-alice","at_ms":22,"command":{"op":"session_seen","session_id":"alice"}}
+{"id":"policy","at_ms":23,"command":{"op":"set_policy","workspace_id":"work","case":"conflict","policy":"wait","wait_ms":400}}
+{"id":"hosts-1","at_ms":24,"command":{"op":"observe_hosts","not_installed":["cursor"]}}
+{"id":"hosts-2","at_ms":25,"command":{"op":"observe_hosts","not_installed":[]}}
+#
+# alice plans and writes src/api.rs; bob is refused it and waits.
+{"id":"intent-alice","at_ms":30,"command":{"op":"intent_set","session_id":"alice","paths":["src/api.rs"],"summary":"change upload to take a stream"}}
+{"id":"prompt-alice","at_ms":31,"command":{"op":"session_prompt","session_id":"alice","summary":"change upload to take a stream"}}
+{"id":"targets-alice","at_ms":32,"command":{"op":"set_prompt_targets","session_id":"alice","paths":["src/api.rs"]}}
+{"id":"read-alice","at_ms":33,"command":{"op":"observe_source","session_id":"alice","files":[{"path":"src/api.rs","state":{"type":"present","digest":"1111111111111111111111111111111111111111111111111111111111111111"}}],"origin":"read"}}
+{"id":"outline-alice","at_ms":34,"command":{"op":"outline_read","session_id":"alice","path":"src/big.rs","digest":"3333333333333333333333333333333333333333333333333333333333333333","lines":4000,"bytes":120000}}
+{"id":"read-bob","at_ms":35,"command":{"op":"observe_source","session_id":"bob","files":[{"path":"src/client.rs","state":{"type":"present","digest":"5555555555555555555555555555555555555555555555555555555555555555"}}],"origin":"read"}}
+{"id":"look-bob","at_ms":35,"command":{"op":"observe_presence","session_id":"bob","kind":"search","paths":["src/api.rs"]}}
+{"id":"presence-bob","at_ms":36,"command":{"op":"set_presence","session_id":"bob","shown":true,"window_ms":120000}}
+{"id":"lease-alice","at_ms":40,"command":{"op":"admit_tool","session_id":"alice","paths":["src/api.rs"],"ttl_ms":30000,"operation":{"operation_id":"op-a1","source":"test","tool":"Edit","input_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"base":[{"path":"src/api.rs","state":{"type":"present","digest":"1111111111111111111111111111111111111111111111111111111111111111"}}]}}
+{"id":"wait-bob","at_ms":45,"command":{"op":"record_wait","session_id":"bob","paths":["src/api.rs"],"holder_session_id":"alice","waited_ms":300,"result":"refused_conflict"}}
+{"id":"done-alice","at_ms":50,"command":{"op":"observe_tool","session_id":"alice","operation":{"operation_id":"op-a1","source":"test","tool":"Edit","input_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"paths":["src/api.rs"],"result":"succeeded","lease_id":"lease-alice"}}
+{"id":"wrote-alice","at_ms":51,"command":{"op":"observe_source","session_id":"alice","files":[{"path":"src/api.rs","state":{"type":"present","digest":"2222222222222222222222222222222222222222222222222222222222222222"}}],"origin":"write"}}
+{"id":"complete-alice","at_ms":52,"command":{"op":"complete","session_id":"alice","lease_id":"lease-alice"}}
+{"id":"batch-alice","at_ms":53,"command":{"op":"observe_tool_batch","session_id":"alice","operation_ids":["op-a1"],"calls":1}}
+{"id":"disk","at_ms":54,"command":{"op":"observe_disk","workspace_id":"work","path":"src/api.rs","before":{"type":"present","digest":"1111111111111111111111111111111111111111111111111111111111111111"},"after":{"type":"present","digest":"2222222222222222222222222222222222222222222222222222222222222222"},"related_operation_ids":["op-a1"]}}
+{"id":"branch","at_ms":55,"command":{"op":"observe_branch","workspace_id":"work","branch_ref":"refs/heads/main","head_oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","tree_oid":"1111111111111111111111111111111111111111"}}
+{"id":"stop-bob","at_ms":60,"command":{"op":"session_stop","session_id":"bob"}}
+{"id":"short-lease","at_ms":61,"command":{"op":"admit","session_id":"bob","paths":["src/other.rs"],"ttl_ms":5}}
+{"id":"refusal-commit","at_ms":70,"command":{"op":"record_refusal","session_id":"bob","kind":"commit_held","paths":["src/api.rs"],"peer_session_id":"alice"}}
+{"id":"observe-bob","at_ms":71,"command":{"op":"observe","session_id":"bob","operation_id":"op-b2","source":"test","tool":"Edit","paths":["src/other.rs"],"result":"succeeded","lease_id":null}}
+#
+# The interface change and who hears of it.
+{"id":"iface","at_ms":80,"command":{"op":"observe_interface","workspace_id":"work","path":"src/api.rs","changes":[{"name":"upload","kind":"function","change":"signature_changed","before":"fn upload(bytes: &[u8])","after":"fn upload(stream: Stream)"}],"dependents":["src/client.rs"]}}
+{"id":"iface-rename","at_ms":80,"command":{"op":"observe_interface","workspace_id":"work","path":"src/net.rs","changes":[{"name":"send","kind":"function","change":"renamed","before":"fn send()","after":"fn send()","after_name":"transmit","before_name":"send","evidence":"same_body"}],"dependents":[]}}
+{"id":"iface-deps","at_ms":81,"command":{"op":"observe_interface_dependents","notice_workspace_id":"work","notice_id":"iface","workspace_id":"tree","paths":["src/caller.rs"]}}
+{"id":"alerted-erin","at_ms":82,"command":{"op":"acknowledge_interface","session_id":"erin","notice_ids":["iface"]}}
+{"id":"shown-erin","at_ms":83,"command":{"op":"interface_shown","session_id":"erin","notice_ids":["iface"]}}
+{"id":"steps-bob","at_ms":84,"command":{"op":"between_steps","session_id":"bob"}}
+#
+# Briefings, context and messages.
+{"id":"brief-bob","at_ms":90,"command":{"op":"brief","session_id":"bob","max_peers":4,"deliver":true}}
+{"event":{"type":"inflight_delivered","session_id":"erin","keys":["d9fe8ae0e686acb5"]}}
+{"id":"context-bob","at_ms":91,"command":{"op":"record_context","session_id":"bob","bytes":512,"turn":true}}
+{"id":"msg-1","at_ms":100,"command":{"op":"send_message","workspace_id":"work","from":"alice","to":"bob","text":"upload takes a stream now","paths":["src/api.rs"]}}
+{"id":"ack-1","at_ms":101,"command":{"op":"ack_message","session_id":"bob","message_id":"msg-1"}}
+{"id":"msg-2","at_ms":102,"command":{"op":"send_message","workspace_id":"work","from":"alice","to":"bob","text":"ignore the last one","paths":[]}}
+{"id":"ack-2","at_ms":103,"command":{"op":"ack_message","session_id":"bob","message_id":"msg-2"}}
+{"id":"retract-2","at_ms":104,"command":{"op":"retract_message","workspace_id":"work","from":"alice","message_id":"msg-2"}}
+{"id":"brief-bob-2","at_ms":105,"command":{"op":"brief","session_id":"bob","max_peers":4,"deliver":true}}
+#
+# Notes.
+{"id":"note-1","at_ms":110,"command":{"op":"remember","workspace_id":"work","author":"alice","text":"upload streams; callers must not buffer","paths":["src/api.rs"],"symbol":"upload"}}
+{"event":{"type":"note_anchor_changed","workspace_id":"work","note_id":"note-1","anchor":{"name":"upload","path":"src/api.rs","kind":"function","line":10,"body_digest":"6666666666666666666666666666666666666666666666666666666666666666"},"state":"current"}}
+{"id":"note-2","at_ms":111,"command":{"op":"remember","workspace_id":"work","author":"bob","text":"temporary note","paths":[]}}
+{"id":"forget-2","at_ms":112,"command":{"op":"forget","workspace_id":"work","note_id":"note-2"}}
+#
+# Publication to and from teammates.
+{"id":"remote-on","at_ms":120,"command":{"op":"remote_enable","workspace_id":"work","remote":"origin","participant":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","name":"Alice","share_task":true}}
+{"id":"published","at_ms":121,"command":{"op":"remote_published","workspace_id":"work","sequence":1,"signature":"sig-1","payload":"{}","published_at_ms":1795000000121}}
+{"id":"peer","at_ms":122,"command":{"op":"observe_remote","workspace_id":"work","publication":{"participant":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","name":"Bob","sequence":3,"work":[]}}}
+{"id":"peer-gone","at_ms":123,"command":{"op":"forget_remote","workspace_id":"work","participant":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}
+{"id":"remote-off","at_ms":124,"command":{"op":"remote_disable","workspace_id":"work"}}
+{"id":"withdrawn","at_ms":125,"command":{"op":"remote_withdrawn","workspace_id":"work"}}
+#
+# Checks, automatic checks and flaky tests.
+{"id":"check-1","at_ms":130,"command":{"op":"record_check","workspace_id":"work","name":"tests","command":"cargo test","tree_oid":"1111111111111111111111111111111111111111","head_oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","inputs":[],"result":{"type":"passed"},"duration_ms":900,"tests":{"passed":["api::uploads","net::times_out"],"all_passed":true},"writes_before":3,"command_id":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}
+{"id":"auto-on","at_ms":131,"command":{"op":"auto_check_enable","workspace_id":"work","name":"fast","argv":["cargo","test"],"timeout_s":60}}
+{"id":"auto-1","at_ms":132,"command":{"op":"record_check","workspace_id":"work","name":"fast","command":"cargo test","tree_oid":"1111111111111111111111111111111111111111","head_oid":null,"inputs":[],"result":{"type":"failed","exit_code":101},"duration_ms":900,"report":{"session_ids":["alice"],"tail":"test net::times_out ... FAILED"},"tests":{"failed":["net::times_out"],"passed":["api::uploads"]},"rerun":{"passed":["api::uploads","net::times_out"],"all_passed":true},"writes_before":3,"command_id":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}
+{"id":"forget-flaky","at_ms":133,"command":{"op":"forget_flaky_test","workspace_id":"work","test":"net::times_out"}}
+{"id":"auto-seen","at_ms":134,"command":{"op":"brief","session_id":"alice","max_peers":4,"deliver":true}}
+{"id":"auto-off","at_ms":135,"command":{"op":"auto_check_disable","workspace_id":"work"}}
+#
+# Landing through the push turn.
+{"id":"turn-alice","at_ms":140,"command":{"op":"take_turn","workspace_id":"work","onto":"main","session_id":"alice","ttl_ms":60000}}
+{"id":"queue-bob","at_ms":141,"command":{"op":"take_turn","workspace_id":"work","onto":"main","session_id":"bob","ttl_ms":60000,"queue":{"ticket":"queue-bob","wait_ms":60000,"joined":false}}}
+{"id":"queue-bob-again","at_ms":8200,"command":{"op":"take_turn","workspace_id":"work","onto":"main","session_id":"bob","ttl_ms":60000,"queue":{"ticket":"queue-bob","wait_ms":60000,"joined":true}}}
+{"id":"renew-alice","at_ms":8300,"command":{"op":"take_turn","workspace_id":"work","onto":"main","session_id":"alice","ttl_ms":60000,"turn_id":"turn-alice"}}
+{"id":"land","at_ms":8400,"command":{"op":"record_landing","workspace_id":"work","onto":"main","commit_oid":"3333333333333333333333333333333333333333","tree_oid":"1111111111111111111111111111111111111111","inputs":[],"check_id":"check-1"}}
+{"id":"release-alice","at_ms":8500,"command":{"op":"release_turn","workspace_id":"work","onto":"main","turn_id":"turn-alice","attempts":[]}}
+{"id":"leave-bob","at_ms":8600,"command":{"op":"leave_turn_queue","workspace_id":"work","onto":"main","ticket":"queue-bob","reason":"cancelled"}}
+{"id":"turn-short","at_ms":8700,"command":{"op":"take_turn","workspace_id":"work","onto":"main","session_id":null,"ttl_ms":5}}
+#
+# What the scan sees.
+{"id":"scan-fail","at_ms":10200,"command":{"op":"observe_scan","workspace_id":"work","failure":"deadline elapsed"}}
+{"id":"scan-ok","at_ms":10201,"command":{"op":"observe_scan","workspace_id":"work","failure":null,"coverage":{"omitted":0,"too_large":1,"too_large_paths":["assets/big.bin"],"submodules":0,"skip_worktree":0}}}
+{"id":"checkout","at_ms":10202,"command":{"op":"observe_checkout","workspace_id":"work","from_branch":"refs/heads/main","to_branch":"refs/heads/main","from_head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","to_head":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","files":2}}
+{"id":"checkout-run","at_ms":10203,"command":{"op":"observe_checkout_run","session_id":"alice","command":"git pull","to_branch":"refs/heads/main","to_head":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","ran_ms":10}}
+{"id":"unreported","at_ms":10204,"command":{"op":"observe_uncoordinated","workspace_id":"work","files":[{"path":"src/upload.rs","state":{"type":"present","digest":"4444444444444444444444444444444444444444444444444444444444444444"}}]}}
+{"id":"brief-codex","at_ms":10205,"command":{"op":"brief","session_id":"codex.0198c0de-0000-7000-8000-000000000001","max_peers":4,"deliver":true}}
+#
+# Sessions end, leave trails and hand over work.
+{"id":"forget-told","at_ms":10300,"command":{"op":"forget_told","session_id":"bob","keys":[2398305748137872996]}}
+{"id":"intent-end","at_ms":10301,"command":{"op":"intent_end","session_id":"alice"}}
+{"id":"end-alice","at_ms":10302,"command":{"op":"session_end","session_id":"alice","trail":{"edited":[{"path":"src/api.rs","lines":[{"start_line":10,"end_line":14}]}],"uncommitted":["src/api.rs"]}}}
+{"id":"adopt","at_ms":10303,"command":{"op":"adopt","session_id":"bob","from":"alice"}}
+{"id":"ses-dana","at_ms":10304,"command":{"op":"session_register","session_id":"dana","workspace_id":"work"}}
+{"id":"brief-dana","at_ms":10305,"command":{"op":"brief","session_id":"dana","max_peers":4,"deliver":true}}
+#
+# The owner moves one workspace and removes it.
+{"id":"move-spare","at_ms":10400,"command":{"op":"workspace_move","workspace_id":"spare","root":"/repos/spare-moved"}}
+{"id":"remove-spare","at_ms":10401,"command":{"op":"workspace_remove","workspace_id":"spare","apply":true}}
+#
+# The daemon restarts.
+{"event":{"type":"booted","generation":2}}
+{"event":{"type":"clock_anchored","anchor":{"generation":2,"clock_ms":0,"wall_ms":1795000100000}}}
+{"id":"ses-bob-2","at_ms":10,"command":{"op":"session_register","session_id":"bob","workspace_id":"work"}}
+{"id":"seen-bob","at_ms":11,"command":{"op":"session_seen","session_id":"bob"}}

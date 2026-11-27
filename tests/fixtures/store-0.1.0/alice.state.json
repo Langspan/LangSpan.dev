@@ -1,0 +1,407 @@
+{
+  "state": {
+    "generation": 1,
+    "workspaces": {
+      "app": {
+        "workspace_id": "app",
+        "root": "/private/tmp/ls-demo.36GjOj/alice"
+      }
+    },
+    "sessions": {
+      "claude-code.claude-1": {
+        "session_id": "claude-code.claude-1",
+        "workspace_id": "app",
+        "generation": 1
+      },
+      "codex.codex-1": {
+        "session_id": "codex.codex-1",
+        "workspace_id": "app",
+        "generation": 1
+      }
+    },
+    "intents": {},
+    "leases": {
+      "lsh1-admit-0d1907ea80b8bc848766cb8dbba4fd54": {
+        "lease_id": "lsh1-admit-0d1907ea80b8bc848766cb8dbba4fd54",
+        "session_id": "claude-code.claude-1",
+        "workspace_id": "app",
+        "paths": [
+          "NOTES.md"
+        ],
+        "generation": 1,
+        "expires_at_ms": 1925918887,
+        "status": "completed",
+        "operation": {
+          "operation_id": "lsh1-op-a9aefafb2aa51f2946b60539eca8ffb6",
+          "source": "claude-code",
+          "tool": "Write",
+          "input_digest": "e90301c8df81e1dc5dd45483bf6b340bdd1f8dce098986301e31a4e67c61aff6"
+        },
+        "base_unknown": [
+          "NOTES.md"
+        ]
+      },
+      "lsh1-admit-4f915fed1fc4f26e621fd8806d0723a4": {
+        "lease_id": "lsh1-admit-4f915fed1fc4f26e621fd8806d0723a4",
+        "session_id": "claude-code.claude-1",
+        "workspace_id": "app",
+        "paths": [
+          "GUIDE.md"
+        ],
+        "generation": 1,
+        "expires_at_ms": 1925918917,
+        "status": "completed",
+        "operation": {
+          "operation_id": "lsh1-op-f7160fe867993495b9579f5aabf37dca",
+          "source": "claude-code",
+          "tool": "Write",
+          "input_digest": "1da00b02e8ae1fcd8aa97ad9f37e17ad8c84b32e53a5ccdeddb702f4e2d0f719"
+        },
+        "base_unknown": [
+          "GUIDE.md"
+        ]
+      },
+      "lsh1-admit-6411f0fc6b3d25ed68c0107de1dd53e3": {
+        "lease_id": "lsh1-admit-6411f0fc6b3d25ed68c0107de1dd53e3",
+        "session_id": "codex.codex-1",
+        "workspace_id": "app",
+        "paths": [
+          "src/upload.rs"
+        ],
+        "generation": 1,
+        "expires_at_ms": 1925918975,
+        "status": "completed",
+        "operation": {
+          "operation_id": "lsh1-op-6a060af4a142336008bb20b834c2e837",
+          "source": "codex",
+          "tool": "apply_patch",
+          "input_digest": "3f82fffcd643ac7ce710ce3659469a8950c45090211595db4a5541e0a8dff052"
+        }
+      },
+      "lsh1-admit-8652457c5707b8c6950a623271dd82b5": {
+        "lease_id": "lsh1-admit-8652457c5707b8c6950a623271dd82b5",
+        "session_id": "codex.codex-1",
+        "workspace_id": "app",
+        "paths": [
+          "src/upload.rs"
+        ],
+        "generation": 1,
+        "expires_at_ms": 1925918936,
+        "status": "completed",
+        "operation": {
+          "operation_id": "lsh1-op-235d2077235d5a2a16397ae8fd374a5c",
+          "source": "codex",
+          "tool": "apply_patch",
+          "input_digest": "3f82fffcd643ac7ce710ce3659469a8950c45090211595db4a5541e0a8dff052"
+        },
+        "base_unknown": [
+          "src/upload.rs"
+        ]
+      },
+      "lsh1-admit-a670c05831888af9e0dbe3b01d26d106": {
+        "lease_id": "lsh1-admit-a670c05831888af9e0dbe3b01d26d106",
+        "session_id": "claude-code.claude-1",
+        "workspace_id": "app",
+        "paths": [
+          "src/main.rs"
+        ],
+        "generation": 1,
+        "expires_at_ms": 1925921158,
+        "status": "completed",
+        "operation": {
+          "operation_id": "lsh1-op-3d8e363e602d58cc4abc44f5c94f514f",
+          "source": "claude-code",
+          "tool": "Write",
+          "input_digest": "72685c1cb7a50dcdbb60a8a9d93d19a198c324fcb20ce3d8a63d1424a8985f37"
+        },
+        "base_unknown": [
+          "src/main.rs"
+        ]
+      },
+      "lsh1-admit-b8866e72893035d925026a05723b8fda": {
+        "lease_id": "lsh1-admit-b8866e72893035d925026a05723b8fda",
+        "session_id": "codex.codex-1",
+        "workspace_id": "app",
+        "paths": [
+          "src/upload.rs"
+        ],
+        "generation": 1,
+        "expires_at_ms": 1925921179,
+        "status": "completed",
+        "operation": {
+          "operation_id": "lsh1-op-bbbbefa242fa602955ac509b229b9d0f",
+          "source": "codex",
+          "tool": "apply_patch",
+          "input_digest": "3f82fffcd643ac7ce710ce3659469a8950c45090211595db4a5541e0a8dff052"
+        }
+      },
+      "lsh1-admit-c0659ad40286269042b5f3d90f725d2d": {
+        "lease_id": "lsh1-admit-c0659ad40286269042b5f3d90f725d2d",
+        "session_id": "codex.codex-1",
+        "workspace_id": "app",
+        "paths": [
+          "NOTES.md"
+        ],
+        "generation": 1,
+        "expires_at_ms": 1925925150,
+        "status": "completed",
+        "operation": {
+          "operation_id": "lsh1-op-4db769fd5fd32f154f0ed7a09c3bf080",
+          "source": "codex",
+          "tool": "apply_patch",
+          "input_digest": "03f36a87c814ad298ecbe07125c56e4fa02f96673394efe3bc4098adf0fd010e"
+        },
+        "base_unknown": [
+          "NOTES.md"
+        ]
+      },
+      "lsh1-admit-d0afcdaf257def58e3bc58a3ba826d14": {
+        "lease_id": "lsh1-admit-d0afcdaf257def58e3bc58a3ba826d14",
+        "session_id": "claude-code.claude-1",
+        "workspace_id": "app",
+        "paths": [
+          "src/upload.rs"
+        ],
+        "generation": 1,
+        "expires_at_ms": 1925919011,
+        "status": "completed",
+        "operation": {
+          "operation_id": "lsh1-op-28b91e7422a860e79dfda1417b7eac5f",
+          "source": "claude-code",
+          "tool": "Write",
+          "input_digest": "57f74d69faa4f1a3d1aa5c5d49f7f8d3acfa3c8eb7374d51cec9b08a1ef33a7e"
+        }
+      }
+    },
+    "workspace_git": {
+      "app": {
+        "workspace_id": "app",
+        "repository_id": "local-c171e57152ab2c637781a59c26a5390b",
+        "branch_ref": "refs/heads/main"
+      }
+    },
+    "activity": {
+      "claude-code.claude-1": {
+        "session_id": "claude-code.claude-1",
+        "generation": 1,
+        "last_ms": 1925893205,
+        "summary": "prompt 12225",
+        "touched": [
+          {
+            "path": "src/main.rs",
+            "at_ms": 1925891166
+          },
+          {
+            "path": "src/upload.rs",
+            "at_ms": 1925889020
+          },
+          {
+            "path": "GUIDE.md",
+            "at_ms": 1925888946
+          },
+          {
+            "path": "NOTES.md",
+            "at_ms": 1925888897
+          }
+        ],
+        "known": [
+          {
+            "path": "src/main.rs",
+            "state": {
+              "type": "present",
+              "digest": "70e3bc8c325c537a95033393b8c1d92e8ea1efdb31250999cab21421ec78efbd"
+            },
+            "at_ms": 1925891166
+          },
+          {
+            "path": "src/upload.rs",
+            "state": {
+              "type": "present",
+              "digest": "07b29bd8879c9f98cd1bb6d7f859d8725f6ac75ee04b4f2f23093b166b01f87b"
+            },
+            "at_ms": 1925889020
+          },
+          {
+            "path": "GUIDE.md",
+            "state": {
+              "type": "present",
+              "digest": "d44df65e05ba9c9a4914741293a0f2a8c1f4b838d482e6db31e6310be1bfdb1e"
+            },
+            "at_ms": 1925888946
+          },
+          {
+            "path": "NOTES.md",
+            "state": {
+              "type": "present",
+              "digest": "398f0caf7b66ab7c09f5d7f9a1da93f0b71e236820c1abf7414c905a086b00c6"
+            },
+            "at_ms": 1925888897
+          }
+        ],
+        "briefed": "28fe31fd2735a94e",
+        "ended": true,
+        "wrote_since_boundary": true,
+        "looking": [
+          {
+            "path": "src/upload.rs",
+            "kind": "read",
+            "at_ms": 1925889002
+          }
+        ]
+      },
+      "codex.codex-1": {
+        "session_id": "codex.codex-1",
+        "generation": 1,
+        "last_ms": 1925895157,
+        "touched": [
+          {
+            "path": "NOTES.md",
+            "at_ms": 1925895157
+          },
+          {
+            "path": "src/upload.rs",
+            "at_ms": 1925891187
+          }
+        ],
+        "known": [
+          {
+            "path": "NOTES.md",
+            "state": {
+              "type": "present",
+              "digest": "ec5a4a87ffeec0f8f90ac9c41e414f8cadc12309b4bd506256d1ba49ff055305"
+            },
+            "at_ms": 1925895158
+          },
+          {
+            "path": "src/upload.rs",
+            "state": {
+              "type": "present",
+              "digest": "56e915b2531b7f075cb2065d3b7e2a6e76934d6c63d8a2d94a6dd029f87cfe2e"
+            },
+            "at_ms": 1925891187
+          }
+        ],
+        "briefed": "3de87e4a3ecb8f79",
+        "wrote_since_boundary": true
+      }
+    },
+    "remote_links": {
+      "app": {
+        "workspace_id": "app",
+        "remote": "origin",
+        "participant": "686e16046b8b4cb278242ec959408a74",
+        "name": "Alice",
+        "share_task": true,
+        "sequence": 1,
+        "signature": "8377016779bdd903",
+        "enabled": false,
+        "withdrawn": true
+      }
+    },
+    "checks": {
+      "app": [
+        {
+          "check_id": "lsh1-check-a4e264a52cfb28440f67d761e2e4ad0f",
+          "workspace_id": "app",
+          "name": "unit",
+          "command": "sh -c grep -q retries src/upload.rs && grep -q bob CHANGELOG.md",
+          "tree_oid": "bf21542abd097ee0735c31c3a0bd0fa12e3bccfc",
+          "head_oid": "538a9212299944e978f77b9ebc33f860dc608769",
+          "inputs": [
+            "cf55b3c829c46df514c050bdec82f3e1134e7ccc",
+            "d79ce528944e82a8ef16ad12d29abc1e69cdc5a7",
+            "54058eb776390c4587396cd0732dd91b1612d41f"
+          ],
+          "result": {
+            "type": "passed"
+          },
+          "duration_ms": 20,
+          "recorded_ms": 1925894416,
+          "generation": 1
+        }
+      ]
+    },
+    "landings": {
+      "app": [
+        {
+          "landing_id": "lsh1-land-62e4ac1ce0af05a5f6f9dc8c0a9001c3",
+          "workspace_id": "app",
+          "onto": "main",
+          "commit_oid": "538a9212299944e978f77b9ebc33f860dc608769",
+          "tree_oid": "bf21542abd097ee0735c31c3a0bd0fa12e3bccfc",
+          "inputs": [
+            "cf55b3c829c46df514c050bdec82f3e1134e7ccc",
+            "d79ce528944e82a8ef16ad12d29abc1e69cdc5a7",
+            "54058eb776390c4587396cd0732dd91b1612d41f"
+          ],
+          "check_id": "lsh1-check-a4e264a52cfb28440f67d761e2e4ad0f"
+        }
+      ]
+    },
+    "interface_notices": {
+      "app": [
+        {
+          "notice_id": "lsh1-interface-0b1cebed14e31296b5a287b5fb6cf56a",
+          "workspace_id": "app",
+          "path": "src/upload.rs",
+          "changes": [
+            {
+              "name": "upload",
+              "kind": "function",
+              "change": "signature_changed",
+              "before": "pub fn upload(path: &str) -> bool",
+              "after": "pub fn upload(path: &str, retries: u32) -> bool"
+            }
+          ],
+          "dependents": [
+            "src/main.rs"
+          ],
+          "by_session": "codex.codex-1",
+          "at_ms": 1925893131,
+          "generation": 1
+        }
+      ]
+    },
+    "writes": {
+      "app": 13
+    }
+  },
+  "first_writes": {
+    "claude-code.claude-1": 0,
+    "codex.codex-1": 2
+  },
+  "write_runs": {
+    "app": [
+      {
+        "session_id": "claude-code.claude-1",
+        "first": 1,
+        "last": 2
+      },
+      {
+        "session_id": "codex.codex-1",
+        "first": 3,
+        "last": 4
+      },
+      {
+        "session_id": "claude-code.claude-1",
+        "first": 5,
+        "last": 5
+      },
+      {
+        "session_id": "claude-code.claude-1",
+        "first": 8,
+        "last": 8
+      },
+      {
+        "session_id": "codex.codex-1",
+        "first": 9,
+        "last": 9
+      },
+      {
+        "session_id": "codex.codex-1",
+        "first": 12,
+        "last": 12
+      }
+    ]
+  }
+}

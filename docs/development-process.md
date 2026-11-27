@@ -68,6 +68,12 @@ by priority:
   titled "Review follow-ups from #N" instead of starting more rounds.
 - Work follow-up issues in the debt slot.
 
+A pull request that changes a committed state snapshot (the `state.json`
+files the replay tests compare, ADR 0015) says in its body which snapshot
+changed and why. Rewrite one with `LANGSPAN_UPDATE_GOLDEN=1` on the test
+that compares it, then read `git diff` before committing: an unexplained
+refresh hides the regression the snapshot exists to catch.
+
 ## Integration
 
 Pull requests merge through GitHub's merge queue. The queue tests each pull

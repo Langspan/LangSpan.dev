@@ -1,0 +1,107 @@
+{"type":"booted","generation":1}
+{"type":"clock_anchored","anchor":{"generation":1,"clock_ms":0,"wall_ms":1795000000000}}
+{"type":"workspace_registered","workspace":{"workspace_id":"work","root":"/repos/work"}}
+{"type":"workspace_registered","workspace":{"workspace_id":"tree","root":"/repos/tree"}}
+{"type":"workspace_registered","workspace":{"workspace_id":"spare","root":"/repos/spare"}}
+{"type":"workspace_git_observed","git":{"workspace_id":"work","repository_id":"repo","branch_ref":"refs/heads/main"}}
+{"type":"workspace_git_observed","git":{"workspace_id":"tree","repository_id":"repo","branch_ref":"refs/heads/feature"}}
+{"type":"session_registered","session":{"session_id":"alice","workspace_id":"work","generation":1}}
+{"type":"session_registered","session":{"session_id":"bob","workspace_id":"work","generation":1}}
+{"type":"session_registered","session":{"session_id":"erin","workspace_id":"tree","generation":1}}
+{"type":"session_registered","session":{"session_id":"codex.0198c0de-0000-7000-8000-000000000001","workspace_id":"work","generation":1}}
+{"type":"session_liveness_observed","liveness":{"session_id":"alice","process":{"pid":4,"start_token":"t"},"status":"alive","observed_at_ms":21,"generation":1}}
+{"type":"session_seen","session_id":"alice","at_ms":22,"generation":1}
+{"type":"policy_set","workspace_id":"work","case":"conflict","policy":"wait","wait_ms":400}
+{"type":"host_not_installed","host":{"host":"cursor","at_ms":24,"generation":1}}
+{"type":"host_cleared","host":"cursor"}
+{"type":"intent_set","intent":{"session_id":"alice","workspace_id":"work","paths":["src/api.rs"],"summary":"change upload to take a stream","generation":1}}
+{"type":"session_prompted","session_id":"alice","summary":"change upload to take a stream","at_ms":31,"generation":1}
+{"type":"prompt_targets_set","session_id":"alice","paths":["src/api.rs"],"at_ms":32,"generation":1}
+{"type":"source_observed","session_id":"alice","files":[{"path":"src/api.rs","state":{"type":"present","digest":"1111111111111111111111111111111111111111111111111111111111111111"}}],"origin":"read","at_ms":33,"generation":1}
+{"type":"read_outlined","session_id":"alice","path":"src/big.rs","digest":"3333333333333333333333333333333333333333333333333333333333333333"}
+{"type":"source_observed","session_id":"bob","files":[{"path":"src/client.rs","state":{"type":"present","digest":"5555555555555555555555555555555555555555555555555555555555555555"}}],"origin":"read","at_ms":35,"generation":1}
+{"type":"presence_observed","session_id":"bob","kind":"search","paths":["src/api.rs"],"at_ms":35,"generation":1}
+{"type":"presence_set","session_id":"bob","setting":{"shown":true,"window_ms":120000}}
+{"type":"lease_granted","lease":{"lease_id":"lease-alice","session_id":"alice","workspace_id":"work","paths":["src/api.rs"],"generation":1,"expires_at_ms":30040,"status":"active","operation":{"operation_id":"op-a1","source":"test","tool":"Edit","input_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}
+{"type":"write_waited","session_id":"bob","workspace_id":"work","paths":["src/api.rs"],"holder_session_id":"alice","waited_ms":300,"result":"refused_conflict","at_ms":45,"generation":1}
+{"type":"write_refused","session_id":"bob","workspace_id":"work","kind":"conflict","paths":["src/api.rs"],"peer_session_id":"alice","at_ms":45,"generation":1}
+{"type":"operation_observed","observation":{"observation_id":"done-alice","session_id":"alice","workspace_id":"work","operation_id":"op-a1","source":"test","tool":"Edit","paths":["src/api.rs"],"result":"succeeded","lease_id":"lease-alice","lease_relation":"current","concurrent_holders":[],"observed_at_ms":50,"generation":1}}
+{"type":"source_observed","session_id":"alice","files":[{"path":"src/api.rs","state":{"type":"present","digest":"2222222222222222222222222222222222222222222222222222222222222222"}}],"origin":"write","at_ms":51,"generation":1}
+{"type":"lease_completed","lease_id":"lease-alice"}
+{"type":"tool_batch_observed","session_id":"alice","operation_ids":["op-a1"],"calls":1,"at_ms":53,"generation":1}
+{"type":"disk_observed","observation":{"observation_id":"disk","workspace_id":"work","path":"src/api.rs","before":{"type":"present","digest":"1111111111111111111111111111111111111111111111111111111111111111"},"after":{"type":"present","digest":"2222222222222222222222222222222222222222222222222222222222222222"},"related_operation_ids":["op-a1"],"observed_at_ms":54,"generation":1}}
+{"type":"branch_observed","observation":{"observation_id":"branch","workspace_id":"work","branch_ref":"refs/heads/main","head_oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","tree_oid":"1111111111111111111111111111111111111111","observed_at_ms":55,"generation":1}}
+{"type":"session_stopped","session_id":"bob","released":[],"failure":null,"at_ms":60,"generation":1}
+{"type":"refusal_settled","session_id":"bob","workspace_id":"work","kind":"conflict","paths":["src/api.rs"],"refused_at_ms":45,"outcome":"stopped","at_ms":60,"generation":1}
+{"type":"lease_granted","lease":{"lease_id":"short-lease","session_id":"bob","workspace_id":"work","paths":["src/other.rs"],"generation":1,"expires_at_ms":66,"status":"active"}}
+{"type":"lease_expired","lease_id":"short-lease"}
+{"type":"write_refused","session_id":"bob","workspace_id":"work","kind":"commit_held","paths":["src/api.rs"],"peer_session_id":"alice","at_ms":70,"generation":1}
+{"type":"operation_observed","observation":{"observation_id":"observe-bob","session_id":"bob","workspace_id":"work","operation_id":"op-b2","source":"test","tool":"Edit","paths":["src/other.rs"],"result":"succeeded","lease_id":null,"lease_relation":"not_admitted","concurrent_holders":[],"observed_at_ms":71,"generation":1}}
+{"type":"interface_changed","notice":{"notice_id":"iface","workspace_id":"work","path":"src/api.rs","changes":[{"name":"upload","kind":"function","change":"signature_changed","before":"fn upload(bytes: &[u8])","after":"fn upload(stream: Stream)"}],"dependents":["src/client.rs"],"by_session":"alice","at_ms":80,"generation":1}}
+{"type":"interface_changed","notice":{"notice_id":"iface-rename","workspace_id":"work","path":"src/net.rs","changes":[{"name":"send","kind":"function","change":"renamed","before":"fn send()","after":"fn send()","after_name":"transmit","before_name":"send","evidence":"same_body"}],"dependents":[],"by_session":null,"at_ms":80,"generation":1}}
+{"type":"interface_dependents_found","notice_workspace_id":"work","notice_id":"iface","files":[{"workspace_id":"tree","path":"src/caller.rs"}]}
+{"type":"interface_alerted","session_id":"erin","notice_ids":["iface"]}
+{"type":"interface_notices_told","session_id":"erin","notice_ids":["iface"],"via":"briefing"}
+{"type":"interface_notices_told","session_id":"bob","notice_ids":["iface"],"via":"between_steps"}
+{"type":"briefing_delivered","session_id":"bob","signature":"32913a5f3dc1f239","told":[16855862699291930776,2398305748137872996],"told_at_ms":90}
+{"type":"inflight_delivered","session_id":"erin","keys":["d9fe8ae0e686acb5"]}
+{"type":"context_added","session_id":"bob","bytes":512,"turn":true,"generation":1}
+{"type":"message_sent","message":{"message_id":"msg-1","workspace_id":"work","from":"alice","to":{"kind":"session","session_id":"bob"},"text":"upload takes a stream now","paths":["src/api.rs"]},"at_ms":100,"generation":1}
+{"type":"message_acknowledged","workspace_id":"work","message_id":"msg-1","session_id":"bob","via":"ack","at_ms":101,"generation":1}
+{"type":"message_sent","message":{"message_id":"msg-2","workspace_id":"work","from":"alice","to":{"kind":"session","session_id":"bob"},"text":"ignore the last one","paths":[]},"at_ms":102,"generation":1}
+{"type":"message_acknowledged","workspace_id":"work","message_id":"msg-2","session_id":"bob","via":"ack","at_ms":103,"generation":1}
+{"type":"message_retracted","workspace_id":"work","message_id":"msg-2","by":"alice"}
+{"type":"retraction_delivered","session_id":"bob","message_id":"msg-2"}
+{"type":"remembered","note":{"note_id":"note-1","workspace_id":"work","author":"alice","text":"upload streams; callers must not buffer","paths":["src/api.rs"],"anchor":{"name":"upload"},"anchor_state":"unknown"},"at":{"at_ms":110,"generation":1}}
+{"type":"note_anchor_changed","workspace_id":"work","note_id":"note-1","anchor":{"name":"upload","path":"src/api.rs","kind":"function","line":10,"body_digest":"6666666666666666666666666666666666666666666666666666666666666666"},"state":"current"}
+{"type":"remembered","note":{"note_id":"note-2","workspace_id":"work","author":"bob","text":"temporary note","paths":[]},"at":{"at_ms":111,"generation":1}}
+{"type":"forgotten","workspace_id":"work","note_id":"note-2"}
+{"type":"remote_enabled","link":{"workspace_id":"work","remote":"origin","participant":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","name":"Alice","share_task":true,"sequence":0,"signature":"","enabled":true,"withdrawn":false}}
+{"type":"remote_published","workspace_id":"work","sequence":1,"signature":"sig-1","payload":"{}","published_at_ms":1795000000121}
+{"type":"remote_observed","peer":{"workspace_id":"work","publication":{"participant":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","name":"Bob","sequence":3,"work":[]},"received_ms":122,"generation":1}}
+{"type":"remote_forgotten","workspace_id":"work","participant":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+{"type":"remote_disabled","workspace_id":"work"}
+{"type":"remote_withdrawn","workspace_id":"work"}
+{"type":"check_recorded","check":{"check_id":"check-1","workspace_id":"work","name":"tests","command":"cargo test","tree_oid":"1111111111111111111111111111111111111111","head_oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","inputs":[],"result":{"type":"passed"},"duration_ms":900,"recorded_ms":130,"generation":1},"tests":{"results":{"passed":["api::uploads","net::times_out"],"all_passed":true},"writes_before":3,"command_id":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}
+{"type":"tests_recorded","workspace_id":"work","check_id":"check-1","name":"tests","tree_oid":"1111111111111111111111111111111111111111","command":"cargo test","command_id":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","results":{"passed":["api::uploads","net::times_out"],"all_passed":true},"at_ms":130}
+{"type":"auto_check_enabled","check":{"workspace_id":"work","name":"fast","argv":["cargo","test"],"timeout_s":60}}
+{"type":"check_recorded","check":{"check_id":"auto-1","workspace_id":"work","name":"fast","command":"cargo test","tree_oid":"1111111111111111111111111111111111111111","head_oid":null,"inputs":[],"result":{"type":"failed","exit_code":101},"duration_ms":900,"recorded_ms":132,"generation":1},"tests":{"results":{"failed":["net::times_out"],"passed":["api::uploads"]},"writes_before":3,"command_id":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}
+{"type":"tests_recorded","workspace_id":"work","check_id":"auto-1","name":"fast","tree_oid":"1111111111111111111111111111111111111111","command":"cargo test","command_id":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","results":{"failed":["net::times_out"],"passed":["api::uploads"]},"at_ms":132}
+{"type":"tests_recorded","workspace_id":"work","check_id":"auto-1","name":"fast","tree_oid":"1111111111111111111111111111111111111111","command":"cargo test","command_id":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","results":{"passed":["api::uploads","net::times_out"],"all_passed":true},"rerun":true,"at_ms":132}
+{"type":"check_reported","session_ids":["alice"],"notice":{"check_id":"auto-1","name":"fast","tree_oid":"1111111111111111111111111111111111111111","result":{"type":"failed","exit_code":101},"duration_ms":900,"tail":"test net::times_out ... FAILED","failures":[{"test":"net::times_out"}]}}
+{"type":"flaky_test_forgotten","workspace_id":"work","test":"net::times_out"}
+{"type":"briefing_delivered","session_id":"alice","signature":"e570324e363bbf76+0000000000000000000400000000080400200000000000","told":[5122270038844973103,4740437054453460583,12163789538057641963,10021502573866829698],"told_at_ms":134}
+{"type":"check_delivered","session_id":"alice","check_id":"auto-1"}
+{"type":"auto_check_disabled","workspace_id":"work"}
+{"type":"turn_taken","turn":{"turn_id":"turn-alice","workspace_id":"work","onto":"main","session_id":"alice","taken_ms":140,"expires_at_ms":60140,"generation":1}}
+{"type":"turn_queue_joined","waiter":{"ticket":"queue-bob","workspace_id":"work","onto":"main","session_id":"bob","joined_ms":141,"deadline_ms":60141,"seen_until_ms":15141,"generation":1}}
+{"type":"turn_queue_seen","workspace_id":"work","onto":"main","ticket":"queue-bob","seen_until_ms":23200}
+{"type":"turn_renewed","workspace_id":"work","onto":"main","turn_id":"turn-alice","expires_at_ms":68300}
+{"type":"landed","landing":{"landing_id":"land","workspace_id":"work","onto":"main","commit_oid":"3333333333333333333333333333333333333333","tree_oid":"1111111111111111111111111111111111111111","inputs":[],"check_id":"check-1"}}
+{"type":"turn_released","workspace_id":"work","onto":"main","turn_id":"turn-alice","attempts":[]}
+{"type":"turn_queue_left","workspace_id":"work","onto":"main","ticket":"queue-bob","reason":"cancelled"}
+{"type":"turn_taken","turn":{"turn_id":"turn-short","workspace_id":"work","onto":"main","session_id":null,"taken_ms":8700,"expires_at_ms":8705,"generation":1}}
+{"type":"turn_expired","workspace_id":"work","onto":"main","turn_id":"turn-short"}
+{"type":"scan_failed","failure":{"workspace_id":"work","detail":"deadline elapsed","at_ms":10200,"generation":1}}
+{"type":"scan_recovered","workspace_id":"work"}
+{"type":"scan_coverage_observed","workspace_id":"work","coverage":{"omitted":0,"too_large":1,"too_large_paths":["assets/big.bin"],"submodules":0,"skip_worktree":0}}
+{"type":"checkout_changed","change":{"change_id":"checkout","workspace_id":"work","from_branch":"refs/heads/main","to_branch":"refs/heads/main","from_head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","to_head":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","files":2,"at_ms":10202,"generation":1}}
+{"type":"checkout_run_observed","run":{"run_id":"checkout-run","workspace_id":"work","session_id":"alice","command":"git pull","to_branch":"refs/heads/main","to_head":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","started_ms":10193,"finished_ms":10203,"generation":1}}
+{"type":"uncoordinated_changed","change":{"change_id":"unreported","workspace_id":"work","sessions":["codex.0198c0de-0000-7000-8000-000000000001"],"files":[{"path":"src/upload.rs","state":{"type":"present","digest":"4444444444444444444444444444444444444444444444444444444444444444"}}],"at_ms":10204,"generation":1}}
+{"type":"briefing_delivered","session_id":"codex.0198c0de-0000-7000-8000-000000000001","signature":"2dfeca274ee17b00+0000000000000000000400000000080400200000000000","told":[5122270038844973103,4740437054453460583,12163789538057641963,10021502573866829698,16855862699291930776,2398305748137872996],"told_at_ms":10205}
+{"type":"uncoordinated_delivered","workspace_id":"work","change_id":"unreported","session_id":"codex.0198c0de-0000-7000-8000-000000000001"}
+{"type":"told_forgotten","session_id":"bob","keys":[2398305748137872996]}
+{"type":"intent_ended","session_id":"alice"}
+{"type":"session_ended","session_id":"alice"}
+{"type":"trail_recorded","trail":{"session_id":"alice","workspace_id":"work","summary":"change upload to take a stream","read":["src/api.rs"],"edited":[{"path":"src/api.rs","lines":[{"start_line":10,"end_line":14}]}],"checks":[{"name":"fast","result":{"type":"failed","exit_code":101}},{"name":"tests","result":{"type":"passed"}}],"uncommitted":["src/api.rs"],"at_ms":10302,"generation":1}}
+{"type":"session_adopted","adoption":{"from":"alice","session_id":"bob","workspace_id":"work","reason":{"kind":"handoff","message_id":"msg-1"},"at_ms":10303,"generation":1}}
+{"type":"session_registered","session":{"session_id":"dana","workspace_id":"work","generation":1}}
+{"type":"briefing_delivered","session_id":"dana","signature":"a2b75e7ee297f4da+0000000000000000000400000000080400200000000000","told":[5122270038844973103,4740437054453460583,12163789538057641963,10021502573866829698,4097930131021135676,2398305748137872996],"told_at_ms":10305}
+{"type":"trail_taken","workspace_id":"work","from":"alice","session_id":"dana"}
+{"type":"uncoordinated_delivered","workspace_id":"work","change_id":"unreported","session_id":"dana"}
+{"type":"workspace_moved","workspace":{"workspace_id":"spare","root":"/repos/spare-moved"},"from_root":"/repos/spare"}
+{"type":"workspace_removed","workspace_id":"spare"}
+{"type":"booted","generation":2}
+{"type":"clock_anchored","anchor":{"generation":2,"clock_ms":0,"wall_ms":1795000100000}}
+{"type":"session_registered","session":{"session_id":"bob","workspace_id":"work","generation":2}}
+{"type":"session_seen","session_id":"bob","at_ms":11,"generation":2}
