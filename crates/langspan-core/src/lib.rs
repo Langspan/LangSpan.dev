@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 mod admission;
 mod anchors;
+mod authority;
 mod briefing;
 mod checks;
 mod classes;
@@ -46,6 +47,7 @@ pub use anchors::{
     ANCHOR_CANDIDATES, AnchorIndex, AnchorLookup, AnchorState, MAX_TAGS, NoteAnchor, SYMBOL_BYTES,
     TAG_BYTES, anchored, remember_lookups, validate_tag, validate_tags,
 };
+pub use authority::{Authority, authority};
 #[allow(unused_imports)]
 pub use briefing::*;
 #[allow(unused_imports)]

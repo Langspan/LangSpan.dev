@@ -132,3 +132,50 @@ pub fn check_endpoint(state_dir: &Path) -> Result<(), crate::Error> {
     }
     Ok(())
 }
+
+/// Whether the peer of an accepted connection is this process's user, as the
+/// kernel reports it; a peer that is not, or whose user cannot be read, is
+/// logged as `peer_refused`. Another user cannot reach the owner-only socket;
+/// were the directory opened, this still holds (ADR 0039).
+#[cfg(unix)]
+pub(crate) fn peer_is_owner(stream: &tokio::net::UnixStream) -> bool {
+    let peer = stream
+        .peer_cred()
+        .map_err(crate::Error::from)
+        .and_then(|peer| check_peer(peer.uid()));
+    if let Err(error) = &peer {
+        eprintln!(
+            "{}",
+            serde_json::json!({"level":"warn","event":"peer_refused","error":error.to_string()})
+        );
+    }
+    peer.is_ok()
+}
+
+/// Refuses a socket peer whose effective user is not this process's: the
+/// coordinator answers only its owner.
+#[cfg(unix)]
+fn check_peer(uid: u32) -> Result<(), crate::Error> {
+    let owner = rustix::process::geteuid().as_raw();
+    if uid != owner {
+        return Err(format!(
+            "refused a connection from user {uid}: the coordinator answers only its owner, user {owner}"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    #[test]
+    fn a_peer_of_another_user_is_refused() {
+        let owner = rustix::process::geteuid().as_raw();
+        assert!(super::check_peer(owner).is_ok());
+        let error = super::check_peer(owner.wrapping_add(1)).unwrap_err();
+        assert!(
+            error.to_string().contains("answers only its owner"),
+            "{error}"
+        );
+    }
+}

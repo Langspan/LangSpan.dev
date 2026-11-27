@@ -37,7 +37,7 @@ repository instructions.
 | Process metadata → session evidence | Same-user process incarnation, alive/exited/unknown, explicit time and generation; no effect on admission authority. |
 | Persisted JSON → replay and read views | Versioned schema, validated replay, preserved historical records, one owner and atomic event/receipt or event/snapshot commits. An event that does not parse stops the store opening; a receipt that does not parse is skipped and its request refused on retry ([ADR 0015](../adr/0015-version-tolerance.md)). |
 | Hook settings → disk | Dry run first, explicit apply, recognized owned entries only, preservation of unrelated settings and refusal of settings-file symlinks. |
-| Daemon → automatic check | Off by default; the owner's own command, set through the CLI only, run without a shell in its own process group within its time limit, outside any agent host's sandbox. Its output's redacted, bounded end reaches the event log and the triggering sessions' context as labelled data ([ADR 0030](../adr/0030-automatic-checks-after-write-batches.md)). The comparison with a session's baseline (issue #69) adds no input: it uses test names already parsed and redacted, and the IDs of other sessions in the same workspace that wrote, which are cooperative labels from the owner-only socket, cleaned and capped like every session ID in a briefing. A same-user process that records a false check result or a false write can make a failure read as new or already failing; it cannot change the record, its result or what `land` accepts. |
+| Daemon → automatic check | Off by default; the owner's own command, set with `check auto`, an owner grant with no MCP tool ([caller authority](#caller-authority)), run without a shell in its own process group within its time limit, outside any agent host's sandbox. Its output's redacted, bounded end reaches the event log and the triggering sessions' context as labelled data ([ADR 0030](../adr/0030-automatic-checks-after-write-batches.md)). The comparison with a session's baseline (issue #69) adds no input: it uses test names already parsed and redacted, and the IDs of other sessions in the same workspace that wrote, which are cooperative labels from the owner-only socket, cleaned and capped like every session ID in a briefing. A same-user process that records a false check result or a false write can make a failure read as new or already failing; it cannot change the record, its result or what `land` accepts. |
 | Daemon → desktop notifier | Off by default; `osascript` or `notify-send` from the daemon's `PATH`, with a title and a body of at most 200 bytes (workspace, session, paths) as arguments, in its own process group, killed at 2 seconds, on a thread of its own ([Desktop notices](#desktop-notices)). |
 | Browser → dashboard (TCP) | Loopback by default, a per-run 256-bit token, a `Host` check against the arrival address, `GET` only, bounded heads and deadlines, read-only through the socket client ([ADR 0013](../adr/0013-dashboard.md)). |
 
@@ -45,6 +45,24 @@ Intent text, filenames, branch names and another participant's identity are data
 LangSpan does not treat them as executable instructions. Relayed conflict context
 is labelled as coordination data and capped. No UI or remote publication service
 is introduced by M3.
+
+### Caller authority
+
+[ADR 0039](../adr/0039-caller-authority.md) gives every command a class:
+coordination, which any client of the socket may send, or owner grant, which
+makes the coordinator run a program, read or write a file outside the state
+directory, send data off the machine, delete history or change the admission
+policy. The coordinator closes a connection whose peer, as the kernel reports
+it, is not its own user (`peer_refused` on stderr).
+
+The confined-caller case: an agent whose host sandbox stops it running
+programs, writing outside its workspace or reaching the network may still reach
+the socket. The coordinator runs outside that sandbox, so an owner grant it
+carries out for that caller is a confused deputy. "Any same-user process could
+change those files directly" doesn't hold for that caller. "CLI only", where
+this model says it, means there is no MCP tool; it is not an access control.
+Which host sandboxes can reach the socket has not been tested and is open
+evidence.
 
 ## STRIDE assessment
 
