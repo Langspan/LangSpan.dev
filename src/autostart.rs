@@ -216,7 +216,25 @@ pub fn stop(state_dir: &Path, deadline: Instant) -> Result<bool, crate::Error> {
     }
     kill_process(process, Signal::TERM)
         .map_err(|error| format!("cannot stop the coordinator, process {pid}: {error}"))?;
-    while crate::client::accepts(state_dir, probe_deadline(deadline)) {
+    wait_for_exit(&lock, pid, deadline)?;
+    Ok(true)
+}
+
+/// Waits until `deadline` for the coordinator, process `pid`, to free
+/// `daemon.lock`, which it holds until its process ends. A connect that
+/// fails is no such proof: one bounded by a deadline already past fails too.
+fn wait_for_exit(lock: &fs::File, pid: u32, deadline: Instant) -> Result<(), crate::Error> {
+    loop {
+        match lock.try_lock() {
+            Ok(()) => return Ok(()),
+            Err(fs::TryLockError::WouldBlock) => {}
+            Err(fs::TryLockError::Error(error)) => {
+                return Err(format!(
+                    "cannot tell whether the coordinator, process {pid}, stopped: {error}"
+                )
+                .into());
+            }
+        }
         if Instant::now() >= deadline {
             return Err(format!(
                 "the coordinator, process {pid}, did not stop in time; run `kill {pid}` and run this again"
@@ -225,7 +243,6 @@ pub fn stop(state_dir: &Path, deadline: Instant) -> Result<bool, crate::Error> {
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    Ok(true)
 }
 
 /// A connect bounded to a small part of the caller's wait.
@@ -383,6 +400,32 @@ mod tests {
         env.iter()
             .find(|(key, _)| key == name)
             .and_then(|(_, value)| value.to_str())
+    }
+
+    /// Issue #292: a coordinator that outlives the wait, here one that still
+    /// holds `daemon.lock`, is reported as not stopped; a wait whose
+    /// deadline passed before it started reports the same, never success.
+    /// A free lock means it stopped.
+    #[test]
+    fn the_wait_for_the_coordinator_to_stop_ends_in_an_error_at_its_deadline() {
+        let directory = std::env::temp_dir().join(format!("ls-stop-wait-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("daemon.lock");
+        let held = local::private_file(&path, true).unwrap();
+        held.try_lock().unwrap();
+        let waiting = local::private_file(&path, true).unwrap();
+        let start = Instant::now();
+        for deadline in [start + Duration::from_millis(300), start] {
+            let error = wait_for_exit(&waiting, 42, deadline)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("did not stop in time"), "{error}");
+            assert!(error.contains("kill 42"), "{error}");
+        }
+        assert!(start.elapsed() >= Duration::from_millis(300));
+        held.unlock().unwrap();
+        wait_for_exit(&waiting, 42, start).unwrap();
+        fs::remove_dir_all(&directory).unwrap();
     }
 
     #[test]

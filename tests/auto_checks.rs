@@ -739,6 +739,48 @@ fn a_daemon_that_stops_stops_its_running_automatic_check() {
     assert!(stops(pid), "the check outlived its daemon");
 }
 
+/// A daemon asked to stop by a signal (`uninstall` sends SIGTERM; a
+/// terminal sends SIGINT or SIGHUP) stops its running automatic check
+/// first and exits 0 (issue #292). The check runs in its own process group,
+/// so without this the signal ends only the daemon.
+#[test]
+fn a_daemon_stopped_by_a_signal_stops_its_running_automatic_check() {
+    for signal in ["TERM", "INT", "HUP"] {
+        // `0` turns a debug build's idle exit off; the log is kept.
+        let mut f = Fixture::with_idle_exit(json!({ "auto_check_debounce_ms": 100 }), Some(0));
+        let pidfile = f.base.join("check.pid");
+        f.enable(
+            600,
+            &format!(r#"echo $$ > {}; exec sleep 30"#, pidfile.display()),
+        );
+        f.write_batch("call-1", "one\n");
+        let pid = f.pid("check.pid");
+        assert!(support::running(pid), "SIG{signal}: the check is running");
+        let mut daemon = f.daemon.take().unwrap();
+        let sent = std::process::Command::new("kill")
+            .arg(format!("-{signal}"))
+            .arg(daemon.id().to_string())
+            .status()
+            .unwrap();
+        assert!(sent.success());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = daemon.try_wait().unwrap() {
+                break status;
+            }
+            assert!(Instant::now() < deadline, "SIG{signal}: the daemon runs on");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(stops(pid), "SIG{signal}: the check outlived its daemon");
+        assert_eq!(status.code(), Some(0), "SIG{signal}: {status:?}");
+        let log = fs::read_to_string(f.base.join("daemon.log")).unwrap();
+        assert!(
+            log.contains(&format!(r#""detail":"received SIG{signal}""#)),
+            "{log}"
+        );
+    }
+}
+
 /// A clone of the fixture's checkout, for `workspace move --switch`.
 fn switch_to_a_clone(f: &Fixture) {
     let clone = f.base.join("clone");
