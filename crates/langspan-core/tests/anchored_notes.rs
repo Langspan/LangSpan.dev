@@ -761,6 +761,32 @@ fn anchored_keeps_every_notes_paths_when_notes_share_a_name() {
     assert!(!lookups["check_size"].workspace);
 }
 
+/// Review follow-up on #405: the per-call cap counts distinct paths, so a
+/// repeated path does not push a later one out of the lookup.
+#[test]
+fn remember_lookups_caps_distinct_paths_not_repeated_entries() {
+    let mut named = vec!["a.rs"; 65];
+    named.push("z.rs");
+    let lookup = langspan_core::remember_lookups("parse_upload", &named);
+    let paths: Vec<&str> = lookup["parse_upload"]
+        .paths
+        .iter()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(paths, ["a.rs", "z.rs"]);
+    // Repeats spread through more than 65 distinct paths still stop at
+    // 65 distinct ones, enough for the command to be refused.
+    let many: Vec<String> = (0..100).map(|n| format!("f/{n:03}.rs")).collect();
+    let repeated: Vec<&str> = many
+        .iter()
+        .flat_map(|path| [path.as_str(), path.as_str()])
+        .collect();
+    let lookup = langspan_core::remember_lookups("parse_upload", &repeated);
+    assert_eq!(lookup["parse_upload"].paths.len(), 65);
+    assert!(lookup["parse_upload"].paths.contains("f/064.rs"));
+    assert!(!lookup["parse_upload"].paths.contains("f/065.rs"));
+}
+
 /// A workspace-wide lookup that reached its cap counts what it found as a
 /// lower bound.
 #[test]
