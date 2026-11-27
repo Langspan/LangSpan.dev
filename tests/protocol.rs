@@ -2646,40 +2646,153 @@ fn two_new_capabilities_are_added_on_lines_of_their_own() {
     );
 }
 
-/// Each release, the protocol version it speaks, and the event types it
-/// reads, frozen from that release's tag (issue #331).
-const RELEASES: [(&str, u16, &str); 6] = [
+/// The capabilities 0.5.0 and 0.5.1 name in a request: each one that has a
+/// version.
+const NAMED_0_5: &[&str] = &[
+    "anchored_notes",
+    "briefing_memory",
+    "inflight_partial",
+    "interface_notices",
+    "landing_rewrites",
+    "outline_reads",
+    "refusal_outcomes",
+    "renames",
+    "symbol_findings",
+    "trails",
+];
+
+/// The capabilities 0.6.0 and 0.7.0 name: 0.5.1's and three without one.
+const NAMED_0_6: &[&str] = &[
+    "anchored_notes",
+    "briefing_memory",
+    "inflight_partial",
+    "interface_notices",
+    "landing_rewrites",
+    "outline_reads",
+    "recap_since",
+    "refusal_outcomes",
+    "renames",
+    "symbol_findings",
+    "tolerant_responses",
+    "trails",
+    "withheld_events",
+];
+
+/// The capabilities 0.8.0 names: 0.7.0's and `rename_holds`.
+const NAMED_0_8: &[&str] = &[
+    "anchored_notes",
+    "briefing_memory",
+    "inflight_partial",
+    "interface_notices",
+    "landing_rewrites",
+    "outline_reads",
+    "recap_since",
+    "refusal_outcomes",
+    "rename_holds",
+    "renames",
+    "symbol_findings",
+    "tolerant_responses",
+    "trails",
+    "withheld_events",
+];
+
+/// Each release, the protocol version it speaks, the capabilities it names
+/// (none before 0.5.0), and the event types it reads, frozen from that
+/// release's tag (issue #331).
+const RELEASES: [(&str, u16, Option<&[&str]>, &str); 9] = [
     (
         "0.1.0",
         3,
+        None,
         include_str!("../fixtures/event-types/0.1.0.txt"),
     ),
     (
         "0.2.0",
         3,
+        None,
         include_str!("../fixtures/event-types/0.2.0.txt"),
     ),
     (
         "0.3.0",
         8,
+        None,
         include_str!("../fixtures/event-types/0.3.0.txt"),
     ),
     (
         "0.4.0",
         9,
+        None,
         include_str!("../fixtures/event-types/0.4.0.txt"),
     ),
     (
         "0.5.0",
         10,
+        Some(NAMED_0_5),
         include_str!("../fixtures/event-types/0.5.0.txt"),
     ),
     (
         "0.5.1",
         10,
+        Some(NAMED_0_5),
         include_str!("../fixtures/event-types/0.5.1.txt"),
     ),
+    (
+        "0.6.0",
+        10,
+        Some(NAMED_0_6),
+        include_str!("../fixtures/event-types/0.6.0.txt"),
+    ),
+    (
+        "0.7.0",
+        10,
+        Some(NAMED_0_6),
+        include_str!("../fixtures/event-types/0.7.0.txt"),
+    ),
+    (
+        "0.8.0",
+        10,
+        Some(NAMED_0_8),
+        include_str!("../fixtures/event-types/0.8.0.txt"),
+    ),
 ];
+
+/// What a release's requests are granted: the capabilities it names, or
+/// its version's set when it names none.
+fn release_grant(version: u16, named: Option<&[&str]>) -> (Capabilities, Option<Vec<String>>) {
+    let named: Option<Vec<String>> =
+        named.map(|names| names.iter().map(|name| (*name).to_string()).collect());
+    (Capabilities::negotiate(version, named.as_deref()), named)
+}
+
+/// Issue #331: every release `CHANGELOG.md` names has a frozen list in
+/// `fixtures/event-types/` and a row in `RELEASES`, and every list has a
+/// row, so a release cannot ship without the test of its pages.
+#[test]
+fn every_published_release_has_a_frozen_list() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let rows: std::collections::BTreeSet<&str> = RELEASES.iter().map(|row| row.0).collect();
+    let changelog = std::fs::read_to_string(root.join("CHANGELOG.md")).unwrap();
+    let published: Vec<&str> = changelog
+        .lines()
+        .filter_map(|line| line.strip_prefix("## ["))
+        .filter_map(|line| line.split(']').next())
+        .collect();
+    assert!(published.len() >= 8, "{published:?}");
+    for release in published {
+        assert!(
+            root.join(format!("fixtures/event-types/{release}.txt"))
+                .is_file(),
+            "{release} is published and has no fixtures/event-types/{release}.txt: \
+             write the event types its tag reads there"
+        );
+        assert!(rows.contains(release), "{release}: add it to RELEASES");
+    }
+    for entry in std::fs::read_dir(root.join("fixtures/event-types")).unwrap() {
+        let name = entry.unwrap().file_name().to_string_lossy().to_string();
+        let release = name.strip_suffix(".txt").unwrap_or(&name);
+        assert!(rows.contains(release), "{name} has no row in RELEASES");
+    }
+}
 
 /// One event of each type this build has: the event vectors, one per type
 /// (`tests/event_vectors.rs`).
@@ -2720,10 +2833,11 @@ fn answer(outcome: langspan_core::Outcome) -> Response {
     }
 }
 
-/// Issue #331: a page holding every current event type, encoded for the
-/// version a release speaks, holds only types of that release's frozen
-/// list, and every current type all releases of that version read. 0.1.0
-/// and 0.2.0 both speak version 3, which gets what 0.1.0 reads.
+/// Issue #331: a page holding every current event type, encoded for what a
+/// release's requests are granted, holds only types of that release's
+/// frozen list, and every current type all releases granted the same read.
+/// 0.1.0 and 0.2.0 both speak version 3, which gets what 0.1.0 reads. A
+/// release that reads `withheld` is told how many were left out.
 #[test]
 fn each_release_is_sent_only_the_event_types_it_reads() {
     use langspan_core::Outcome;
@@ -2734,16 +2848,17 @@ fn each_release_is_sent_only_the_event_types_it_reads() {
         }))
         .unwrap(),
     );
-    let reads = |version: u16| {
+    let reads = |granted: Capabilities| {
         RELEASES
             .iter()
-            .filter(|(_, speaks, _)| *speaks == version)
-            .map(|(_, _, list)| list.lines().map(str::to_string).collect())
+            .filter(|(_, version, named, _)| release_grant(*version, *named).0 == granted)
+            .map(|(_, _, _, list)| list.lines().map(str::to_string).collect())
             .reduce(|both: std::collections::BTreeSet<String>, next| &both & &next)
             .unwrap()
     };
-    for (release, version, _) in RELEASES {
-        let expected = &reads(version) & &current;
+    for (release, version, named, _) in RELEASES {
+        let (granted, named) = release_grant(version, named);
+        let expected = &reads(granted) & &current;
         for outcome in [
             Outcome::Events {
                 events: events.clone(),
@@ -2753,10 +2868,15 @@ fn each_release_is_sent_only_the_event_types_it_reads() {
                 scan: None,
             },
         ] {
-            let wire = encode_for(version, &answer(outcome)).unwrap();
+            let wire = encode_with(granted, named.as_deref(), &answer(outcome)).unwrap();
             let page: serde_json::Value = serde_json::from_slice(&wire).unwrap();
             assert_eq!(event_types(&page), expected, "{release}");
-            assert!(page.get("withheld").is_none(), "{release} cannot read it");
+            let left_out = events.len() - expected.len();
+            if granted.has("withheld_events") && left_out > 0 {
+                assert_eq!(page["withheld"], left_out, "{release}");
+            } else {
+                assert!(page.get("withheld").is_none(), "{release}: {page}");
+            }
         }
     }
 }

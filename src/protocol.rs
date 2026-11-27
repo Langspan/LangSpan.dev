@@ -741,7 +741,7 @@ mod tests {
     /// names it.
     #[test]
     fn an_event_type_no_release_reads_needs_a_capability_of_its_own() {
-        let newest: Vec<&str> = include_str!("../fixtures/event-types/0.5.1.txt")
+        let newest: Vec<&str> = include_str!("../fixtures/event-types/0.8.0.txt")
             .lines()
             .collect();
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
