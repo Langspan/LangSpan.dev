@@ -103,8 +103,9 @@ fn the_codex_capture_refuses_to_run_without_a_separate_codex_home() {
 }
 
 /// A `codex` that reports a signed-in account and whose every `exec` turn
-/// records `per_turn` events through `langspan session start`, so the run's
-/// own events span several pages of `langspan events`.
+/// registers `per_turn` sessions through one `langspan mcp`, so the run's
+/// own events span several pages of `langspan events`. One process a turn,
+/// not one a session: the registrations are the fixture, not the subject.
 fn signed_in(per_turn: u32) -> Scratch {
     let base = scratch("Logged in using ChatGPT", 0);
     let script = r#"#!/bin/sh
@@ -114,11 +115,32 @@ case "$1 $2" in
 esac
 [ "$1" = exec ] || { echo "stand-in codex: unexpected $*" >&2; exit 99; }
 turn=$$-$(date +%s)
-i=0
-while [ $i -lt PER_TURN ]; do
-  i=$((i + 1))
-  "$LANGSPAN" session start "standin.t$turn-$i" standin --request-id "standin-$turn-$i" >&2 || exit 98
-done
+# IDs near the 128-byte limit, so fewer events fill more than one page.
+pad=$(printf '%090d' 0)
+replies="$PWD/standin-$turn.replies"
+: > "$replies"
+# Whether the first $1 calls are answered (and the initialize, id 0).
+answered() { [ "$(grep -c '"id":' "$replies")" -gt "$1" ]; }
+{
+  printf '%s\n' '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"standin","version":"0"}}}' '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+  i=0
+  while [ $i -lt PER_TURN ]; do
+    i=$((i + 1))
+    printf '{"jsonrpc":"2.0","id":%s,"method":"tools/call","params":{"name":"langspan_session_register","arguments":{"session_id":"standin.t%s-%s-%s","workspace_id":"standin","request_id":"standin-%s-%s"}}}\n' "$i" "$turn" "$i" "$pad" "$turn" "$i"
+    # 16 calls at a time, within the coordinator's 32 clients, each batch
+    # answered (at most 30 s) before the next; input stays open until the
+    # last is answered, so no call is still running when it ends.
+    if [ $((i % 16)) -eq 0 ] || [ $i -eq PER_TURN ]; then
+      waited=0
+      until answered $i || [ $waited -ge 3000 ]; do
+        waited=$((waited + 1))
+        sleep 0.01
+      done
+    fi
+  done
+} | "$LANGSPAN" mcp > "$replies" || exit 98
+answered PER_TURN || { echo "stand-in codex: calls unanswered" >&2; exit 98; }
+! grep -q '"isError":true' "$replies" || { cat "$replies" >&2; exit 98; }
 "#;
     fs::write(
         base.0.join("bin/codex"),
@@ -172,9 +194,60 @@ impl Drop for Daemon {
     }
 }
 
-fn daemon(state: &Path) -> Daemon {
+fn state_dir(state: &Path) {
     fs::create_dir_all(state).unwrap();
     fs::set_permissions(state, fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+/// Workspace `seed` at `root` and `sessions` sessions of it, written to the
+/// store before the daemon starts as the events the coordinator records, in
+/// one transaction: the older history is the fixture here, not the subject.
+fn seed(state: &Path, root: &Path, sessions: u32) {
+    state_dir(state);
+    let path = state.join("state.sqlite3");
+    let generation = {
+        let mut store = langspan::store::Store::open(&path).unwrap();
+        let command = langspan_core::Command::WorkspaceRegister {
+            workspace_id: "seed".into(),
+            root: root.to_str().unwrap().into(),
+        };
+        let outcome = store.execute("add-seed", &command, &command, 1).unwrap();
+        assert!(
+            !matches!(outcome.outcome, langspan_core::Outcome::Error { .. }),
+            "{:?}",
+            outcome.outcome
+        );
+        store.state().generation
+    };
+    let mut connection = rusqlite::Connection::open(&path).unwrap();
+    let transaction = connection.transaction().unwrap();
+    for i in 1..=sessions {
+        let registered = langspan_core::Event::SessionRegistered {
+            session: langspan_core::Session {
+                session_id: format!("seed.s{i}"),
+                workspace_id: "seed".into(),
+                generation,
+                parent: None,
+                headless: false,
+            },
+        };
+        transaction
+            .execute(
+                "INSERT INTO events (event_json) VALUES (?1)",
+                [serde_json::to_string(&registered).unwrap()],
+            )
+            .unwrap();
+    }
+    transaction.commit().unwrap();
+    drop(connection);
+    // The daemon accepts only owner-only state files.
+    for entry in fs::read_dir(state).unwrap() {
+        fs::set_permissions(entry.unwrap().path(), fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
+
+fn daemon(state: &Path) -> Daemon {
+    state_dir(state);
     let child = Command::new(env!("CARGO_BIN_EXE_langspan"))
         .args(["daemon", "--state-dir"])
         .arg(state)
@@ -196,15 +269,20 @@ fn daemon(state: &Path) -> Daemon {
 /// and while the run's own events fill several transport pages.
 #[test]
 fn the_codex_capture_saves_every_event_of_its_own_run_and_no_earlier_one() {
+    // Three turns of 80 registrations of about 250 bytes each: more than
+    // one 48 KiB page of `langspan events`.
+    const PER_TURN: u32 = 80;
     for seeded in [0, 1001] {
-        let base = signed_in(150);
+        let base = signed_in(PER_TURN);
         let state = base.0.join("state");
+        let root = fs::canonicalize(&base.0).unwrap();
+        fs::create_dir(root.join("seed")).unwrap();
+        seed(&state, &root.join("seed"), seeded);
         let _daemon = daemon(&state);
+        // The stand-in's workspace, through the command line.
         let seed = Command::new("bash")
             .arg("-c")
-            .arg(format!(
-                "for w in seed standin; do mkdir \"$w\" && \"$LANGSPAN\" --request-id add-$w workspace add $w \"$PWD/$w\" >/dev/null || exit 1; done; i=0; while [ $i -lt {seeded} ]; do i=$((i + 1)); \"$LANGSPAN\" session start seed.s$i seed --request-id seed-$i >/dev/null || exit 1; done"
-            ))
+            .arg("mkdir standin && \"$LANGSPAN\" --request-id add-standin workspace add standin \"$PWD/standin\" >/dev/null")
             .env("LANGSPAN", env!("CARGO_BIN_EXE_langspan"))
             .env("LANGSPAN_STATE_DIR", &state)
             .env("LANGSPAN_AUTOSTART", "off")
@@ -292,7 +370,7 @@ fn the_codex_capture_saves_every_event_of_its_own_run_and_no_earlier_one() {
                     |line| line.contains("\"session_registered\"") && line.contains("\"standin.t")
                 )
                 .count(),
-            450,
+            3 * PER_TURN as usize,
             "{said}"
         );
         for own in ["capture-peer-", ".holder"] {

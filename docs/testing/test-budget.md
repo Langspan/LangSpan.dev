@@ -111,6 +111,31 @@ size the input from it. On an Apple M-series laptop under the `ci-fast`
 profile they took 5.6, 4.4, 1.6 and 5.9 s before and each under 0.2 s
 after.
 
+#459 changed how the other five build their state; each still calls the
+coordinator, the CLI or the hook it checks:
+
+- `capture_codex` writes its 1,001 earlier sessions to the store before the
+  daemon starts. The stand-in Codex registers each turn's sessions through
+  one `langspan mcp`, 16 calls at a time, not one `session start` each. With
+  IDs near the 128-byte limit, 240 registrations (not 450) still fill more
+  than one page of `langspan events`.
+- The two `status_history` tests make the bounded view leave out
+  `landings` and `workspace_git` with one automatic check at its limits,
+  written to the store, in place of 800 sessions registered over the socket.
+- `binary_versions` reads the real copied binary once, then replaces it
+  with a small file holding another version's marker.
+- `retention`'s daemon test keeps 100 days of 10 steps, not 150 of 40.
+- `hook_replies` still builds a new coordinator for each recorded event:
+  the briefing names a peer of the coordinator's current generation, so a
+  copied state would change the pinned replies. It runs four fixtures at a
+  time.
+
+With the five files run together on an Apple M-series laptop (debug, default
+profile), the six tests #459 names took 27.2, 23.3, 23.8, 7.8, 4.4 and
+21.6 s before and 4.3, 1.6, 1.9, 2.0, 0.8 and 3.1 s after (in the order
+capture, the two status tests, Codex replies, retention, versions); the
+five files took 28.8 s before and 5.1 s after.
+
 ### Process starts where an in-process check would do (#458)
 
 `cli_golden::every_option_against_every_command_matches_the_table` starts
