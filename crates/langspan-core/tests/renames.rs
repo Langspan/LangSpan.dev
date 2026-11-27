@@ -260,6 +260,8 @@ fn remember(state: &mut State, id: &str, paths: &[&str]) {
             author: None,
             text: "keep the retry off".into(),
             paths: paths.iter().map(|path| (*path).into()).collect(),
+            symbol: None,
+            tags: Vec::new(),
         },
         id,
         5,
@@ -495,6 +497,9 @@ fn the_history_of_a_moved_file_includes_what_was_recorded_under_its_old_path() {
                 author: None,
                 text: "save must stay idempotent".into(),
                 paths: vec!["src/a.py".into()],
+                anchor: None,
+                anchor_state: None,
+                tags: Vec::new(),
             },
             at: Some(langspan_core::Stamp {
                 at_ms: 9,
@@ -569,6 +574,9 @@ fn a_reused_path_keeps_each_files_history_to_its_own_lifetime() {
                 author: None,
                 text: "the first save must stay idempotent".into(),
                 paths: vec!["src/a.py".into()],
+                anchor: None,
+                anchor_state: None,
+                tags: Vec::new(),
             },
             at: Some(langspan_core::Stamp {
                 at_ms: 9,

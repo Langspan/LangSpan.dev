@@ -293,6 +293,8 @@ fn evidence_and_risks_are_carried_with_their_applicability() {
             author: None,
             text: "Release freeze until Friday".into(),
             paths: vec![],
+            symbol: None,
+            tags: Vec::new(),
         },
         100,
     );
@@ -429,6 +431,9 @@ fn a_crowded_state_is_bounded_with_counts_of_what_was_left_out() {
                 author: None,
                 text: "\"".repeat(400),
                 paths: (0..8).map(quote_path).collect(),
+                anchor: None,
+                anchor_state: None,
+                tags: Vec::new(),
             })
             .collect(),
     );
@@ -637,6 +642,8 @@ fn notes_on_one_path_in_unrelated_repositories_resolve_to_different_groups() {
                 author: None,
                 text: format!("about src/api.rs in {workspace}"),
                 paths: vec!["src/api.rs".into()],
+                symbol: None,
+                tags: Vec::new(),
             },
             100,
         );

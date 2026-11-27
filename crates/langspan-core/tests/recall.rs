@@ -45,6 +45,8 @@ fn remember(state: &mut State, id: &str, text: &str, paths: &[&str]) {
             author: Some("alice".into()),
             text: text.into(),
             paths: paths.iter().map(|path| (*path).into()).collect(),
+            symbol: None,
+            tags: Vec::new(),
         },
     );
     assert!(matches!(outcome, Outcome::Remembered { .. }), "{outcome:?}");

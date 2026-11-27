@@ -1862,6 +1862,7 @@ fn brief_with(
             left: Vec::new(),
             inflight,
             inflight_partial: false,
+            mentioned: Default::default(),
         },
         now,
     )) {
@@ -1892,6 +1893,7 @@ fn a_partial_index_is_told_beside_news_and_is_not_news_itself() {
             changes_only: false,
             inflight: Vec::new(),
             inflight_partial,
+            mentioned: Default::default(),
         },
         now,
     )) {
@@ -1989,6 +1991,7 @@ fn an_in_flight_signature_is_told_once_per_signature_and_only_from_another_workt
             left: Vec::new(),
             inflight: found(v3),
             inflight_partial: false,
+            mentioned: Default::default(),
         },
         7_000,
     )) {
@@ -2046,6 +2049,7 @@ fn in_flight_lines_are_at_most_three_within_their_share_and_the_rest_counted() {
             left: Vec::new(),
             inflight: too_many,
             inflight_partial: false,
+            mentioned: Default::default(),
         },
         3_000,
     );
@@ -2183,6 +2187,7 @@ fn presence_and_an_in_flight_signature_are_each_news_once() {
             left: Vec::new(),
             inflight: found(v1),
             inflight_partial: false,
+            mentioned: Default::default(),
         },
         3_500,
     )) {
