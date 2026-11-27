@@ -104,7 +104,9 @@ the event (`LANGSPAN_CHECK_LANE`):
   profile selects: every unit test, every test of `langspan-core` and
   `langspan-graph`, and the integration tests of the protocol, the store,
   Git output, MCP framing, the workflows and the docs. None of those
-  starts a coordinator. The `macOS` check passes at once and says that the
+  starts a coordinator, except the CLI's golden transcripts
+  (`tests/cli_transcript.rs`, `tests/cli_golden.rs`), so that output that
+  differs on Linux shows on the pull request. The `macOS` check passes at once and says that the
   full run happens in the merge queue. Target: a result **under 3
   minutes** from push. The job stops at 10 minutes.
 - **The full lane: a merge-queue commit, a push to `main`, the nightly run
