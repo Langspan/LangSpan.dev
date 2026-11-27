@@ -13,6 +13,13 @@ use langspan::cli::setup::{Mode, guidance, hooks, hosts_report, setup, user_inst
 use langspan::hosts::UserHome;
 use std::path::PathBuf;
 
+#[cfg(test)]
+#[path = "run/option_matrix.rs"]
+mod option_matrix;
+#[cfg(test)]
+#[path = "run/option_table.rs"]
+mod option_table;
+
 pub(crate) async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
     if input.is_empty() || input.iter().any(|v| v == "--help" || v == "-h") {
         print!("{HELP}");
