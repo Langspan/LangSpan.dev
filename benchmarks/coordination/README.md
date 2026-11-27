@@ -92,18 +92,21 @@ lists its tools fails too.
 ## Files
 
 - `driver.py`: one trial of an arm, task family, session count and seed.
+- `matrix.py`: every trial of a set of families, session counts, seeds and
+  arms, and the results document from their records
+  ([Publishable runs](#publishable-runs)).
 - `tasks.py`: the three task families, their prompts and what the oracle checks.
 - `fixture/`: the fixture repository, a small Python package with its own tests.
 - `oracle.py`: the combined-integration oracle, run on the merged result.
 - `standin_agent.py`: the dry-run agent; it makes one of its task's fixed
   edits, or a repair round's, and no model call.
-- `run-record.schema.json`: the driver's run record v7.
+- `run-record.schema.json`: the driver's run record v8.
 - `runner.py`: validate-only by default; opt-in real-process execution.
 - `manifest.schema.json`: command manifest v1.
 - `manifest.template.json`: owner-filled template for the three required arms.
 - `records.schema.json`: raw per-item/per-arm/per-repetition JSONL journal v1.
 - `SCENARIOS.md`: workload, ordering, and outcome evidence requirements.
-- `test_runner.py`, `test_driver.py`: real local processes, Git and, for the
+- `test_runner.py`, `test_driver.py`, `test_matrix.py`: real local processes, Git and, for the
   LangSpan arm, the real `langspan` binary; no mocked model or host event.
 
 Python 3.9+ on POSIX is required. There are no package dependencies.
@@ -566,6 +569,66 @@ A value the run did not measure is `null`, never zero. In the arms without
 LangSpan, `refusals.status`, `coordinator_scans.status` and
 `context_added.status` are `not_applicable`.
 
+### Publishable runs
+
+`matrix.py` runs every trial of a comparison and writes the results document
+for `docs/evidence/`. From a clean checkout:
+
+1. Build the binary: `cargo build --release --locked`.
+2. Print the trials and the session counts, and run nothing:
+
+   ```sh
+   python3 benchmarks/coordination/matrix.py run --plan-only \
+     --families discovered_change --sessions 2 5 --seeds 1 2 3 4 5 \
+     --output /path/outside/the/repository/k1
+   ```
+
+3. Run them. `--agent standin` (the default) is a dry run with no model call:
+
+   ```sh
+   python3 benchmarks/coordination/matrix.py run \
+     --families discovered_change --sessions 2 5 --seeds 1 2 3 4 5 \
+     --langspan target/release/langspan --output /path/outside/the/repository/k1
+   ```
+
+4. Write the document: `python3 benchmarks/coordination/matrix.py report
+   /path/outside/the/repository/k1 --output results.md`. Review the
+   transcripts before committing it or any record under `docs/evidence/`.
+
+Each trial runs `driver.py` in `OUTPUT/FAMILY-nN-sSEED-ARM/`, one after
+another, with the driver's output in `OUTPUT/FAMILY-nN-sSEED-ARM.driver.log`.
+`--arms` defaults to all three; within each family, N and seed the arm order
+rotates with the seed. `OUTPUT/matrix.jsonl` gets one line per trial each
+time the matrix runs: the trial, its `outcome` (`ran`, `kept` when its
+directory already held a record, `incomplete` when its directory had none,
+`no_record` when the driver wrote none, `timed_out` past 4 hours) and the
+driver's `exit_code`. The matrix never stops at a failed, refused or
+timed-out trial, never deletes a directory and never repeats a trial whose
+directory exists, so running the same command again resumes an interrupted
+matrix. It exits 1 when any trial has no record.
+
+The report lists every trial, refused, failed and `change_not_made` included,
+with why the comparison excludes it ([`summarize`](#cost-to-a-correct-result)
+decides), the combined build, tasks accepted, stale-name writes admitted,
+the time to the last stale caller fixed, tokens (input, cache read, cache
+write, output), turns, elapsed time and the repair. Per condition it gives the
+combined build passed before any repair and the correct results, each as
+k of n with a Wilson 95% interval, the stale-name writes, each trial's time to
+the last stale caller fixed, and the summed tokens of the run, the repair and
+both. It lists the versions and seeds, and says in its third line when trials
+were dry runs. It shows no price, although the record keeps the host's own
+`total_cost_usd`.
+
+**Live runs need the owner's approval.** With
+`LANGSPAN_BENCH_CLAUDE_CONFIG_DIR` set to a separate sign-in folder
+([Prepare a clean agent configuration](#prepare-a-clean-agent-configuration)),
+add `--agent claude` to the command in step 3. The matrix adds no flag to a
+session's command; the driver's preflight and permission limits apply to
+every trial. Stage 1 is `discovered_change` at N = 2 and 5 with seeds 1 to 5:
+30 trials, 105 sessions and at most 30 repair sessions. Stage 2 repeats it with
+`--families rename_vs_new_caller`. Turns per session are not measured yet;
+**Estimate:** 10 to 30 turns per session, and as many for a repair session.
+
 ## Refuse against wait on a current holder
 
 `holder_wait.py` compares the two conflict policies of
@@ -828,7 +891,7 @@ mechanics tests below use real child processes to verify the harness only.
 cargo test --locked --test benchmark_harness
 ```
 
-`tests/benchmark_harness.rs` runs both Python suites with the `langspan`
+`tests/benchmark_harness.rs` runs the Python suites with the `langspan`
 binary built from the checkout, so `cargo test` and CI run them on Linux and
 macOS. To run one suite by hand:
 
@@ -840,7 +903,17 @@ LANGSPAN_BENCH_LANGSPAN=target/debug/langspan \
 `test_runner.py` uses temporary directories and real Python children. It
 tests normal and failed output, parallel rendezvous, timeout/descendant
 cleanup, repetition retention, output bounds, spawn errors, argv literalness,
-the dry-run gate, metadata phases, and unknown/evidence-backed assessments.
+the dry-run gate, metadata phases, unknown/evidence-backed assessments, and
+the three benchmark arms with their rotating order.
+
+`test_matrix.py` checks the Wilson interval against known values, the trial
+list and its arm rotation, `--plan-only`'s counts, the results document from
+hand-built records (every trial listed, tokens summed per condition, no
+price), the refusal of an older record, and that the matrix keeps going past
+a refused trial. Its dry run runs `discovered_change` at N = 2 in all three
+arms, resumes without repeating a trial, reports a directory without a
+record as incomplete, and checks that the report shows the LangSpan arm's
+combined build passing and the others' failing.
 
 `test_driver.py` runs the whole dry-run pipeline for every arm and all three
 families at N = 2 and N = 5 with `follow` and `ignore`, the LangSpan arm at
