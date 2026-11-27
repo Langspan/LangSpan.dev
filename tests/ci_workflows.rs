@@ -1584,6 +1584,8 @@ struct MainRed {
     /// What the issue writes read on stdin.
     body: String,
     summary: String,
+    /// The fixtures whose flood the stub wrote to the end.
+    finished: String,
 }
 
 impl MainRed {
@@ -1650,6 +1652,7 @@ fn main_red(platform: &str, result: &str, dry_run: bool, files: &[(&str, &str)])
         calls: read_or_empty(&log),
         body: read_or_empty(&dir.join("calls.body")),
         summary: read_or_empty(&summary),
+        finished: read_or_empty(&dir.join("calls.finished")),
     };
     let _ = fs::remove_dir_all(&dir);
     run
@@ -1885,6 +1888,70 @@ fn a_report_says_what_it_could_not_find_rather_than_failing() {
     assert!(!out.status.success());
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("RUN_ID"), "{stderr}");
+}
+
+/// 64 MiB: twice the log cap and four times the cap on other output.
+const FLOOD: &str = "67108864";
+
+#[test]
+fn a_log_over_its_cap_is_read_to_the_cap_and_its_download_stopped() {
+    // The first error lines come from the start of the log; the 64 MiB
+    // after them are never read, so the stub never writes them all.
+    let run = main_red(
+        "macOS",
+        "failure",
+        false,
+        &[("api/repos_o_r_actions_jobs_2_logs.flood", FLOOD)],
+    );
+    assert!(run.ok, "{}", run.stderr);
+    assert!(
+        run.body
+            .contains("\n~~~~text\n--- macOS tests 2\nFAIL [   2.001s] cli_golden"),
+        "{}",
+        run.body
+    );
+    assert!(!run.body.contains("Could not read the log"), "{}", run.body);
+    assert_eq!(run.finished, "", "the log download ran to its end");
+}
+
+#[test]
+fn other_gh_output_over_its_cap_is_refused_and_its_call_stopped() {
+    // A jobs list too long to be the jobs list is not buffered whole: the
+    // call stops at the cap and the report says so.
+    let run = main_red(
+        "macOS",
+        "failure",
+        false,
+        &[("api/repos_o_r_actions_runs_200_jobs.flood", FLOOD)],
+    );
+    assert!(run.ok, "{}", run.stderr);
+    assert!(
+        run.body.contains(
+            "Could not list the jobs: gh api printed more than 16777216 bytes; stopped it"
+        ),
+        "{}",
+        run.body
+    );
+    assert_eq!(run.finished, "", "the jobs download ran to its end");
+}
+
+#[test]
+fn a_flood_on_stderr_is_drained_and_its_first_line_reported() {
+    // Reading stdout to its end while stderr fills its pipe would deadlock;
+    // stderr is drained alongside, capped, and its first line reported.
+    let run = main_red(
+        "macOS",
+        "failure",
+        false,
+        &[("api/repos_o_r_actions_jobs_2_logs.flood-stderr", FLOOD)],
+    );
+    assert!(run.ok, "{}", run.stderr);
+    assert!(
+        run.body
+            .contains("Could not read the log of macOS tests 2: noise line"),
+        "{}",
+        run.body
+    );
 }
 
 /// Runs scripts/advisory-ignores.py over `dir` with `args`; returns

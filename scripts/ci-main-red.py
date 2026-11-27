@@ -28,6 +28,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 
 WORKFLOW = "check.yml"
 LABEL = "main-red"
@@ -38,6 +39,9 @@ LOG_JOBS = 3
 LOG_LINES = 15
 LINE_CHARS = 300
 LOG_BYTES = 32 * 1024 * 1024
+OUT_BYTES = 16 * 1024 * 1024
+ERR_BYTES = 64 * 1024
+CHUNK = 64 * 1024
 TIMEOUT_S = 60
 
 TIMESTAMP = re.compile(r"^\d{4}-\d\d-\d\dT[\d:.]+Z ")
@@ -52,22 +56,77 @@ class GhError(Exception):
     pass
 
 
+def run_capped(cmd, limit, timeout, stdin=None, env=None):
+    """Runs cmd, reading at most `limit` bytes of its stdout.
+
+    Returns (exit code, stdout bytes, first stderr line, whether stdout
+    reached the limit). At the limit or the timeout the child is killed and
+    reaped; nothing is buffered past the limit. stderr is drained alongside,
+    to at most ERR_BYTES, so a child that fills it cannot stall.
+    """
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+        )
+    except OSError as e:
+        raise GhError(f"{cmd[0]}: {e}") from e
+    expired = threading.Event()
+
+    def expire():
+        expired.set()
+        proc.kill()
+
+    timer = threading.Timer(timeout, expire)
+    timer.start()
+    err = bytearray()
+
+    def drain():
+        while chunk := proc.stderr.read1(CHUNK):
+            err.extend(chunk[: max(0, ERR_BYTES - len(err))])
+
+    def feed():
+        try:
+            proc.stdin.write(stdin.encode())
+            proc.stdin.close()
+        except OSError:
+            pass
+
+    threads = [threading.Thread(target=drain, daemon=True)]
+    if stdin is not None:
+        threads.append(threading.Thread(target=feed, daemon=True))
+    for t in threads:
+        t.start()
+    out = bytearray()
+    full = False
+    while chunk := proc.stdout.read1(min(CHUNK, limit + 1 - len(out))):
+        out.extend(chunk)
+        if len(out) > limit:
+            full = True
+            proc.kill()
+            break
+    proc.stdout.close()
+    proc.wait()
+    timer.cancel()
+    for t in threads:
+        t.join(timeout=5)
+    if expired.is_set():
+        raise GhError(f"{cmd[0]} {cmd[1]} timed out after {timeout} s; stopped it")
+    first = (err.decode(errors="replace").strip().splitlines() or ["no message"])[0]
+    return proc.returncode, bytes(out[:limit]), first, full
+
+
 def gh(args, stdin=None):
     """Runs gh with a timeout; returns stdout or raises GhError."""
-    try:
-        out = subprocess.run(
-            ["gh", *args],
-            input=stdin,
-            capture_output=True,
-            text=True,
-            timeout=TIMEOUT_S,
-        )
-    except (OSError, subprocess.TimeoutExpired) as e:
-        raise GhError(f"gh {args[0]} {args[1]}: {e}") from e
-    if out.returncode != 0:
-        first = (out.stderr.strip().splitlines() or ["no message"])[0]
-        raise GhError(f"gh {args[0]} {args[1]} exited {out.returncode}: {first}")
-    return out.stdout
+    code, out, first, full = run_capped(["gh", *args], OUT_BYTES, TIMEOUT_S, stdin)
+    if full:
+        raise GhError(f"gh {args[0]} printed more than {OUT_BYTES} bytes; stopped it")
+    if code != 0:
+        raise GhError(f"gh {args[0]} {args[1]} exited {code}: {first}")
+    return out.decode(errors="replace")
 
 
 def api(path):
@@ -88,25 +147,13 @@ def log_line(raw):
 
 
 def read_log(job_id):
-    """The job's log text, at most LOG_BYTES, or raises GhError."""
-    try:
-        proc = subprocess.Popen(
-            ["gh", "api", f"repos/{REPO}/actions/jobs/{job_id}/logs"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-    except OSError as e:
-        raise GhError(f"gh api: {e}") from e
-    try:
-        data, err = proc.communicate(timeout=TIMEOUT_S * 2)
-    except subprocess.TimeoutExpired as e:
-        proc.kill()
-        proc.communicate()
-        raise GhError("gh api timed out reading the log") from e
-    if proc.returncode != 0:
-        first = (err.decode(errors="replace").strip().splitlines() or ["no message"])[0]
+    """The job's log text, at most its first LOG_BYTES, or raises GhError."""
+    code, data, first, full = run_capped(
+        ["gh", "api", f"repos/{REPO}/actions/jobs/{job_id}/logs"], LOG_BYTES, TIMEOUT_S * 2)
+    # A log cut at the cap was killed there, so its exit code says nothing.
+    if code != 0 and not full:
         raise GhError(first)
-    return data[:LOG_BYTES].decode(errors="replace")
+    return data.decode(errors="replace")
 
 
 def platform_job(name):
@@ -174,11 +221,13 @@ def failed_tests(run_id):
                 if not name.endswith(".xml"):
                     continue
                 env = {k: v for k, v in os.environ.items() if k != "GITHUB_OUTPUT"}
-                out = subprocess.run(
-                    ["bash", os.path.join(here, "ci-failed-tests.sh"), os.path.join(top, name)],
-                    capture_output=True, text=True, timeout=TIMEOUT_S, env=env,
-                )
-                names += [n for n in out.stdout.splitlines() if n]
+                try:
+                    _, out, _, _ = run_capped(
+                        ["bash", os.path.join(here, "ci-failed-tests.sh"), os.path.join(top, name)],
+                        OUT_BYTES, TIMEOUT_S, env=env)
+                except GhError as e:
+                    return f"Could not read the JUnit report {inline(name)}: {inline(e)}"
+                names += [n for n in out.decode(errors="replace").splitlines() if n]
     if not names:
         return ("No failed test was recorded: the job failed outside the tests, or "
                 "stopped before their report. The failing jobs' logs say where.")

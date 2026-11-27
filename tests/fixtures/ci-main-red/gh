@@ -7,15 +7,32 @@
 # --dir D` copies each fixture directory matching P into D, or fails with
 # the text of $GH_STUB_OVERRIDE/download-error when that exists. The fixtures
 # are in $GH_STUB_FIXTURES; a file in $GH_STUB_OVERRIDE wins over the one
-# there, and with neither the call fails as an HTTP 404 does.
+# there, and with neither the call fails as an HTTP 404 does. When
+# $GH_STUB_OVERRIDE holds FILE.flood (a byte count N), serving FILE then
+# writes N more bytes to stdout and, once it has written them all, appends
+# FILE to $GH_STUB_LOG.finished; with FILE.flood-stderr it writes N bytes to
+# stderr instead and fails.
 set -euo pipefail
 here=$GH_STUB_FIXTURES
 printf '%s\n' "$*" >>"$GH_STUB_LOG"
+
+flood() {
+  local over=${GH_STUB_OVERRIDE:-/nonexistent}
+  if [ -f "$over/$1.flood" ]; then
+    { yes "filler line" || true; } | head -c "$(cat "$over/$1.flood")"
+    printf '%s\n' "$1" >>"$GH_STUB_LOG.finished"
+  fi
+  if [ -f "$over/$1.flood-stderr" ]; then
+    { yes "noise line" || true; } | head -c "$(cat "$over/$1.flood-stderr")" >&2
+    exit 1
+  fi
+}
 
 serve() {
   for dir in "${GH_STUB_OVERRIDE:-}" "$here"; do
     if [ -n "$dir" ] && [ -f "$dir/$1" ]; then
       cat "$dir/$1"
+      flood "$1"
       return 0
     fi
   done
