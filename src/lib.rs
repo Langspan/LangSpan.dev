@@ -32,9 +32,7 @@ mod vendor;
 // Infrastructure layer.
 
 // fs
-mod file_state;
-mod input;
-mod local;
+mod fs;
 
 // git
 pub mod git;
@@ -123,6 +121,9 @@ pub mod demo;
 pub mod skill;
 
 // Compatibility aliases: old paths kept until importers are repointed.
+use fs::file_state;
+use fs::input;
+use fs::local;
 use ids::registration;
 use ids::sha256;
 use text::redact;

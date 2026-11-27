@@ -617,7 +617,7 @@ class Coordinator:
 
     def __init__(self, langspan, state_dir, log_path):
         # The daemon refuses a socket path longer than this many bytes once
-        # links are resolved (src/local.rs); macOS allows 104 with the
+        # links are resolved (src/fs/local.rs); macOS allows 104 with the
         # terminator. Say so here rather than "did not start".
         socket = os.fsencode(os.path.join(os.path.realpath(state_dir), "daemon.sock"))
         if len(socket) > MAX_SOCKET_PATH:
