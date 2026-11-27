@@ -241,6 +241,107 @@ class Indexing(unittest.TestCase):
         self.assertEqual(source.pub_items(), 1)
         self.assertEqual(source.indexing(), (1, 0))
 
+    def test_indexing_across_a_comment_counts(self):
+        # Each operand kind, then block, nested, doc and line comments before `[`.
+        src = (
+            "fn f(v: &[u8], i: usize) -> u8 {\n"
+            "    let a = v /* element */ [i];\n"
+            "    let b = f(v, i) /* a /* b */ */ [..i];\n"
+            "    let c = v[0] /** doc */ [1..];\n"
+            '    let d = b"ab" /* c */ [i];\n'
+            "    let e = v.get(i)? /* c */ /* d */ [0];\n"
+            "    let g = v // line\n"
+            "        [i];\n"
+            "    a + e + g\n"
+            "}\n"
+        )
+        self.assertEqual(ratchets.Source(src).indexing(), (5, 2))
+
+    def test_a_comment_before_an_array_or_slice_pattern_is_not_indexing(self):
+        # A keyword or punctuation before the comment starts a literal, type or pattern.
+        src = (
+            "fn f(v: &mut /* c */ [u8]) -> /* c */ [u8; 2] {\n"
+            "    let /* c */ [a, b] = [1, 2];\n"
+            "    let x = /* c */ [a, b];\n"
+            "    for y in /* c */ [a, b] {}\n"
+            "    match /* c */ [a, b] { _ => {} }\n"
+            "    if let /* c */ [_] = v {}\n"
+            "    return /* c */ [a, b];\n"
+            "}\n"
+        )
+        self.assertEqual(ratchets.Source(src).indexing(), (0, 0))
+
+    def test_every_keyword_that_starts_an_array_type_or_pattern_after_a_comment(self):
+        # Each keyword rustfmt can leave before a comment and then `[`: none is an operand.
+        src = (
+            "impl<T> Tr for /* c */ [T] where /* c */ [T; 1]: Sized {}\n"
+            "fn f(p: *const /* c */ [u8], q: *mut /* c */ [u8]) {\n"
+            "    for /* rows */ [a, b] in [[1, 2]] {}\n"
+            "    while let /* c */ [_] = [0] { break /* c */ [0]; }\n"
+            "    let _ = loop { break /* c */ [1]; };\n"
+            "    if /* c */ [1] == [1] {}\n"
+            "    match /* c */ [1] { /* c */ [_] => {} }\n"
+            "    const /* c */ X: [u8; 1] = [0];\n"
+            "}\n"
+        )
+        self.assertEqual(ratchets.Source(src).indexing(), (0, 0))
+
+    def test_a_raw_identifier_spelled_as_a_keyword_is_an_operand(self):
+        # `r#match` is a variable, not the keyword, with or without a comment.
+        src = (
+            "fn f(i: usize) -> u8 {\n"
+            "    let r#match = [1, 2];\n"
+            "    let r#for = [1, 2];\n"
+            "    let a = r#match[i];\n"
+            "    let b = r#for /* c */ [i];\n"
+            "    let c = &r#in[..i];\n"
+            "    let d = r#let /* c */ [1..];\n"
+            "    a + b\n"
+            "}\n"
+        )
+        self.assertEqual(ratchets.Source(src).indexing(), (2, 2))
+
+    def test_a_lifetime_or_label_before_a_comment_is_not_an_operand(self):
+        # A lifetime starts a slice type and a label a break value; neither is indexed.
+        src = (
+            "pub fn f(v: &'static /* bytes */ [u8]) {}\n"
+            "fn g<'a>(v: &'a /* c */ [u8], w: &'a1 /* c */ [u8]) {}\n"
+            "fn h() -> [u8; 1] {\n"
+            "    'out: loop { break 'out /* result */ [1]; }\n"
+            "}\n"
+        )
+        self.assertEqual(ratchets.Source(src).indexing(), (0, 0))
+
+    def test_an_attribute_before_a_comment_is_not_an_operand(self):
+        # An attribute's `]` ends the attribute, so the `[` after the comment starts
+        # a pattern or an array, however deeply the attribute nests its brackets.
+        src = (
+            "fn f(v: [u8; 2]) {\n"
+            "    match v { #[allow(unused_variables)] /* row */ [a, b] => {} }\n"
+            "    match v { #[cfg_attr(all(), allow(unused))] /* c */ [a, _] => {} }\n"
+            '    #[doc = "x[1]"] /* c */ [1, 2];\n'
+            "    #[rustfmt::skip] /* c */ [1, 2];\n"
+            "    let _ = vec![#[allow(unused)] /* c */ [1]];\n"
+            "}\n"
+        )
+        self.assertEqual(ratchets.Source(src).indexing(), (0, 0))
+
+    def test_a_bracket_that_closes_an_expression_before_a_comment_is_an_operand(self):
+        # Only an attribute's `]` is excluded: an array or an index still gets indexed.
+        src = (
+            "fn f(x: [[u8; 2]; 2], i: usize) -> u8 {\n"
+            "    let a = [1, 2] /* c */ [i];\n"
+            "    let b = x[0] /* c */ [1];\n"
+            "    let c = &x[0] /* c */ [..i];\n"
+            "    a + b\n"
+            "}\n"
+        )
+        self.assertEqual(ratchets.Source(src).indexing(), (4, 1))
+
+    def test_marking_a_comment_keeps_its_lines(self):
+        marked = ratchets.strip("a /* x\ny */ b // z\n", mark=True)
+        self.assertEqual(marked, "a " + "\x01" * 4 + "\n" + "\x01" * 4 + " b " + "\x01" * 4 + "\n")
+
     def test_marking_an_unterminated_string_keeps_its_lines(self):
         self.assertEqual(ratchets.strip('x = "a\n', mark=True), "x =   \n")
 

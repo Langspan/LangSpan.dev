@@ -1,6 +1,6 @@
 //! Prompt analysis: what a hook takes from the owner's prompt (its summary,
 //! line digests, candidate identifiers and qualifiers). Pure text handling.
-use super::redact::redact;
+use crate::redact::redact;
 use crate::sha256;
 use crate::text::{SUMMARY_LIMIT, clean};
 

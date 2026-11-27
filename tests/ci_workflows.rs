@@ -1129,18 +1129,18 @@ fn coverage_drops_test_only_items_that_integration_tests_compile() {
     assert_eq!(again, prepared);
     let _ = fs::remove_dir_all(&dir);
 
-    // tests/parser_properties.rs includes src/hook/redact.rs: from its first
+    // tests/parser_properties.rs includes src/text/redact.rs: from its first
     // #[cfg(test)] to the end, only the blank lines between test items stay.
     let dir = temp_dir("coverage-redact");
-    let text = read("src/hook/redact.rs");
+    let text = read("src/text/redact.rs");
     let source: Vec<&str> = text.lines().collect();
     let first = 1 + source.iter().position(|l| *l == "#[cfg(test)]").unwrap();
-    fs::create_dir_all(dir.join("src/hook")).unwrap();
-    fs::write(dir.join("src/hook/redact.rs"), &text).unwrap();
-    let measured = [Measured("src/hook/redact.rs", source.len(), 0, 0)];
+    fs::create_dir_all(dir.join("src/text")).unwrap();
+    fs::write(dir.join("src/text/redact.rs"), &text).unwrap();
+    let measured = [Measured("src/text/redact.rs", source.len(), 0, 0)];
     let out = coverage_fixture(&dir, &measured, "");
     let prepared = fs::read_to_string(out.join("production.lcov")).unwrap();
-    let kept = kept_lines(&prepared, "src/hook/redact.rs");
+    let kept = kept_lines(&prepared, "src/text/redact.rs");
     let (before, after): (Vec<usize>, Vec<usize>) = kept.iter().partition(|&&n| n < first);
     assert_eq!(before, (1..first).collect::<Vec<_>>());
     assert!(

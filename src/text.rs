@@ -1,4 +1,6 @@
 //! Text for people: cleaned, quoted and cut peer text, and ages.
+pub(crate) mod redact;
+
 pub(crate) const SUMMARY_LIMIT: usize = 200;
 
 /// Characters that can forge a line break or reorder what a reader sees.

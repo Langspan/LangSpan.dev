@@ -1,6 +1,4 @@
 pub	28
 slice	2
 edge	commit
-edge	git
 edge	reformat
-edge	shell
