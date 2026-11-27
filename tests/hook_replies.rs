@@ -338,6 +338,12 @@ folders! {
     cursor_constructed => "cursor-constructed",
 }
 
+/// The folders of `fixtures/` that hold no host's hook events.
+const OTHER_FOLDERS: [&str; 1] = [
+    // Protocol capability vectors, pinned in `tests/protocol.rs`.
+    "capabilities",
+];
+
 /// The goldens in `tests/golden/hook/` that are not a fixtures folder's.
 const OTHER_GOLDENS: [&str; 3] = [
     "shell-write-targets.txt",
@@ -359,10 +365,12 @@ fn every_recorded_event_has_a_golden_reply_and_no_reply_outlives_its_event() {
         names.sort();
         names
     };
+    let mut folders: Vec<&str> = FOLDERS.iter().copied().chain(OTHER_FOLDERS).collect();
+    folders.sort();
     assert_eq!(
         names(fixtures(), Path::is_dir),
-        FOLDERS,
-        "add each new fixtures folder to `folders!`"
+        folders,
+        "add each new fixtures folder of hook events to `folders!`, any other to `OTHER_FOLDERS`"
     );
     let goldens = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/hook");
     let mut expected: Vec<String> = FOLDERS
