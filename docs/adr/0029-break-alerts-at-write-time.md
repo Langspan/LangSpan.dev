@@ -324,9 +324,13 @@ Any failure is a note in the diagnostic, never a decision.
   from its `HEAD` and mention a name (a name match, at most
   `NOTICE_DEPENDENTS` per worktree and name, at most 8 worktrees), with the
   worktree's live sessions. Nothing is recorded. A daemon without the
-  capability is asked about the calls only. The hook does not send
-  `renamed` yet; holding the write once on that answer is the next part of
-  #213.
+  capability is asked about the calls only. The Claude Code and Codex
+  file-tool hooks send `renamed` before admission. When the answer lists
+  callers, the hook holds the write once per session, file and name (coverage
+  `held_rename`), and the reason suggests a forwarding alias; repeating the
+  write goes through. With no callers, or when the check fails, the write goes
+  on to admission
+  ([ADR 0035's amendment](0035-semantic-layer.md)).
 - Not observed on a host: the alert reaching a real Codex or Cursor model, or a model changing its call because of it. A Claude Code
   alert reaching the model has been seen once and is not yet in the
   repository's evidence.

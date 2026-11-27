@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "LangSpan coordination benchmark run record v7",
-  "description": "One record per driver run: one arm, task family, session count and seed, including a run the preflight check refused. A value the run did not measure is null, never zero. The runner's raw journal (runner/runs.jsonl) holds the per-command detail. v2: isolated clones, tasks_accepted in place of tasks_completed, no contradictions_reported (notes are evidence, not a verdict), split permission denials, session cost, duration and turns, coordinator scans, the requested model, ignored options and the refused status. v3: worktrees of one repository and one coordinator in the langspan arm (isolation), the tool guard's verdict (tool_check), figures summed over every result line of a session (results, turns), peer_checkout denials, interface notices per session, and the hedge stand-in mode. v4: the discovered_change family (roles changer and dependent), the stagger (stagger_s), auto memory (auto_memory) and, per task, whether an interface notice came before the session's first write (notice_before_write). v5: whether the changer made the interface change (interface_change), with dependents not judged when it did not, and the workaround stand-in mode. v6: the repair round of a trial whose combined result failed (repair), and the cost to a correct result (cost): the run's, the repair's and the total figures, and the cost per accepted task. v7: the context LangSpan's hooks added to the sessions (context_added), per task and per trial, in bytes and estimated tokens per turn.",
+  "title": "LangSpan coordination benchmark run record v8",
+  "description": "One record per driver run: one arm, task family, session count and seed, including a run the preflight check refused. A value the run did not measure is null, never zero. The runner's raw journal (runner/runs.jsonl) holds the per-command detail. v2: isolated clones, tasks_accepted in place of tasks_completed, no contradictions_reported (notes are evidence, not a verdict), split permission denials, session cost, duration and turns, coordinator scans, the requested model, ignored options and the refused status. v3: worktrees of one repository and one coordinator in the langspan arm (isolation), the tool guard's verdict (tool_check), figures summed over every result line of a session (results, turns), peer_checkout denials, interface notices per session, and the hedge stand-in mode. v4: the discovered_change family (roles changer and dependent), the stagger (stagger_s), auto memory (auto_memory) and, per task, whether an interface notice came before the session's first write (notice_before_write). v5: whether the changer made the interface change (interface_change), with dependents not judged when it did not, and the workaround stand-in mode. v6: the repair round of a trial whose combined result failed (repair), and the cost to a correct result (cost): the run's, the repair's and the total figures, and the cost per accepted task. v7: the context LangSpan's hooks added to the sessions (context_added), per task and per trial, in bytes and estimated tokens per turn. v8: in discovered_change, the stale-name writes admitted and the time from the change to the last stale caller fixed (stale_callers), from the sessions' transcripts and the oracle's definitions.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -9,12 +9,12 @@
     "dry_run", "status", "started_at", "elapsed_s", "total_elapsed_s", "time_limit_s",
     "ignored_options", "isolation", "stagger_s", "auto_memory", "tool_check", "versions", "tasks", "tasks_total",
     "tasks_accepted",
-    "integrated_tests", "interface_change", "merge_conflicts", "semantic_conflicts", "duplicate_work", "stops", "questions",
+    "integrated_tests", "interface_change", "stale_callers", "merge_conflicts", "semantic_conflicts", "duplicate_work", "stops", "questions",
     "permission_denials", "cost_usd", "turns", "refusals", "coordinator_scans", "context_added", "tokens", "repair", "cost",
     "evidence"
   ],
   "properties": {
-    "schema_version": {"const": 7},
+    "schema_version": {"const": 8},
     "record_type": {"const": "coordination_run"},
     "run_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
     "arm": {"enum": ["worktrees", "awareness_only", "langspan"]},
@@ -120,6 +120,34 @@
     "interface_change": {
       "description": "discovered_change: made when the changer's own branch defines the helper in its changed, required form; change_not_made when it does not, and then no dependent is judged (completed and accepted null); unknown when the oracle did not run. not_applicable in the other families.",
       "enum": ["made", "change_not_made", "unknown", "not_applicable"]
+    },
+    "stale_callers": {
+      "description": "discovered_change (stale_callers.py): from the changer's first admitted write that changes the helper, each admitted dependent write that leaves a call in the old form (writes_admitted), the dependent files with one (stale_files), those still stale at the session's end (unfixed), and the seconds from the change to the last stale caller fixed (fixed_after_s, null when none was stale or one stays stale). Each item is one file becoming stale at the change or by a write, or being fixed. unknown, with a reason, when a transcript or a clock line is missing or a committed file is not what the replayed Write and Edit calls left; not_applicable in other families and when the change was not made.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": {
+        "status": {"enum": ["reported", "unknown", "not_applicable"]},
+        "reason": {"type": "string"},
+        "writes_admitted": {"type": "integer", "minimum": 0},
+        "stale_files": {"type": "integer", "minimum": 0},
+        "unfixed": {"type": "integer", "minimum": 0},
+        "fixed_after_s": {"type": ["number", "null"], "minimum": 0},
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["session", "path", "after_s", "kind"],
+            "properties": {
+              "session": {"type": "integer", "minimum": 1},
+              "path": {"type": "string"},
+              "after_s": {"type": "number", "minimum": 0},
+              "kind": {"enum": ["stale_at_change", "stale_write", "fixed"]}
+            }
+          }
+        }
+      }
     },
     "merge_conflicts": {
       "type": "array",
