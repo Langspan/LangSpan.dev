@@ -10,7 +10,15 @@ docs/development-process.md#ratchets.
 Each measured file may have a baseline, scripts/ratchets/baseline/<file>.tsv,
 with tab-separated rows: `lines N`, `pub N`, `index N`, `slice N` (the last
 three summed per crate), `fn NAME N` and, in a module's root file of the
-`langspan` crate, `edge MODULE`. Only production code is
+`langspan` crate, `edge MODULE`. In that crate each namespace of
+scripts/ratchets/namespaces.tsv (a top-level module of src/), and each file with
+a role, is a node; paths through `crate::`, `super::`, `self::`, child modules
+and lib.rs's compatibility aliases name nodes, and an edge row may name a node
+or an alias. An edge in a cycle, pointing outward, between namespaces of one
+layer without an `allow` row, outside an `only` list or from a pipeline file to
+an adapter beside it fails without an edge row; so does a top-level file that
+isn't a namespace, a file deeper than src/<namespace>/<sub>/<file>.rs and an
+alias nothing uses. Only production code is
 measured: `#[cfg(test)]` items and files outside `src/` are skipped. The
 scanner is lexical, not a Rust parser; it is exact for rustfmt-formatted code.
 """
@@ -23,6 +31,10 @@ MAX_FN_LINES = 150
 BASELINE_DIR = os.path.join("scripts", "ratchets", "baseline")
 LAYERS = ("utility", "infrastructure", "application", "interface")
 LAYER_MARK = re.compile(r"^//\s*layer:\s*(\S*)\s*$", re.M)
+NAMESPACES = "scripts/ratchets/namespaces.tsv"
+ROLES = ("adapter", "feature")
+ROLE_MARK = re.compile(r"^//\s*role:\s*(\S*)\s*$", re.M)
+MAX_DEPTH = 3  # src/<namespace>/<sub>/<file>.rs
 FIX = (
     "split it, or justify the growth in the pull request and run "
     "`python3 -I -B scripts/ratchets.py --record {path}`"
@@ -292,6 +304,8 @@ class Workspace:
             if os.path.isfile(os.path.join(crates, d, "Cargo.toml"))
         )
         self.root_crate = _crate_name(os.path.join(root, "Cargo.toml"))
+        self.paths = []  # every .rs file of the root crate's src/, tests included
+        self.roles = {}  # "namespace::file" -> adapter or feature
         tests = set()
         for d in dirs:
             crate = _crate_name(os.path.join(root, d, "Cargo.toml"))
@@ -303,7 +317,11 @@ class Workspace:
                         continue
                     path = os.path.relpath(os.path.join(here, f), root).replace(os.sep, "/")
                     with open(os.path.join(root, path), encoding="utf-8") as fh:
-                        source = Source(fh.read())
+                        text = fh.read()
+                    source = Source(text)
+                    if crate == self.root_crate:
+                        self.paths.append(path)
+                        self._role_mark(path, text)
                     self.sources[path] = source
                     self.crate_of[path] = crate
                     parent = path[:-3] if f not in ("lib.rs", "main.rs", "mod.rs") else os.path.dirname(path)
@@ -312,82 +330,247 @@ class Workspace:
         for path in tests:
             self.sources.pop(path, None)
             self.crate_of.pop(path, None)
-        self._edges = None
+        self.ns = load_namespaces(root)
+        self.roles.update(self.ns.roles if self.ns else {})
+        self.modules = {_module_path(p)[0] for p in self.sources if self._in_src(p) and _module_path(p)}
+        lib = self.sources.get("src/lib.rs")
+        self.aliases = {}  # name -> the module path it stands for, from lib.rs's `use` lines
+        for m in _ALIAS.finditer(lib.text if lib else ""):
+            segs = m.group(1).split("::")
+            if segs[0] in self.modules:
+                self.aliases[m.group(2) or segs[-1]] = segs
+        self.used = set()  # aliases a path resolved through
+        self._edges, self._layers = None, {}
 
-    # Modules of the root crate: a top-level file of src/ with its submodules.
-    def module_of(self, path):
-        if self.crate_of.get(path) != self.root_crate or not path.startswith("src/"):
+    def _in_src(self, path):
+        return self.crate_of.get(path) == self.root_crate and path.startswith("src/")
+
+    def _role_mark(self, path, text):
+        m = ROLE_MARK.search(text)
+        if not m:
+            return
+        parts = _module_path(path)
+        if len(parts) != 2 or m.group(1) not in ROLES:
+            raise RatchetError(
+                f"{path}: a `// role:` marker is `adapter` or `feature`, in "
+                f"src/<namespace>/<file>.rs; got {m.group(1)!r}"
+            )
+        self.roles["::".join(parts)] = m.group(1)
+
+    def _node(self, segs):
+        """The node a module path belongs to: a role file, else its namespace."""
+        if not segs or segs[0] not in self.modules:
             return None
-        top = path.split("/")[1]
-        name = top[:-3] if top.endswith(".rs") else top
-        return None if name == "lib" else name
+        return "::".join(segs[:2]) if "::".join(segs[:2]) in self.roles else segs[0]
+
+    def resolve(self, segs, use=True):
+        """The node of a crate path, through lib.rs's compatibility aliases."""
+        if segs and segs[0] in self.aliases:
+            self.used.update([segs[0]] if use else [])
+            segs = self.aliases[segs[0]] + list(segs[1:])
+        return self._node(segs)
+
+    # Nodes of the root crate: namespaces (top-level files of src/ with their
+    # submodules) and the files with a role.
+    def module_of(self, path):
+        return self._node(_module_path(path)) if self._in_src(path) else None
 
     def module_root(self, module):
-        for path in (f"src/{module}.rs", f"src/{module}/mod.rs"):
+        base = "src/" + module.replace("::", "/")
+        for path in (base + ".rs", base + "/mod.rs"):
             if path in self.sources:
                 return path
         return None
 
     def edges(self):
-        """{module: set of modules it names}, from `crate::` (and `langspan::` in main)."""
+        """{node: set of nodes it names}, from crate, super, self and child-module
+        paths (`crate::` and `langspan::` only in main)."""
         if self._edges is not None:
             return self._edges
-        modules = {m for m in map(self.module_of, self.sources) if m}
-        edges = {m: set() for m in modules}
+        edges = {n: set() for n in self.modules | set(self.roles)}
         for path, source in self.sources.items():
-            module = self.module_of(path)
-            if not module:
+            node = self.module_of(path)
+            if not node:
                 continue
-            prefixes = "crate|langspan" if module == "main" else "crate"
-            for name in _named_modules(source.text, prefixes):
-                if name in modules and name != module:
-                    edges[module].add(name)
+            if node == "main":
+                paths = named_paths(source.text, None, (), ("crate", "langspan"))
+            else:
+                paths = named_paths(source.text, _module_path(path), _CHILD.findall(source.text))
+            for segs in paths:
+                target = self.resolve(segs)
+                if target and target != node:
+                    edges[node].add(target)
         self._edges = edges
         return edges
 
     def layer(self, module):
+        """A namespace's layer: its namespaces.tsv row, else its `// layer:` marker."""
+        if self.ns and self.ns.layer.get(module):
+            return self.ns.layer[module]
+        if module in self._layers:
+            return self._layers[module]
         path = self.module_root(module)
         with open(os.path.join(self.root, path), encoding="utf-8") as f:
             m = LAYER_MARK.search(f.read())
-        if not m:
-            return None
-        if m.group(1) not in LAYERS:
+        if m and m.group(1) not in LAYERS:
             raise RatchetError(
                 f"{path}: unknown layer {m.group(1)!r} in its `// layer:` marker; "
                 f"use one of {', '.join(LAYERS)}"
             )
-        return m.group(1)
+        self._layers[module] = m.group(1) if m else None
+        return self._layers[module]
+
+    def _reason(self, a, b, component):
+        """Why the edge a -> b is debt, or None."""
+        na, nb = a.split("::")[0], b.split("::")[0]
+        la, lb = self.layer(na), self.layer(nb)
+        if component[a] == component[b]:
+            return "cycle"
+        if la and lb and LAYERS.index(la) < LAYERS.index(lb):
+            return f"outward ({la} -> {lb})"
+        if na == nb and self.roles.get(b) == "adapter" and self.roles.get(a) != "adapter":
+            return f"adapter (a pipeline may not name {b})"
+        if not self.ns or na == nb:
+            return None
+        if nb in self.ns.only and na not in self.ns.only[nb]:
+            return f"only-list ({nb} is imported only from {', '.join(sorted(self.ns.only[nb]))})"
+        if la and la == lb and (na, nb) not in self.ns.allow:
+            return f"same-layer ({la}, no `allow {na} {nb}` row)"
+        return None
 
     def debt(self):
-        """{module: {target: reason}} for edges in a cycle or pointing outward."""
+        """{node: {target: reason}} for edges that break namespaces.tsv or the layers."""
         edges = self.edges()
         component = _components(edges)
-        layers = {m: self.layer(m) for m in edges}
+        for module in sorted(self.modules):  # a bad marker fails even without an edge
+            self.layer(module)
         out = {}
         for a, targets in edges.items():
             for b in targets:
-                if component[a] == component[b]:
-                    out.setdefault(a, {})[b] = "cycle"
-                elif layers[a] and layers[b] and LAYERS.index(layers[a]) < LAYERS.index(layers[b]):
-                    out.setdefault(a, {})[b] = f"outward ({layers[a]} -> {layers[b]})"
+                reason = self._reason(a, b, component)
+                if reason:
+                    out.setdefault(a, {})[b] = reason
         return out
 
+    def layout(self):
+        """Failures of the layout: depth, top-level files and unused aliases."""
+        failures, tops = [], {}
+        for path in self.paths:
+            parts = path.split("/")
+            if len(parts) > MAX_DEPTH + 1:
+                failures.append(f"{path}: deeper than src/<namespace>/<sub>/<file>.rs; "
+                                f"move it up into {'/'.join(parts[:MAX_DEPTH])}/")
+            name = parts[1][:-3] if len(parts) == 2 else parts[1]
+            if name not in ("lib", "main"):
+                tops.setdefault(name, self.module_root(name) or path)
+        if self.ns:
+            for name in sorted(set(tops) - set(self.ns.layer)):
+                failures.append(
+                    f"{tops[name]}: {name} is not a namespace in {NAMESPACES}; move it into a "
+                    "namespace (git mv, with a re-export in lib.rs's compatibility block) or "
+                    f"add a `namespace {name} LAYER` row"
+                )
+            for name in sorted(set(self.ns.layer) - set(tops)):
+                failures.append(f"{NAMESPACES}: namespace {name} has no src/{name}.rs or "
+                                f"src/{name}/mod.rs; delete its rows")
+            for role in sorted(r for r in self.ns.roles if not self.module_root(r)):
+                failures.append(f"{NAMESPACES}: role {role} has no src/{role.replace('::', '/')}.rs; "
+                                "delete its row")
+        # Users of an alias: every file of the root crate, unit tests and lib.rs
+        # included (where an alias is also a bare path head), and tests/.
+        for path in self.paths:
+            with open(os.path.join(self.root, path), encoding="utf-8") as fh:
+                text = strip(fh.read())
+            module = _module_path(path)
+            if module == ["main"]:
+                paths = named_paths(text, None, (), ("crate", "langspan"))
+            else:
+                children = _CHILD.findall(text) + ([] if module else list(self.aliases))
+                paths = named_paths(text, module, children)
+            for segs in paths:
+                self.resolve(segs)
+        for here, _, files in os.walk(os.path.join(self.root, "tests")):
+            for f in (f for f in files if f.endswith(".rs")):
+                with open(os.path.join(here, f), encoding="utf-8") as fh:
+                    for segs in named_paths(strip(fh.read()), None, (), ("langspan",)):
+                        self.resolve(segs)
+        for name in sorted(set(self.aliases) - self.used):
+            failures.append(f"src/lib.rs: compatibility alias {name} "
+                            f"({'::'.join(self.aliases[name])}) has no users; delete it")
+        return failures
 
-def _named_modules(text, prefixes):
-    for m in re.finditer(r"\b(?:%s)::(\w+)" % prefixes, text):
-        yield m.group(1)
-    for m in re.finditer(r"\b(?:%s)::\{" % prefixes, text):
-        i, depth, current = m.end(), 1, ""
-        while i < len(text) and depth:
-            c = text[i]
-            depth += {"{": 1, "}": -1}.get(c, 0)
-            if depth == 1 and c == ",":
-                yield from re.findall(r"^\s*(\w+)", current)
-                current = ""
-            elif depth >= 1:
-                current += c
-            i += 1
-        yield from re.findall(r"^\s*(\w+)", current)
+
+def _module_path(path):
+    """The module path of a file under src/: src/a/b.rs and src/a/b/mod.rs are a::b."""
+    parts = path[len("src/") : -len(".rs")].split("/")
+    if parts[-1] == "mod":
+        parts.pop()
+    return [] if parts == ["lib"] else parts
+
+
+_ALIAS = re.compile(r"^[ \t]*(?:pub(?:\([^)]*\))?\s+)?use\s+(\w+(?:::\w+)+)(?:\s+as\s+(\w+))?\s*;", re.M)
+_CHILD = re.compile(r"^[ \t]*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;", re.M)
+_INLINE_MOD = re.compile(r"\bmod\s+(\w+)\s*\{")
+_PATH_HEAD = re.compile(r"(?<![\w:])\$?(\w+)\s*::\s*")
+_WORD = re.compile(r"(\w+)\s*")
+_RENAME = re.compile(r"as\s+\w+\s*")
+_SPACE = re.compile(r"\s*")
+_SEPARATOR = re.compile(r"[\s,]*")
+
+
+def _use_tree(text, i):
+    """([segments...] for each path of the use tree at i, the offset after it)."""
+    i = _SPACE.match(text, i).end()
+    if text.startswith("{", i):
+        out, i = [], i + 1
+        while i < len(text) and not text.startswith("}", i):
+            sub, j = _use_tree(text, i)
+            out += sub
+            i = _SEPARATOR.match(text, max(j, i + 1)).end()
+        return out, i + 1
+    m = _WORD.match(text, i)
+    if not m:
+        return [[]], i
+    if text.startswith("::", m.end()):
+        subs, i = _use_tree(text, m.end() + 2)
+        return [[m.group(1)] + s for s in subs], i
+    rename = _RENAME.match(text, m.end())  # `b as c` names b; c is a new local name
+    return [[m.group(1)]], rename.end() if rename else m.end()
+
+
+def named_paths(text, module_path, children, prefixes=("crate",)):
+    """The first two segments of each crate-absolute module path text names.
+
+    A path starts at one of prefixes or, with a module_path, at `super`, `self`
+    or (outside an inline module) one of the file's child modules. `super` and
+    `self` start from the inline `mod name { ... }` blocks around them. A `self`
+    in a group names its parent.
+    """
+    consumed = 0
+    scopes = [(m.end() - 1, _matching_brace(text, m.end() - 1), m.group(1))
+              for m in _INLINE_MOD.finditer(text)]
+    for m in _PATH_HEAD.finditer(text):
+        head = m.group(1)
+        if m.start() < consumed:
+            continue
+        scope = [name for start, end, name in scopes if start < m.start() < end]
+        if head in prefixes:
+            out = []
+        elif module_path is not None and (head in ("super", "self") or head in children and not scope):
+            out = list(module_path) + scope + ([head] if head in children and not scope else [])
+            out = out[:-1] if head == "super" else out
+        else:
+            continue
+        trees, consumed = _use_tree(text, m.end())
+        for segs in trees:
+            path = list(out)
+            for seg in segs:
+                if seg == "super":
+                    path = path[:-1]
+                elif seg != "self":
+                    path.append(seg)
+            if path:
+                yield tuple(path[:2])
 
 
 def _components(edges):
@@ -478,6 +661,54 @@ def parse_baseline(text, where):
     return b
 
 
+class Namespaces:
+    def __init__(self):
+        self.layer, self.allow, self.only, self.roles = {}, set(), {}, {}
+
+
+def parse_namespaces(text, where):
+    """namespaces.tsv rows: `namespace NAME LAYER` (`-` for none yet), `allow FROM TO`
+    (a same-layer edge), `only TARGET IMPORTER...` and `role NAMESPACE::FILE ROLE`."""
+    ns, named = Namespaces(), []
+    for number, line in enumerate(text.split("\n"), 1):
+        row, at = line.split(), f"{where}:{number}"
+        if not row or row[0].startswith("#"):
+            continue
+        if row[0] == "namespace" and len(row) == 3:
+            if row[2] not in (*LAYERS, "-"):
+                raise RatchetError(f"{at}: unknown layer {row[2]!r}; use one of {', '.join(LAYERS)}, or -")
+            ns.layer[row[1]] = None if row[2] == "-" else row[2]
+        elif row[0] == "allow" and len(row) == 3:
+            ns.allow.add((row[1], row[2]))
+            named += [(at, row[1]), (at, row[2])]
+        elif row[0] == "only" and len(row) >= 3:
+            ns.only[row[1]] = set(row[2:])
+            named += [(at, n) for n in row[1:]]
+        elif row[0] == "role" and len(row) == 3 and row[1].count("::") == 1:
+            if row[2] not in ROLES:
+                raise RatchetError(f"{at}: unknown role {row[2]!r}; use one of {', '.join(ROLES)}")
+            ns.roles[row[1]] = row[2]
+            named.append((at, row[1].split("::")[0]))
+        else:
+            raise RatchetError(
+                f"{at}: expected `namespace NAME LAYER`, `allow FROM TO`, `only TARGET "
+                f"IMPORTER...` or `role NAMESPACE::FILE ROLE`; got {line!r}"
+            )
+    for at, name in named:
+        if name not in ns.layer and name != "main":
+            raise RatchetError(f"{at}: {name} is not a namespace; add a `namespace {name} LAYER` row")
+    return ns
+
+
+def load_namespaces(root):
+    """The parsed namespaces.tsv, or None in a workspace without one."""
+    path = os.path.join(root, NAMESPACES)
+    if not os.path.exists(path):
+        return None
+    with open(path, encoding="utf-8") as f:
+        return parse_namespaces(f.read(), NAMESPACES)
+
+
 def load_baselines(root):
     base, out = os.path.join(root, BASELINE_DIR), {}
     for here, _, files in os.walk(base):
@@ -560,17 +791,22 @@ def check(root):
     debt = ws.debt()
     for module in sorted(ws.edges()):
         path = ws.module_root(module)
-        allowed = set().union(*(baselines[p].edges for p in ws.sources if ws.module_of(p) == module and p in baselines))
+        if not path:
+            continue
+        rows = set().union(*(baselines[p].edges for p in ws.sources if ws.module_of(p) == module and p in baselines))
+        # A row names a node, or a module that an alias in lib.rs now stands for.
+        allowed = {r: ws.resolve(r.split("::"), use=False) for r in rows}
         for target, reason in sorted(debt.get(module, {}).items()):
-            if target not in allowed:
+            if target not in allowed.values():
                 failures.append(
                     f"{path}: module {module} now depends on {target}, a new {reason} edge. "
                     f"Move the shared item to a lower module, or justify the edge in the pull "
                     f"request and run `python3 -I -B scripts/ratchets.py --record {path}`"
                 )
-        for target in sorted(allowed - set(debt.get(module, {}))):
-            improvements.append(f"{path}: edge {module} -> {target} is no longer a cycle or outward; "
+        for row in sorted(r for r, node in allowed.items() if node not in debt.get(module, {})):
+            improvements.append(f"{path}: edge {module} -> {row} is no longer debt; "
                                 + TIGHTEN.format(path=path))
+    failures += ws.layout()
     for path in sorted(set(baselines) - set(ws.sources)):
         improvements.append(f"{path}: no longer measured; {TIGHTEN.format(path=path)} to delete its baseline")
     return failures, improvements
@@ -599,7 +835,8 @@ def tighten(root, path):
         mine = getattr(b, metric)
         setattr(b, metric, mine - max(0, min(mine - source.count(metric), allowed - actual)))
     module = ws.module_of(path)
-    b.edges &= set(ws.debt().get(module, {})) if module else set()
+    debt = ws.debt().get(module, {}) if module else {}
+    b.edges = {r for r in b.edges if ws.resolve(r.split("::"), use=False) in debt}
     save_baseline(root, path, b)
 
 
