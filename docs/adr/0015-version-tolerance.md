@@ -20,7 +20,9 @@ Two places read data that another build of LangSpan wrote:
 
 **Events stay fail-closed.** Events are the state; replaying around one that
 does not parse would build a state that never existed. A store whose events do
-not all parse does not open, and says which sequence failed.
+not all parse does not open, and says which sequence failed. When the store
+records a newer build than this one, it names that build in one line instead
+([ADR 0038](0038-store-rollback.md)).
 
 **Receipts that do not parse are skipped.** A receipt only answers a retry of
 its own request. One this build cannot read is counted at open, logged once to

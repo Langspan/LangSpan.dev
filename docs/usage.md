@@ -3106,8 +3106,16 @@ LangSpan never downloads or replaces its own binary and makes no update
 check. Upgrade with a new release archive, checked as in
 [Verify the binary](install.md#verify-a-download), or by rebuilding from
 source; roll back by keeping the previous archive. `brew upgrade langspan`
-applies once the Homebrew tap is published. The store stays readable by the
-earlier build while the schema marker is unchanged.
+applies once the Homebrew tap is published. The earlier build reads the
+store only until the later one records an event kind or field it doesn't
+know, which can happen within minutes. From then on an earlier build that
+has [ADR 0038](adr/0038-store-rollback.md) refuses with one line naming the
+build to start instead; releases up to 0.5.1 stop with
+`invalid persisted event at sequence N`. Either start the later build again,
+or stop the coordinator and move the state directory aside, which starts an
+empty store and keeps the old history in the moved directory. A
+`config.json` key the earlier build doesn't know also stops it; remove the
+key. [ADR 0038](adr/0038-store-rollback.md) is the compatibility policy.
 
 After an upgrade, a coordinator started before it keeps running the old
 binary while hooks start the new one. `langspan doctor` asks the coordinator

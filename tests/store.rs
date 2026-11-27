@@ -635,6 +635,76 @@ fn malformed_events_fail_closed_instead_of_resetting_history() {
     open_fails_without_appending(&database.path());
 }
 
+/// The newest build that wrote to the store, as `open` records it (ADR 0038).
+fn newest_writer(database: &Database) -> String {
+    database
+        .connection()
+        .query_row("SELECT version FROM newest_writer", [], |row| row.get(0))
+        .unwrap()
+}
+
+/// Rollback (ADR 0038): a later build records itself and an event kind this
+/// build has no variant for. This build, playing the earlier one, refuses
+/// with one line naming the build that can read the store.
+#[test]
+fn an_earlier_build_refuses_a_newer_store_with_one_line_naming_the_build_needed() {
+    let database = Database::new();
+    {
+        let mut store = Store::open(&database.path()).unwrap();
+        register(&mut store);
+    }
+    database
+        .connection()
+        .execute_batch(
+            r#"UPDATE newest_writer SET version = '99.1.0';
+               INSERT INTO events (event_json, recorded_at_ms)
+               VALUES ('{"type":"a_kind_from_a_newer_build"}', 0);"#,
+        )
+        .unwrap();
+    let connection = database.connection();
+    let before = event_count(&connection);
+    let error = Store::open(&database.path())
+        .err()
+        .expect("an earlier build refuses the store")
+        .to_string();
+    assert_eq!(event_count(&connection), before, "the refusal appended");
+    assert!(!error.contains('\n'), "{error}");
+    assert!(!error.contains("unknown variant"), "{error}");
+    for part in [
+        "LangSpan 99.1.0".to_string(),
+        format!("this build ({})", env!("CARGO_PKG_VERSION")),
+        "move the state directory aside".to_string(),
+    ] {
+        assert!(error.contains(&part), "{part:?} missing from: {error}");
+    }
+    assert_eq!(newest_writer(&database), "99.1.0");
+}
+
+/// An earlier build that can read every event opens the store, and the
+/// marker still names the newest build; an older marker is raised.
+#[test]
+fn the_newest_writer_is_kept_by_an_earlier_build_and_raised_by_a_later_one() {
+    for (marked, expected) in [
+        ("99.1.0", "99.1.0"),
+        ("0.0.1", env!("CARGO_PKG_VERSION")),
+        ("not a version", env!("CARGO_PKG_VERSION")),
+    ] {
+        let database = Database::new();
+        {
+            let mut store = Store::open(&database.path()).unwrap();
+            register(&mut store);
+        }
+        database
+            .connection()
+            .execute("UPDATE newest_writer SET version = ?1", [marked])
+            .unwrap();
+        let store = Store::open(&database.path()).expect("the store opens");
+        assert!(store.state().sessions.contains_key("session"), "{marked}");
+        drop(store);
+        assert_eq!(newest_writer(&database), expected, "{marked}");
+    }
+}
+
 /// A receipt only answers a retry of its own request. One this build cannot
 /// read (written by another version, or damaged) leaves the store opening
 /// with its history, and only that request cannot be answered again.
@@ -882,6 +952,9 @@ fn stores_written_by_earlier_releases_still_open() {
                 file.display()
             );
             assert!(before > 0);
+            drop(store);
+            // A release before the marker left none; this build records itself.
+            assert_eq!(newest_writer(&database), env!("CARGO_PKG_VERSION"));
             opened += 1;
         }
     }
