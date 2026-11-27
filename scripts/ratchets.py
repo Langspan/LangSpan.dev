@@ -9,7 +9,9 @@ docs/development-process.md#ratchets.
 
 Each measured file may have a baseline, scripts/ratchets/baseline/<file>.tsv,
 with tab-separated rows: `lines N`, `pub N`, `index N`, `slice N` (the last
-three summed per crate), `fn NAME N` and, in a module's root file of the
+three summed per crate), `fn NAME N`, `fields STRUCT N` (the `pub` fields of
+`struct STRUCT` in that file; a row is only ever added by hand) and, in a
+module's root file of the
 `langspan` crate, `edge MODULE`. In that crate each namespace of
 scripts/ratchets/namespaces.tsv (a top-level module of src/), and each file with
 a role, is a node; paths through `crate::`, `super::`, `self::`, child modules
@@ -151,6 +153,8 @@ _FN = re.compile(
     r"^[ \t]*(?:pub(?:\([^)]*\))?\s+)?(?:(?:const|async|unsafe|extern)\s+)*fn\s+(\w+)",
     re.M,
 )
+_STRUCT = re.compile(r"^[ \t]*(?:pub(?:\([^)]*\))?\s+)?struct\s+(\w+)\b", re.M)
+_PUB_FIELD = re.compile(r"^[ \t]*pub\s+(?:r#)?\w+\s*:", re.M)
 _PUB = re.compile(
     r"^\s*pub\s+(?:(?:const|async|unsafe|extern)\s+)*"
     r"(?:fn|struct|enum|trait|type|const|static|mod|union)\b"
@@ -251,6 +255,15 @@ class Source:
 
     def pub_items(self):
         return sum(1 for line in self.text.split("\n") if _PUB.match(line))
+
+    def pub_fields(self, name):
+        """The number of `pub` fields of production `struct NAME`, or None if there is none."""
+        s = self.text
+        for m in _STRUCT.finditer(s):
+            end = _block_end(s, m.end())
+            if m.group(1) == name and end is not None and s[end] == "{":
+                return len(_PUB_FIELD.findall(s, end, _matching_brace(s, end)))
+        return None
 
     def indexing(self):
         """(index, slice): `x[i]` and `x[a..b]` expressions, which can panic."""
@@ -615,14 +628,15 @@ def _components(edges):
 
 
 class Baseline:
-    def __init__(self, lines=None, pub=0, fns=None, edges=None, index=0, slice=0):
+    def __init__(self, lines=None, pub=0, fns=None, edges=None, index=0, slice=0, fields=None):
         self.lines, self.pub, self.index, self.slice = lines, pub, index, slice
         self.fns = dict(fns or {})
+        self.fields = dict(fields or {})
         self.edges = set(edges or ())
 
     def empty(self):
         counts = any(getattr(self, m) for m in COUNTS)
-        return self.lines is None and not counts and not self.fns and not self.edges
+        return self.lines is None and not counts and not self.fns and not self.edges and not self.fields
 
     def dump(self):
         rows = []
@@ -630,6 +644,7 @@ class Baseline:
             rows.append(f"lines\t{self.lines}")
         rows += [f"{m}\t{getattr(self, m)}" for m in COUNTS if getattr(self, m)]
         rows += [f"fn\t{n}\t{v}" for n, v in sorted(self.fns.items())]
+        rows += [f"fields\t{n}\t{v}" for n, v in sorted(self.fields.items())]
         rows += [f"edge\t{m}" for m in sorted(self.edges)]
         return "".join(r + "\n" for r in rows)
 
@@ -649,6 +664,8 @@ def parse_baseline(text, where):
                 setattr(b, row[0], int(row[1]))
             elif row[0] == "fn" and len(row) == 3:
                 b.fns[row[1]] = int(row[2])
+            elif row[0] == "fields" and len(row) == 3:
+                b.fields[row[1]] = int(row[2])
             elif row[0] == "edge" and len(row) == 2:
                 b.edges.add(row[1])
             else:
@@ -656,7 +673,7 @@ def parse_baseline(text, where):
         except ValueError:
             raise RatchetError(
                 f"{where}:{number}: expected `lines N`, `pub N`, `index N`, `slice N`, "
-                f"`fn NAME N` or `edge MODULE`, tab-separated; got {line!r}"
+                f"`fn NAME N`, `fields STRUCT N` or `edge MODULE`, tab-separated; got {line!r}"
             ) from None
     return b
 
@@ -768,6 +785,16 @@ def check(root):
         for name, base in sorted(b.fns.items()):
             if fns.get(name, 0) < base:
                 improvements.append(f"{path}: fn {name} is {fns.get(name, 0)} lines, baseline {base}; {tighten}")
+        for name, base in sorted(b.fields.items()):
+            count = source.pub_fields(name)
+            if count is None:
+                failures.append(f"{path}: no struct {name}, which its `fields` row counts; move the row "
+                                "to the baseline of the file that defines it")
+            elif count > base:
+                failures.append(f"{path}: struct {name} has {count} pub fields, baseline {base}; make the "
+                                "new fields pub(crate), with a read accessor where callers outside need one")
+            elif count < base:
+                improvements.append(f"{path}: struct {name} has {count} pub fields, baseline {base}; {tighten}")
     for metric, (what, how) in COUNTS.items():
         base = {p: getattr(baselines[p], metric) if p in baselines else 0 for p in ws.sources}
         for crate, (actual, allowed) in sorted(_totals(ws, baselines, metric).items()):
@@ -830,6 +857,9 @@ def tighten(root, path):
         b.fns[name] = min(base, fns.get(name, 0))
         if b.fns[name] <= MAX_FN_LINES:
             del b.fns[name]
+    for name, base in b.fields.items():
+        count = source.pub_fields(name)
+        b.fields[name] = base if count is None else min(base, count)
     for metric in COUNTS:
         actual, allowed = _totals(ws, baselines, metric)[ws.crate_of[path]]
         mine = getattr(b, metric)
@@ -848,12 +878,15 @@ def record(root, path):
     source = ws.sources[path]
     lines = source.production_lines()
     module = ws.module_of(path)
+    kept = (load_baselines(root).get(path) or Baseline()).fields
+    counts = {n: source.pub_fields(n) for n in kept}
     save_baseline(root, path, Baseline(
         lines=lines if lines > MAX_FILE_LINES else None,
         pub=source.pub_items(),
         index=source.count("index"),
         slice=source.count("slice"),
         fns={n: v for n, v in source.functions().items() if v > MAX_FN_LINES},
+        fields={n: kept[n] if counts[n] is None else counts[n] for n in kept},
         edges=set(ws.debt().get(module, {})) if module and ws.module_root(module) == path else (),
     ))
 

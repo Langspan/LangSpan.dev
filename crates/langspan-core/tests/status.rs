@@ -48,10 +48,8 @@ fn session(state: &mut State, id: &str, last_ms: Option<u64>) {
 }
 
 fn base() -> State {
-    let mut state = State {
-        generation: 2,
-        ..State::default()
-    };
+    let mut state = State::default();
+    state.set_generation(2);
     state.workspaces.insert(
         "w".into(),
         Workspace {
@@ -245,10 +243,8 @@ fn a_page_resumes_after_its_cursor_at_every_split_without_loss_or_repeat() {
             .collect();
         assert_eq!(rest, expected, "resuming after record {split}");
     }
-    let mut rebuilt = State {
-        generation: state.generation,
-        ..State::default()
-    };
+    let mut rebuilt = State::default();
+    rebuilt.set_generation(state.generation);
     for (_, record) in all {
         record.apply(&mut rebuilt).unwrap();
     }
@@ -299,10 +295,8 @@ fn paged_records_carry_adoptions_so_the_whole_state_rebuilds_them() {
     state
         .adoptions
         .insert("ended".into(), adoption("ended", "adopter"));
-    let mut rebuilt = State {
-        generation: state.generation,
-        ..State::default()
-    };
+    let mut rebuilt = State::default();
+    rebuilt.set_generation(state.generation);
     for (_, record) in status_records(&state, None).unwrap().1 {
         record.apply(&mut rebuilt).unwrap();
     }

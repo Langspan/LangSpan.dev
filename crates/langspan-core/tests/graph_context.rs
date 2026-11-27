@@ -144,10 +144,8 @@ fn read(state: &mut State, id: &str, path: &str) {
 }
 
 fn world() -> State {
-    let mut state = State {
-        generation: 1,
-        ..State::default()
-    };
+    let mut state = State::default();
+    state.set_generation(1);
     session(&mut state, "claude-code.alice");
     session(&mut state, "codex.bob");
     state
