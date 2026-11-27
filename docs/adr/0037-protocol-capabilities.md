@@ -77,7 +77,9 @@ it. Two answers make it ask once more:
   names, reshaped to them.
 
 A request that never parsed never took effect, so asking again cannot
-apply it twice. Reshaping drops what the daemon cannot read when that is
+apply it twice. The daemon answers such a request without its request ID,
+because it never read one; the client takes an error without a request ID
+as the answer, and still refuses any other answer whose ID differs. Reshaping drops what the daemon cannot read when that is
 safe: `changes_only` in a briefing, findings in `record_check` (advisory;
 the check's result is recorded unchanged). It refuses, before sending, what
 would lose meaning: a rebased or adapted landing, a note's symbol or tags,

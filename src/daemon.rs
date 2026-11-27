@@ -5418,6 +5418,9 @@ mod unix {
                 "capabilities": later}));
             assert_eq!(reply["outcome"]["code"], "invalid_request", "{reply}");
             assert_eq!(reply["capabilities"], serde_json::json!(all), "{reply}");
+            // Without the request ID, as the client's fallback tests
+            // answer (review comment 4715859499).
+            assert_eq!(reply["request_id"], "", "{reply}");
             fs::remove_dir_all(&directory).unwrap();
         }
     }

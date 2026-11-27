@@ -115,7 +115,12 @@ mod unix {
             None => None,
         };
         let response: Response = serde_json::from_value(value)?;
-        if response.request_id != request.request_id {
+        // A daemon answers a request it could not read (or a frame it did
+        // not take) without the request ID, as an error: it never reached
+        // the command, so nothing took effect and the error is the answer.
+        let unread =
+            response.request_id.is_empty() && matches!(response.outcome, Outcome::Error { .. });
+        if response.request_id != request.request_id && !unread {
             return Err(
                 "daemon response does not match the request identity or protocol version".into(),
             );
@@ -503,6 +508,10 @@ mod unix {
                         "replayed": false, "generation": 1, "lease_valid": null,
                         "outcome": {"type": "error", "code": "answered", "message": "read"}});
                     if request["command"].get("symbol_findings").is_some() {
+                        // As the daemon answers a request it cannot read:
+                        // without its request ID (review comment 4715859499).
+                        reply["request_id"] = serde_json::json!("");
+                        reply["generation"] = serde_json::json!(0);
                         reply["outcome"] = serde_json::json!({"type": "error", "code": "invalid_request",
                             "message": "expected a typed version 1 request; unknown fields are rejected"});
                         reply["capabilities"] = serde_json::json!(known);
@@ -540,6 +549,87 @@ mod unix {
             );
         }
 
+        /// Answers one connection with `reply`, then reports whether a
+        /// second came within 200 ms.
+        fn answer_once(name: &str, reply: serde_json::Value) -> (Result<Response, String>, bool) {
+            use std::io::{BufRead, BufReader};
+            use std::os::unix::fs::PermissionsExt;
+            let dir = std::env::temp_dir().join(format!("ls-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let listener = std::os::unix::net::UnixListener::bind(dir.join("daemon.sock")).unwrap();
+            std::fs::set_permissions(
+                dir.join("daemon.sock"),
+                std::fs::Permissions::from_mode(0o600),
+            )
+            .unwrap();
+            let peer = std::thread::spawn(move || {
+                let (stream, _) = listener.accept().unwrap();
+                let mut line = String::new();
+                BufReader::new(&stream).read_line(&mut line).unwrap();
+                writeln!(&stream, "{reply}").unwrap();
+                listener.set_nonblocking(true).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                listener.accept().is_ok()
+            });
+            let request = Request::new("read", langspan_core::Command::Dashboard);
+            let result = call(&dir, &request).map_err(|error| error.to_string());
+            let asked_again = peer.join().unwrap();
+            std::fs::remove_dir_all(&dir).unwrap();
+            (result, asked_again)
+        }
+
+        /// Review comment 4715859499: a daemon answers a request it cannot
+        /// read, a frame it cannot take, or one that came too late, without
+        /// the request ID, as `src/daemon.rs` does. Such an error is the
+        /// answer, read before the identity check, and only a refusal of
+        /// the version or the request asks again.
+        #[test]
+        fn an_error_without_the_request_id_is_the_answer() {
+            for code in ["invalid_frame", "read_timeout"] {
+                let reply = serde_json::json!({"version": PROTOCOL_VERSION, "request_id": "",
+                    "replayed": false, "generation": 0, "lease_valid": null,
+                    "outcome": {"type": "error", "code": code, "message": "not read"}});
+                let (result, asked_again) = answer_once(code, reply);
+                assert!(!asked_again, "{code} asked again");
+                let response = result.unwrap();
+                assert!(
+                    matches!(&response.outcome, Outcome::Error { code: c, .. } if c == code),
+                    "{response:?}"
+                );
+            }
+        }
+
+        /// Review comment 4715859499: only an error may come without the
+        /// request ID; any other answer, or one naming another request,
+        /// does not match the request.
+        #[test]
+        fn an_answer_for_another_request_is_refused() {
+            for (name, id, outcome) in [
+                (
+                    "idless",
+                    "",
+                    serde_json::json!({"type": "version", "version": "x", "pid": 1}),
+                ),
+                (
+                    "other",
+                    "other",
+                    serde_json::json!({"type": "error", "code": "invalid_request", "message": "m"}),
+                ),
+            ] {
+                let reply = serde_json::json!({"version": PROTOCOL_VERSION, "request_id": id,
+                    "replayed": false, "generation": 0, "lease_valid": null, "outcome": outcome});
+                let (result, asked_again) = answer_once(name, reply);
+                assert!(!asked_again, "{name} asked again");
+                let error = result.unwrap_err();
+                assert!(
+                    error.contains("does not match the request identity"),
+                    "{error}"
+                );
+            }
+        }
+
         fn ask_an_earlier_daemon(version: u16) {
             use std::io::{BufRead, BufReader};
             use std::os::unix::fs::PermissionsExt;
@@ -562,8 +652,11 @@ mod unix {
                     BufReader::new(&stream).read_line(&mut line).unwrap();
                     let request: serde_json::Value = serde_json::from_str(&line).unwrap();
                     // It reads requests with `deny_unknown_fields`, as
-                    // every earlier build does.
-                    let outcome = if request.get("capabilities").is_some() {
+                    // every earlier build does, and answers one it cannot
+                    // read without its request ID (review comment
+                    // 4715859499).
+                    let unread = request.get("capabilities").is_some();
+                    let outcome = if unread {
                         serde_json::json!({"type": "error", "code": "invalid_request",
                             "message": "expected a typed version 1 request; unknown fields are rejected"})
                     } else if request["version"] == version {
@@ -572,7 +665,12 @@ mod unix {
                         serde_json::json!({"type": "error", "code": "unsupported_version",
                             "message": "expected another protocol version; restart the daemon after upgrading LangSpan"})
                     };
-                    let reply = serde_json::json!({"version": version, "request_id": request["request_id"],
+                    let id = if unread {
+                        serde_json::json!("")
+                    } else {
+                        request["request_id"].clone()
+                    };
+                    let reply = serde_json::json!({"version": version, "request_id": id,
                         "replayed": false, "generation": 1, "lease_valid": null, "outcome": outcome});
                     writeln!(&stream, "{reply}").unwrap();
                     asked.push(request);

@@ -1,6 +1,6 @@
-lines	4754
+lines	4765
 pub	5
-fn	answer	228
+fn	answer	229
 fn	check_calls	163
 fn	check_write	171
 fn	prepare	163
