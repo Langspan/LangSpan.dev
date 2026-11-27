@@ -47,6 +47,7 @@ pub const CAPABILITIES: &[(&str, Option<u16>)] = &[
     ("outline_reads", Some(PROTOCOL_VERSION_10)),
     ("recap_since", None),
     ("refusal_outcomes", Some(PROTOCOL_VERSION_5)),
+    ("rename_holds", None),
     ("renames", Some(PROTOCOL_VERSION_4)),
     ("symbol_findings", Some(PROTOCOL_VERSION_6)),
     ("tolerant_responses", None),
@@ -160,6 +161,11 @@ pub fn encode_with(
         && let Outcome::Recap { recap } = &mut earlier.outcome
     {
         recap.since = None;
+    }
+    if !granted.has("rename_holds")
+        && let Outcome::CallBreaks { callers, .. } = &mut earlier.outcome
+    {
+        callers.clear();
     }
     let mut value = serde_json::to_value(&earlier)?;
     earlier_shape(granted, &mut value);
@@ -439,7 +445,8 @@ fn without_briefing_memory(outcome: &mut Outcome) {
 /// this before it pushes (roadmap F5). A note with a symbol or tags, and a
 /// recap by tag, are not sent to a daemon without `anchored_notes`
 /// (roadmap E1), nor a recap asked for `since` to one without
-/// `recap_since` (roadmap C10).
+/// `recap_since` (roadmap C10). A check of renamed names alone is not sent
+/// to a daemon without `rename_holds` (issue #213).
 pub fn fits_with(granted: Capabilities, command: &Command) -> bool {
     match command {
         Command::RecordLanding {
@@ -451,6 +458,9 @@ pub fn fits_with(granted: Capabilities, command: &Command) -> bool {
         Command::Recap { tag, since, .. } => {
             (granted.has("anchored_notes") || tag.is_none())
                 && (granted.has("recap_since") || since.is_none())
+        }
+        Command::CheckCalls { calls, renamed, .. } => {
+            granted.has("rename_holds") || !calls.is_empty() || renamed.is_empty()
         }
         _ => true,
     }
@@ -466,7 +476,9 @@ pub fn fits(version: u16, command: &Command) -> bool {
 /// changes only (`briefing_memory`, issue #222) is asked of a daemon
 /// without it as the full view, which is all that daemon gives. A check is
 /// recorded without its findings (`symbol_findings`, issue #265), which
-/// are advisory, by a daemon that cannot read them.
+/// are advisory, by a daemon that cannot read them. A write check asks a
+/// daemon without `rename_holds` about its calls only, so it holds nothing
+/// (issue #213).
 pub fn for_capabilities(granted: Capabilities, command: &mut Command) {
     match command {
         Command::Brief { changes_only, .. } if !granted.has("briefing_memory") => {
@@ -475,6 +487,7 @@ pub fn for_capabilities(granted: Capabilities, command: &mut Command) {
         Command::RecordCheck {
             symbol_findings, ..
         } if !granted.has("symbol_findings") => *symbol_findings = None,
+        Command::CheckCalls { renamed, .. } if !granted.has("rename_holds") => renamed.clear(),
         _ => {}
     }
 }
@@ -482,7 +495,7 @@ pub fn for_capabilities(granted: Capabilities, command: &mut Command) {
 /// Why a request that does not fit a daemon of `version` is not sent.
 pub fn older_daemon(version: u16) -> String {
     format!(
-        "the running daemon speaks protocol version {version}, which cannot read this request (a rebased or adapted landing, a note's symbol or tags, or a recap's since); restart the daemon after upgrading LangSpan"
+        "the running daemon speaks protocol version {version}, which cannot read this request (a rebased or adapted landing, a note's symbol or tags, a recap's since, or a rename check); restart the daemon after upgrading LangSpan"
     )
 }
 

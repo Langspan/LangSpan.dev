@@ -879,6 +879,23 @@ pub(crate) fn validate_arity(arity: &Arity) -> Result<(), CoreError> {
     Ok(())
 }
 
+/// Whether `peer` is a session of this generation that has not exited or
+/// ended.
+pub(crate) fn live_session(state: &State, peer: &str) -> bool {
+    state
+        .sessions
+        .get(peer)
+        .is_some_and(|session| session.generation == state.generation)
+        && state
+            .session_liveness
+            .get(peer)
+            .is_none_or(|liveness| liveness.status != LivenessStatus::Exited)
+        && state
+            .activity
+            .get(peer)
+            .is_none_or(|activity| !activity.ended)
+}
+
 /// The calls of one write check: 1 to `MAX_CALL_SITES`, each in a relative
 /// path, on a line from 1 to 2,000,000, naming 1 to 128 bytes without
 /// control characters, with at most `MAX_ARITY` arguments.
@@ -1000,20 +1017,7 @@ fn alertable<'a>(
         .filter(|activity| activity.generation == state.generation)
         .map(|activity| activity.alerted.as_slice())
         .unwrap_or(&[]);
-    let live = |peer: &str| {
-        state
-            .sessions
-            .get(peer)
-            .is_some_and(|session| session.generation == state.generation)
-            && state
-                .session_liveness
-                .get(peer)
-                .is_none_or(|liveness| liveness.status != LivenessStatus::Exited)
-            && state
-                .activity
-                .get(peer)
-                .is_none_or(|activity| !activity.ended)
-    };
+    let live = |peer: &str| live_session(state, peer);
     let mut found = Vec::new();
     let own = state.interface_notices.get(&me.workspace_id);
     let others = state

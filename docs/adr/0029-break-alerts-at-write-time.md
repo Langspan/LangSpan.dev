@@ -317,6 +317,16 @@ Any failure is a note in the diagnostic, never a decision.
   `after_name`, the change label `renamed`, and `change` and `after_name` on
   each break of the `check_calls` answer, whose `after_arity` is now optional.
   The protocol stays at version 3.
+- Issue #213 adds `renamed` to `check_calls`, behind the `rename_holds`
+  capability ([ADR 0037](0037-protocol-capabilities.md)): the names a write
+  renames or removes. The answer's `callers` list, per other worktree of
+  the repository whose index has a complete scan, its files that differ
+  from its `HEAD` and mention a name (a name match, at most
+  `NOTICE_DEPENDENTS` per worktree and name, at most 8 worktrees), with the
+  worktree's live sessions. Nothing is recorded. A daemon without the
+  capability is asked about the calls only. The hook does not send
+  `renamed` yet; holding the write once on that answer is the next part of
+  #213.
 - Not observed on a host: the alert reaching a real Codex or Cursor model, or a model changing its call because of it. A Claude Code
   alert reaching the model has been seen once and is not yet in the
   repository's evidence.

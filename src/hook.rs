@@ -2636,6 +2636,7 @@ impl Session<'_> {
             Command::CheckCalls {
                 session_id: ids.session_id.clone(),
                 calls,
+                renamed: Vec::new(),
             },
         );
         match checked.map(|response| response.outcome) {
