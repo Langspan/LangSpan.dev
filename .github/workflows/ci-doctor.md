@@ -19,6 +19,10 @@ permissions:
   pull-requests: read
   copilot-requests: write
 
+tools:
+  github:
+    toolsets: [default, actions]
+
 safe-outputs:
   create-issue:
     title-prefix: "[CI failure] "
