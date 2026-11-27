@@ -833,21 +833,28 @@ fn the_skill_is_written_only_when_asked_reported_by_doctor_and_removed_exactly()
     }
     let before = home.skill_files();
 
-    // A dry run shows each host's form and its size, and writes nothing.
+    // A dry run shows the skill's text and size once, names the other
+    // host's copy, and writes nothing (issue #291).
+    let skill_path = |vendor, dir| skill::path(vendor, &home.home().join(dir));
+    let claude = skill_path(Vendor::ClaudeCode, ".claude");
+    let codex = skill_path(Vendor::Codex, ".codex");
     let dry = home.ok(&["install", "--skill", "--hosts", SKILL_HOSTS]);
-    for vendor in [Vendor::ClaudeCode, Vendor::Codex] {
-        let path = skill::path(
-            vendor,
-            &home.home().join(match vendor {
-                Vendor::ClaudeCode => ".claude",
-                _ => ".codex",
-            }),
-        );
-        assert!(
-            dry.contains(&format!("{} would become (", path.display())),
-            "{dry}"
-        );
-    }
+    assert!(
+        dry.contains(&format!("{} would become (", claude.display())),
+        "{dry}"
+    );
+    assert!(
+        dry.contains(&format!(
+            "{} would get the same skill text as {}.",
+            codex.display(),
+            claude.display()
+        )),
+        "{dry}"
+    );
+    assert_eq!(
+        dry.matches(skill::SOURCE.lines().next().unwrap()).count(),
+        1
+    );
     assert!(dry.contains(skill::SOURCE.lines().next().unwrap()), "{dry}");
     assert!(dry.contains("Dry run; nothing was written"), "{dry}");
     assert_eq!(home.skill_files(), before);
@@ -911,6 +918,43 @@ fn the_skill_is_written_only_when_asked_reported_by_doctor_and_removed_exactly()
 
     // `--skill` is for install only.
     assert!(!home.langspan(&["uninstall", "--skill"]).status.success());
+}
+
+#[test]
+fn an_uninstall_dry_run_shows_each_section_file_with_its_own_remaining_text() {
+    use langspan::{install::Vendor, skill};
+    let home = Home::new();
+    home.claude_and_codex();
+    home.write(".gemini/settings.json", "{}\n");
+    let gemini_notes = "# My Gemini notes\n\nRun the tests first.\n";
+    let agents = home.write(".codex/AGENTS.md", OWNER_AGENTS);
+    home.ok(&["install", "--skill", "--hosts", "codex", "--apply"]);
+    // Gemini CLI can no longer be installed; an earlier install left this.
+    let gemini = home.write(
+        ".gemini/GEMINI.md",
+        &format!("{gemini_notes}\n{}", skill::render(Vendor::Gemini)),
+    );
+    let hosts = ["--hosts", "codex,gemini-cli"];
+
+    // Each file keeps different notes once its section goes, so neither
+    // preview stands in for the other (PR #400 review).
+    let dry = home.ok(&[&["uninstall"][..], &hosts].concat());
+    assert!(!dry.contains("would get the same skill text"), "{dry}");
+    for (path, notes) in [(&agents, OWNER_AGENTS), (&gemini, gemini_notes)] {
+        let shown = format!(
+            "{} would become ({} bytes):\n{}",
+            path.display(),
+            notes.len(),
+            notes.trim_end()
+        );
+        assert!(dry.contains(&shown), "{dry}");
+    }
+    let skill_line = skill::SOURCE.lines().next().unwrap();
+    assert!(!dry.contains(skill_line), "{dry}");
+
+    home.ok(&[&["uninstall", "--apply"][..], &hosts].concat());
+    assert_eq!(fs::read_to_string(&agents).unwrap(), OWNER_AGENTS);
+    assert_eq!(fs::read_to_string(&gemini).unwrap(), gemini_notes);
 }
 
 #[test]

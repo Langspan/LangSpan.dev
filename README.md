@@ -101,7 +101,7 @@ In one Git repository, open two agent sessions, such as Claude Code and Codex, o
 2. Ask the second session to change the same function. LangSpan names the first session's work in the second session's context and refuses the overlapping edit, as in the recorded lines above.
 3. After the first edit completes or its reply ends, the hold is released and the second session can retry.
 
-Watch both sessions in LangSpan Live, the read-only dashboard, with `langspan dashboard --open`. To see the page before you run any agents, use `langspan dashboard --demo`, which shows labeled, simulated data.
+Watch both sessions in LangSpan Live, the read-only dashboard, with `langspan dashboard --open`. To see the page before you run any agents, use `langspan dashboard --demo --open`, which shows labeled, simulated data.
 
 [Installation options](docs/install.md): verify a download, build from source, or set up a single project.
 

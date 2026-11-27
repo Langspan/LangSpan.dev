@@ -2,14 +2,15 @@ LangSpan — local cooperative coordination for AI coding agents
 
 Usage: langspan [--state-dir DIR] COMMAND [--json]
 
-  setup [--home DIR] [--hosts ...] [--yes]
+  setup [--home DIR] [--hosts ...] [--yes] [--verbose]
                                  From nothing to coordinated sessions: shows one plan
                                  (the hosts found, the files `install --skill` changes,
                                  the coordinator's login service and the state
                                  directory), asks once, applies it, starts the
                                  coordinator and runs `doctor`. --yes applies without
                                  asking; without a terminal and without --yes it only
-                                 prints the plan. A second run changes nothing
+                                 prints the plan. The plan lists each file; --verbose
+                                 shows each file's full text. A second run changes nothing
   demo                           Show a real refusal with no agent: two example
                                  sessions edit one file in a temporary workspace,
                                  with a coordinator of the demo's own. Removes
