@@ -505,7 +505,9 @@ delivered after it, and `at` orders them against the other sessions' calls.
 Hook context does not appear in `stream-json`, so the hook log is the only
 copy of what LangSpan said.
 
-Each line also says whether the hook ran in the background (`background`)
+Each line also keeps the first 2 KiB of the hook's stderr (`stderr`), where
+LangSpan's hook logs its coverage and why it added nothing (issue #262),
+and says whether the hook ran in the background (`background`)
 and whether the wrapper ended it at its bound (`timed_out`). A foreground
 hook still running after 900 s is refused (exit 2), as a failed safety
 control must be. A background hook, such as LangSpan's between-step
