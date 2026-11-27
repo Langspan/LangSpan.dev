@@ -7,6 +7,8 @@ import importlib.util
 import io
 import json
 import os
+import shutil
+import subprocess
 import tempfile
 import unittest
 
@@ -142,6 +144,70 @@ class Tables(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("docs/usage/mcp.md", report)
         self.assertIn(END, report)
+
+
+class TwoPullRequests(unittest.TestCase):
+    """Issue #298's "done when": two branches that each add a tool and a
+    capability, and regenerate, merge without a conflict in docs. A Git test,
+    since Git's merge is what is verified; it skips without `git`."""
+
+    def git(self, *args):
+        env = {
+            "PATH": os.environ.get("PATH", ""),
+            "HOME": self.ws.root,
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+        }
+        identity = ["-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+        return subprocess.run(
+            ["git", *identity, *args], cwd=self.ws.root, env=env,
+            capture_output=True, text=True, check=False,
+        )
+
+    def ok(self, *args):
+        done = self.git(*args)
+        self.assertEqual(done.returncode, 0, f"git {args}: {done.stdout}{done.stderr}")
+
+    def add(self, tool, capability):
+        """What a pull request does: an entry each, a CAPABILITIES line in
+        name order, then the generator."""
+        self.ws.write(f"docs/tables/mcp-tools/{tool}.txt", f"{tool} text\n")
+        self.ws.write(f"docs/tables/capabilities/{capability}.txt", "fields\n")
+        lines = self.ws.read("src/protocol.rs").splitlines(keepends=True)
+        rows = sorted([*lines[1:-1], f'    ("{capability}", None),\n'])
+        self.ws.write("src/protocol.rs", "".join([lines[0], *rows, lines[-1]]))
+        self.assertEqual(self.ws.run()[0], 0)
+
+    def test_two_branches_adding_items_merge_cleanly(self):
+        if shutil.which("git") is None:
+            self.skipTest("skipped: git is not on PATH")
+        self.ws = Workspace(self)
+        # One unchanged row between the two additions in each table, as when
+        # an existing name sorts between the two new ones.
+        self.ws.write("docs/tables/mcp-tools/langspan_map.txt", "Map\n")
+        self.ws.write("docs/tables/capabilities/renames.txt", "r\n")
+        self.ws.write("src/protocol.rs", PROTOCOL.replace("];", '    ("renames", None),\n];'))
+        self.assertEqual(self.ws.run()[0], 0)
+        self.ok("init", "-q", "-b", "main")
+        self.ok("add", "-A")
+        self.ok("commit", "-qm", "base")
+        for branch, tool, capability in [
+            ("a", "langspan_brief", "briefing_memory"),
+            ("b", "langspan_today", "trails"),
+        ]:
+            self.ok("switch", "-q", "-c", branch, "main")
+            self.add(tool, capability)
+            self.ok("add", "-A")
+            self.ok("commit", "-qm", branch)
+        self.ok("switch", "-q", "a")
+        self.ok("merge", "-q", "--no-edit", "b")
+        self.assertEqual(self.ws.run("--check"), (0, ""))
+        page = self.ws.read("docs/usage/mcp.md")
+        self.assertIn("| `langspan_brief` | langspan_brief text |\n", page)
+        self.assertIn("| `langspan_today` | langspan_today text |\n", page)
+        adr = self.ws.read(gen_docs.CAPABILITY_DOC)
+        self.assertIn("| `briefing_memory` | fields | none |\n", adr)
+        self.assertIn("| `trails` | fields | none |\n", adr)
 
 
 def issue(number, title, area, body):
