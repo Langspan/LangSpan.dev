@@ -1,5 +1,7 @@
 lines	3360
 pub	45
+index	7
+slice	2
 fn	execute	273
 fn	lifecycle	290
 fn	pre	174

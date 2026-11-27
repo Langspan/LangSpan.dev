@@ -207,6 +207,53 @@ class PublicSurface(unittest.TestCase):
         self.assertEqual(self.ws.baseline("src/a.rs"), "pub\t1\n")
 
 
+class Indexing(unittest.TestCase):
+    def setUp(self):
+        self.ws = Workspace(self)
+        self.ws.write("src/a.rs", "fn f(v: &[u8]) -> u8 {\n    v[0] + v[1..][0]\n}\n")
+        self.ws.write("src/b.rs", "")
+        self.ws.record("src/a.rs", "src/b.rs")
+
+    def test_the_fixture_counts_index_and_slice_expressions_only(self):
+        with open(os.path.join(HERE, "fixtures", "indexing.rs"), encoding="utf-8") as f:
+            self.assertEqual(ratchets.Source(f.read()).indexing(), (6, 3))
+
+    def test_recording_writes_both_counts(self):
+        self.assertEqual(self.ws.baseline("src/a.rs"), "index\t2\nslice\t1\n")
+        self.assertEqual(self.ws.check(), ([], []))
+
+    def test_a_new_index_fails_for_its_crate(self):
+        self.ws.write("src/b.rs", "fn g(v: &[u8]) -> u8 {\n    v[2]\n}\n")
+        failures, _ = self.ws.check()
+        self.assertEqual(len(failures), 1)
+        self.assertIn("crate langspan: 3 index expressions, baseline 2, 1 more", failures[0])
+        self.assertIn("src/b.rs 1 (baseline 0)", failures[0])
+        self.assertIn("Use `.get(i)`", failures[0])
+
+    def test_a_new_slice_fails_for_its_crate(self):
+        self.ws.write("crates/core/src/lib.rs", "fn g(s: &str) -> &str {\n    &s[1..]\n}\n")
+        failures, _ = self.ws.check()
+        self.assertEqual(len(failures), 1)
+        self.assertIn("crate core: 1 slice expressions, baseline 0, 1 more", failures[0])
+
+    def test_indexing_in_tests_is_not_counted(self):
+        self.ws.write("src/b.rs", "#[cfg(test)]\nmod tests {\n    fn t(v: &[u8]) -> u8 {\n        v[0]\n    }\n}\n")
+        self.assertEqual(self.ws.check(), ([], []))
+
+    def test_moving_indexing_between_files_passes_and_removing_it_tightens(self):
+        self.ws.write("src/a.rs", "")
+        self.ws.write("src/b.rs", "fn f(v: &[u8]) -> u8 {\n    v[0] + v[1..][0]\n}\n")
+        self.assertEqual(self.ws.check(), ([], []))
+        self.ws.write("src/b.rs", "fn f(v: &[u8]) -> u8 {\n    v[0]\n}\n")
+        failures, improvements = self.ws.check()
+        self.assertEqual(failures, [])
+        self.assertIn("crate langspan: 1 index expressions, baseline 2", improvements[0])
+        self.assertIn("crate langspan: 0 slice expressions, baseline 1", improvements[1])
+        self.ws.tighten("src/a.rs")
+        self.assertEqual(self.ws.baseline("src/a.rs"), "index\t1\n")
+        self.assertEqual(self.ws.check(), ([], []))
+
+
 class ModuleDependencies(unittest.TestCase):
     def setUp(self):
         self.ws = Workspace(self)

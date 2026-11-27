@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""Architecture ratchets: file size, function length, module dependencies and
-public surface of the Rust workspace. See docs/development-process.md#ratchets.
+"""Architecture ratchets: file size, function length, module dependencies,
+public surface and unchecked indexing of the Rust workspace. See
+docs/development-process.md#ratchets.
 
     python3 -I -B scripts/ratchets.py --check [ROOT]
     python3 -I -B scripts/ratchets.py --tighten FILE... [--root ROOT]
     python3 -I -B scripts/ratchets.py --record FILE... [--root ROOT]
 
 Each measured file may have a baseline, scripts/ratchets/baseline/<file>.tsv,
-with tab-separated rows: `lines N`, `pub N`, `fn NAME N` and, in a module's
-root file of the `langspan` crate, `edge MODULE`. Only production code is
+with tab-separated rows: `lines N`, `pub N`, `index N`, `slice N` (the last
+three summed per crate), `fn NAME N` and, in a module's root file of the
+`langspan` crate, `edge MODULE`. Only production code is
 measured: `#[cfg(test)]` items and files outside `src/` are skipped. The
 scanner is lexical, not a Rust parser; it is exact for rustfmt-formatted code.
 """
@@ -26,6 +28,12 @@ FIX = (
     "`python3 -I -B scripts/ratchets.py --record {path}`"
 )
 TIGHTEN = "run `python3 -I -B scripts/ratchets.py --tighten {path}`"
+# Counts each crate may not grow past the sum of its files' rows: {row: (what, fix)}.
+COUNTS = {
+    "pub": ("pub items", "Make the new items pub(crate) or private"),
+    "index": ("index expressions", "Use `.get(i)` and handle the missing element"),
+    "slice": ("slice expressions", "Use `.get(a..b)` and handle the missing range"),
+}
 
 
 class RatchetError(Exception):
@@ -126,6 +134,9 @@ _PUB = re.compile(
     r"^\s*pub\s+(?:(?:const|async|unsafe|extern)\s+)*"
     r"(?:fn|struct|enum|trait|type|const|static|mod|union)\b"
 )
+# A `[` right after an operand: rustfmt puts a space or `<`, `&`, `(` before an
+# array type, literal or slice pattern, and `!` before a macro's.
+_INDEX = re.compile(r"(?<=[\w)\]?])\[")
 
 
 class Source:
@@ -138,6 +149,7 @@ class Source:
             self.lines.pop()
         self.test_modules = []  # `#[cfg(test)] mod name;`
         self.excluded = set()
+        self._indexing = None
         starts = [0]
         for line in self.lines:
             starts.append(starts[-1] + len(line) + 1)
@@ -185,6 +197,30 @@ class Source:
 
     def pub_items(self):
         return sum(1 for line in self.text.split("\n") if _PUB.match(line))
+
+    def indexing(self):
+        """(index, slice): `x[i]` and `x[a..b]` expressions, which can panic."""
+        if self._indexing is not None:
+            return self._indexing
+        counts, s = [0, 0], self.text
+        for m in _INDEX.finditer(s):
+            depth, j = 0, m.end()
+            while j < len(s) and (depth or s[j] != "]"):
+                depth += {"(": 1, "[": 1, "{": 1, ")": -1, "]": -1, "}": -1}.get(s[j], 0)
+                if not depth and s.startswith("..", j):
+                    counts[1] += 1
+                    break
+                j += 1
+            else:
+                counts[0] += 1
+        self._indexing = tuple(counts)
+        return self._indexing
+
+    def count(self, metric):
+        """The production number a crate-wide ratchet sums: pub, index or slice."""
+        if metric == "pub":
+            return self.pub_items()
+        return self.indexing()[("index", "slice").index(metric)]
 
 
 # --- The workspace ----------------------------------------------------------
@@ -352,20 +388,20 @@ def _components(edges):
 
 
 class Baseline:
-    def __init__(self, lines=None, pub=0, fns=None, edges=None):
-        self.lines, self.pub = lines, pub
+    def __init__(self, lines=None, pub=0, fns=None, edges=None, index=0, slice=0):
+        self.lines, self.pub, self.index, self.slice = lines, pub, index, slice
         self.fns = dict(fns or {})
         self.edges = set(edges or ())
 
     def empty(self):
-        return self.lines is None and not self.pub and not self.fns and not self.edges
+        counts = any(getattr(self, m) for m in COUNTS)
+        return self.lines is None and not counts and not self.fns and not self.edges
 
     def dump(self):
         rows = []
         if self.lines is not None:
             rows.append(f"lines\t{self.lines}")
-        if self.pub:
-            rows.append(f"pub\t{self.pub}")
+        rows += [f"{m}\t{getattr(self, m)}" for m in COUNTS if getattr(self, m)]
         rows += [f"fn\t{n}\t{v}" for n, v in sorted(self.fns.items())]
         rows += [f"edge\t{m}" for m in sorted(self.edges)]
         return "".join(r + "\n" for r in rows)
@@ -382,7 +418,7 @@ def parse_baseline(text, where):
             continue
         row = line.split("\t")
         try:
-            if row[0] in ("lines", "pub") and len(row) == 2:
+            if row[0] in ("lines", *COUNTS) and len(row) == 2:
                 setattr(b, row[0], int(row[1]))
             elif row[0] == "fn" and len(row) == 3:
                 b.fns[row[1]] = int(row[2])
@@ -392,8 +428,8 @@ def parse_baseline(text, where):
                 raise ValueError
         except ValueError:
             raise RatchetError(
-                f"{where}:{number}: expected `lines N`, `pub N`, `fn NAME N` or "
-                f"`edge MODULE`, tab-separated; got {line!r}"
+                f"{where}:{number}: expected `lines N`, `pub N`, `index N`, `slice N`, "
+                f"`fn NAME N` or `edge MODULE`, tab-separated; got {line!r}"
             ) from None
     return b
 
@@ -424,13 +460,13 @@ def save_baseline(root, path, baseline):
 # --- The check --------------------------------------------------------------
 
 
-def _pub_totals(ws, baselines):
+def _totals(ws, baselines, metric):
     """{crate: (actual, allowed)}: a crate's allowance is the sum of its files'."""
     totals = {}
     for path, source in ws.sources.items():
         actual, allowed = totals.get(ws.crate_of[path], (0, 0))
         b = baselines.get(path)
-        totals[ws.crate_of[path]] = (actual + source.pub_items(), allowed + (b.pub if b else 0))
+        totals[ws.crate_of[path]] = (actual + source.count(metric), allowed + (getattr(b, metric) if b else 0))
     return totals
 
 
@@ -457,24 +493,26 @@ def check(root):
         for name, base in sorted(b.fns.items()):
             if fns.get(name, 0) < base:
                 improvements.append(f"{path}: fn {name} is {fns.get(name, 0)} lines, baseline {base}; {tighten}")
-    for crate, (actual, allowed) in sorted(_pub_totals(ws, baselines).items()):
-        grown = [
-            f"{p} {s.pub_items()} (baseline {baselines[p].pub if p in baselines else 0})"
-            for p, s in sorted(ws.sources.items())
-            if ws.crate_of[p] == crate and s.pub_items() > (baselines[p].pub if p in baselines else 0)
-        ]
-        if actual > allowed:
-            failures.append(
-                f"crate {crate}: {actual} pub items, baseline {allowed}, {actual - allowed} more; "
-                f"grown: {', '.join(grown)}. Make the new items pub(crate) or private, or justify "
-                "them in the pull request and run `python3 -I -B scripts/ratchets.py --record FILE` "
-                "for each grown file"
-            )
-        elif actual < allowed:
-            improvements.append(
-                f"crate {crate}: {actual} pub items, baseline {allowed}; run "
-                "`python3 -I -B scripts/ratchets.py --tighten FILE` for each file that lost pub items"
-            )
+    for metric, (what, how) in COUNTS.items():
+        base = {p: getattr(baselines[p], metric) if p in baselines else 0 for p in ws.sources}
+        for crate, (actual, allowed) in sorted(_totals(ws, baselines, metric).items()):
+            grown = [
+                f"{p} {s.count(metric)} (baseline {base[p]})"
+                for p, s in sorted(ws.sources.items())
+                if ws.crate_of[p] == crate and s.count(metric) > base[p]
+            ]
+            if actual > allowed:
+                failures.append(
+                    f"crate {crate}: {actual} {what}, baseline {allowed}, {actual - allowed} more; "
+                    f"grown: {', '.join(grown)}. {how}, or justify "
+                    "them in the pull request and run `python3 -I -B scripts/ratchets.py --record FILE` "
+                    "for each grown file"
+                )
+            elif actual < allowed:
+                improvements.append(
+                    f"crate {crate}: {actual} {what}, baseline {allowed}; run "
+                    f"`python3 -I -B scripts/ratchets.py --tighten FILE` for each file that lost {what}"
+                )
     debt = ws.debt()
     for module in sorted(ws.edges()):
         path = ws.module_root(module)
@@ -512,8 +550,10 @@ def tighten(root, path):
         b.fns[name] = min(base, fns.get(name, 0))
         if b.fns[name] <= MAX_FN_LINES:
             del b.fns[name]
-    actual, allowed = _pub_totals(ws, baselines)[ws.crate_of[path]]
-    b.pub -= max(0, min(b.pub - source.pub_items(), allowed - actual))
+    for metric in COUNTS:
+        actual, allowed = _totals(ws, baselines, metric)[ws.crate_of[path]]
+        mine = getattr(b, metric)
+        setattr(b, metric, mine - max(0, min(mine - source.count(metric), allowed - actual)))
     module = ws.module_of(path)
     b.edges &= set(ws.debt().get(module, {})) if module else set()
     save_baseline(root, path, b)
@@ -530,6 +570,8 @@ def record(root, path):
     save_baseline(root, path, Baseline(
         lines=lines if lines > MAX_FILE_LINES else None,
         pub=source.pub_items(),
+        index=source.count("index"),
+        slice=source.count("slice"),
         fns={n: v for n, v in source.functions().items() if v > MAX_FN_LINES},
         edges=set(ws.debt().get(module, {})) if module and ws.module_root(module) == path else (),
     ))
