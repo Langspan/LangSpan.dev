@@ -1,0 +1,54 @@
+{
+  "source": "Stand-in dry run on 2026-11-27: driver.py --arm worktrees --family discovered_change --sessions 2 --seed 11 --standin-mode ignore. The sessions' transcripts (agent-s1.stdout, agent-s2.stdout) as the tool guard wrote them, and the files the sessions committed, with the checkout paths rewritten to /bench/work.",
+  "plan": {
+    "family": "discovered_change",
+    "tasks": [
+      {"role": "changer", "module": "shelf.expiry", "interface": {"module": "shelf.dates", "name": "days_left", "arity": 2}},
+      {"role": "dependent", "module": "shelf.features.gone", "interface": {"module": "shelf.dates", "name": "days_left", "arity": 2}}
+    ]
+  },
+  "roots": ["/bench/work/s1", "/bench/work/s2"],
+  "transcripts": [
+    [
+      {"type": "system", "subtype": "init", "session_id": "b5984b48-f295-46b4-a20d-032320c113df", "model": "standin", "tools": ["Bash", "Edit", "Glob", "Grep", "Read", "Write"], "mcp_servers": []},
+      {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "edit-ab95e445cd45445ca96454051d4911cc", "name": "Edit", "input": {"file_path": "/bench/work/s1/shelf/dates.py", "old_string": "def days_left(day):", "new_string": "def days_left(day, today):", "replace_all": false}}]}},
+      {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "edit-ab95e445cd45445ca96454051d4911cc", "is_error": false, "content": "done"}]}},
+      {"type": "langspan_bench_clock", "tool_use_ids": ["edit-ab95e445cd45445ca96454051d4911cc"], "monotonic_ns": 2152102353923250},
+      {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "edit-d2df7336589045a780e26e44792b3a26", "name": "Edit", "input": {"file_path": "/bench/work/s1/shelf/dates.py", "old_string": "from today until", "new_string": "from ``today`` until", "replace_all": false}}]}},
+      {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "edit-d2df7336589045a780e26e44792b3a26", "is_error": false, "content": "done"}]}},
+      {"type": "langspan_bench_clock", "tool_use_ids": ["edit-d2df7336589045a780e26e44792b3a26"], "monotonic_ns": 2152102354287833},
+      {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "edit-551b177f2da24272acde32b5dcdca602", "name": "Edit", "input": {"file_path": "/bench/work/s1/shelf/dates.py", "old_string": "(day - datetime.date.today()).days", "new_string": "(day - today).days", "replace_all": false}}]}},
+      {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "edit-551b177f2da24272acde32b5dcdca602", "is_error": false, "content": "done"}]}},
+      {"type": "langspan_bench_clock", "tool_use_ids": ["edit-551b177f2da24272acde32b5dcdca602"], "monotonic_ns": 2152102354531458},
+      {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "edit-383d8f181219479489268067246568f1", "name": "Edit", "input": {"file_path": "/bench/work/s1/shelf/orders.py", "old_string": "from shelf.dates import days_left\n", "new_string": "import datetime\n\nfrom shelf.dates import days_left\n", "replace_all": false}}]}},
+      {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "edit-383d8f181219479489268067246568f1", "is_error": false, "content": "done"}]}},
+      {"type": "langspan_bench_clock", "tool_use_ids": ["edit-383d8f181219479489268067246568f1"], "monotonic_ns": 2152102354680250},
+      {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "edit-697d6ec2c53443249d8099e14c3522e5", "name": "Edit", "input": {"file_path": "/bench/work/s1/shelf/orders.py", "old_string": "days_left(due)", "new_string": "days_left(due, datetime.date.today())", "replace_all": false}}]}},
+      {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "edit-697d6ec2c53443249d8099e14c3522e5", "is_error": false, "content": "done"}]}},
+      {"type": "langspan_bench_clock", "tool_use_ids": ["edit-697d6ec2c53443249d8099e14c3522e5"], "monotonic_ns": 2152102354870958},
+      {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "edit-5d509e28dc8949eeb73999511b7ddc19", "name": "Write", "input": {"file_path": "/bench/work/s1/shelf/expiry.py", "content": "from shelf.dates import days_left\n\n\ndef expired(items, today):\n    return [name for name, day in items if days_left(day, today) is None]\n"}}]}},
+      {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "edit-5d509e28dc8949eeb73999511b7ddc19", "is_error": false, "content": "done"}]}},
+      {"type": "langspan_bench_clock", "tool_use_ids": ["edit-5d509e28dc8949eeb73999511b7ddc19"], "monotonic_ns": 2152102355003166},
+      {"type": "result", "subtype": "success", "is_error": false, "num_turns": 1, "result": "Stand-in ignore edit of shelf/dates.py, shelf/dates.py, shelf/dates.py, shelf/orders.py, shelf/orders.py, shelf/expiry.py.", "session_id": "b5984b48-f295-46b4-a20d-032320c113df", "permission_denials": [], "standin": {"mode": "ignore", "informed": false, "revised": false, "peers_heard": [], "hook_calls": 0, "late_hooks": 0, "refusals": [], "edited": ["shelf/dates.py", "shelf/dates.py", "shelf/dates.py", "shelf/orders.py", "shelf/orders.py", "shelf/expiry.py"]}},
+      {"type": "benchmark_tool_check", "status": "passed", "unexpected": []}
+    ],
+    [
+      {"type": "system", "subtype": "init", "session_id": "beda3fee-5a5a-4e91-b521-d6929b893f7b", "model": "standin", "tools": ["Bash", "Edit", "Glob", "Grep", "Read", "Write"], "mcp_servers": []},
+      {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "edit-b726a645530a49e0a50e8c62dd4da6bd", "name": "Write", "input": {"file_path": "/bench/work/s2/shelf/features/gone.py", "content": "from shelf.dates import days_left\n\n\ndef count_expired(items):\n    return sum(1 for name, day in items if days_left(day) is None)\n"}}]}},
+      {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "edit-b726a645530a49e0a50e8c62dd4da6bd", "is_error": false, "content": "done"}]}},
+      {"type": "langspan_bench_clock", "tool_use_ids": ["edit-b726a645530a49e0a50e8c62dd4da6bd"], "monotonic_ns": 2152102449586291},
+      {"type": "result", "subtype": "success", "is_error": false, "num_turns": 1, "result": "Stand-in ignore edit of shelf/features/gone.py.", "session_id": "beda3fee-5a5a-4e91-b521-d6929b893f7b", "permission_denials": [], "standin": {"mode": "ignore", "informed": false, "revised": false, "peers_heard": [], "hook_calls": 0, "late_hooks": 0, "refusals": [], "edited": ["shelf/features/gone.py"]}},
+      {"type": "benchmark_tool_check", "status": "passed", "unexpected": []}
+    ]
+  ],
+  "committed": [
+    {
+      "shelf/dates.py": "\"\"\"Dates the shop works with.\"\"\"\n\nimport datetime\n\n\ndef days_left(day, today):\n    \"\"\"The number of days from ``today`` until ``day``: 0 on the day itself,\n    and None once it has passed.\"\"\"\n    left = (day - today).days\n    return left if left >= 0 else None\n",
+      "shelf/orders.py": "\"\"\"Deliveries the shop is waiting for.\"\"\"\n\nimport datetime\n\nfrom shelf.dates import days_left\n\n\ndef late_orders(orders):\n    \"\"\"The names of ``orders``, pairs of a name and its due date, whose due\n    date has passed, in the order given.\"\"\"\n    return [name for name, due in orders if days_left(due, datetime.date.today()) is None]\n",
+      "shelf/expiry.py": "from shelf.dates import days_left\n\n\ndef expired(items, today):\n    return [name for name, day in items if days_left(day, today) is None]\n"
+    },
+    {
+      "shelf/features/gone.py": "from shelf.dates import days_left\n\n\ndef count_expired(items):\n    return sum(1 for name, day in items if days_left(day) is None)\n"
+    }
+  ]
+}

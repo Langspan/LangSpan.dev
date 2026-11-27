@@ -33,12 +33,13 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import runner  # noqa: E402
+import stale_callers as stale  # noqa: E402
 import tasks as families  # noqa: E402
 
 ARMS = ("worktrees", "awareness_only", "langspan")
 AGENTS = ("standin", "claude")
 STANDIN_MODES = ("follow", "ignore", "hedge", "workaround")
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 MAX_SOCKET_PATH = 100
 GIT_IDENTITY = ["-c", "user.name=Benchmark", "-c", "user.email=benchmark@example.invalid",
                 "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"]
@@ -740,7 +741,9 @@ def guard_session(argv, env, allowed, sink, stop_seconds=GUARD_STOP_SECONDS):
     which the host reports before the model's first turn. The verdict is
     the transcript's last line (TOOL_CHECK_TYPE); a stopped session, or
     one that never lists its tools, exits TOOL_CHECK_EXIT, so the runner
-    marks the trial failed. A line longer than GUARD_LINE_BYTES is passed
+    marks the trial failed. After each line that carries tool results it
+    adds a clock line (stale_callers.clock_line), the time the stale-caller
+    measure orders writes by. A line longer than GUARD_LINE_BYTES is passed
     on unchecked."""
     allowed = set(allowed)
     try:
@@ -763,6 +766,10 @@ def guard_session(argv, env, allowed, sink, stop_seconds=GUARD_STOP_SECONDS):
             continue
         if isinstance(event, dict) and event.get("type") == "system" and event.get("subtype") == "init":
             listed = True
+        clock = stale.clock_line(event, time.monotonic_ns())
+        if clock:
+            sink.write((json.dumps(clock) + "\n").encode())
+            sink.flush()
         for name in unexpected_tools(event, allowed):
             if name not in unexpected:
                 unexpected.append(name)
@@ -1519,6 +1526,42 @@ def interface_change_status(family, oracle):
     return (oracle or {}).get("interface_change") or "unknown"
 
 
+def stale_section(plan, commands, runner_dir, work):
+    """The stale-caller measure (stale_callers.py): each session's
+    transcript, the fixture's files and those each session committed (its
+    checkout, which integration committed)."""
+    def text(path):
+        try:
+            with open(path, "rb") as file:
+                return file.read(TRANSCRIPT_BYTES + 1).decode("utf-8", errors="replace")
+        except OSError:
+            return None
+
+    def transcript(index):
+        command, root = commands.get(("agent", "s%d" % index)), work / ("s%d" % index)
+        # A command whose stdout file is missing has no transcript, not an empty one.
+        raw = text(runner_dir / command["stdout_path"]) if command else None
+        return (transcript_events(raw) if raw is not None else None), (str(root), str(root.resolve()))
+
+    def changed(index):
+        """The paths session INDEX's checkout added, changed or removed
+        since the base, committed or not; None when Git cannot list them."""
+        if not isinstance(plan.get("base"), str):
+            return None
+        clone = work / ("s%d" % index)
+        try:
+            listed = [git("diff", "--name-only", "-z", "--no-renames", plan["base"], "--", cwd=clone),
+                      git("ls-files", "-z", "--others", "--exclude-standard", cwd=clone)]
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
+            # ValueError: a path Git gives that is not UTF-8.
+            return None
+        return [path for done in listed for path in done.stdout.split("\0") if path]
+    # Read lazily: a family without a change reads nothing.
+    transcripts = (transcript(index) for index in range(1, len(plan["tasks"]) + 1))
+    return stale.stale_callers(plan, transcripts, lambda path: text(HERE / "fixture" / path),
+                               lambda index, path: text(work / ("s%d" % index) / path), changed)
+
+
 def session_outcome(command, runner_dir, output, root, work, index):
     """What one session's runner COMMAND and transcript show: its figures,
     whether it stopped or asked a question, the tool guard's verdict and its
@@ -1734,6 +1777,7 @@ def build_record(plan, final, runner_dir, run_dir, events, started_at, total_ela
         "tasks_accepted": sum(task["accepted"] is True for task in tasks) if oracle else None,
         "integrated_tests": oracle["integrated_tests"] if oracle else "unknown",
         "interface_change": interface_change_status(plan["family"], oracle),
+        "stale_callers": stale_section(plan, commands, runner_dir, work),
         "merge_conflicts": [{"session": s, "files": e["files"]} for s, e in sorted(integration.items()) if not e["merged"]],
         "semantic_conflicts": len(oracle["semantic_conflicts"]) if oracle else None,
         "semantic_conflict_details": oracle["semantic_conflicts"] if oracle else [],
@@ -1854,7 +1898,10 @@ def summarize(records):
     change_not_made trial are each counted but
     contribute no task, result or figure. A figure is
     None when any counted trial lacks it, never zero; so is the context
-    LangSpan added (context_added) outside the langspan arm. Trials group by agent,
+    LangSpan added (context_added) outside the langspan arm, and the
+    stale-name writes admitted (stale_writes_admitted) unless every counted
+    trial reports them. The time to the last stale caller fixed is listed
+    per trial (stale_fixed_after_s), not averaged. Trials group by agent,
     family, session count and stagger, so staggered trials stay apart."""
     groups = {}
     for record in records:
@@ -1877,6 +1924,9 @@ def summarize(records):
         context = None if not added or any(a["status"] != "reported" for a in added) else context_figures(
             sum(a["turns"] for a in added), sum(a["bytes"] for a in added),
             max(a["largest_turn_bytes"] for a in added))
+        # Read with .get: records built by hand for other measures lack it.
+        stale_found = [r.get("stale_callers") or {} for r in compared]
+        stale_reported = [s for s in stale_found if s.get("status") == "reported"]
         summary.append({
             **dict(zip(SUMMARY_KEY, key)),
             "trials": len(trials), "refused": kinds.count("refused"),
@@ -1892,6 +1942,10 @@ def summarize(records):
             "cost_per_accepted_task": per_task((figures["total"] or {}).get("cost_usd"), accepted),
             "unreported": sum(r["cost"]["total"]["cost_usd"] is None for r in compared),
             "context_added": context,
+            "stale_writes_admitted": sum(s["writes_admitted"] for s in stale_reported)
+            if stale_found and len(stale_reported) == len(stale_found) else None,
+            "stale_fixed_after_s": [s["fixed_after_s"] for s in stale_reported],
+            "stale_unfixed_trials": sum(s["unfixed"] > 0 for s in stale_reported),
         })
     return summary
 
@@ -1911,7 +1965,7 @@ def summarize_main(paths):
         version = record.get("schema_version") if isinstance(record, dict) else None
         if version != SCHEMA_VERSION:
             print(json.dumps({"error": "%s has schema version %s; summarize reads version %d records, which have "
-                                       "the context LangSpan added" % (path, version, SCHEMA_VERSION)}), file=sys.stderr)
+                                       "the stale-caller measure" % (path, version, SCHEMA_VERSION)}), file=sys.stderr)
             return 2
         records.append(record)
     try:

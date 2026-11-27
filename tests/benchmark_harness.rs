@@ -109,6 +109,11 @@ fn runner_mechanics() {
 }
 
 #[test]
+fn stale_callers() {
+    python_suite("test_stale_callers.py", None);
+}
+
+#[test]
 fn driver_planning_oracle_and_refusals() {
     python_suite("test_driver.py", Some("DriverUnitTests"));
 }
