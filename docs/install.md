@@ -118,4 +118,16 @@ Requires Rust and a C compiler. Restart a running coordinator after upgrading; `
 
 For [user-level setup](usage.md#all-repositories-for-this-user), use `langspan setup`. For a single checkout, see [project-level installation](reference-overview.md#one-project). To remove installed hooks, MCP configuration and the service, run `langspan uninstall --apply`.
 
+### Remove LangSpan
+
+The first line shows what would change. The second removes the hooks, MCP entries, skill and login service, stops the coordinator and deletes its state directory. The third deletes the binary.
+
+```sh
+langspan uninstall --purge
+langspan uninstall --purge --apply
+rm "$(command -v langspan)"
+```
+
+Without `--purge`, the state directory stays, and uninstall prints the `rm` command for it and for the binary.
+
 See the [host evidence](IMPLEMENTATION_STATUS.md).

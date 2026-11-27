@@ -1803,3 +1803,93 @@ fn doctor_takes_a_user_level_state_directory_named_through_a_link_for_the_same_o
         "{text}"
     );
 }
+
+/// Issue #292: uninstall stops the coordinator, takes out the folders the
+/// skill needed, and names what it leaves with the commands to remove it;
+/// `--purge` removes the state directory too.
+#[test]
+fn uninstall_stops_the_coordinator_and_names_everything_it_leaves() {
+    let mut home = Home::new();
+    fs::create_dir(home.home().join(".claude")).unwrap();
+    home.ok(&["install", "--hosts", "claude-code", "--skill", "--apply"]);
+    assert!(
+        home.home()
+            .join(".claude/skills/langspan/SKILL.md")
+            .is_file()
+    );
+    home.start();
+
+    let dry = home.ok(&["uninstall", "--purge"]);
+    assert!(dry.contains("The coordinator would be stopped."), "{dry}");
+    let state = home.state_dir();
+    assert!(
+        dry.contains(&format!("{} would be removed.", state.display())),
+        "{dry}"
+    );
+    assert!(
+        client::call(&state, &status()).is_ok(),
+        "a dry run stops nothing"
+    );
+
+    let removed = home.ok(&["uninstall", "--apply"]);
+    let mut daemon = home.daemon.take().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while daemon.try_wait().unwrap().is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "the coordinator still runs: {removed}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(removed.contains("Stopped the coordinator."), "{removed}");
+    // Only the folder the test made is left in the home.
+    assert!(
+        contents(&home.home()).is_empty(),
+        "{:?}",
+        contents(&home.home())
+    );
+    assert!(!home.home().join(".claude/skills").exists());
+    assert!(home.home().join(".claude").is_dir());
+    // What stays is named, with the commands that remove it.
+    let executable = fs::canonicalize(env!("CARGO_BIN_EXE_langspan")).unwrap();
+    assert!(
+        removed.contains(&format!("  rm '{}'", executable.display())),
+        "{removed}"
+    );
+    assert!(
+        removed.contains(&format!("  rm -r '{}'", state.display())),
+        "{removed}"
+    );
+    assert!(state.is_dir());
+
+    let purged = home.ok(&["uninstall", "--purge", "--apply"]);
+    assert!(!state.exists(), "{purged}");
+    assert!(
+        purged.contains(&format!("Removed {}.", state.display())),
+        "{purged}"
+    );
+    assert!(
+        purged.contains(&format!("  rm '{}'", executable.display())),
+        "{purged}"
+    );
+    assert!(!purged.contains("rm -r"), "{purged}");
+}
+
+/// `--purge` removes only a LangSpan state directory, and only on a whole
+/// uninstall: other hosts' hooks still use it after `--hosts`.
+#[test]
+fn purge_refuses_a_folder_that_is_not_a_state_directory_and_a_partial_uninstall() {
+    let home = Home::new();
+    fs::create_dir(home.home().join(".claude")).unwrap();
+    home.write("../state/notes.txt", "mine\n");
+    let refused = home.langspan(&["uninstall", "--purge", "--apply"]);
+    assert!(!refused.status.success(), "{refused:?}");
+    let said = String::from_utf8(refused.stderr).unwrap();
+    assert!(said.contains("not a LangSpan state directory"), "{said}");
+    assert!(home.state_dir().join("notes.txt").is_file());
+
+    let partial = home.langspan(&["uninstall", "--hosts", "claude-code", "--purge"]);
+    assert!(!partial.status.success(), "{partial:?}");
+    let said = String::from_utf8(partial.stderr).unwrap();
+    assert!(said.contains("--purge"), "{said}");
+}

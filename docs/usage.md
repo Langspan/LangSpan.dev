@@ -223,8 +223,13 @@ precedence. `langspan doctor --root /path/to/checkout` reports both setups;
 through a symbolic link (`/tmp` and `/private/tmp` on macOS) is the same
 coordinator, and only a genuinely different directory is reported.
 `langspan uninstall --apply` removes the user-level entries it recognizes,
-stops and removes the coordinator's login service if `setup` installed one, and
-leaves the coordination state directory in place. A hooks or MCP file left
+stops and removes the coordinator's login service if `setup` installed one,
+stops the coordinator however it was started, removes the `~/.claude/skills` folder when
+the skill was all it held, and leaves the coordination state directory in
+place. It then prints the `rm` commands for the binary and the state directory.
+`--purge` removes the state directory as well; it refuses a directory that
+holds no `daemon.lock` and isn't empty, and it isn't valid with `--hosts`,
+since the other hosts' hooks still use that directory. A hooks or MCP file left
 holding nothing else (`{}`, or empty text) is removed rather than left behind.
 Running it again after an upgrade also removes such a file an earlier
 version left behind. A file with any of your own settings in it keeps them

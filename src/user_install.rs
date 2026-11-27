@@ -486,6 +486,78 @@ pub fn plan_codex(existing: Option<&str>, server: Option<&McpServer>) -> Result<
     }
 }
 
+/// What a whole `uninstall` leaves (issue #292): the binary, and the state
+/// directory unless `--purge` removes it.
+pub struct Leftover {
+    /// The state directory, when it exists.
+    state_dir: Option<PathBuf>,
+    purge: bool,
+}
+
+impl Leftover {
+    /// Checked before anything is written. `whole` is an uninstall without
+    /// `--hosts`; only that names what is left, since the other hosts'
+    /// hooks still use the binary and the state directory. `--purge` needs
+    /// one, and removes only an empty directory or one a coordinator used.
+    pub fn check(state_dir: &Path, purge: bool, whole: bool) -> Result<Option<Self>, crate::Error> {
+        if !whole && purge {
+            return Err("--purge removes the state directory every host uses: run `langspan uninstall --purge` without --hosts".into());
+        }
+        if !whole {
+            return Ok(None);
+        }
+        let state_dir = match std::fs::symlink_metadata(state_dir) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(format!("{}: {error}", state_dir.display()).into()),
+            Ok(_) => Some(state_dir.to_path_buf()),
+        };
+        if purge && let Some(dir) = &state_dir {
+            let ours = dir.is_dir()
+                && !dir.is_symlink()
+                && (dir.join("daemon.lock").is_file() || std::fs::read_dir(dir)?.next().is_none());
+            if !ours {
+                return Err(format!("{} is not a LangSpan state directory (it has no daemon.lock), so --purge changed nothing. Remove it yourself, or run uninstall without --purge", dir.display()).into());
+            }
+        }
+        Ok(Some(Self { state_dir, purge }))
+    }
+
+    /// With `--purge`, removes the state directory once `apply`. Returns
+    /// how many removals there are and the lines to print: after `apply`,
+    /// what is left and the commands that remove it.
+    pub fn finish(
+        &self,
+        executable: &Path,
+        apply: bool,
+    ) -> Result<(usize, Vec<String>), crate::Error> {
+        use crate::install::quote;
+        let mut left = self.state_dir.as_deref();
+        let removing = usize::from(self.purge && left.is_some());
+        let mut lines = Vec::new();
+        if let (1, Some(dir)) = (removing, left) {
+            if !apply {
+                return Ok((1, vec![format!("{} would be removed.", dir.display())]));
+            }
+            std::fs::remove_dir_all(dir)
+                .map_err(|error| format!("remove {}: {error}", dir.display()))?;
+            lines.push(format!("Removed {}.", dir.display()));
+            left = None;
+        }
+        if apply {
+            lines.push(match left {
+                Some(_) => {
+                    "Left in place: the langspan binary and its state directory. To remove them:"
+                        .into()
+                }
+                None => "Left in place: the langspan binary. To remove it:".into(),
+            });
+            lines.push(format!("  rm {}", quote(&executable.to_string_lossy())));
+            lines.extend(left.map(|dir| format!("  rm -r {}", quote(&dir.to_string_lossy()))));
+        }
+        Ok((removing, lines))
+    }
+}
+
 /// Marks the `statusLine` LangSpan writes in Claude Code's user settings. The
 /// host runs the command through a shell, which ignores the comment.
 const STATUS_LINE_MARKER: &str = " # langspan-managed:claude-code:statusline:v1";

@@ -190,6 +190,38 @@ pub fn ensure(
     }
 }
 
+/// Stops the coordinator for `state_dir`, for `uninstall` (issue #292): asks
+/// it for its process id, sends that process SIGTERM, and waits until
+/// `deadline` for it to stop accepting connections. Returns false when none
+/// was running.
+pub fn stop(state_dir: &Path, deadline: Instant) -> Result<bool, crate::Error> {
+    use rustix::process::{Pid, Signal, kill_process};
+    if !crate::client::accepts(state_dir, probe_deadline(deadline)) {
+        return Ok(false);
+    }
+    let asked = crate::protocol::Request::new("uninstall", langspan_core::Command::Version);
+    let pid = match crate::client::call_until(state_dir, &asked, deadline)?.outcome {
+        langspan_core::Outcome::Version { pid, .. } => pid,
+        other => return Err(format!("the coordinator answered {other:?} when asked for its process id; stop it yourself and run this again").into()),
+    };
+    let process = i32::try_from(pid)
+        .ok()
+        .and_then(Pid::from_raw)
+        .ok_or_else(|| format!("the coordinator gave process id {pid}, which is not one"))?;
+    kill_process(process, Signal::TERM)
+        .map_err(|error| format!("cannot stop the coordinator, process {pid}: {error}"))?;
+    while crate::client::accepts(state_dir, probe_deadline(deadline)) {
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "the coordinator, process {pid}, did not stop in time; run `kill {pid}` and run this again"
+            )
+            .into());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    Ok(true)
+}
+
 /// A connect bounded to a small part of the caller's wait.
 fn probe_deadline(deadline: Instant) -> Instant {
     deadline.min(Instant::now() + Duration::from_millis(100))
