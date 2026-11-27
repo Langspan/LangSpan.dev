@@ -191,6 +191,7 @@ MAX_RECENT_WINDOW_MS
 MAX_REFUSALS
 MAX_REGIONS
 MAX_REGION_LINE
+MAX_RENAMED
 MAX_RENAMES
 MAX_RENAME_HOPS
 MAX_REPORT_DEPENDENT_PATHS
@@ -268,6 +269,7 @@ PathFacts
 PathRefusal
 PathRegions
 PathStep
+PeerCallers
 PeerRelation
 PeerWork
 Policy
@@ -463,6 +465,7 @@ inflight_told
 is_graph_name
 is_qualifier
 known_sessions
+live_sessions
 message_status
 open_intents
 rank_definitions
@@ -489,6 +492,7 @@ validate_count_days
 validate_graph_context
 validate_observed_file
 validate_rank
+validate_renamed
 validate_request_id
 validate_tag
 validate_tags

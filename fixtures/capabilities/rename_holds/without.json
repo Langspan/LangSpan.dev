@@ -1,0 +1,1 @@
+{"version":10,"request_id":"rename-hold-1","replayed":false,"generation":4,"lease_valid":null,"outcome":{"type":"call_breaks","breaks":[],"coverage":{"indexable_files":1,"current_files":1,"partial_files":0,"scanned":true},"ready":true}}

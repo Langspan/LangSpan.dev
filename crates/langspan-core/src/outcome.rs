@@ -9,12 +9,12 @@ use crate::{
     CheckView, CheckoutChange, CheckoutRun, CompactionReport, Conflict, ContextUse, Dashboard,
     DiskObservation, FlakyTest, GraphCoverage, History, ImpactLevel, InflightNotice, Intent,
     InterfaceImpact, InterfaceNotice, Landing, Lease, MapArea, MapEdge, Message, MessageStatus,
-    NameContext, NameRef, Note, Observation, OutlineEntry, PolicyRow, PresenceSetting, Publication,
-    QueuedLanding, Recall, Recap, RecordedEvent, RefusalCount, RemoteLink, Rename, Report,
-    ScanFailure, ScanSummary, SentPublication, Session, SessionLiveness, ShownMessage, StaleFile,
-    State, StatusLine, StatusRecord, StatusSummary, SymbolPath, SymbolRef, Today, TrailView, Turn,
-    Workspace, WorkspaceEnding, WorkspaceGit, WorkspaceKept, WorkspaceSummary, WriteCheck,
-    WrittenLines, is_false, is_zero,
+    NameContext, NameRef, Note, Observation, OutlineEntry, PeerCallers, PolicyRow, PresenceSetting,
+    Publication, QueuedLanding, Recall, Recap, RecordedEvent, RefusalCount, RemoteLink, Rename,
+    Report, ScanFailure, ScanSummary, SentPublication, Session, SessionLiveness, ShownMessage,
+    StaleFile, State, StatusLine, StatusRecord, StatusSummary, SymbolPath, SymbolRef, Today,
+    TrailView, Turn, Workspace, WorkspaceEnding, WorkspaceGit, WorkspaceKept, WorkspaceSummary,
+    WriteCheck, WrittenLines, is_false, is_zero,
 };
 
 // One reply per request, built and sent once: its size does not matter, and
@@ -550,6 +550,12 @@ pub enum Outcome {
         breaks: Vec<CallBreak>,
         coverage: GraphCoverage,
         ready: bool,
+        /// The request's `renamed` names that other worktrees' uncommitted
+        /// files mention (capability `rename_holds`, issue #213). Asked
+        /// about renamed names alone, `ready` says only that the index
+        /// was read, and `coverage` is empty.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        callers: Vec<PeerCallers>,
     },
     /// The answer to `CheckWrite` (roadmap B26). Nothing was recorded.
     WriteCheck {

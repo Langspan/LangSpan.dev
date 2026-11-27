@@ -29,6 +29,7 @@ mod recall;
 mod recent;
 mod refusal_outcome;
 mod remote;
+mod rename_holds;
 mod report;
 mod sessions;
 mod shared;
@@ -96,6 +97,7 @@ pub use recent::{
 };
 pub use refusal_outcome::{PENDING, REFUSAL_WINDOW_MS, RefusalOutcome};
 pub use remote::*;
+pub use rename_holds::{MAX_RENAMED, PeerCallers, live_sessions, validate_renamed};
 pub use report::{
     OTHER_HOST, REPORT_HISTORY_EVENTS, REPORT_SESSIONS, Report, ReportCounts, ReportHost,
     ReportKnown, ReportQuery, ReportSession, host_kind, known_sessions, open_intents, report,
