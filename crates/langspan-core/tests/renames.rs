@@ -385,7 +385,7 @@ fn a_rename_is_followed_to_its_newest_name_and_forgotten_when_the_name_returns()
         },
     )
     .unwrap();
-    assert!(state.renames.is_empty());
+    assert!(state.renames().is_empty());
 }
 
 /// Review finding on #203: function `fetch_user` became `load_user`, then
