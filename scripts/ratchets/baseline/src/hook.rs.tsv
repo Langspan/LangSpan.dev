@@ -1,10 +1,8 @@
-lines	6032
-pub	63
+lines	3360
+pub	45
 fn	execute	273
 fn	lifecycle	290
 fn	pre	174
-fn	render_peers_placed	530
-fn	shell_post	194
 edge	adopt
 edge	antigravity
 edge	breaks
