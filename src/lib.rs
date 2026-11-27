@@ -1,88 +1,128 @@
 //! LangSpan adapters. The domain crate has no dependency on these modules.
-
-pub mod adopt;
-pub mod auto_check;
-pub mod autostart;
-pub mod between_steps;
-pub mod binary_version;
-pub mod breaks;
-pub mod claude_code;
-pub mod cli;
-pub mod client;
-pub mod clock;
-pub mod commit;
-pub mod count;
-pub mod daemon;
-pub mod dashboard;
-pub mod definitions;
-pub mod demo;
-mod file_state;
-pub mod formatter;
-pub mod guidance;
-mod ids;
-mod input;
-pub mod install;
-mod lines;
-mod local;
-pub mod local_day;
-pub mod mcp;
-pub mod notify;
-pub mod protocol;
-pub mod recent;
-mod reformat;
-pub mod regions;
-mod registration;
-pub mod report;
-pub mod service;
-mod sha1;
-mod sha256;
-pub mod since;
-pub mod skill;
-pub mod status_line;
-pub mod store;
-pub mod test_output;
-mod text;
-pub mod today;
-mod tool_names;
-pub mod trail;
-pub mod user_install;
-mod vendor;
-mod wait;
-mod zone;
+//!
+//! One block per target namespace, bottom layer first (docs/architecture.md#module-map).
+//! A block lists today's top-level modules that move into that namespace.
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 
-pub mod hook;
+// Utility layer.
 
-pub mod hosts;
+// text
+mod text;
 
+// ids
+mod ids;
+mod registration;
+mod sha256;
+
+// time
+pub mod clock;
+pub mod local_day;
+mod zone;
+
+// protocol
+pub mod protocol;
+
+// regions
+pub mod breaks;
+pub mod regions;
+
+// hosts
+mod tool_names;
+mod vendor;
+
+// Infrastructure layer.
+
+// fs
+mod file_state;
+mod input;
+mod local;
+
+// git
 pub mod git;
+pub mod observer;
+pub mod remote;
+mod sha1;
 
-pub mod codex;
-
-pub mod cursor;
-
-pub mod gemini_removed;
-
-pub mod antigravity;
-
+// process
 pub mod process;
 
-pub mod observer;
+// ipc
+pub mod autostart;
+pub mod client;
 
-pub mod remote;
+// store
+pub mod store;
 
-pub mod shell;
-
-pub mod journal;
-
-pub mod spool;
-
+// graph
 pub mod graph;
 pub mod index_file;
+
+// shell
+pub mod shell;
+
+// install
+pub mod binary_version;
+pub mod guidance;
+pub mod hosts;
+pub mod install;
+pub mod service;
+pub mod user_install;
+
+// Application layer.
+
+// ownership
+pub mod adopt;
+pub mod commit;
+pub mod formatter;
+pub mod journal;
+mod lines;
+mod reformat;
+
+// checks
+pub mod auto_check;
+pub mod definitions;
 pub mod integrate;
 pub mod landing;
 pub mod rewrite;
+pub mod test_output;
+
+// briefing
+pub mod recent;
+pub mod since;
+pub mod trail;
+
+// person
+pub mod count;
+pub mod dashboard;
+pub mod notify;
+pub mod report;
+pub mod status_line;
+pub mod today;
+
+// hook
+pub mod antigravity;
+pub mod between_steps;
+pub mod claude_code;
+pub mod codex;
+pub mod cursor;
+pub mod gemini_removed;
+pub mod hook;
+pub mod spool;
+mod wait;
+
+// Interface layer.
+
+// daemon
+pub mod daemon;
+
+// mcp
+pub mod mcp;
+
+// cli
+pub mod cli;
+pub mod demo;
+pub mod skill;
 
 // Compatibility aliases: old paths kept until importers are repointed.
 use text::redact;

@@ -202,6 +202,10 @@ fn code_split_into_new_core_daemon_or_hook_modules_runs_the_dry_runs() {
         "src/daemon/serve.rs",
         "src/hook.rs",
         "src/hook/redact.rs",
+        "src/text.rs",
+        "src/text/redact.rs",
+        "src/briefing.rs",
+        "src/briefing/render.rs",
     ] {
         let repo = Repo::new();
         repo.commit("README.md");
@@ -216,6 +220,8 @@ fn code_split_into_new_core_daemon_or_hook_modules_runs_the_dry_runs() {
     for path in [
         "src/daemonize.rs",
         "src/hooks.rs",
+        "src/texts.rs",
+        "src/briefings.rs",
         "crates/langspan-graph/src/lib.rs",
     ] {
         let repo = Repo::new();

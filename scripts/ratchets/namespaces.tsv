@@ -7,8 +7,8 @@
 #   role NAMESPACE::FILE ROLE    src/NAMESPACE/FILE.rs is its own node: adapter or feature
 # An edge that breaks these rows, or a cycle, needs an `edge` row in its module's baseline.
 #
-# Today's top-level modules carry the layer of the namespace they move into. hook, wait and
-# graph have none yet: placing them needs debt rows in other baselines first, for
+# Today's top-level modules carry the layer of the namespace they move into. The edges that
+# layering exposes and the target layout forbids are debt rows in their modules' baselines:
 # auto_check, definitions, integrate, landing, report, test_output, today, hosts and store
 # -> hook, store -> wait, and graph -> definitions and reformat. Each allow row below is an
 # edge inside one target namespace, or one the target layout allows (regions -> ids,
@@ -44,7 +44,7 @@ namespace	process	infrastructure
 namespace	client	infrastructure
 namespace	autostart	infrastructure
 namespace	store	infrastructure
-namespace	graph	-
+namespace	graph	infrastructure
 namespace	index_file	infrastructure
 namespace	shell	infrastructure
 namespace	install	infrastructure
@@ -64,6 +64,9 @@ allow	shell	file_state
 allow	shell	git
 allow	shell	local
 allow	store	observer
+allow	graph	git
+allow	graph	index_file
+allow	graph	observer
 allow	hosts	install
 allow	hosts	user_install
 allow	user_install	install
@@ -93,7 +96,7 @@ namespace	report	application
 namespace	status_line	application
 namespace	notify	application
 namespace	dashboard	application
-namespace	hook	-
+namespace	hook	application
 namespace	claude_code	application
 namespace	codex	application
 namespace	cursor	application
@@ -101,7 +104,7 @@ namespace	antigravity	application
 namespace	gemini_removed	application
 namespace	between_steps	application
 namespace	spool	application
-namespace	wait	-
+namespace	wait	application
 allow	auto_check	integrate
 allow	auto_check	landing
 allow	auto_check	test_output
@@ -112,6 +115,9 @@ allow	landing	rewrite
 allow	count	today
 allow	dashboard	count
 allow	report	today
+allow	cursor	hook
+allow	hook	spool
+allow	hook	wait
 
 # interface
 namespace	daemon	interface
