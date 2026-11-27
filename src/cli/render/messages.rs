@@ -61,7 +61,7 @@ pub(super) fn print_message_status(status: &langspan_core::MessageStatus) {
     use langspan_core::{Delivery, MessageState, Recipient, RecipientState};
     let sent = status
         .sent_age_ms
-        .map(crate::hook::age)
+        .map(crate::text::age)
         .unwrap_or_else(|| "before the daemon last started".into());
     let to = match &status.to {
         Recipient::Session { session_id } => session_id.clone(),
@@ -94,7 +94,7 @@ pub(super) fn print_message_status(status: &langspan_core::MessageStatus) {
                 let mut line = "delivered".to_owned();
                 if let Some(age) = recipient.age_ms {
                     line.push(' ');
-                    line.push_str(&crate::hook::age(age));
+                    line.push_str(&crate::text::age(age));
                 }
                 if let Some(via) = recipient.via {
                     line.push_str(match via {

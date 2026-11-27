@@ -19,7 +19,10 @@
 //! goes out as a system message in `injectSteps`, on the two events that
 //! take it. Every other outcome is `{}`.
 
-use crate::hook::{self, Config, LifecycleKind, Operation, Phase, Reply};
+use crate::hook::{self, BRIEFING_LIMIT, Operation};
+use crate::hosts::port::{Config, LifecycleKind, Phase, Reply};
+use crate::ids::{file_key, valid_host_id};
+use crate::input::MAX_EVENT_BYTES;
 use langspan_core::ToolResult;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -169,27 +172,20 @@ fn handle(input: impl Read, config: &Config, event_name: &str, deadline: Instant
         return Reply::none("timeout", "hook deadline elapsed before parsing");
     }
     let mut bytes = Vec::new();
-    if let Err(error) = input
-        .take(hook::MAX_EVENT_BYTES + 1)
-        .read_to_end(&mut bytes)
-    {
+    if let Err(error) = input.take(MAX_EVENT_BYTES + 1).read_to_end(&mut bytes) {
         return Reply::none(
             "unknown",
             format!("could not read Antigravity event: {error}"),
         );
     }
-    if bytes.len() as u64 > hook::MAX_EVENT_BYTES {
+    if bytes.len() as u64 > MAX_EVENT_BYTES {
         return Reply::none("unsupported", "Antigravity event exceeds 8 MiB");
     }
     let event: HostEvent = match serde_json::from_slice(&bytes) {
         Ok(event) => event,
         Err(_) => return Reply::none("unknown", "malformed Antigravity hook JSON"),
     };
-    let Some(conversation) = event
-        .conversation_id
-        .clone()
-        .filter(|id| hook::valid_host_id(id))
-    else {
+    let Some(conversation) = event.conversation_id.clone().filter(|id| valid_host_id(id)) else {
         return Reply::none(
             "unsupported",
             "Antigravity event lacks a usable conversation identity",
@@ -284,7 +280,7 @@ fn lifecycle(
             (event_name, None),
             &resolved,
             deadline,
-            hook::BRIEFING_LIMIT.saturating_sub(used + separator),
+            BRIEFING_LIMIT.saturating_sub(used + separator),
         );
         if let Some(text) = context(&reply) {
             used += separator + text.len();
@@ -423,7 +419,7 @@ fn tool_call(
         text(path_key(tool)).ok_or_else(|| unsupported("Antigravity tool call names no file"))?;
     let cwd = event.directory(Some(file_path));
     let config = hook::resolve_workspace(config, cwd, deadline)?;
-    let key = hook::file_key(&config.root, cwd, file_path)
+    let key = file_key(&config.root, cwd, file_path)
         .map_err(|error| Reply::none("unsupported", error))?;
     let phase = match (pre, reads, event.failed()) {
         (true, _, _) => Phase::Pre,
@@ -620,7 +616,7 @@ mod tests {
         ] {
             let event: HostEvent = serde_json::from_str(&fixture(name)).expect(name);
             assert!(
-                hook::valid_host_id(event.conversation_id.as_deref().unwrap()),
+                valid_host_id(event.conversation_id.as_deref().unwrap()),
                 "{name}"
             );
             assert!(event.step_idx.is_some(), "{name}");
@@ -916,7 +912,7 @@ mod tests {
         // The longest valid conversation ID still gives a valid, distinct one.
         let long = "a".repeat(100);
         let scoped = scoped_session(&long, "root-one");
-        assert!(hook::valid_host_id(&scoped), "{scoped}");
+        assert!(valid_host_id(&scoped), "{scoped}");
         assert_ne!(scoped, scoped_session(&"b".repeat(100), "root-one"));
         for id in [one, scoped] {
             langspan_core::validate_request_id(&format!("{SOURCE}.{id}")).unwrap();
@@ -944,10 +940,7 @@ mod tests {
         assert!(both.detail.contains("deferred"), "{}", both.detail);
         // Each part was briefed within the room the ones before it left, and
         // what it delivered is acknowledged: the join never cuts it.
-        let long = joined(vec![
-            briefed(&"x".repeat(hook::BRIEFING_LIMIT)),
-            briefed("tail"),
-        ]);
+        let long = joined(vec![briefed(&"x".repeat(BRIEFING_LIMIT)), briefed("tail")]);
         let value: Value = serde_json::from_str(&long.stdout).unwrap();
         let text = value["hookSpecificOutput"]["additionalContext"]
             .as_str()
