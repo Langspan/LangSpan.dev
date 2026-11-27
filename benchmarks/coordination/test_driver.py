@@ -1994,8 +1994,8 @@ class DryRun(Temporary):
             # Issue #222: the context LangSpan's hooks added, from the coordinator, per task and in all.
             added = [t["context_added"] for t in record["tasks"]]
             self.assertTrue(all(a is not None and a["turns"] >= 1 for a in added), added)
-            self.assertTrue(any(a["bytes"] > 0 for a in added),
-                            "%s\n%s" % (added, self.silence_report(output, record)))
+            if not any(a["bytes"] > 0 for a in added):
+                self.fail("no context added: %s\n%s" % (added, self.silence_report(output, record)))
             trial = record["context_added"]
             self.assertEqual((trial["status"], trial["turns"], trial["bytes"]),
                              ("reported", sum(a["turns"] for a in added), sum(a["bytes"] for a in added)))
@@ -2214,8 +2214,9 @@ class DryRun(Temporary):
                             # new caller's session, in the coordinator's own log.
                             output = self.root / ("%s-%s-%d-%s" % (arm, family, n, mode))
                             notices = [t["interface_notices"] for t in record["tasks"] if t["role"] == "new_caller"]
-                            self.assertTrue(all(count >= 1 for count in notices),
-                                            "%s\n%s" % (notices, self.silence_report(output, record)))
+                            if not all(count >= 1 for count in notices):
+                                self.fail("a new caller got no interface notice: %s\n%s"
+                                          % (notices, self.silence_report(output, record)))
                             told = [(output / t["hook_log"]).read_text() for t in record["tasks"]
                                     if t["role"] == "new_caller"]
                             self.assertTrue(all("load_config" in log and "In flight" in log for log in told))
