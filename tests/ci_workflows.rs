@@ -287,7 +287,7 @@ fn the_full_lane_builds_once_per_platform_and_tests_the_archive_in_every_shard()
             "          LANGSPAN_TEST_ARCHIVE: ${{ runner.temp }}/tests.tar.zst\n".into(),
             // The partition's total is the matrix's own size, so adding a
             // shard can't leave a test in none.
-            "          LANGSPAN_TEST_PARTITION: hash:${{ matrix.shard }}/${{ strategy.job-total }}\n"
+            "          LANGSPAN_TEST_PARTITION: time:${{ matrix.shard }}/${{ strategy.job-total }}\n"
                 .into(),
             format!("          LANGSPAN_BENCH_DRY_RUNS: ${{{{ needs.{build}.outputs.dry_runs }}}}\n"),
             format!("          name: junit-{platform}-${{{{ matrix.shard }}}}\n"),
@@ -562,7 +562,7 @@ fn check_sh_refuses_a_build_or_shard_lane_without_its_archive_or_partition() {
     }
     // A shard runs only the part its partition names; without one, or with
     // one nextest would read as a different scheme, it would run them all.
-    for partition in ["", "1/4", "count:1/4", "hash:0/4", "hash:1"] {
+    for partition in ["", "1/4", "count:1/4", "hash:1/4", "time:0/4", "time:1"] {
         let (code, stderr) = check_sh_refusal(
             "check-partition",
             &[
@@ -574,10 +574,486 @@ fn check_sh_refuses_a_build_or_shard_lane_without_its_archive_or_partition() {
         assert_eq!(code, Some(2), "{partition}: {stderr}");
         assert!(
             stderr.contains(&format!(
-                "LANGSPAN_TEST_PARTITION is '{partition}'; the shard lane needs hash:K/N"
+                "LANGSPAN_TEST_PARTITION is '{partition}'; the shard lane needs time:K/N"
             )),
             "{stderr}"
         );
+    }
+}
+
+#[test]
+fn the_shard_stage_refuses_to_run_without_its_shard_and_checks_what_nextest_selects() {
+    // Outside the repository, so a stage that started would fail otherwise.
+    let dir = temp_dir("foreign-home-shard");
+    let out = Command::new("sh")
+        .arg(root().join("scripts/test-foreign-home.sh"))
+        .current_dir(&dir)
+        .env("LANGSPAN_TEST_STAGE", "shard")
+        .env("LANGSPAN_TEST_ARCHIVE", "/nonexistent/tests.tar.zst")
+        .env_remove("LANGSPAN_TEST_SHARD")
+        .output()
+        .unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr)
+            .contains("the shard stage needs LANGSPAN_TEST_SHARD, the shard as K/N"),
+        "{out:?}"
+    );
+    // The shard runs the filterset only once nextest has been seen to
+    // select the count the assignment expects, and the dry runs weigh
+    // nothing when they are skipped.
+    let script = read("scripts/test-foreign-home.sh");
+    for line in [
+        "    if [ \"${LANGSPAN_BENCH_DRY_RUNS:-}\" = skip ]; then skip=--skip-dry-runs; fi\n",
+        "    if [ \"$selected\" != \"$expected\" ]; then\n",
+        "      exit 1\n    fi\n    set -- \"$@\" -E \"$filter\"\n",
+    ] {
+        assert!(script.contains(line), "test-foreign-home.sh lacks {line}");
+    }
+}
+
+/// Runs scripts/ci-shards.py with `args`; returns (success, stdout, stderr).
+/// It is a child process because CI runs it as one, from the shell.
+fn ci_shards(args: &[&std::ffi::OsStr]) -> (bool, String, String) {
+    let out = Command::new("python3")
+        .args(["-I", "-B"])
+        .arg(root().join("scripts/ci-shards.py"))
+        .args(args)
+        .output()
+        .expect("python3 runs scripts/ci-shards.py");
+    (
+        out.status.success(),
+        String::from_utf8(out.stdout).unwrap(),
+        String::from_utf8(out.stderr).unwrap(),
+    )
+}
+
+/// `cargo nextest list --message-format json` output for `binaries` of
+/// (binary id, [(test, matches)]): the fields ci-shards.py reads.
+fn nextest_list(binaries: &[(&str, &[(&str, bool)])]) -> String {
+    let mut suites = serde_json::Map::new();
+    for (binary, tests) in binaries {
+        let mut cases = serde_json::Map::new();
+        for (test, matches) in *tests {
+            let status = if *matches {
+                serde_json::json!({"status": "matches"})
+            } else {
+                serde_json::json!({"status": "mismatch", "reason": "ignored"})
+            };
+            cases.insert(
+                (*test).into(),
+                serde_json::json!({"kind": "test", "ignored": !matches, "filter-match": status}),
+            );
+        }
+        suites.insert(
+            (*binary).into(),
+            serde_json::json!({"binary-id": binary, "testcases": cases}),
+        );
+    }
+    serde_json::json!({"test-count": 0, "rust-suites": suites}).to_string()
+}
+
+/// Whether one filterset `ci-shards.py assign` printed selects `test` of
+/// `binary`. It reads only the three forms the script writes, joined by
+/// ` | `, and `none()` for a shard given nothing, so a form it doesn't know
+/// fails here.
+fn selects(filter: &str, binary: &str, test: &str) -> bool {
+    if filter == "none()" {
+        return false;
+    }
+    let mut terms = Vec::new();
+    let (mut depth, mut start) = (0, 0);
+    for (i, c) in filter.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            '|' if depth == 0 => {
+                terms.push(filter[start..i].trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    terms.push(filter[start..].trim());
+    terms.iter().any(|term| {
+        let is = |b: &str| b == binary;
+        if let Some(rest) = term
+            .strip_prefix("(binary_id(=")
+            .and_then(|t| t.strip_suffix("))"))
+        {
+            let (b, inner) = rest.split_once(") & ").unwrap();
+            if let Some(t) = inner.strip_prefix("test(=") {
+                return is(b) && t == test;
+            }
+            let others = inner
+                .strip_prefix("not (test(=")
+                .and_then(|t| t.strip_suffix(')'))
+                .unwrap();
+            return is(b) && !others.split(") | test(=").any(|t| t == test);
+        }
+        let b = term
+            .strip_prefix("binary_id(=")
+            .and_then(|t| t.strip_suffix(')'))
+            .unwrap_or_else(|| panic!("unknown filterset form {term}"));
+        is(b)
+    })
+}
+
+#[test]
+fn measured_shards_give_every_test_to_exactly_one_shard() {
+    let dir = temp_dir("ci-shards-cover");
+    let times = dir.join("times.tsv");
+    // langspan::b's `gone` was removed after recording, and langspan::c and
+    // langspan::a's `new_test` were added: each still runs exactly once.
+    fs::write(
+        &times,
+        "# fixture\n\
+         linux\tlangspan::a\tslow_one\t60.0\t1\n\
+         linux\tlangspan::a\tslow_two\t40.0\t1\n\
+         linux\tlangspan::a\t*\t9.0\t3\n\
+         linux\tlangspan::b\tgone\t30.0\t1\n\
+         linux\tlangspan::b\t*\t20.0\t2\n\
+         linux\tlangspan::benchmark_harness\tdry_run_x\t50.0\t1\n\
+         linux\tlangspan::benchmark_harness\t*\t1.0\t1\n\
+         linux\tlangspan\t*\t5.0\t10\n\
+         macos\tlangspan::a\tslow_one\t90.0\t1\n",
+    )
+    .unwrap();
+    let binaries: &[(&str, &[(&str, bool)])] = &[
+        (
+            "langspan",
+            &[("m::tests::one", true), ("m::tests::two", true)],
+        ),
+        (
+            "langspan::a",
+            &[
+                ("slow_one", true),
+                ("slow_two", true),
+                ("l1", true),
+                ("l2", true),
+                ("new_test", true),
+                ("ignored_one", false),
+            ],
+        ),
+        ("langspan::b", &[("b1", true), ("b2", true)]),
+        (
+            "langspan::benchmark_harness",
+            &[("dry_run_x", true), ("plain", true)],
+        ),
+        ("langspan::c", &[("c1", true), ("c2", true)]),
+        ("langspan::d", &[("only_ignored", false)]),
+    ];
+    let list = dir.join("list.json");
+    fs::write(&list, nextest_list(binaries)).unwrap();
+    let running: Vec<(&str, &str)> = binaries
+        .iter()
+        .flat_map(|(b, tests)| tests.iter().filter(|t| t.1).map(move |t| (*b, t.0)))
+        .collect();
+    for skip in [false, true] {
+        let mut seen = vec![0; running.len()];
+        let mut counted = 0;
+        for k in 1..=4 {
+            let shard = format!("{k}/4");
+            let mut args: Vec<&std::ffi::OsStr> = vec![
+                "--times".as_ref(),
+                times.as_os_str(),
+                "assign".as_ref(),
+                "--platform".as_ref(),
+                "linux".as_ref(),
+                "--threads".as_ref(),
+                "2".as_ref(),
+                "--shard".as_ref(),
+                shard.as_ref(),
+            ];
+            if skip {
+                args.push("--skip-dry-runs".as_ref());
+            }
+            args.push(list.as_os_str());
+            let (ok, stdout, stderr) = ci_shards(&args);
+            assert!(ok, "{stderr}");
+            let (count, filter) = stdout.trim_end().split_once('\n').unwrap();
+            let count: usize = count.parse().unwrap();
+            let mine = running
+                .iter()
+                .filter(|(b, t)| selects(filter, b, t))
+                .count();
+            // The count the shard checks nextest against is what its
+            // filterset selects.
+            assert_eq!(count, mine, "shard {k}: {filter}");
+            counted += count;
+            for (i, (b, t)) in running.iter().enumerate() {
+                if selects(filter, b, t) {
+                    seen[i] += 1;
+                }
+            }
+        }
+        assert_eq!(counted, running.len());
+        for (i, n) in seen.iter().enumerate() {
+            assert_eq!(*n, 1, "{:?} runs in {n} shards", running[i]);
+        }
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn measured_shards_are_the_same_on_every_shard_whatever_the_list_order() {
+    let dir = temp_dir("ci-shards-same");
+    let times = dir.join("times.tsv");
+    fs::write(
+        &times,
+        "linux\tlangspan::a\tx\t10.0\t1\nlinux\tlangspan::a\ty\t10.0\t1\nlinux\tlangspan::b\t*\t10.0\t2\n",
+    )
+    .unwrap();
+    let forward: &[(&str, &[(&str, bool)])] = &[
+        ("langspan::a", &[("x", true), ("y", true)]),
+        ("langspan::b", &[("p", true), ("q", true)]),
+    ];
+    let backward: &[(&str, &[(&str, bool)])] = &[
+        ("langspan::b", &[("q", true), ("p", true)]),
+        ("langspan::a", &[("y", true), ("x", true)]),
+    ];
+    let mut outputs = Vec::new();
+    for (name, binaries) in [("f", forward), ("f", forward), ("b", backward)] {
+        let list = dir.join(format!("{name}.json"));
+        fs::write(&list, nextest_list(binaries)).unwrap();
+        let shards: Vec<String> = (1..=2)
+            .map(|k| {
+                let shard = format!("{k}/2");
+                let (ok, stdout, stderr) = ci_shards(&[
+                    "--times".as_ref(),
+                    times.as_os_str(),
+                    "assign".as_ref(),
+                    "--platform".as_ref(),
+                    "linux".as_ref(),
+                    "--threads".as_ref(),
+                    "1".as_ref(),
+                    "--shard".as_ref(),
+                    shard.as_ref(),
+                    list.as_os_str(),
+                ]);
+                assert!(ok, "{stderr}");
+                stdout
+            })
+            .collect();
+        outputs.push(shards);
+    }
+    // Without --threads the assignment is the platform's, not this
+    // machine's: runners of one platform with different CPU counts would
+    // otherwise split the tests differently, and a test would run twice or
+    // not at all. A 40 s test and twenty 10 s binaries: at 4 threads the
+    // other shard fills to 40 s after 16 binaries, at 3 after 12, and at 8
+    // or more never, so each of those splits differently.
+    let mut times_rows = String::from("linux\tlangspan::a\tslow\t40.0\t1\n");
+    let mut binaries: Vec<(String, Vec<(&str, bool)>)> =
+        vec![("langspan::a".into(), vec![("slow", true)])];
+    for b in 0..20 {
+        times_rows.push_str(&format!("linux\tlangspan::b{b}\t*\t10.0\t1\n"));
+        binaries.push((format!("langspan::b{b}"), vec![("t", true)]));
+    }
+    fs::write(&times, times_rows).unwrap();
+    let list = dir.join("threads.json");
+    let borrowed: Vec<(&str, &[(&str, bool)])> = binaries
+        .iter()
+        .map(|(b, t)| (b.as_str(), t.as_slice()))
+        .collect();
+    fs::write(&list, nextest_list(&borrowed)).unwrap();
+    let first = |threads: Option<&str>| {
+        let mut args: Vec<&std::ffi::OsStr> = vec![
+            "--times".as_ref(),
+            times.as_os_str(),
+            "assign".as_ref(),
+            "--platform".as_ref(),
+            "linux".as_ref(),
+            "--shard".as_ref(),
+            "1/2".as_ref(),
+        ];
+        if let Some(threads) = threads {
+            args.push("--threads".as_ref());
+            args.push(threads.as_ref());
+        }
+        args.push(list.as_os_str());
+        let (ok, stdout, stderr) = ci_shards(&args);
+        assert!(ok, "{stderr}");
+        stdout
+    };
+    let standard = first(Some("4"));
+    assert_ne!(standard, first(Some("3")));
+    assert_ne!(standard, first(Some("8")));
+    assert_eq!(first(None), standard);
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(outputs[0], outputs[1]);
+    assert_eq!(outputs[0], outputs[2]);
+    // Equal units, ties to the lower shard: the three ten-second units
+    // split two and one.
+    assert_eq!(
+        outputs[0],
+        [
+            "3\n(binary_id(=langspan::a) & test(=x)) | binary_id(=langspan::b)\n",
+            "1\n(binary_id(=langspan::a) & test(=y))\n",
+        ]
+    );
+}
+
+#[test]
+fn measured_shards_refuse_a_bad_shard_or_a_name_a_filterset_cannot_hold() {
+    let dir = temp_dir("ci-shards-refuse");
+    let list = dir.join("list.json");
+    fs::write(&list, nextest_list(&[("langspan::a", &[("x", true)])])).unwrap();
+    let times = dir.join("none.tsv");
+    for shard in ["0/4", "5/4", "1", "a/4"] {
+        let (ok, _, stderr) = ci_shards(&[
+            "--times".as_ref(),
+            times.as_os_str(),
+            "assign".as_ref(),
+            "--platform".as_ref(),
+            "linux".as_ref(),
+            "--shard".as_ref(),
+            shard.as_ref(),
+            list.as_os_str(),
+        ]);
+        assert!(!ok, "{shard}");
+        assert!(
+            stderr.contains(&format!(
+                "--shard is '{shard}'; expected K/N with 1 <= K <= N"
+            )),
+            "{stderr}"
+        );
+    }
+    fs::write(&list, nextest_list(&[("langspan::a", &[("x(y)", true)])])).unwrap();
+    let (ok, _, stderr) = ci_shards(&[
+        "--times".as_ref(),
+        times.as_os_str(),
+        "assign".as_ref(),
+        "--platform".as_ref(),
+        "linux".as_ref(),
+        "--shard".as_ref(),
+        "1/4".as_ref(),
+        list.as_os_str(),
+    ]);
+    let _ = fs::remove_dir_all(&dir);
+    assert!(!ok);
+    assert!(
+        stderr.contains("the test name 'x(y)' has a character a nextest filterset can't hold"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn measured_times_are_recorded_from_a_runs_junit_reports() {
+    let dir = temp_dir("ci-shards-record");
+    let times = dir.join("times.tsv");
+    fs::write(
+        &times,
+        "macos\tlangspan::a\t*\t3.0\t2\nlinux\tlangspan::old\t*\t9.0\t9\n",
+    )
+    .unwrap();
+    let junit = |name: &str, body: &str| {
+        let path = dir.join(name);
+        fs::write(
+            &path,
+            format!("<?xml version=\"1.0\"?><testsuites name=\"nextest-run\">{body}</testsuites>"),
+        )
+        .unwrap();
+        path
+    };
+    let one = junit(
+        "1.xml",
+        "<testsuite name=\"langspan::a\"><testcase name=\"slow\" time=\"12.34\"/>\
+         <testcase name=\"quick\" time=\"0.5\"/><testcase name=\"quicker\" time=\"0.3\"/></testsuite>",
+    );
+    let two = junit(
+        "2.xml",
+        "<testsuite name=\"langspan\"><testcase name=\"m::tests::t\" time=\"1.999\"/></testsuite>\
+         <testsuite name=\"langspan::a\"><testcase name=\"edge\" time=\"2.0\"/></testsuite>",
+    );
+    // A second run's report: a test seen in both is weighed at its mean.
+    let again = junit(
+        "3.xml",
+        "<testsuite name=\"langspan::a\"><testcase name=\"slow\" time=\"7.66\"/>\
+         <testcase name=\"quick\" time=\"1.5\"/></testsuite>\
+         <testsuite name=\"langspan\"><testcase name=\"m::tests::t\" time=\"2.001\"/></testsuite>",
+    );
+    let record = |reports: &[&std::path::Path]| {
+        let mut args: Vec<&std::ffi::OsStr> = vec![
+            "--times".as_ref(),
+            times.as_os_str(),
+            "record".as_ref(),
+            "--platform".as_ref(),
+            "linux".as_ref(),
+        ];
+        args.extend(reports.iter().map(|r| r.as_os_str()));
+        let (ok, _, stderr) = ci_shards(&args);
+        assert!(ok, "{stderr}");
+        let text = fs::read_to_string(&times).unwrap();
+        assert!(
+            text.starts_with("# Measured test time per CI platform"),
+            "{text}"
+        );
+        text.lines()
+            .filter(|l| !l.starts_with('#'))
+            .map(String::from)
+            .collect::<Vec<_>>()
+    };
+    // The platform's old rows go; the other platform's stay. A test of 2 s
+    // or more has a row of its own; the rest of its binary are summed.
+    assert_eq!(
+        record(&[&one, &two]),
+        [
+            "linux\tlangspan\t*\t2.0\t1",
+            "linux\tlangspan::a\t*\t0.8\t2",
+            "linux\tlangspan::a\tedge\t2.0\t1",
+            "linux\tlangspan::a\tslow\t12.3\t1",
+            "macos\tlangspan::a\t*\t3.0\t2",
+        ]
+    );
+    // Over two runs: slow (12.34 + 7.66) / 2, quick (0.5 + 1.5) / 2 plus
+    // quicker 0.3, and m::tests::t's mean of 2.0 earns a row of its own.
+    let rows = record(&[&one, &two, &again]);
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(
+        rows,
+        [
+            "linux\tlangspan\tm::tests::t\t2.0\t1",
+            "linux\tlangspan::a\t*\t1.3\t2",
+            "linux\tlangspan::a\tedge\t2.0\t1",
+            "linux\tlangspan::a\tslow\t10.0\t1",
+            "macos\tlangspan::a\t*\t3.0\t2",
+        ]
+    );
+}
+
+#[test]
+fn measured_shards_balance_the_recorded_times_on_both_platforms() {
+    // The threads of CI's standard runners: 4 on Linux, 3 on macOS.
+    for (platform, threads) in [("linux", "4"), ("macos", "3")] {
+        for skip in [false, true] {
+            let mut args: Vec<&std::ffi::OsStr> = vec![
+                "balance".as_ref(),
+                "--platform".as_ref(),
+                platform.as_ref(),
+                "--threads".as_ref(),
+                threads.as_ref(),
+                "--shards".as_ref(),
+                "4".as_ref(),
+            ];
+            if skip {
+                args.push("--skip-dry-runs".as_ref());
+            }
+            let (ok, stdout, stderr) = ci_shards(&args);
+            assert!(ok, "{stderr}");
+            let seconds: Vec<f64> = stdout
+                .lines()
+                .map(|l| l.split('\t').nth(1).unwrap().parse().unwrap())
+                .collect();
+            assert_eq!(seconds.len(), 4, "{stdout}");
+            let mean = seconds.iter().sum::<f64>() / 4.0;
+            let slowest = seconds.iter().copied().fold(0.0, f64::max);
+            assert!(
+                slowest <= mean * 1.2,
+                "{platform}, dry runs skipped {skip}: the slowest shard takes {slowest} s against a mean of {mean} s\n{stdout}"
+            );
+        }
     }
 }
 
@@ -1213,7 +1689,7 @@ fn check_sh_denies_doc_warnings_and_ends_each_lane_with_no_process_left() {
     // before they exit, the full and build lanes on the last line.
     assert!(check.contains("  leftovers\n  echo \"check.sh: fast lane done"));
     assert!(check.contains(
-        "  sh scripts/test-foreign-home.sh --partition \"$partition\"\n  leftovers\n  exit 0\n"
+        "  LANGSPAN_TEST_SHARD=${partition#time:} sh scripts/test-foreign-home.sh\n  leftovers\n  exit 0\n"
     ));
     assert!(check.trim_end().ends_with("\nleftovers"), "{check}");
 }

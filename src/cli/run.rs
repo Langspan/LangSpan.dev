@@ -10,7 +10,7 @@ use crate::serve::{daemon, dashboard, mcp};
 use langspan::cli::doctor::doctor;
 use langspan::cli::options::no_unused_options;
 use langspan::cli::setup::{Mode, guidance, hooks, hosts_report, setup, user_install};
-use langspan::hosts::UserHome;
+use langspan::install::detect::UserHome;
 use std::path::PathBuf;
 
 #[cfg(test)]
