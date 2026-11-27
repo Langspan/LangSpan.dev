@@ -15,7 +15,7 @@ Every capability still to build is a GitHub issue labeled `roadmap` ([the list](
 
 - Pick an issue whose ADR says it is planned, or whose condition for revisiting has been met. Read the issue and that ADR.
 - Propose any change of decision as an ADR change in the same pull request, and update the issue.
-- A pull request that finishes a capability says "Fixes #N" and removes its line from the index.
+- A pull request that finishes a capability says "Fixes #N"; the index is [generated](docs/development-process.md#generated-files), not edited.
 
 ## Constraints the code doesn't show
 

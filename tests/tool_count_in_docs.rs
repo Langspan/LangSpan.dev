@@ -3,8 +3,15 @@
 //! stale with the next tool and makes every branch that adds one conflict.
 //! The tool table in `docs/usage/mcp.md` is held to that list by name.
 
+//!
+//! The tool table and ADR 0037's capability table are generated from
+//! `docs/tables/` by `scripts/gen-docs.py`; the last two tests hold them to
+//! their entries and run the generator's own tests. Both run the Python
+//! script as a child process, since the script is what they verify.
+
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// Written in batches by the maintainers, not by a pull request that adds a
 /// tool; their stated counts are theirs to remove.
@@ -175,4 +182,44 @@ fn no_document_states_how_many_tools_there_are() {
          added. Name the tools or point at TOOL_NAMES in src/mcp.rs instead:\n{}",
         problems.join("\n")
     );
+}
+
+fn python(args: &[&str]) -> (bool, String) {
+    let output = Command::new("python3")
+        // -I: ignore the environment and the user's site packages; -B: write
+        // no bytecode beside the scripts.
+        .args(["-I", "-B"])
+        .args(args)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("the generated docs check needs python3 on PATH");
+    let report = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    (output.status.success(), report)
+}
+
+#[test]
+fn the_generated_tables_match_their_entries() {
+    let (passed, report) = python(&["scripts/gen-docs.py", "--check"]);
+    assert!(passed, "{report}");
+}
+
+#[test]
+fn the_docs_generator_passes_its_own_tests() {
+    let (passed, report) = python(&[
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "scripts/gen-docs",
+        "-p",
+        "test_*.py",
+    ]);
+    eprintln!("{report}");
+    assert!(passed, "{report}");
+    // Python before 3.12 passes a run that found no tests.
+    assert!(!report.contains("Ran 0 tests"), "{report}");
 }

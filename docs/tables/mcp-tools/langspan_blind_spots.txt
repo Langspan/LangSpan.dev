@@ -1,0 +1,1 @@
+List the files the index cannot answer for (partial, never parsed cleanly, waiting, too large, unscanned) and other languages by extension
