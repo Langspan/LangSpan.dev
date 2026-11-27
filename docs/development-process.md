@@ -56,7 +56,9 @@ A pull request is done when all of the following are true:
   `cargo clippy --workspace --all-targets --locked -- -D warnings` are clean.
 - The docs and the [roadmap index](roadmap.md) match the change.
 - CI's fast lane is green on the pull request, and the full lane on Linux
-  and macOS passes on its merge-queue commit, on top of the latest `main`.
+  passes on its merge-queue commit, on top of the latest `main`. The macOS
+  full lane runs there too; it isn't a required check, so read its result
+  and fix a macOS failure before it reaches the nightly run.
 - No P0 or P1 review finding is open.
 
 Write "Fixes #N" only when the pull request meets every build criterion of
@@ -85,8 +87,10 @@ refresh hides the regression the snapshot exists to catch.
 
 Pull requests merge through GitHub's merge queue. The queue tests each pull
 request on top of `main` and every pull request queued ahead of it, under
-the same required checks (Linux, macOS, Workflows and Content), and merges
-it only if they pass. A pull request whose checks fail there leaves the
+the same required checks (Linux, Workflows and Content), and merges
+it only if they pass. The macOS check runs on the same commit but isn't
+required: the queue doesn't wait for it, because waiting doubled the time a
+pull request spent in the queue. A pull request whose checks fail there leaves the
 queue, and the ones behind it are tested again without it. The Content
 check on a queued commit checks the tree only; the pull request's title and
 body passed it before the pull request was queued.
@@ -122,8 +126,10 @@ the event (`LANGSPAN_CHECK_LANE`):
   and the two-developer demonstration. Target: **under 8 minutes** in the
   merge queue. The job stops at 15 minutes there, and at 30 on `main` and
   nightly, which also build the release binary and run the demonstration
-  on it. The queue merges a pull request only when its full lane passes,
-  so nothing reaches `main` untested.
+  on it. The queue merges a pull request only when its full Linux lane
+  passes, so nothing reaches `main` untested on Linux. A macOS failure
+  doesn't block the merge; it shows on the queue's run, on `main` and in
+  the nightly run's issue.
 
 In the full lane, the benchmark harness's dry runs (the `dry_run_*` tests
 in `tests/benchmark_harness.rs`) run only when the change touches one of
