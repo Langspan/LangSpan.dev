@@ -1,0 +1,968 @@
+# Each command line from the help alone, then with each option added.
+# `same` lists the options with which it exits and reports as it
+# does alone: accepted. The others are grouped by what they print,
+# the option named as {option}. `every other option` of the
+# table's list is not valid for the command. No coordinator is running, so a
+# command that gets past its options stops where it asks one. A
+# command that asks before it checks its options (check run,
+# check status) lists them all as same; the transcript tests
+# cover those. `daemon` and `setup` get a state directory that is
+# a regular file, so that neither starts anything.
+
+## langspan setup
+alone: exit 0
+same: --state-dir --prompt-summary --presence --presence-minutes --home --hosts --statusline --mcp-tools --outline-reads
+--json
+  exit 1: {"level":"error","message":"--json is not valid for `setup`; run `langspan doctor --json` after it"}
+--apply
+  exit 1: {"level":"error","message":"`setup` asks before it changes anything; use --yes to skip the question"}
+--help -h
+  exit 0: the help
+--skill
+  exit 1: {"level":"error","message":"`setup` always installs the skill; leave out --skill"}
+--yes
+  exit 1: {"level":"error","message":"state files must belong to the current user and be owner-only (directory 0700, files 0600)"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan demo
+alone: exit 0
+same: --apply
+--json
+  exit 1: {"level":"error","message":"--json is not valid for `demo`"}
+--help -h
+  exit 0: the help
+--state-dir
+  exit 1: {"level":"error","message":"`demo` uses a temporary state directory of its own; leave out --state-dir"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan daemon
+alone: exit 1: {"level":"error","message":"prepare state directory: state files must belong to the current user and be owner-only (directory 0700, files 0600)"}
+same: --json --state-dir
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan mcp
+alone: exit 1: {"level":"error","message":"connection closed: initialize request"}
+same: --json --state-dir --tools
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+--host
+  exit 1: {"level":"error","message":"--host is valid only with --tools hooked"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan dashboard --json
+alone: exit 1: {"level":"error","message":"--json is not valid for `dashboard`; its JSON is served at /api/state"}
+same: --json --open --allow-network --demo --state-dir --listen
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan workspace add w ROOT --request-id r1
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --state-dir
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--request-id
+  exit 1: {"level":"error","message":"duplicate option --request-id"}
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan workspace list
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --state-dir --request-id --after
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan workspace move w ROOT --request-id r1
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --switch --state-dir
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--request-id
+  exit 1: {"level":"error","message":"duplicate option --request-id"}
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan workspace remove w
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --state-dir --request-id
+--apply
+  exit 1: {"level":"error","message":"mutation requires --request-id ID; reuse it only for an identical retry"}
+--help -h
+  exit 0: the help
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan session start s1 w --request-id r1
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --state-dir
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--request-id
+  exit 1: {"level":"error","message":"duplicate option --request-id"}
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan session attach-pid s1 PID --request-id r1
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --state-dir
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--request-id
+  exit 1: {"level":"error","message":"duplicate option --request-id"}
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan intent set s1 a.rs --request-id r1
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --state-dir --summary
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--request-id
+  exit 1: {"level":"error","message":"duplicate option --request-id"}
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan intent end s1 --request-id r1
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --state-dir
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--request-id
+  exit 1: {"level":"error","message":"duplicate option --request-id"}
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan admit s1 a.rs --request-id r1
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --state-dir --ttl-ms
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--request-id
+  exit 1: {"level":"error","message":"duplicate option --request-id"}
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan complete s1 l1 --request-id r1
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --state-dir
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--request-id
+  exit 1: {"level":"error","message":"duplicate option --request-id"}
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan brief s1 --request-id r1
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --recent --state-dir --max-peers
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--request-id
+  exit 1: {"level":"error","message":"duplicate option --request-id"}
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan remote enable w --name n --request-id r1
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --publish-as-branch --state-dir --root --remote --share-task
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--request-id
+  exit 1: {"level":"error","message":"duplicate option --request-id"}
+--name
+  exit 1: {"level":"error","message":"duplicate option --name"}
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan remote disable w --request-id r1
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --state-dir
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--request-id
+  exit 1: {"level":"error","message":"duplicate option --request-id"}
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan remote outbox w
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --state-dir --request-id
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan remote sent w
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --state-dir --request-id --limit
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan check run w --name n -- true
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --apply --open --allow-network --demo --check-again --rebase --adapt-renames --symbols --publish-as-branch --mine --detail --rank --renamed --recent --all --skill --create --yes --switch --off --state-dir --request-id --summary --ttl-ms --after --limit --workspace --root --budget-ms --event --settings --prompt-summary --code-briefing --presence --presence-minutes --max-peers --remote --share-task --onto --timeout-s --wait-s --session --to --from --home --hosts --listen -m --message --statusline --deadline-ms --forget --since --sound --depth --path --out --in --before --keep-days --month --format --file --tools --host --mcp-tools --wait-ms --max-hops --mode --outline-reads
+--help -h
+  exit 0: the help
+--name
+  exit 1: {"level":"error","message":"duplicate option --name"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan check status w
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --apply --open --allow-network --demo --check-again --rebase --adapt-renames --symbols --publish-as-branch --mine --detail --rank --renamed --recent --all --skill --create --yes --switch --off --state-dir --request-id --summary --ttl-ms --after --limit --workspace --root --budget-ms --event --settings --prompt-summary --code-briefing --presence --presence-minutes --max-peers --remote --name --share-task --onto --timeout-s --wait-s --session --to --from --home --hosts --listen -m --message --statusline --deadline-ms --forget --since --sound --depth --path --out --in --before --keep-days --month --format --file --tools --host --mcp-tools --wait-ms --max-hops --mode --outline-reads
+--help -h
+  exit 0: the help
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan check auto w
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --apply --off --state-dir --home
+--help -h
+  exit 0: the help
+--open --allow-network --demo --check-again --rebase --adapt-renames --symbols --publish-as-branch --mine --detail --rank --renamed --recent --all --skill --create --yes --switch --request-id --summary --ttl-ms --after --limit --workspace --root --budget-ms --event --settings --prompt-summary --code-briefing --presence --presence-minutes --max-peers --remote --share-task --onto --timeout-s --wait-s --session --to --from --hosts --listen -m --message --statusline --deadline-ms --forget --since --sound --depth --path --out --in --before --keep-days --month --format --file --tools --host --mcp-tools --wait-ms --max-hops --mode --outline-reads
+  exit 1: {"level":"error","message":"--name NAME is required: it is how this check's evidence is found again"}
+--name
+  exit 1: {"level":"error","message":"give the check command after --, for example: -- cargo test"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan check flaky w
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --apply --state-dir --name --home
+--help -h
+  exit 0: the help
+--forget
+  exit 1: {"level":"error","message":"--forget requires --request-id ID; reuse it only for an identical retry"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan integrate check w --onto main --name n b -- true
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --apply --rebase --adapt-renames --symbols --state-dir --request-id --remote --timeout-s --session --home
+--help -h
+  exit 0: the help
+--check-again
+  exit 1: {"level":"error","message":"--check-again is valid only for `land`"}
+--name
+  exit 1: {"level":"error","message":"duplicate option --name"}
+--onto
+  exit 1: {"level":"error","message":"duplicate option --onto"}
+--wait-s
+  exit 1: {"level":"error","message":"--wait-s is valid only for `land`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan land w --onto main --name n b
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --apply --rebase --adapt-renames --state-dir --request-id --remote --timeout-s --wait-s --session --home
+--help -h
+  exit 0: the help
+--check-again
+  exit 1: {"level":"error","message":"--check-again needs the check command after --, for example: -- cargo test"}
+--symbols
+  exit 1: {"level":"error","message":"--symbols is valid only for `integrate check`"}
+--name
+  exit 1: {"level":"error","message":"duplicate option --name"}
+--onto
+  exit 1: {"level":"error","message":"duplicate option --onto"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan land-queue w --onto main
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --apply --state-dir --home
+--help -h
+  exit 0: the help
+--onto
+  exit 1: {"level":"error","message":"duplicate option --onto"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan land-cancel w --onto main --request-id r1
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --apply --state-dir --home
+--help -h
+  exit 0: the help
+--request-id
+  exit 1: {"level":"error","message":"duplicate option --request-id"}
+--onto
+  exit 1: {"level":"error","message":"duplicate option --onto"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan graph symbol w name
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --detail --rank --renamed --state-dir --request-id --limit --session
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan graph references w name
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --state-dir --request-id --limit
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan graph impact w a.rs
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --state-dir --request-id --limit --depth
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan graph path w from to
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --state-dir --request-id --max-hops
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan graph map w
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --state-dir --request-id --depth
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan graph blind-spots w
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --state-dir --request-id --limit
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan graph inflight w
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --state-dir --request-id
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan graph export w --out ROOT/index.jsonl
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --state-dir --request-id
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+--out
+  exit 1: {"level":"error","message":"duplicate option --out"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan graph import w --in ROOT/index.jsonl
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --apply --state-dir --request-id
+--help -h
+  exit 0: the help
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+--in
+  exit 1: {"level":"error","message":"duplicate option --in"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan graph history w name
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --state-dir --request-id --limit --path --before
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan check-write s1 a.rs
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --symbol --state-dir --request-id
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan recap w
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --tag --state-dir --request-id
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan trail w
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --state-dir --request-id --limit
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan today
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --state-dir --request-id --since
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan report w
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --state-dir --request-id --since
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan count
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --apply --state-dir --home --month
+--help -h
+  exit 0: the help
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan policy w
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --state-dir --request-id
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan policy set w conflict refuse --request-id r1
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --state-dir --wait-ms
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--request-id
+  exit 1: {"level":"error","message":"duplicate option --request-id"}
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan remember w text --request-id r1
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --symbol --tag --state-dir --session
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--request-id
+  exit 1: {"level":"error","message":"duplicate option --request-id"}
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan forget w n1 --request-id r1
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --state-dir
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--request-id
+  exit 1: {"level":"error","message":"duplicate option --request-id"}
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan recall w words
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --state-dir --request-id --limit --path
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan commit --mine -m text
+alone: exit 1: {"level":"error","message":"no session is running this command through its shell tool in the state directory '$TMP/state'; if LangSpan's hooks were installed with --state-dir, pass the same --state-dir, or pass --session ID (a briefing says \"Your session ID is ...\")"}
+same: --json --apply --state-dir --root --home
+--help -h
+  exit 0: the help
+--mine
+  exit 1: {"level":"error","message":"duplicate option --mine"}
+--session
+  exit 1: {"level":"error","message":"git rev-parse --path-format=absolute --show-toplevel --absolute-git-dir failed (exit status: 128). Git said: fatal: not a git repository (or any of the parent directories): .git"}
+-m --message
+  exit 1: {"level":"error","message":"duplicate option --message"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan adopt s2
+alone: exit 1: {"level":"error","message":"no session is running this command through its shell tool in the state directory '$TMP/state'; if LangSpan's hooks were installed with --state-dir, pass the same --state-dir, or pass --session ID (a briefing says \"Your session ID is ...\")"}
+same: --json --apply --state-dir --request-id --root --home
+--help -h
+  exit 0: the help
+--session
+  exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan message w text --request-id r1
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --state-dir --to --from
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--request-id
+  exit 1: {"level":"error","message":"duplicate option --request-id"}
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan handoff s1 text --request-id r1
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --state-dir
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--request-id
+  exit 1: {"level":"error","message":"duplicate option --request-id"}
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan ack s1 m1 --request-id r1
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --state-dir
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--request-id
+  exit 1: {"level":"error","message":"duplicate option --request-id"}
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan messages show w m1
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --state-dir --request-id
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan messages status w last
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --state-dir --request-id --from
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan messages retract w last --request-id r1
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --state-dir --from
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--request-id
+  exit 1: {"level":"error","message":"duplicate option --request-id"}
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan doctor
+alone: exit 1
+same: --json --apply --state-dir --root --home
+--help -h
+  exit 0: the help
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan hosts
+alone: exit 0
+same: --json --apply --state-dir --home
+--help -h
+  exit 0: the help
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan guidance
+alone: exit 0
+same: --state-dir --format
+--json
+  exit 1: {"level":"error","message":"--json is not valid for guidance; it prints text"}
+--apply
+  exit 1: {"level":"error","message":"--apply is valid for `guidance install` and `guidance remove`"}
+--help -h
+  exit 0: the help
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan guidance install --root ROOT --file AGENTS.md
+alone: exit 1: {"level":"error","message":"$TMP/root/AGENTS.md does not exist; add --create to create it with only LangSpan's block. Nothing was changed"}
+same: --apply --state-dir
+--json
+  exit 1: {"level":"error","message":"--json is not valid for guidance; it prints text"}
+--help -h
+  exit 0: the help
+--create
+  exit 0
+--root
+  exit 1: {"level":"error","message":"duplicate option --root"}
+--file
+  exit 1: {"level":"error","message":"duplicate option --file"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan guidance remove --root ROOT --file AGENTS.md
+alone: exit 0
+same: --apply --state-dir
+--json
+  exit 1: {"level":"error","message":"--json is not valid for guidance; it prints text"}
+--help -h
+  exit 0: the help
+--create
+  exit 1: {"level":"error","message":"--create is valid only for `guidance install`"}
+--root
+  exit 1: {"level":"error","message":"duplicate option --root"}
+--file
+  exit 1: {"level":"error","message":"duplicate option --file"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan status
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --all --state-dir --request-id
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--mine
+  exit 1: {"level":"error","message":"no session is running this command through its shell tool in the state directory '$TMP/state'; if LangSpan's hooks were installed with --state-dir, pass the same --state-dir, or pass --session ID (a briefing says \"Your session ID is ...\")"}
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan status --mine
+alone: exit 1: {"level":"error","message":"no session is running this command through its shell tool in the state directory '$TMP/state'; if LangSpan's hooks were installed with --state-dir, pass the same --state-dir, or pass --session ID (a briefing says \"Your session ID is ...\")"}
+same: --json --apply --state-dir --root --home
+--help -h
+  exit 0: the help
+--mine
+  exit 1: {"level":"error","message":"duplicate option --mine"}
+--session
+  exit 1: {"level":"error","message":"git rev-parse --path-format=absolute --show-toplevel --absolute-git-dir failed (exit status: 128). Git said: fatal: not a git repository (or any of the parent directories): .git"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan status --all
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --state-dir --request-id --after
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--mine
+  exit 1: {"level":"error","message":"option --all is not valid for this command"}
+--all
+  exit 1: {"level":"error","message":"duplicate option --all"}
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan notify status
+alone: exit 0
+same: --json --apply --state-dir --home
+--help -h
+  exit 0: the help
+--sound
+  exit 1: {"level":"error","message":"--sound is valid with `notify on` and `notify off`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan statusline
+alone: exit 0
+same: --json --apply --state-dir --root --home --deadline-ms
+--help -h
+  exit 0: the help
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan events
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --state-dir --request-id --after --limit
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan compact
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --apply --state-dir --request-id --keep-days
+--help -h
+  exit 0: the help
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan changes w
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --state-dir --request-id --after --limit
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan request REQUEST
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --state-dir
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan hook claude-code
+alone: exit 0: {"level":"info","event":"langspan_hook","coverage":"unknown","detail":"malformed host event"}
+same: --json --apply --symbol --tag --state-dir --ttl-ms --budget-ms --prompt-summary --code-briefing --presence --presence-minutes --outline-reads
+--help
+  exit 1: {"level":"error","event":"langspan_hook","coverage":"unknown","message":"unknown option --help; use -- before a filename beginning with '-' "}
+-h
+  exit 1: {"level":"error","event":"langspan_hook","coverage":"unknown","message":"unknown option -h; use -- before a filename beginning with '-' "}
+--workspace --root
+  exit 1: {"level":"error","event":"langspan_hook","coverage":"unknown","message":"--workspace and --root go together; omit both for the user-level form"}
+--event
+  exit 1: {"level":"error","event":"langspan_hook","coverage":"unknown","message":"--event is not used for claude-code"}
+--mode
+  exit 0: {"level":"info","event":"langspan_between_steps","detail":"malformed host event"}
+every other option
+  exit 1: {"level":"error","event":"langspan_hook","coverage":"unknown","message":"option {option} is not valid for this command"}
+
+## langspan hooks install claude-code --workspace w --root ROOT
+alone: exit 0
+same: --json --apply --state-dir --settings --prompt-summary --code-briefing --presence --presence-minutes --outline-reads
+--help -h
+  exit 0: the help
+--skill
+  exit 1: {"level":"error","message":"--skill is valid for `hooks install cursor` and `hooks install antigravity` only: they read the LangSpan skill as a project rule. For claude-code and codex, run `langspan install --skill`; `hooks remove` removes the rule without it"}
+--workspace
+  exit 1: {"level":"error","message":"duplicate option --workspace"}
+--root
+  exit 1: {"level":"error","message":"duplicate option --root"}
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan hooks remove claude-code --root ROOT
+alone: exit 0
+same: --json --apply --state-dir --settings
+--help -h
+  exit 0: the help
+--skill
+  exit 1: {"level":"error","message":"--skill is valid for `hooks install cursor` and `hooks install antigravity` only: they read the LangSpan skill as a project rule. For claude-code and codex, run `langspan install --skill`; `hooks remove` removes the rule without it"}
+--root
+  exit 1: {"level":"error","message":"duplicate option --root"}
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan install
+alone: exit 0
+same: --json --apply --skill --state-dir --prompt-summary --presence --presence-minutes --home --hosts --statusline --mcp-tools --outline-reads
+--help -h
+  exit 0: the help
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
+## langspan uninstall
+alone: exit 0
+same: --json --apply --state-dir --prompt-summary --presence --presence-minutes --home --hosts --outline-reads
+--help -h
+  exit 0: the help
+--skill
+  exit 1: {"level":"error","message":"--skill is valid only for `install`; `uninstall` always removes LangSpan's skill"}
+--statusline
+  exit 1: {"level":"error","message":"--statusline is valid only for `install`; `uninstall` always removes LangSpan's status line"}
+--mcp-tools
+  exit 1: {"level":"error","message":"--mcp-tools is valid only for `install`; `uninstall` removes the whole MCP entry, flag included"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
