@@ -58,7 +58,7 @@ A pull request is done when all of the following are true:
 - CI's fast lane is green on the pull request, and the full lane on Linux
   passes on its merge-queue commit, on top of the latest `main`. The macOS
   full lane runs there too; it isn't a required check, so read its result
-  and fix a macOS failure before it reaches the nightly run.
+  and fix a macOS failure before it reaches `main`'s macOS issue.
 - No P0 or P1 review finding is open.
 
 Write "Fixes #N" only when the pull request meets every build criterion of
@@ -85,15 +85,28 @@ refresh hides the regression the snapshot exists to catch.
 
 ## Integration
 
-Pull requests merge through GitHub's merge queue. The queue tests each pull
-request on top of `main` and every pull request queued ahead of it, under
-the same required checks (Linux, Workflows and Content), and merges
-it only if they pass. The macOS check runs on the same commit but isn't
-required: the queue doesn't wait for it, because waiting doubled the time a
-pull request spent in the queue. A pull request whose checks fail there leaves the
-queue, and the ones behind it are tested again without it. The Content
-check on a queued commit checks the tree only; the pull request's title and
-body passed it before the pull request was queued.
+Pull requests merge through GitHub's merge queue. Exactly these gate a
+merge, as the ruleset for `main` requires them
+([`.github/desired-settings.json`](../.github/desired-settings.json)):
+
+1. **To join the queue**, the pull request's own `Linux` (the fast lane),
+   `Workflows` (zizmor) and `Content` checks pass. Its `macOS` check passes
+   at once on a pull request and gates nothing.
+2. **To merge**, the same three checks pass again on the queue's commit:
+   the pull request on top of `main` and every pull request queued ahead
+   of it, with `Linux` in the full lane. A pull request whose checks fail
+   there leaves the queue, and the ones behind it are tested again without
+   it. The Content check on a queued commit checks the tree only; the
+   pull request's title and body passed it before the pull request was
+   queued.
+
+`macOS` isn't required: the full macOS lane runs on the queue's commit and
+again on `main`, but the queue doesn't wait for it, because waiting doubled
+the time a pull request spent in the queue. Nor is coverage, the nightly
+run, or the release build. A macOS failure on a push to `main` opens an
+issue titled "macOS Rust checks on main failed", or comments on it while it
+is open, naming the commit and the tests that failed (at most 50). Treat it
+like a failing check on `main` and fix it the same day.
 
 While the Linux check on `main` fails, merge only the fix for that failure.
 
@@ -123,13 +136,31 @@ the event (`LANGSPAN_CHECK_LANE`):
 - **The full lane: a merge-queue commit, a push to `main`, the nightly run
   and a manual run.** On Linux and macOS side by side: everything in the
   fast lane, every other test (the `ci` profile, which leaves none out),
-  and the two-developer demonstration. Target: **under 8 minutes** in the
-  merge queue. The job stops at 15 minutes there, and at 30 on `main` and
-  nightly, which also build the release binary and run the demonstration
-  on it. The queue merges a pull request only when its full Linux lane
-  passes, so nothing reaches `main` untested on Linux. A macOS failure
-  doesn't block the merge; it shows on the queue's run, on `main` and in
-  the nightly run's issue.
+  and the two-developer demonstration on the debug binary the tests built.
+  Format, dependency policy, advisories, unused dependencies and the docs
+  don't depend on the platform, so only Linux runs them
+  (`LANGSPAN_CHECK_PORTABLE=false` on macOS); macOS runs lint, the build
+  and every test. Target: **under 8 minutes** in the merge queue. The job
+  stops at 35 minutes there and at 30 on `main` and nightly. Only the
+  nightly run also builds the release binary and runs the demonstration on
+  it; nothing else reads it, and the release workflow builds its own. The queue
+  merges a pull request only when its full Linux lane passes, so nothing
+  reaches `main` untested on Linux. A macOS failure doesn't block the
+  merge; it shows on the queue's run, and on `main` in its own issue
+  ([integration](#integration)).
+
+Each event and commit has its own concurrency group, so the push to `main`
+starts at once instead of waiting for the merge-queue run of the same
+commit, and neither cancels the other. Only a newer push to a pull request
+cancels its older run.
+
+Every run restores the latest build cache `main` saved for its platform,
+job and toolchain, its exact key first. `main` saves under its own key
+after a run whose checks passed or failed, but not after a cancelled or
+timed-out run, or one that built no tests
+([threat model](security/threat-model.md#ci-build-cache)). A manual run
+with `cold` set restores nothing, to measure a build from nothing; on
+`main`, it still saves an entry that `main` lacks.
 
 In the full lane, the benchmark harness's dry runs (the `dry_run_*` tests
 in `tests/benchmark_harness.rs`) run only when the change touches one of
@@ -149,7 +180,7 @@ builds nothing in either lane.
   ahead runs the dry runs.
 - **A push to `main`** that adds one commit, as a squash merge does,
   follows the same rule for the dry runs. A push of several commits runs
-  them, and it always builds and runs the release binary.
+  them.
 - **The nightly run** (03:23 UTC on `main`) and **a manual run** run
   everything. If the nightly run fails, it opens an issue titled "Nightly
   Rust checks on main failed", or comments on that issue while it is open.
