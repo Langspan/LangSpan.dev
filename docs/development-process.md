@@ -257,6 +257,22 @@ the pull request that moved the code. `--tighten` never raises a number,
 and it deletes a baseline that has nothing left to record. The checker's
 own tests are in `scripts/ratchets/test_*.py`.
 
+### Repository settings
+
+[`.github/desired-settings.json`](../.github/desired-settings.json) records
+the GitHub settings the owner chose: merge methods, branch deletion, Actions
+permissions, the security features and both rulesets. To see whether GitHub
+still matches it, run:
+
+```sh
+python3 -I -B scripts/github-drift.py
+```
+
+It reads the live values with `gh api` and prints each difference, and
+changes nothing. It exits 0 when they match and 1 when they differ. Some
+values need an admin's `gh` login to read. To change a setting, change it
+on GitHub and in the file in the same pull request.
+
 ## Releases
 
 release-please keeps a release pull request open on `main`, built from the
