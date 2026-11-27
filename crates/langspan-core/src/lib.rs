@@ -2725,7 +2725,7 @@ pub struct Recap {
     pub scan_coverage: Option<ScanCoverage>,
     /// Asked for with `since` (roadmap C10): what happened after that point.
     /// Absent when asked for "since away" and no such gap was found.
-    /// Protocol version 8.
+    /// Protocol version 9.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<Since>,
 }
@@ -2846,6 +2846,12 @@ pub struct Briefing {
     /// briefing.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub omitted_inflight: u32,
+    /// The source index has not finished a first scan of this session's
+    /// workspace or of another worktree of its repository, so `inflight`
+    /// may leave out work in flight there (issue #262). Not part of the
+    /// signature: it is said beside news, and is not news by itself.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub inflight_partial: bool,
     /// Remembered notes about the workspace or about files this session
     /// works on.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -4199,7 +4205,7 @@ pub enum Command {
     },
     /// Read-only: a bounded account of one workspace. With `since`, the
     /// answer also says what happened after that point of the event log
-    /// (roadmap C10), read by the daemon's store; protocol version 8.
+    /// (roadmap C10), read by the daemon's store; protocol version 9.
     Recap {
         workspace_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4615,7 +4621,8 @@ pub enum Command {
     /// Prepared adapter input only, as `WorkspaceRegisterVerified`: the
     /// receipt stores the original `Brief`. `inflight` is what the daemon's
     /// source index found other worktrees have in flight that the session's
-    /// workspace mentions (roadmap C7).
+    /// workspace mentions (roadmap C7), and `inflight_partial` that the
+    /// index had not finished a first scan of a worktree it reads.
     #[serde(skip_serializing)]
     BriefPrepared {
         session_id: String,
@@ -4628,6 +4635,8 @@ pub enum Command {
         left: Vec<String>,
         changes_only: bool,
         inflight: Vec<InflightSymbol>,
+        #[serde(default)]
+        inflight_partial: bool,
     },
     /// Read-only: the bounded view of what matters now. Closed admissions
     /// are counted, not listed; the answer always fits one frame.
@@ -5081,7 +5090,7 @@ enum CommandWire {
     },
     /// Read-only: a bounded account of one workspace. With `since`, the
     /// answer also says what happened after that point of the event log
-    /// (roadmap C10), read by the daemon's store; protocol version 8.
+    /// (roadmap C10), read by the daemon's store; protocol version 9.
     Recap {
         workspace_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -7820,21 +7829,27 @@ fn decide_checked(
                 ));
             }
             let window = recent::window(*recent_window_ms)?;
-            let inflight = match command {
-                Command::BriefPrepared { inflight, .. } => {
+            let (inflight, inflight_partial) = match command {
+                Command::BriefPrepared {
+                    inflight,
+                    inflight_partial,
+                    ..
+                } => {
                     if inflight.len() > INFLIGHT_CANDIDATES {
                         return Err(error(
                             "invalid_limit",
                             "A briefing is offered at most 32 in-flight symbols",
                         ));
                     }
-                    inflight.as_slice()
+                    (inflight.as_slice(), *inflight_partial)
                 }
-                _ => &[],
+                _ => (&[][..], false),
             };
             let (mut briefing, signature, inflight_keys) =
                 brief(state, session_id, *max_peers, !*mid_turn, now_ms, inflight)?;
             briefing.left_work = left_work(state, session_id, left)?;
+            // Not part of the signature (see `Briefing::inflight_partial`).
+            briefing.inflight_partial = inflight_partial;
             // Not part of the signature: a prompt's briefing never carries
             // it, so it must not make the next one look new.
             if *recent {
@@ -10598,6 +10613,8 @@ fn brief(
             omitted_inflight: u32::try_from(owed.len() - inflight_notices.len())
                 .unwrap_or(u32::MAX),
             inflight: inflight_notices,
+            // Set by the request that carries the index's answer.
+            inflight_partial: false,
             notes,
             messages,
             retracted,

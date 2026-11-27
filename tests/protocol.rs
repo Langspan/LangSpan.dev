@@ -1,6 +1,7 @@
 use langspan::protocol::{
     OLDEST_PROTOCOL_VERSION, PROTOCOL_VERSION, PROTOCOL_VERSION_4, PROTOCOL_VERSION_5,
-    PROTOCOL_VERSION_6, Request, Response, encode, encode_for, encode_record_for, read_frame,
+    PROTOCOL_VERSION_6, PROTOCOL_VERSION_7, PROTOCOL_VERSION_8, Request, Response, encode,
+    encode_for, encode_record_for, read_frame,
 };
 use langspan_core::Command;
 
@@ -1079,10 +1080,11 @@ fn v4_rename_history_response_and_its_version_3_form_match_the_golden_vectors() 
         history.entries[1].before_path.as_deref(),
         Some("app/old_users.py")
     );
-    // Versions 5, 6 and 7 added nothing to a history answer: 4 to 7 agree.
+    // Versions 5 to 8 added nothing to a history answer: 4 to 8 agree.
     assert_eq!(encode_for(PROTOCOL_VERSION_4, &response).unwrap(), wire);
     assert_eq!(encode_for(PROTOCOL_VERSION_5, &response).unwrap(), wire);
     assert_eq!(encode_for(PROTOCOL_VERSION_6, &response).unwrap(), wire);
+    assert_eq!(encode_for(PROTOCOL_VERSION_7, &response).unwrap(), wire);
     assert_eq!(encode_for(PROTOCOL_VERSION, &response).unwrap(), wire);
 
     response.version = OLDEST_PROTOCOL_VERSION;
@@ -1146,9 +1148,15 @@ fn v5_report_response_and_its_version_4_and_3_forms_match_the_golden_vectors() {
     assert_eq!(report.hosts[0].counts.refusal_outcomes["adapted"], 1);
     // A version 5 client still reads `refusal_outcomes`.
     assert_eq!(encode_for(PROTOCOL_VERSION_5, &response).unwrap(), wire);
-    // Version 6 changed landings and version 7 (issue #222) activity,
-    // briefings and events: their report is the version 5 form.
-    for later in [PROTOCOL_VERSION_6, PROTOCOL_VERSION] {
+    // Version 6 changed landings, version 7 (issue #222) activity,
+    // briefings and events, version 8 (issue #262) briefings and version 9
+    // (roadmap C10) recaps: their report is the version 5 form.
+    for later in [
+        PROTOCOL_VERSION_6,
+        PROTOCOL_VERSION_7,
+        PROTOCOL_VERSION_8,
+        PROTOCOL_VERSION,
+    ] {
         let mut current = response.clone();
         current.version = later;
         assert_eq!(
@@ -1379,6 +1387,45 @@ fn a_version_3_reply_leaves_out_trails() {
     );
 }
 
+/// Issue #262: a client of version 7 or earlier reads briefings with
+/// `deny_unknown_fields`, so its answer does not say the index was partial;
+/// a version 8 client's does, and so does that of version 9 (roadmap C10).
+#[test]
+fn a_version_7_reply_leaves_out_a_partial_index() {
+    use langspan_core::{Briefing, Outcome};
+    let mut briefing: Briefing = serde_json::from_value(serde_json::json!({
+        "session_id": "codex.bob", "changed": true, "peers": [], "omitted_peers": 0,
+    }))
+    .unwrap();
+    briefing.inflight_partial = true;
+    let response = Response {
+        version: PROTOCOL_VERSION,
+        request_id: "r".into(),
+        replayed: false,
+        generation: 1,
+        lease_valid: None,
+        outcome: Outcome::Briefing { briefing },
+    };
+    for version in std::iter::once(PROTOCOL_VERSION_7).chain(EARLIER_VERSIONS) {
+        let earlier: serde_json::Value =
+            serde_json::from_slice(&encode_for(version, &response).unwrap()).unwrap();
+        assert!(
+            earlier["outcome"]["briefing"]
+                .get("inflight_partial")
+                .is_none(),
+            "{version}: {earlier:#}"
+        );
+    }
+    for version in [PROTOCOL_VERSION_8, PROTOCOL_VERSION] {
+        let current: Response =
+            serde_json::from_slice(&encode_for(version, &response).unwrap()).unwrap();
+        assert!(
+            matches!(&current.outcome, Outcome::Briefing { briefing: read } if read.inflight_partial),
+            "version {version}"
+        );
+    }
+}
+
 /// Roadmap D7 (review comment 4707749784): to a version 3 client an
 /// interface notice has no rename fields and no change of a definition that
 /// is not exported, while a version 4 client gets both.
@@ -1498,7 +1545,8 @@ const ADDED_IN_7: [&str; 6] = [
     "context_added",
     "told_forgotten",
 ];
-/// Every version the daemon answers before the current one.
+/// Every version the daemon answers before version 7. Versions 8 (issue
+/// #262) and 9 (roadmap C10) keep what version 7 added.
 const EARLIER_VERSIONS: [u16; 4] = [
     PROTOCOL_VERSION_6,
     PROTOCOL_VERSION_5,
@@ -1661,6 +1709,15 @@ fn an_earlier_reply_leaves_out_what_version_7_added_to_activity_briefings_and_ev
             serde_json::from_str::<Response>(&current).unwrap(),
             response
         );
+        // Versions 8 (issue #262) and 9 (roadmap C10) keep them: version 7
+        // and 8 clients read the same answer.
+        for version in [PROTOCOL_VERSION_7, PROTOCOL_VERSION_8] {
+            assert_eq!(
+                String::from_utf8(encode_for(version, &response).unwrap()).unwrap(),
+                current,
+                "version {version}"
+            );
+        }
         for version in EARLIER_VERSIONS {
             let earlier = String::from_utf8(encode_for(version, &response).unwrap()).unwrap();
             for field in ADDED_IN_7 {
@@ -1815,13 +1872,14 @@ fn recording_a_rebased_or_adapted_landing_fits_only_version_6_and_later() {
     }
 }
 
-/// Roadmap C10: a recap asked for `since` needs version 8; an earlier
-/// daemon would refuse the field, so it is not sent there. A client of an
-/// earlier version, which cannot ask for it, is never answered with it, and
-/// a recap without it reads as before.
+/// Roadmap C10: a recap asked for `since` needs version 9; an earlier
+/// daemon, version 8 of the released build included, would refuse the
+/// field, so it is not sent there. A client of an earlier version, which
+/// cannot ask for it, is never answered with it, and a recap without it
+/// reads as before.
 #[test]
-fn a_recap_since_a_point_fits_only_version_8_and_older_clients_never_see_it() {
-    use langspan::protocol::{PROTOCOL_VERSION_7, fits, older_daemon};
+fn a_recap_since_a_point_fits_only_version_9_and_older_clients_never_see_it() {
+    use langspan::protocol::{fits, older_daemon};
     use langspan_core::{Outcome, SinceChecks, SinceFrom};
     let asked = Command::Recap {
         workspace_id: "work".into(),
@@ -1833,9 +1891,10 @@ fn a_recap_since_a_point_fits_only_version_8_and_older_clients_never_see_it() {
         workspace_id: "work".into(),
         since: None,
     };
-    assert_eq!(PROTOCOL_VERSION, 8);
+    assert_eq!(PROTOCOL_VERSION, 9);
     assert!(fits(PROTOCOL_VERSION, &asked));
     for version in [
+        PROTOCOL_VERSION_8,
         PROTOCOL_VERSION_7,
         PROTOCOL_VERSION_6,
         OLDEST_PROTOCOL_VERSION,
@@ -1843,13 +1902,13 @@ fn a_recap_since_a_point_fits_only_version_8_and_older_clients_never_see_it() {
         assert!(!fits(version, &asked), "version {version}");
         assert!(fits(version, &plain), "version {version}");
     }
-    let message = older_daemon(PROTOCOL_VERSION_7, &asked);
+    let message = older_daemon(PROTOCOL_VERSION_8, &asked);
     assert!(
-        message.contains("version 7") && message.contains("since a point"),
+        message.contains("version 8") && message.contains("since a point"),
         "{message}"
     );
     // The request reads back as sent, and one without `since` is the
-    // version 7 request byte for byte.
+    // version 8 request byte for byte.
     let json = serde_json::to_string(&asked).unwrap();
     assert_eq!(
         json,
@@ -1891,6 +1950,7 @@ fn a_recap_since_a_point_fits_only_version_8_and_older_clients_never_see_it() {
     let current = String::from_utf8(encode_for(PROTOCOL_VERSION, &response).unwrap()).unwrap();
     assert!(current.contains(r#""since":{"from_seq":9"#), "{current}");
     for version in [
+        PROTOCOL_VERSION_8,
         PROTOCOL_VERSION_7,
         PROTOCOL_VERSION_6,
         OLDEST_PROTOCOL_VERSION,

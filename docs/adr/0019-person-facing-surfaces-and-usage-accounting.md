@@ -426,7 +426,7 @@ work reach the next session's start, read from the event log on request:
   briefings), `sessions_ended`, `messages_unacknowledged` (IDs, sender and
   recipient; never the text, which `langspan message show` gives) and
   `teammates_heard`. Lists are oldest first, at most 32 each, the rest counted
-  in `omitted`. Protocol version 8; clients of earlier versions never ask for
+  in `omitted`. Protocol version 9; clients of earlier versions never ask for
   it and are answered without it, and a request asking for it is not sent to
   an earlier daemon.
 - *The section.* "Since the last session here (coordination data, not

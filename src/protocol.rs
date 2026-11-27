@@ -1,4 +1,4 @@
-//! Version 8 of the local IPC contract. One bounded JSON line per connection.
+//! Version 9 of the local IPC contract. One bounded JSON line per connection.
 
 use langspan_core::{
     Command, ContextUse, Event, Outcome, RecordedEvent, SessionActivity, StatusRecord,
@@ -6,9 +6,10 @@ use langspan_core::{
 use serde::{Deserialize, Serialize};
 use std::io::{self, BufRead, BufReader, Read};
 
-/// Version 8 is version 7 with roadmap C10's `since` in a recap request
-/// and its answer (`fits`). Version 7 is version 6 with issue #222's
-/// briefing memory and context
+/// Version 9 is version 8 with roadmap C10's `since` in a recap request
+/// and its answer (`fits`). Version 8 is version 7 with issue #262's
+/// `inflight_partial` in a briefing. Version 7 is version 6 with issue
+/// #222's briefing memory and context
 /// measurement: a session activity's `told`, `told_at_ms` and `context`, a
 /// briefing's `unchanged`, a briefing delivery's `told` and `told_at_ms`,
 /// and the `context_added` and `told_forgotten` events (with the
@@ -21,7 +22,9 @@ use std::io::{self, BufRead, BufReader, Read};
 /// in-flight symbols. Apart from recording a rebased or adapted landing and
 /// asking a recap for `since`, requests of an earlier version are requests
 /// of this one.
-pub const PROTOCOL_VERSION: u16 = 8;
+pub const PROTOCOL_VERSION: u16 = 9;
+/// Issue #262's version, answered in its own shape.
+pub const PROTOCOL_VERSION_8: u16 = 8;
 /// Issue #222's version, answered in its own shape.
 pub const PROTOCOL_VERSION_7: u16 = 7;
 /// Roadmap F5's version, answered in its own shape.
@@ -44,7 +47,7 @@ pub fn answers(version: u16) -> bool {
 /// earlier version read the objects later versions extended with
 /// `deny_unknown_fields`, so an answer carrying a field they lack would fail
 /// to read as a whole: theirs is encoded without what later versions added
-/// (`protocol_7_outcome`, `protocol_6_outcome`, then `protocol_5_shape`, `protocol_4_shape` and
+/// (`protocol_8_outcome`, `protocol_7_outcome`, `protocol_6_outcome`, then `protocol_5_shape`, `protocol_4_shape` and
 /// `protocol_3_shape`). A state record given in parts is encoded by
 /// `encode_record_for` before it is cut.
 pub fn encode_for(version: u16, response: &Response) -> Result<Vec<u8>, crate::Error> {
@@ -52,7 +55,10 @@ pub fn encode_for(version: u16, response: &Response) -> Result<Vec<u8>, crate::E
         return encode(response);
     }
     let mut earlier = response.clone();
-    protocol_7_outcome(&mut earlier.outcome);
+    protocol_8_outcome(&mut earlier.outcome);
+    if version < PROTOCOL_VERSION_8 {
+        protocol_7_outcome(&mut earlier.outcome);
+    }
     if version < PROTOCOL_VERSION_7 {
         protocol_6_outcome(&mut earlier.outcome);
     }
@@ -94,11 +100,19 @@ fn earlier_shape(version: u16, value: &mut serde_json::Value) {
     }
 }
 
-/// `outcome` without what version 8 (roadmap C10) added: a recap's
+/// `outcome` without what version 9 (roadmap C10) added: a recap's
 /// `since`, which a client of an earlier version cannot ask for.
-fn protocol_7_outcome(outcome: &mut Outcome) {
+fn protocol_8_outcome(outcome: &mut Outcome) {
     if let Outcome::Recap { recap } = outcome {
         recap.since = None;
+    }
+}
+
+/// `outcome` without what version 8 (issue #262) added: a briefing's
+/// `inflight_partial`, which is skipped when false.
+fn protocol_7_outcome(outcome: &mut Outcome) {
+    if let Outcome::Briefing { briefing } = outcome {
+        briefing.inflight_partial = false;
     }
 }
 
@@ -151,7 +165,7 @@ fn protocol_6_outcome(outcome: &mut Outcome) {
 /// The first version that can record a rebased or adapted landing.
 const REWRITES_SINCE: u16 = PROTOCOL_VERSION_6;
 /// The first version that reads a recap's `since` (roadmap C10).
-const RECAP_SINCE: u16 = 8;
+const RECAP_SINCE: u16 = PROTOCOL_VERSION;
 
 /// Whether a daemon answering `version` reads `command` as it is. An
 /// earlier daemon refuses a request to record a landing with `rebased` or

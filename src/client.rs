@@ -36,11 +36,11 @@ mod unix {
         crate::hook::redact_command(&mut request.command);
         let mut response = exchange(state_dir, &request, deadline)?;
         // A daemon of an earlier build refuses this version before it reads
-        // the command, and answers in its own (version 7, 6, 5, 4 or 3), so
-        // the same request in the version it names cannot take effect twice.
-        // Requests are the same in every version it answers, except those
-        // versions 6 and 8 changed (`protocol::fits`), which are not sent at
-        // all to a daemon of an earlier version.
+        // the command, and answers in its own (version 8, 7, 6, 5, 4 or 3),
+        // so the same request in the version it names cannot take effect
+        // twice. Requests are the same in every version it answers, except
+        // those versions 6 and 9 changed (`protocol::fits`), which are not
+        // sent at all to a daemon of an earlier version.
         if request.version == PROTOCOL_VERSION
             && (OLDEST_PROTOCOL_VERSION..PROTOCOL_VERSION).contains(&response.version)
             && matches!(&response.outcome, Outcome::Error { code, .. } if code == "unsupported_version")
@@ -311,7 +311,8 @@ mod unix {
         /// Roadmap D7 (review comment 4707749784), H9 (review comment
         /// 4711096877) and issue #222 (review comments 4711375982 and
         /// 4712860167): a daemon of an earlier build answers only protocol
-        /// version 3, or only up to 4, 5 or 6 (roadmap F5's build). It
+        /// version 3, or only up to 4, 5, 6 (roadmap F5's build) or 7
+        /// (issue #222's). It
         /// refuses this build's version in its own, as that build does, and
         /// the client asks again once in that version, with the same
         /// request, and reads that answer.
@@ -323,6 +324,7 @@ mod unix {
                 crate::protocol::PROTOCOL_VERSION_5,
                 crate::protocol::PROTOCOL_VERSION_6,
                 crate::protocol::PROTOCOL_VERSION_7,
+                crate::protocol::PROTOCOL_VERSION_8,
             ] {
                 ask_an_earlier_daemon(version);
             }
