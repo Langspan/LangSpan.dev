@@ -208,6 +208,12 @@ pub fn stop(state_dir: &Path, deadline: Instant) -> Result<bool, crate::Error> {
         .ok()
         .and_then(Pid::from_raw)
         .ok_or_else(|| format!("the coordinator gave process id {pid}, which is not one"))?;
+    // A coordinator holds `daemon.lock` while it runs. A free lock means
+    // none does, and the id may now name another process: send nothing.
+    let lock = local::private_file(&fs::canonicalize(state_dir)?.join("daemon.lock"), true)?;
+    if lock.try_lock().is_ok() {
+        return Ok(false);
+    }
     kill_process(process, Signal::TERM)
         .map_err(|error| format!("cannot stop the coordinator, process {pid}: {error}"))?;
     while crate::client::accepts(state_dir, probe_deadline(deadline)) {

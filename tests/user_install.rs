@@ -1893,3 +1893,51 @@ fn purge_refuses_a_folder_that_is_not_a_state_directory_and_a_partial_uninstall(
     let said = String::from_utf8(partial.stderr).unwrap();
     assert!(said.contains("--purge"), "{said}");
 }
+
+/// Uninstall signals the process id the coordinator reports only while a
+/// coordinator holds `daemon.lock`: without it the id may name another
+/// process, which is left running.
+#[test]
+fn uninstall_signals_no_process_when_no_coordinator_holds_the_lock() {
+    use std::io::{BufRead, BufReader};
+    let home = Home::new();
+    fs::create_dir(home.home().join(".claude")).unwrap();
+    let state = home.state_dir();
+    fs::create_dir(&state).unwrap();
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+    let socket = state.join("daemon.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut bystander = Process::new("sleep").arg("30").spawn().unwrap();
+    let pid = bystander.id();
+    // Answers every request with the bystander's id, as a coordinator that
+    // exited and whose id was reused would appear to.
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { return };
+            let mut line = String::new();
+            if BufReader::new(&stream).read_line(&mut line).unwrap_or(0) == 0 {
+                continue;
+            }
+            let asked: Value = serde_json::from_str(&line).unwrap();
+            let answer = langspan::protocol::Response {
+                version: u16::try_from(asked["version"].as_u64().unwrap()).unwrap(),
+                request_id: asked["request_id"].as_str().unwrap().into(),
+                replayed: false,
+                generation: 0,
+                lease_valid: None,
+                outcome: Outcome::Version {
+                    version: "0".into(),
+                    pid,
+                },
+            };
+            let _ = writeln!(stream, "{}", serde_json::to_string(&answer).unwrap());
+        }
+    });
+    let said = home.ok(&["uninstall", "--apply"]);
+    let alive = bystander.try_wait().unwrap().is_none();
+    let _ = bystander.kill();
+    let _ = bystander.wait();
+    assert!(alive, "{said}");
+    assert!(!said.contains("Stopped the coordinator."), "{said}");
+}

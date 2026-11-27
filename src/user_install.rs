@@ -495,11 +495,20 @@ pub struct Leftover {
 }
 
 impl Leftover {
-    /// Checked before anything is written. `whole` is an uninstall without
-    /// `--hosts`; only that names what is left, since the other hosts'
-    /// hooks still use the binary and the state directory. `--purge` needs
-    /// one, and removes only an empty directory or one a coordinator used.
-    pub fn check(state_dir: &Path, purge: bool, whole: bool) -> Result<Option<Self>, crate::Error> {
+    /// Checked before anything is written. Only an uninstall of every host
+    /// (no `--hosts`) names what is left, since the other hosts' hooks
+    /// still use the binary and the state directory. `--purge` needs one,
+    /// and removes only an empty directory or one a coordinator used.
+    pub fn check(
+        state_dir: &Path,
+        purge: bool,
+        install: bool,
+        every_host: bool,
+    ) -> Result<Option<Self>, crate::Error> {
+        if purge && install {
+            return Err("--purge is valid only for `uninstall`".into());
+        }
+        let whole = !install && every_host;
         if !whole && purge {
             return Err("--purge removes the state directory every host uses: run `langspan uninstall --purge` without --hosts".into());
         }

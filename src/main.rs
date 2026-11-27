@@ -1119,7 +1119,7 @@ fn user_install(
     let outline_reads = outline_reads(options)?;
     let hosts = options.remove("--hosts");
     let purge = options.remove("--purge").is_some();
-    let leftover = user_install::Leftover::check(&state_dir, purge, !install && hosts.is_none())?;
+    let leftover = user_install::Leftover::check(&state_dir, purge, install, hosts.is_none())?;
     let with_skill = options.remove("--skill").is_some();
     if with_skill && !install {
         return Err(
