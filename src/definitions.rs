@@ -28,6 +28,9 @@ pub const BUDGET: Duration = Duration::from_secs(10);
 /// Changed files of one branch looked at, at most; the rest are counted as
 /// skipped.
 const MAX_FILES: usize = 1000;
+/// Serialized findings kept, at most: a check record travels in one frame
+/// with its command and inputs.
+const FINDINGS_BYTES: usize = crate::protocol::MAX_FRAME_BYTES / 2;
 
 /// The budget, or a test-only shorter one.
 pub fn budget() -> Duration {
@@ -85,7 +88,8 @@ struct Branch {
     name: String,
     changed: Vec<Definition>,
     uses: Vec<Use>,
-    /// Names of definitions the branch added: its own lines may mean them.
+    /// Names of definitions the branch added or renamed something to: its
+    /// own lines may mean them.
     added: BTreeSet<String>,
 }
 
@@ -327,7 +331,27 @@ fn index(
             .find(|symbol| symbol.exported && symbol.name == name && symbol.kind == kind)
             .map_or(1, |symbol| symbol.line)
     };
-    for change in langspan_graph::diff(&old, &new) {
+    // A partial parse is not trusted to say a definition changed or went.
+    // What it did extract still names the branch's own definitions: any the
+    // old parse does not show with the same signature, so that the branch's
+    // calls to them are not compared with another branch's definition.
+    let changes = if old.partial || new.partial {
+        for symbol in new.symbols.iter().filter(|symbol| symbol.exported) {
+            let kept = old.symbols.iter().any(|was| {
+                was.exported
+                    && was.name == symbol.name
+                    && was.kind == symbol.kind
+                    && langspan_graph::same_signature(&was.signature, &symbol.signature)
+            });
+            if !kept {
+                branch.added.insert(symbol.name.clone());
+            }
+        }
+        Vec::new()
+    } else {
+        langspan_graph::diff(&old, &new)
+    };
+    for change in changes {
         let (line, before, after, renamed_to) = match change.change {
             Change::SignatureChanged { before, after } => (
                 line_of(&new, &change.name, change.kind),
@@ -344,12 +368,17 @@ fn index(
                     .unwrap_or_default();
                 (line_of(&old, &change.name, change.kind), before, None, None)
             }
-            Change::Renamed { to, before, .. } => (
-                line_of(&old, &change.name, change.kind),
-                before,
-                None,
-                Some(to),
-            ),
+            Change::Renamed { to, before, .. } => {
+                // The new name is the branch's own definition, as an
+                // addition is.
+                branch.added.insert(to.clone());
+                (
+                    line_of(&old, &change.name, change.kind),
+                    before,
+                    None,
+                    Some(to),
+                )
+            }
             Change::Added => {
                 branch.added.insert(change.name);
                 continue;
@@ -373,7 +402,8 @@ fn index(
     let calls = langspan_graph::calls(language, after)?;
     for call in &calls {
         let written = (call.lines.0..=call.lines.1).any(new_line);
-        if let (true, Some(args)) = (written, call.args) {
+        // A count beyond what an arity states says nothing about a signature.
+        if let (true, Some(args)) = (written, call.args.filter(|args| *args <= MAX_ARITY)) {
             branch.uses.push(Use {
                 path: path.to_owned(),
                 language,
@@ -511,12 +541,20 @@ fn compare(branches: &[Branch]) -> (Vec<SymbolFinding>, u32) {
             }
         }
     }
+    // At most `MAX_SYMBOL_FINDINGS`, and only while they fit their share of
+    // the frame; the rest are counted.
     let total = all.len();
-    all.truncate(MAX_SYMBOL_FINDINGS);
-    (
-        all,
-        u32::try_from(total - total.min(MAX_SYMBOL_FINDINGS)).unwrap_or(u32::MAX),
-    )
+    let mut bytes = 0;
+    let keep = all
+        .iter()
+        .take(MAX_SYMBOL_FINDINGS)
+        .take_while(|finding| {
+            bytes += serde_json::to_vec(finding).map_or(FINDINGS_BYTES, |json| json.len() + 1);
+            bytes <= FINDINGS_BYTES
+        })
+        .count();
+    all.truncate(keep);
+    (all, u32::try_from(total - keep).unwrap_or(u32::MAX))
 }
 
 fn arguments(count: u32) -> &'static str {
@@ -655,5 +693,165 @@ mod tests {
     fn text_is_cut_on_a_character_boundary_and_kept_on_one_line() {
         assert_eq!(clean("a\nb", 10), "a b");
         assert_eq!(clean("ééé", 5), "éé");
+    }
+
+    // Review follow-ups #265.
+
+    #[test]
+    fn a_call_with_more_arguments_than_an_arity_states_is_not_a_finding() {
+        let base = "export function save(...rest: number[]) {}\n";
+        let one = branch(
+            "one",
+            &[("web/s.ts", base, "export function save(a: number) {}\n")],
+        );
+        let call = format!("save({});\n", vec!["1"; MAX_ARITY as usize + 1].join(", "));
+        let wide = branch("wide", &[("web/i.ts", "", &call)]);
+        assert_eq!(compare(&[one, wide]).0, Vec::new());
+    }
+
+    #[test]
+    fn a_name_the_branch_renamed_a_definition_to_is_its_own() {
+        let base = "pub fn save(x: u32) {}\n";
+        let sync = branch(
+            "sync",
+            &[("src/s.rs", base, "pub fn save(x: u32, y: u32) {}\n")],
+        );
+        // It renames `store` to `save` and calls its own `save`.
+        let own = branch(
+            "own",
+            &[
+                (
+                    "src/m.rs",
+                    "pub fn store(x: u32) {}\n",
+                    "pub fn save(x: u32) {}\n",
+                ),
+                ("src/i.rs", "", "fn c() { save(1); }\n"),
+            ],
+        );
+        assert_eq!(compare(&[sync, own]).0, Vec::new());
+    }
+
+    #[test]
+    fn findings_are_kept_only_while_they_fit_half_a_frame() {
+        let long = "\"".repeat(MAX_SYMBOL_FINDING_TEXT);
+        let fns = |params: &str| -> String {
+            (0..MAX_SYMBOL_FINDINGS)
+                .map(|i| format!("pub fn f{i}({params}) {{}}\n"))
+                .collect()
+        };
+        let path = format!("src/{long}.rs");
+        let (base, a, b) = (fns("x: u32"), fns("x: u32, y: u32"), fns("x: u64"));
+        let (findings, more) = compare(&[
+            branch(&long, &[(&path, &base, &a)]),
+            branch(&long, &[(&path, &base, &b)]),
+        ]);
+        let bytes = serde_json::to_vec(&findings).unwrap().len();
+        assert!(
+            bytes <= FINDINGS_BYTES && !findings.is_empty(),
+            "{bytes} bytes"
+        );
+        assert_eq!(findings.len() + more as usize, MAX_SYMBOL_FINDINGS);
+    }
+
+    #[test]
+    fn a_file_that_did_not_parse_completely_changes_no_definition() {
+        // Its parse finds nothing defined, which is not evidence `save` went.
+        let edit = branch("edit", &[("src/s.rs", "pub fn save(x: u32) {}\n", ")\n")]);
+        let caller = branch("caller", &[("src/i.rs", "", "fn c() { save(1); }\n")]);
+        assert_eq!(compare(&[edit, caller]).0, Vec::new());
+    }
+
+    // Review follow-up on #279: a partial parse still names the branch's own
+    // definitions.
+
+    /// `first`, then more exported functions than one parse extracts.
+    fn past_the_symbol_bound(first: &str) -> String {
+        let mut source = format!("{first}\n");
+        for i in 0..langspan_graph::MAX_SYMBOLS {
+            source.push_str(&format!("pub fn filler{i}() {{}}\n"));
+        }
+        source
+    }
+
+    fn sync() -> Branch {
+        branch(
+            "sync",
+            &[(
+                "src/s.rs",
+                "pub fn save(x: u32) {}\n",
+                "pub fn save(x: u32, y: u32) {}\n",
+            )],
+        )
+    }
+
+    #[test]
+    fn a_definition_the_branch_adds_in_a_file_past_the_symbol_bound_is_its_own() {
+        let big = past_the_symbol_bound("pub fn save(x: u32) {}");
+        let own = branch(
+            "own",
+            &[
+                ("src/big.rs", "", &big),
+                ("src/i.rs", "", "fn c() { save(1); }\n"),
+            ],
+        );
+        assert_eq!(compare(&[sync(), own]).0, Vec::new());
+    }
+
+    #[test]
+    fn a_definition_the_branch_changes_in_a_file_past_the_symbol_bound_is_its_own() {
+        let before = past_the_symbol_bound("pub fn save(x: u32) {}");
+        let after = past_the_symbol_bound("pub fn save(x: u32, z: u8) {}");
+        let own = branch(
+            "own",
+            &[
+                ("src/big.rs", &before, &after),
+                ("src/i.rs", "", "fn c() { save(1); }\n"),
+            ],
+        );
+        assert_eq!(compare(&[sync(), own]).0, Vec::new());
+    }
+
+    #[test]
+    fn a_name_the_branch_renames_to_in_a_file_past_the_symbol_bound_is_its_own() {
+        let before = past_the_symbol_bound("pub fn store(x: u32) {}");
+        let after = past_the_symbol_bound("pub fn save(x: u32) {}");
+        let own = branch(
+            "own",
+            &[
+                ("src/big.rs", &before, &after),
+                ("src/i.rs", "", "fn c() { save(1); }\n"),
+            ],
+        );
+        assert_eq!(compare(&[sync(), own]).0, Vec::new());
+    }
+
+    #[test]
+    fn a_definition_added_where_only_the_old_parse_was_partial_is_its_own() {
+        let after = "pub fn save(x: u32) {}\n";
+        let own = branch(
+            "own",
+            &[
+                ("src/m.rs", ")\n", after),
+                ("src/i.rs", "", "fn c() { save(1); }\n"),
+            ],
+        );
+        assert_eq!(compare(&[sync(), own]).0, Vec::new());
+    }
+
+    #[test]
+    fn a_definition_a_partial_file_keeps_unchanged_is_not_the_branch_own() {
+        // `save` is in the file before and after, as it was: a call to it
+        // still breaks against the other branch's change.
+        let big = past_the_symbol_bound("pub fn save(x: u32) {}");
+        let caller = branch(
+            "caller",
+            &[
+                ("src/big.rs", &big, &format!("{big})\n")),
+                ("src/i.rs", "", "fn c() { save(1); }\n"),
+            ],
+        );
+        let (findings, _) = compare(&[sync(), caller]);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].finding, SymbolFindingKind::ChangedAndCalled);
     }
 }

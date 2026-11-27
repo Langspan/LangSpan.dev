@@ -7,8 +7,11 @@ name: Release
 # attestations, attach them to the draft and publish it. A draft first,
 # because a published immutable release takes no more assets.
 #
-# Nothing runs on the tag itself: a tag created with GITHUB_TOKEN starts no
-# workflow. No long-lived secret is used.
+# release-please acts with a short-lived installation token of the project's
+# release GitHub App, so the release pull request's pull_request checks run
+# like any other pull request's. The app's private key (RELEASE_APP_PRIVATE_KEY)
+# is the only long-lived secret; it is used only to mint that token, in the
+# release-please job. No workflow runs on tags, so the tag starts nothing.
 #
 # Every job runs only in the public repository. In any other copy (the
 # private one this was written in, or a fork) the whole workflow is skipped.
@@ -26,25 +29,36 @@ jobs:
     if: github.repository == 'Langspan/LangSpan.dev'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    permissions:
-      contents: write # the release branch, the tag and the Release
-      pull-requests: write # open and update the release pull request
-      issues: write # its labels (autorelease: pending / tagged)
+    # GITHUB_TOKEN is not used here: release-please acts with the app's token.
+    permissions: {}
     outputs:
       release_created: ${{ steps.rp.outputs.release_created }}
       tag: ${{ steps.rp.outputs.tag_name }}
       prs_created: ${{ steps.rp.outputs.prs_created }}
       pr: ${{ steps.rp.outputs.pr }}
     steps:
+      # A token for this repository only, revoked when the job ends.
+      - id: app-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write # the release branch, the tag and the Release
+          permission-pull-requests: write # open and update the release pull request
+          permission-issues: write # its labels (autorelease: pending / tagged)
       - id: rp
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
+          token: ${{ steps.app-token.outputs.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
-  # A pull request opened with GITHUB_TOKEN gets no pull_request run that can
-  # pass, so start check.yml and content.yml (every required check) on its
-  # branch; workflow_dispatch is the event GITHUB_TOKEN may start.
+  # Fallback from when release-please used GITHUB_TOKEN, whose pull request
+  # gets no pull_request run that can pass: start check.yml and content.yml
+  # (every required check) on the release branch. Remove this job once a
+  # release pull request's own pull_request checks run without approval.
   release-pr-checks:
     name: Start checks on the release pull request
     needs: release-please

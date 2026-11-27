@@ -2931,6 +2931,9 @@ clients, also without the `refusal_outcomes` that version 5 added to a
 report's counts and the `interface_notice_ids` it added to a briefing; and
 version 3 clients, also without the rename fields version 4 added. A client
 asks a daemon of an earlier build again in the version that daemon names. A
+hook's briefing of changes only is asked of a daemon of version 6 or
+earlier as the full view, which is all that daemon gives; a daemon of
+version 7 or later still gives changes only. A
 `--rebase` or `--adapt-renames` landing that a daemon of version 5 or
 earlier could not record stops before it pushes, with nothing pushed:
 restart the daemon after upgrading. Upgrade the daemon and clients

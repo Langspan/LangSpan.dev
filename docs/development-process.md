@@ -77,6 +77,36 @@ run again.
 
 While the Linux check on `main` fails, merge only the fix for that failure.
 
+### Which tests run when
+
+The Rust checks ([`check.yml`](../.github/workflows/check.yml)) run
+`scripts/check.sh` on Linux, then on macOS. What they run depends on the
+event:
+
+- **A pull request** runs the whole suite, except for the benchmark
+  harness's dry runs (the `dry_run_*` tests in `tests/benchmark_harness.rs`).
+  Those run only when the change touches one of the following paths:
+  `benchmarks/`, `tests/benchmark_harness.rs`, the daemon, hook and
+  briefing code they drive (`src/daemon.rs`, `src/hook.rs`, `src/hook/`,
+  `src/claude_code.rs`, `src/recent.rs`, `crates/langspan-core/src/lib.rs`),
+  or what builds and runs the suite (`Cargo.toml`, `Cargo.lock`,
+  `rust-toolchain.toml`, `check.yml`, `scripts/check.sh`,
+  `scripts/test-foreign-home.sh`). The dry runs took about 11 minutes of
+  an 18-minute macOS job. A pull request that changes only Markdown builds
+  nothing.
+- **A push to `main`** that adds one commit, as a squash merge does,
+  follows the same rule for the dry runs. A push of several commits runs
+  them, and it always builds and runs the release binary.
+- **The nightly run** (03:23 UTC on `main`) and **a manual run** run
+  everything. If the nightly run fails, it opens an issue titled "Nightly
+  Rust checks on main failed", or comments on that issue while it is open.
+  Treat that issue like a failing check on `main`.
+
+When a dry run is skipped, the test log shows
+`skipped: no benchmark or briefing change`. A local `sh scripts/check.sh`
+runs every test unless `LANGSPAN_BENCH_DRY_RUNS=skip` is set. The workflow
+owns the path list; change the list there and here together.
+
 If a test fails only sometimes, open an issue and land a deterministic fix
 the same day. Never rerun the job and move on.
 
@@ -87,7 +117,8 @@ Conventional Commits titles of merged pull requests
 ([`release.yml`](../.github/workflows/release.yml)). Merge the release pull
 request as soon as its checks pass; merging it tags and publishes the
 release. While its checks run, hold other merges so they don't restart the
-checks.
+checks. The project's release app opens the release pull request, so its
+checks run like any other pull request's.
 
 Before 1.0, a breaking change (`feat!:`) raises the minor version.
 [CONTRIBUTING.md](../CONTRIBUTING.md) lists how each title type affects the

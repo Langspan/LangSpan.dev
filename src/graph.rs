@@ -2495,8 +2495,8 @@ pub const MAP_ROWS: u32 = 200_000;
 /// The area of `path` at `depth` in a `map`: its module path cut to its
 /// first `depth + 1` parts, or `.` for the root. A file's module path is its
 /// path without the extension, or its directory for a Go file (a package is
-/// a directory) and for `mod.rs`, `lib.rs`, `main.rs`, `index.*` and
-/// `__init__.py`, so `src/api.ts`, `src/api/index.ts` and
+/// a directory) and, each in its own language, for `mod.rs`, `lib.rs`,
+/// `main.rs`, `index.*` and `__init__.py`, so `src/api.ts`, `src/api/index.ts` and
 /// `src/api/handler.ts` are all in `src/api` at depth 1. Only the last
 /// extension goes (a `.d.ts` declaration file loses both), so `src/api.v1.ts`
 /// and `src/api.v2.ts` are two areas.
@@ -2507,8 +2507,13 @@ fn map_area(path: &str, depth: u32) -> String {
         .strip_suffix(".d.ts")
         .or_else(|| file.rsplit_once('.').map(|(stem, _)| stem))
         .unwrap_or(file);
-    let by_directory = matches!(stem, "mod" | "lib" | "main" | "index" | "__init__")
-        || Language::for_path(path) == Some(Language::Go);
+    let by_directory = match Language::for_path(path) {
+        Some(Language::Go) => true,
+        Some(Language::Rust) => matches!(stem, "mod" | "lib" | "main"),
+        Some(Language::TypeScript | Language::Tsx) => stem == "index",
+        Some(Language::Python) => stem == "__init__",
+        _ => false,
+    };
     if !by_directory && !stem.is_empty() {
         parts.push(stem);
     }
@@ -4005,6 +4010,11 @@ mod review_regressions {
             ("src/api/index.d.ts", 1, "src/api"),
             ("src/api/index.test.ts", 2, "src/api/index.test"),
             ("src/README", 1, "src/README"),
+            // Each name stands for its directory only in its own language.
+            ("src/lib.ts", 1, "src/lib"),
+            ("tools/main.py", 1, "tools/main"),
+            ("src/index.py", 1, "src/index"),
+            ("src/main.rs", 1, "src"),
         ] {
             assert_eq!(map_area(path, depth), area, "{path} at {depth}");
         }

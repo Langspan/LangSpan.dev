@@ -25,6 +25,12 @@ pub fn admission_id(first: &str) -> String {
     crate::hook::wire_id("admit-waited", &[first])
 }
 
+/// The request ID of the record of how the wait that `first` started
+/// ended.
+pub fn record_id(first: &str) -> String {
+    crate::hook::wire_id("waited", &[first])
+}
+
 /// The admission the post-tool run of `operation_id` observes: the one
 /// asked for after a wait when the pre-tool run left a mark, else `first`.
 pub fn admission_of(state_dir: &Path, operation_id: &str, first: &str) -> String {

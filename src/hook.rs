@@ -3007,8 +3007,14 @@ fn render_peers_placed(
         let with_presence = (!paths.is_empty())
             .then(|| format!("{line} looking at {};\n", list(&paths)))
             .filter(|full| full.len() <= PEER_LINE_LIMIT + 1);
-        // A peer known only by where it looked says nothing without it.
-        let bare = line.ends_with(':');
+        // A peer known only by where it looked says nothing without it. One
+        // whose only news is that it ended or may have, is told that alone.
+        let status = peer.ended || peer.liveness == Some(langspan_core::LivenessStatus::Unknown);
+        let bare = line.ends_with(':') && !(status && peer.looking.is_empty());
+        if line.ends_with(':') && !bare {
+            line.pop();
+            line.push('.');
+        }
         let mut line = truncate(&line, PEER_LINE_LIMIT);
         line.push('\n');
         // A line that is only presence is placed with the rest of presence,
@@ -3977,6 +3983,21 @@ impl Session<'_> {
             )
         };
         let mut admitted = self.attach(ids).and_then(|()| admit(ids.admit.clone()));
+        // The same call delivered again after a wait that admitted it: its
+        // first request replays the conflict that started the wait, so ask
+        // again under the request the wait ended with (issue #244).
+        if let Ok(Response {
+            outcome: Outcome::Conflict { .. },
+            replayed: true,
+            ..
+        }) = &admitted
+        {
+            let after =
+                crate::wait::admission_of(&self.config.state_dir, &ids.operation_id, &ids.admit);
+            if after != ids.admit {
+                admitted = admit(after);
+            }
+        }
         // A current holder, in a workspace whose policy waits for one: wait
         // for its admission to end, then ask again under a second request
         // ID, with the base unchanged (ADR 0036).
@@ -4263,7 +4284,7 @@ impl Session<'_> {
         changed: Vec<langspan_core::ObservedFile>,
     ) {
         if let Err(failure) = self.call(
-            wire_id("waited", &[&ids.admit]),
+            crate::wait::record_id(&ids.admit),
             Command::RecordWait {
                 session_id: ids.session_id.clone(),
                 paths: keys.to_vec(),
@@ -5898,6 +5919,30 @@ pub fn file_key(root: &Path, cwd: Option<&str>, file_path: &str) -> Result<Strin
 mod briefing_text {
     use super::*;
     use langspan_core::{Briefing, Message, PeerWork, RecentPath};
+
+    /// Review follow-up #259: a peer whose only news is its status (it
+    /// ended, every file it names told before) is said, not counted as not
+    /// shown.
+    #[test]
+    fn a_peer_whose_only_news_is_its_status_is_said() {
+        let mut ended = peer("bob", "src/a.rs");
+        ended.ended = true;
+        ended.summary = None;
+        ended.editing.clear();
+        ended.recent.clear();
+        ended.overlap.clear();
+        let mut delta = briefing(vec![ended]);
+        delta.unchanged = 3;
+        let (text, placed) = render_peers_placed(&delta, BRIEFING_LIMIT);
+        assert!(
+            text.contains(
+                r#"- codex session bob in this checkout on branch "main" (session ended)."#
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("not shown"), "{text}");
+        assert_eq!(placed.peers.len(), 1, "placed, so it stays told");
+    }
 
     fn peer(id: &str, path: &str) -> PeerWork {
         PeerWork {

@@ -121,7 +121,11 @@ pub fn watch_within(bytes: &[u8], config: &Config, limit: Duration) -> Watched {
             .map_or(0, |since| since.as_nanos())
     );
     let mut stops = None;
-    for ask in 0_u64.. {
+    let mut ask = 0_u64;
+    // Since when the coordinator has not answered: within `START_GRACE`, the
+    // same ask is asked again.
+    let mut failing_since: Option<Instant> = None;
+    loop {
         if started.elapsed() >= limit {
             return Watched::quiet("watch limit reached");
         }
@@ -139,9 +143,26 @@ pub fn watch_within(bytes: &[u8], config: &Config, limit: Duration) -> Watched {
             Ok(Outcome::BetweenSteps {
                 interface_changes, ..
             }) if !interface_changes.is_empty() => {
+                let stderr = render(&interface_changes);
+                // What the wake places in the model's context is counted, as
+                // a hook's reply is (issue #222). A measurement only: a
+                // failure is left unsaid, and the notice is shown either way.
+                let _ = client::call_until(
+                    &config.state_dir,
+                    &Request {
+                        version: PROTOCOL_VERSION,
+                        request_id: wire_id("between-steps-context", &[&session_id, &nonce]),
+                        command: Command::RecordContext {
+                            session_id: session_id.clone(),
+                            bytes: u64::try_from(stderr.len()).unwrap_or(u64::MAX),
+                            turn: false,
+                        },
+                    },
+                    Instant::now() + CALL_BUDGET,
+                );
                 return Watched {
                     exit: WAKE,
-                    stderr: render(&interface_changes),
+                    stderr,
                     detail: format!(
                         "told {} interface notice(s) between steps",
                         interface_changes.len()
@@ -160,15 +181,20 @@ pub fn watch_within(bytes: &[u8], config: &Config, limit: Duration) -> Watched {
                 }
             }
             Ok(_) => return Watched::quiet("unexpected coordinator answer"),
+            // The coordinator may have recorded what this ask told before
+            // its answer was lost: the same request ID gets its receipt.
             Err(error) => {
-                if started.elapsed() >= START_GRACE {
+                if failing_since.get_or_insert_with(Instant::now).elapsed() >= START_GRACE {
                     return Watched::quiet(format!("coordinator unavailable: {error}"));
                 }
+                std::thread::sleep(POLL);
+                continue;
             }
         }
+        failing_since = None;
+        ask += 1;
         std::thread::sleep(POLL);
     }
-    Watched::quiet("watch limit reached")
 }
 
 /// The text Claude Code shows the model: the briefing's opening words, the
@@ -185,9 +211,11 @@ pub fn render(impacts: &[langspan_core::InterfaceImpact]) -> String {
     text
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::fs::PermissionsExt;
 
     /// Issue #288: the watcher ends itself before its entry's host timeout.
     /// Past `WATCH_LIMIT` it can still be reading its input (the hook's
@@ -198,5 +226,60 @@ mod tests {
         let overrun = Duration::from_secs(4) + CALL_BUDGET * 2 + POLL;
         assert!(WATCH_LIMIT + overrun < Duration::from_secs(HOST_TIMEOUT_SECONDS));
         assert!(START_GRACE < WATCH_LIMIT);
+    }
+
+    /// Review follow-up #266: the coordinator may record what an ask told
+    /// and then lose the answer, so the watcher asks again under the same
+    /// request ID and its receipt answers.
+    #[test]
+    fn an_ask_whose_answer_was_lost_is_asked_again_under_its_id() {
+        let dir = std::env::temp_dir().join(format!("ls-between-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = dir.join("daemon.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let peer = std::thread::spawn(move || {
+            let mut ids = Vec::new();
+            for answer in [false, true] {
+                let (stream, _) = listener.accept().unwrap();
+                let mut line = String::new();
+                BufReader::new(&stream).read_line(&mut line).unwrap();
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                ids.push(request["request_id"].as_str().unwrap().to_owned());
+                // The first connection closes before its answer.
+                if answer {
+                    let reply = serde_json::json!({"version": request["version"],
+                        "request_id": request["request_id"], "replayed": true, "generation": 1,
+                        "lease_valid": null, "outcome": {"type": "between_steps",
+                        "session_id": "claude-code.alice", "open": false, "stops": 0}});
+                    writeln!(&stream, "{reply}").unwrap();
+                }
+            }
+            ids
+        });
+        let config = Config {
+            state_dir: dir.clone(),
+            workspace_id: "work".into(),
+            root: dir.clone(),
+            ttl_ms: 30_000,
+            budget: Duration::from_secs(2),
+            share_prompt: false,
+            code_briefing: false,
+            presence: false,
+            presence_window_ms: 0,
+            vendor: crate::install::Vendor::ClaudeCode,
+            user_level: false,
+        };
+        let watched = watch_within(
+            br#"{"hook_event_name":"UserPromptSubmit","session_id":"alice"}"#,
+            &config,
+            Duration::from_secs(5),
+        );
+        let ids = peer.join().unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(watched.detail, "the turn is over", "{watched:?}");
+        assert_eq!(ids[0], ids[1]);
     }
 }
