@@ -82,7 +82,6 @@ fn released() -> Vec<String> {
 /// A release that changed nothing the store holds still gets its own
 /// directory: the check is then mechanical, and a release cannot be missed.
 #[test]
-#[ignore = "fails until the stores of 0.2.0, 0.3.0 and 0.4.0 are written (#316)"]
 fn every_release_has_a_golden_store_directory() {
     let releases = released();
     let manifest = fs::read_to_string(
@@ -101,8 +100,8 @@ fn every_release_has_a_golden_store_directory() {
         .collect();
     assert!(
         missing.is_empty(),
-        "no golden stores for release {missing:?}: write them with `bash scripts/golden-stores.sh VERSION BINARY` \
-         from that release's own build (docs/development-process.md, Releases)"
+        "no golden stores for release {missing:?}: write them with `bash scripts/golden-stores.sh VERSION`, \
+         which builds that release from its tag (docs/development-process.md, Releases)"
     );
 }
 

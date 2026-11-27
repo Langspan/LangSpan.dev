@@ -433,9 +433,10 @@ release. While its checks run, hold other merges so they don't restart the
 checks. The project's release app opens the release pull request, so its
 checks run like any other pull request's.
 
-After a release, add its golden stores (ADR 0015): build `langspan` from
-the new tag with `--locked`, run `bash scripts/golden-stores.sh VERSION BINARY`,
-write the stores' state snapshots with `LANGSPAN_UPDATE_GOLDEN=1` on
+After a release, add its golden stores (ADR 0015): run
+`bash scripts/golden-stores.sh VERSION`, which builds `langspan` from the new
+tag with `--locked` and runs that tag's demonstration with it, then write
+the stores' state snapshots with `LANGSPAN_UPDATE_GOLDEN=1` on
 `tests/golden_stores.rs`, and say in the pull request how the stores were
 made. `every_release_has_a_golden_store_directory` fails for a changelog
 version with no `tests/fixtures/store-VERSION/`, whether or not the release
