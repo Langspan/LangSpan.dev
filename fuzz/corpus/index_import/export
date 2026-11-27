@@ -1,0 +1,5 @@
+{"format":"langspan-source-index","schema":4,"workspace_root":"demo","created_at":1}
+{"path":"src/api.rs","digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","partial":false,"symbols":[{"name":"serve","kind":"function","line":3,"end_line":9,"signature":"pub fn serve(port: u16) -> Result<(), Error>","exported":true,"body_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}],"refs":[{"name":"Error","line":3}],"imports":[{"target":"crate::error::Error","line":1}],"calls":[{"caller":"serve","callee":"bind","line":4,"args":1}]}
+
+{"path":"app.py","digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","partial":true,"symbols":[],"refs":[],"imports":[],"calls":[]}
+{"path":"app.py","digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","partial":true,"symbols":[],"refs":[],"imports":[],"calls":[]}
