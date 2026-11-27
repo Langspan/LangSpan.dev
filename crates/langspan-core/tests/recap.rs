@@ -109,6 +109,7 @@ fn recap(state: &mut State) -> Recap {
         Command::Recap {
             workspace_id: "work".into(),
             tag: None,
+            since: None,
         },
         100,
     ) {
@@ -307,6 +308,7 @@ fn a_recap_is_bounded_and_orders_current_sessions_first() {
             &Command::Recap {
                 workspace_id: "nowhere".into(),
                 tag: None,
+                since: None,
             },
             "r",
             1
@@ -996,4 +998,633 @@ fn notes_and_messages_are_recorded_with_the_time_they_were_made() {
     // A note or message recorded before the time was kept still replays.
     apply(&mut state, &note("old", "no time", &[], None)).unwrap();
     apply(&mut state, &message("m0", "no time", &[], None)).unwrap();
+}
+
+// What happened since the owner's last session (roadmap C10), from
+// constructed logs: every time is injected, on the daemon's clock and on
+// the wall clock.
+mod since_away {
+    use langspan_core::{
+        AWAY_AFTER_MS, AttemptResult, CheckResult, ClockAnchor, Command, Event, LandingAttempt,
+        MAX_AWAY_AFTER_MS, Outcome, RecordedEvent, SINCE_ITEMS, Since, SinceFrom, SinceQuery,
+        State, apply, decide, since,
+    };
+
+    /// 22:00 wall clock (2026-11-24T22:00:00Z), when the daemon started at
+    /// 5 s on its own clock.
+    const EVENING: u64 = 1_795_557_600_000;
+    const HOUR: u64 = 3_600_000;
+    const START: u64 = 5_000;
+
+    struct Log {
+        state: State,
+        events: Vec<RecordedEvent>,
+        /// The daemon's clock and the wall clock it was anchored to.
+        clock: (u64, u64),
+        /// The store's retention cutoff, when retention removed events.
+        retained_from_ms: Option<u64>,
+    }
+
+    impl Log {
+        fn record(&mut self, event: Event) {
+            apply(&mut self.state, &event).unwrap();
+            let seq = self.events.len() as u64 + 1;
+            self.events.push(RecordedEvent { seq, event });
+        }
+
+        fn boot(&mut self, generation: u64, clock_ms: u64, wall_ms: u64) {
+            self.record(Event::Booted { generation });
+            self.record(Event::ClockAnchored {
+                anchor: ClockAnchor {
+                    generation,
+                    clock_ms,
+                    wall_ms,
+                },
+            });
+            self.clock = (clock_ms, wall_ms);
+        }
+
+        /// The daemon's clock at a wall time.
+        fn at(&self, wall_ms: u64) -> u64 {
+            self.clock.0 + (wall_ms - self.clock.1)
+        }
+
+        fn run(&mut self, id: &str, command: Command, wall_ms: u64) -> Outcome {
+            let decision = decide(&self.state, &command, id, self.at(wall_ms));
+            for event in decision.events {
+                self.record(event);
+            }
+            decision.outcome
+        }
+
+        /// The owner's Claude Code session `alice`, and `bob`, a headless
+        /// Codex agent left running overnight.
+        fn ready() -> Self {
+            let mut log = Self {
+                state: State::default(),
+                events: Vec::new(),
+                clock: (0, 0),
+                retained_from_ms: None,
+            };
+            log.boot(1, START, EVENING);
+            log.run(
+                "w",
+                Command::WorkspaceRegister {
+                    workspace_id: "work".into(),
+                    root: "/repos/work".into(),
+                },
+                EVENING,
+            );
+            for (session, headless) in [("claude-code.alice", false), ("codex.bob", true)] {
+                log.run(
+                    &format!("s-{session}"),
+                    Command::SessionRegister {
+                        session_id: session.into(),
+                        workspace_id: "work".into(),
+                        parent: None,
+                        headless,
+                    },
+                    EVENING,
+                );
+            }
+            log
+        }
+
+        fn prompted(&mut self, session: &str, wall_ms: u64) {
+            self.run(
+                &format!("p-{session}-{wall_ms}"),
+                Command::SessionPrompt {
+                    session_id: session.into(),
+                    summary: "work on the store".into(),
+                    line_digests: Vec::new(),
+                },
+                wall_ms,
+            );
+        }
+
+        fn landed(&mut self, wall_ms: u64) {
+            let taken = self.run(
+                "land-1",
+                Command::TakeTurn {
+                    workspace_id: "work".into(),
+                    onto: "main".into(),
+                    session_id: Some("codex.bob".into()),
+                    ttl_ms: 60_000,
+                    turn_id: None,
+                    queue: None,
+                },
+                wall_ms,
+            );
+            assert!(matches!(taken, Outcome::Turn { .. }), "{taken:?}");
+            let released = self.run(
+                "land-1-release",
+                Command::ReleaseTurn {
+                    workspace_id: "work".into(),
+                    onto: "main".into(),
+                    turn_id: "land-1".into(),
+                    attempts: vec![LandingAttempt {
+                        target_oid: Some("a".repeat(40)),
+                        commit_oid: Some("b".repeat(40)),
+                        result: AttemptResult::Landed {},
+                    }],
+                },
+                wall_ms + 1_000,
+            );
+            assert!(
+                matches!(released, Outcome::TurnReleased { released: true, .. }),
+                "{released:?}"
+            );
+        }
+
+        fn checked(&mut self, id: &str, result: CheckResult, wall_ms: u64) {
+            let recorded = self.run(
+                id,
+                Command::RecordCheck {
+                    workspace_id: "work".into(),
+                    name: "tests".into(),
+                    command: "cargo test".into(),
+                    tree_oid: "c".repeat(40),
+                    head_oid: None,
+                    inputs: Vec::new(),
+                    result,
+                    duration_ms: 900,
+                    symbol_findings: None,
+                    report: None,
+                    tests: None,
+                    rerun: None,
+                    writes_before: None,
+                    command_id: None,
+                },
+                wall_ms,
+            );
+            assert!(
+                matches!(recorded, Outcome::CheckRecorded { .. }),
+                "{recorded:?}"
+            );
+        }
+
+        /// The night: alice's last prompt at 22:00, then bob's work while
+        /// nobody is at the terminal.
+        fn overnight() -> (Self, u64) {
+            let mut log = Self::ready();
+            log.prompted("claude-code.alice", EVENING);
+            let mark = log.events.last().unwrap().seq;
+            log.prompted("codex.bob", EVENING + HOUR);
+            log.landed(EVENING + HOUR);
+            log.checked(
+                "check-1",
+                CheckResult::Failed { exit_code: 101 },
+                EVENING + 2 * HOUR,
+            );
+            (log, mark)
+        }
+
+        fn register(&mut self, session: &str, headless: bool, wall_ms: u64) {
+            let outcome = self.run(
+                &format!("s-{session}-{headless}-{wall_ms}"),
+                Command::SessionRegister {
+                    session_id: session.into(),
+                    workspace_id: "work".into(),
+                    parent: None,
+                    headless,
+                },
+                wall_ms,
+            );
+            assert!(matches!(outcome, Outcome::Session { .. }), "{outcome:?}");
+        }
+
+        fn since_from(&self, from: SinceFrom, earlier: bool, wall_now_ms: u64) -> Option<Since> {
+            since(
+                &self.state,
+                &SinceQuery {
+                    workspace_id: "work",
+                    from,
+                    events: &self.events,
+                    // As the store reads it: the anchor of the first event's
+                    // generation, when the read starts after it.
+                    anchor: (!matches!(
+                        self.events.first().map(|recorded| &recorded.event),
+                        Some(Event::Booted { .. })
+                    ))
+                    .then_some(ClockAnchor {
+                        generation: 1,
+                        clock_ms: START,
+                        wall_ms: EVENING,
+                    }),
+                    earlier,
+                    retained_from_ms: self.retained_from_ms,
+                    wall_now_ms,
+                },
+            )
+        }
+
+        fn away(&self, wall_now_ms: u64) -> Option<Since> {
+            self.since_from(
+                SinceFrom::Away {
+                    after_ms: AWAY_AFTER_MS,
+                },
+                false,
+                wall_now_ms,
+            )
+        }
+    }
+
+    #[test]
+    fn after_a_three_hour_gap_the_landing_and_failed_check_are_named() {
+        let (log, mark) = Log::overnight();
+        let since = log.away(EVENING + 3 * HOUR).expect("away for three hours");
+        assert_eq!(since.from_seq, mark, "{since:?}");
+        assert!(since.ongoing && !since.truncated, "{since:?}");
+        assert_eq!(since.away_ms, Some(3 * HOUR));
+        assert_eq!(since.landings.len(), 1, "{since:?}");
+        assert_eq!(since.landings[0].onto, "main");
+        assert_eq!(since.landings[0].session_id.as_deref(), Some("codex.bob"));
+        assert_eq!(since.checks.failed, 1);
+        let failure = since.checks.latest_failure.as_ref().unwrap();
+        assert_eq!((failure.name.as_str(), failure.exit_code), ("tests", 101));
+        assert!(!failure.passed_since);
+    }
+
+    #[test]
+    fn with_owner_activity_in_the_last_two_hours_nothing_is_away() {
+        let (mut log, _) = Log::overnight();
+        log.prompted("claude-code.alice", EVENING + 90 * 60_000);
+        log.prompted("claude-code.alice", EVENING + 2 * HOUR + 30 * 60_000);
+        assert_eq!(log.away(EVENING + 3 * HOUR), None);
+        // An earlier gap is found, but it has ended: a starting session is
+        // not told it.
+        let (mut log, mark) = Log::overnight();
+        log.prompted("claude-code.alice", EVENING + 2 * HOUR + 30 * 60_000);
+        let since = log.away(EVENING + 3 * HOUR).unwrap();
+        assert_eq!(since.from_seq, mark);
+        assert!(!since.ongoing);
+        // Headless work alone never ends the gap, however recent.
+        let (mut log, mark) = Log::overnight();
+        log.prompted("codex.bob", EVENING + 3 * HOUR - 60_000);
+        let since = log.away(EVENING + 3 * HOUR).unwrap();
+        assert_eq!(since.from_seq, mark);
+        assert!(since.ongoing);
+    }
+
+    #[test]
+    fn a_daemon_restart_and_a_reboot_in_the_gap_do_not_change_what_is_included() {
+        let (plain, mark) = Log::overnight();
+        let expected = plain.away(EVENING + 5 * HOUR).unwrap();
+        let mut log = Log::ready();
+        log.prompted("claude-code.alice", EVENING);
+        assert_eq!(log.events.last().unwrap().seq, mark);
+        // The daemon restarts: same clock, a new generation.
+        let restart = log.at(EVENING + 30 * 60_000);
+        log.boot(2, restart, EVENING + 30 * 60_000);
+        log.prompted("codex.bob", EVENING + HOUR);
+        log.landed(EVENING + HOUR);
+        // A reboot: the daemon's clock starts again near zero.
+        log.boot(3, 2_000, EVENING + 90 * 60_000);
+        log.checked(
+            "check-1",
+            CheckResult::Failed { exit_code: 101 },
+            EVENING + 2 * HOUR,
+        );
+        let since = log.away(EVENING + 5 * HOUR).unwrap();
+        assert_eq!(since.from_seq, expected.from_seq);
+        assert_eq!(since.away_ms, expected.away_ms);
+        assert_eq!(since.landings, expected.landings);
+        assert_eq!(since.checks, expected.checks);
+        assert_eq!(since.sessions_ended, expected.sessions_ended);
+        assert!(since.ongoing && !since.truncated);
+    }
+
+    #[test]
+    fn once_the_owner_is_back_the_same_point_is_found_and_the_gap_has_ended() {
+        let (mut log, mark) = Log::overnight();
+        let at_start = log.away(EVENING + 10 * HOUR).unwrap();
+        log.checked("check-2", CheckResult::Passed {}, EVENING + 10 * HOUR);
+        log.prompted("claude-code.alice", EVENING + 10 * HOUR + 60_000);
+        let later = log.away(EVENING + 10 * HOUR + 5 * 60_000).unwrap();
+        assert_eq!(later.from_seq, mark);
+        assert!(at_start.ongoing && !later.ongoing, "{later:?}");
+        assert_eq!(later.away_ms, Some(10 * HOUR + 60_000));
+        assert_eq!(later.landings, at_start.landings);
+        assert_eq!((later.checks.failed, later.checks.passed), (1, 1));
+        assert!(later.checks.latest_failure.unwrap().passed_since);
+    }
+
+    #[test]
+    fn a_sequence_number_is_taken_as_given() {
+        let (log, mark) = Log::overnight();
+        let since = log
+            .since_from(SinceFrom::Seq { seq: mark }, false, EVENING)
+            .unwrap();
+        assert_eq!(since.from_seq, mark);
+        assert_eq!(since.away_ms, None);
+        assert!(!since.ongoing);
+        assert_eq!(since.landings.len(), 1);
+        assert_eq!(since.checks.failed, 1);
+        let last = log.events.last().unwrap().seq;
+        let none = log
+            .since_from(SinceFrom::Seq { seq: last }, false, EVENING)
+            .unwrap();
+        assert!(none.landings.is_empty() && none.checks.failed == 0);
+    }
+
+    #[test]
+    fn a_point_older_than_the_events_read_says_truncated() {
+        let (mut log, mark) = Log::overnight();
+        // Only the events after the landing were read.
+        let cut = log
+            .events
+            .iter()
+            .position(|recorded| matches!(recorded.event, Event::TurnReleased { .. }))
+            .unwrap();
+        log.events.drain(..=cut);
+        let since = log
+            .since_from(SinceFrom::Seq { seq: mark }, true, EVENING + 3 * HOUR)
+            .unwrap();
+        assert!(since.truncated);
+        assert!(since.landings.is_empty());
+        // No activity among the events read, the oldest of them from before
+        // the gap: away, from a point older than what was read.
+        let away = log
+            .since_from(
+                SinceFrom::Away {
+                    after_ms: AWAY_AFTER_MS,
+                },
+                true,
+                EVENING + 5 * HOUR,
+            )
+            .unwrap();
+        assert!(away.truncated && away.ongoing, "{away:?}");
+        assert_eq!(away.checks.failed, 1);
+    }
+
+    /// The owner's last prompt, 30 minutes before `now`, is older than the
+    /// events read. They start with the landing's release, which has no
+    /// time of its own and so inherits the anchor's, ten hours old; a
+    /// headless agent's prompt 10 minutes before `now` follows it.
+    fn read_from_an_untimed_event(now: u64) -> Log {
+        let mut log = Log::ready();
+        log.prompted("claude-code.alice", now - 30 * 60_000);
+        log.landed(now - 20 * 60_000);
+        log.prompted("codex.bob", now - 10 * 60_000);
+        let taken = log
+            .events
+            .iter()
+            .position(|recorded| matches!(recorded.event, Event::TurnTaken { .. }))
+            .unwrap();
+        log.events.drain(..=taken);
+        assert!(matches!(log.events[0].event, Event::TurnReleased { .. }));
+        log
+    }
+
+    #[test]
+    fn an_inherited_time_at_the_start_of_the_events_read_does_not_make_a_gap() {
+        let now = EVENING + 10 * HOUR;
+        let log = read_from_an_untimed_event(now);
+        let away = SinceFrom::Away {
+            after_ms: AWAY_AFTER_MS,
+        };
+        // The oldest event with a time of its own is ten minutes old: no
+        // two-hour gap is shown by what was read.
+        assert_eq!(log.since_from(away, true, now), None);
+        // Three hours later the gap is real, and measured from that event,
+        // not from the inherited time.
+        let since = log.since_from(away, true, now + 3 * HOUR).unwrap();
+        assert!(since.ongoing && since.truncated, "{since:?}");
+        assert_eq!(since.away_ms, Some(3 * HOUR + 10 * 60_000));
+    }
+
+    #[test]
+    fn events_read_without_any_time_of_their_own_establish_no_gap() {
+        let now = EVENING + 10 * HOUR;
+        let mut log = read_from_an_untimed_event(now);
+        // Only the landing's release, which inherits the anchor's time.
+        log.events.truncate(1);
+        let away = SinceFrom::Away {
+            after_ms: AWAY_AFTER_MS,
+        };
+        assert_eq!(log.since_from(away, true, now), None);
+        // An old retention cutoff does not help: the unread events after
+        // it may hold the owner's work.
+        log.retained_from_ms = Some(EVENING);
+        assert_eq!(log.since_from(away, true, now), None);
+    }
+
+    /// A session started headless and resumed at the terminal: its work
+    /// before the resume was nobody's at the terminal, so it does not end
+    /// the gap, while its work after the resume does.
+    #[test]
+    fn a_headless_session_resumed_interactively_keeps_its_earlier_work_headless() {
+        let (mut log, mark) = Log::overnight();
+        log.register("claude-code.carol", true, EVENING + HOUR);
+        log.prompted("claude-code.carol", EVENING + 3 * HOUR);
+        log.register("claude-code.carol", false, EVENING + 3 * HOUR + 20 * 60_000);
+        let since = log.away(EVENING + 3 * HOUR + 30 * 60_000).unwrap();
+        assert_eq!(since.from_seq, mark, "{since:?}");
+        assert!(since.ongoing, "{since:?}");
+        assert_eq!(since.away_ms, Some(3 * HOUR + 30 * 60_000));
+        // Work after the resume is the owner's: the gap has ended.
+        log.prompted("claude-code.carol", EVENING + 3 * HOUR + 25 * 60_000);
+        let since = log.away(EVENING + 3 * HOUR + 30 * 60_000).unwrap();
+        assert_eq!(since.from_seq, mark);
+        assert!(!since.ongoing, "{since:?}");
+    }
+
+    /// The reverse: an interactive session continued headless keeps its
+    /// interactive work, which ended the gap; what it does headless after
+    /// that does not end a later one.
+    #[test]
+    fn an_interactive_session_continued_headless_keeps_its_earlier_work_interactive() {
+        let (mut log, mark) = Log::overnight();
+        log.prompted("claude-code.alice", EVENING + 3 * HOUR);
+        let back = log.events.last().unwrap().seq;
+        log.register("claude-code.alice", true, EVENING + 3 * HOUR + 10 * 60_000);
+        let since = log.away(EVENING + 3 * HOUR + 30 * 60_000).unwrap();
+        assert_eq!(since.from_seq, mark, "{since:?}");
+        assert!(!since.ongoing, "{since:?}");
+        assert_eq!(since.away_ms, Some(3 * HOUR));
+        log.prompted("claude-code.alice", EVENING + 5 * HOUR);
+        let since = log.away(EVENING + 6 * HOUR).unwrap();
+        assert_eq!(since.from_seq, back, "{since:?}");
+        assert!(since.ongoing, "{since:?}");
+    }
+
+    /// A session registered before the events read registers again among
+    /// them in another mode: its work before that is of an unknown mode,
+    /// so it neither ends nor starts a gap.
+    #[test]
+    fn work_of_an_unknown_mode_neither_ends_nor_starts_a_gap() {
+        let (mut log, mark) = Log::overnight();
+        log.register("claude-code.carol", true, EVENING + HOUR);
+        log.prompted("claude-code.carol", EVENING + 3 * HOUR);
+        log.register("claude-code.carol", false, EVENING + 3 * HOUR + 20 * 60_000);
+        // Read from alice's prompt on: carol's first registration is not.
+        let first = log
+            .events
+            .iter()
+            .position(|recorded| recorded.seq == mark)
+            .unwrap();
+        log.events.drain(..first);
+        let away = SinceFrom::Away {
+            after_ms: AWAY_AFTER_MS,
+        };
+        let since = log
+            .since_from(away, true, EVENING + 3 * HOUR + 30 * 60_000)
+            .unwrap();
+        assert_eq!(since.from_seq, mark, "{since:?}");
+        assert!(since.ongoing, "{since:?}");
+    }
+
+    /// Retention removed the owner's last work and every event after the
+    /// cutoff was read (`earlier` is false): the workspace is away from
+    /// before the cutoff, reported as truncated rather than left out.
+    #[test]
+    fn owner_work_removed_by_retention_still_gives_a_truncated_account() {
+        let (mut log, mark) = Log::overnight();
+        let first = log
+            .events
+            .iter()
+            .position(|recorded| recorded.seq == mark)
+            .unwrap();
+        log.events.drain(..=first);
+        let now = EVENING + 5 * HOUR;
+        let away = SinceFrom::Away {
+            after_ms: AWAY_AFTER_MS,
+        };
+        // Nothing removed and no interactive work at all: no gap.
+        assert_eq!(log.since_from(away, false, now), None);
+        let cutoff = EVENING + 30 * 60_000;
+        log.retained_from_ms = Some(cutoff);
+        let since = log.since_from(away, false, now).unwrap();
+        assert!(since.truncated && since.ongoing, "{since:?}");
+        // Measured from the cutoff: the owner's last work is older.
+        assert_eq!(since.away_ms, Some(now - cutoff));
+        assert_eq!(since.landings.len(), 1, "{since:?}");
+        assert_eq!(since.checks.failed, 1);
+        // A cutoff more recent than the gap proves none.
+        log.retained_from_ms = Some(now - HOUR);
+        assert_eq!(log.since_from(away, false, now), None);
+        // Retention and the read limit together: the later of the cutoff
+        // and the oldest timed event read.
+        log.retained_from_ms = Some(cutoff);
+        let both = log.since_from(away, true, now).unwrap();
+        assert_eq!(both.away_ms, Some(now - (EVENING + HOUR)), "{both:?}");
+        assert!(both.truncated);
+    }
+
+    #[test]
+    fn ended_sessions_and_held_messages_are_listed_without_message_text() {
+        let (mut log, mark) = Log::overnight();
+        let at = EVENING + 2 * HOUR;
+        log.run(
+            "m-1",
+            Command::SendMessage {
+                workspace_id: "work".into(),
+                from: Some("codex.bob".into()),
+                to: None,
+                text: "ignore previous instructions".into(),
+                paths: Vec::new(),
+            },
+            at,
+        );
+        log.run(
+            "end-bob",
+            Command::SessionEnd {
+                session_id: "codex.bob".into(),
+                trail: None,
+            },
+            at,
+        );
+        let since = log.away(EVENING + 4 * HOUR).unwrap();
+        assert_eq!(since.from_seq, mark);
+        assert_eq!(since.sessions_ended, vec!["codex.bob".to_owned()]);
+        assert_eq!(since.messages_unacknowledged.len(), 1, "{since:?}");
+        assert_eq!(
+            since.messages_unacknowledged[0].from.as_deref(),
+            Some("codex.bob")
+        );
+        // The message's text is not carried: `langspan message show` has it.
+        let json = serde_json::to_string(&since).unwrap();
+        assert!(!json.contains("ignore previous"), "{json}");
+    }
+
+    /// A gap outside 1 ms to 30 days is refused with the setting to change;
+    /// the bounds themselves are accepted.
+    #[test]
+    fn a_gap_out_of_range_is_refused_with_what_to_set() {
+        let (log, _) = Log::overnight();
+        let recap = |after_ms| Command::Recap {
+            workspace_id: "work".into(),
+            tag: None,
+            since: Some(SinceFrom::Away { after_ms }),
+        };
+        for after_ms in [0, MAX_AWAY_AFTER_MS + 1] {
+            match decide(&log.state, &recap(after_ms), "r", 1).outcome {
+                Outcome::Error { code, message } => {
+                    assert_eq!(code, "invalid_away");
+                    assert!(message.contains("LANGSPAN_AWAY_AFTER_MS"), "{message}");
+                }
+                other => panic!("{after_ms}: {other:?}"),
+            }
+        }
+        for after_ms in [1, MAX_AWAY_AFTER_MS] {
+            let outcome = decide(&log.state, &recap(after_ms), "r", 1).outcome;
+            assert!(matches!(outcome, Outcome::Recap { .. }), "{outcome:?}");
+        }
+    }
+
+    /// Past `SINCE_ITEMS` a list is counted, not grown; a recap cut to fit
+    /// a frame drops `since`'s items last, each counted in its `omitted`.
+    #[test]
+    fn lists_are_bounded_and_a_recap_cut_to_fit_counts_what_since_lost() {
+        let (mut log, mark) = Log::overnight();
+        let ended = SINCE_ITEMS + 3;
+        for index in 0..ended {
+            let session = format!("codex.agent-{index}");
+            log.run(
+                &format!("s-{index}"),
+                Command::SessionRegister {
+                    session_id: session.clone(),
+                    workspace_id: "work".into(),
+                    parent: None,
+                    headless: true,
+                },
+                EVENING + HOUR,
+            );
+            log.run(
+                &format!("e-{index}"),
+                Command::SessionEnd {
+                    session_id: session,
+                    trail: None,
+                },
+                EVENING + HOUR,
+            );
+        }
+        let since = log
+            .since_from(SinceFrom::Seq { seq: mark }, false, EVENING)
+            .unwrap();
+        assert_eq!(since.sessions_ended.len(), SINCE_ITEMS);
+        assert_eq!(since.omitted, 3);
+        let Outcome::Recap { mut recap } = log.run(
+            "read",
+            Command::Recap {
+                workspace_id: "work".into(),
+                tag: None,
+                since: None,
+            },
+            EVENING,
+        ) else {
+            panic!("no recap");
+        };
+        recap.since = Some(since);
+        recap.shrink_until(|recap| {
+            recap.since.as_ref().unwrap().sessions_ended.len() <= 2
+                && recap.sessions.is_empty()
+                && recap.checks.is_empty()
+                && recap.landings.is_empty()
+        });
+        let since = recap.since.unwrap();
+        assert_eq!(since.sessions_ended.len(), 2);
+        assert_eq!(since.omitted as usize, 3 + SINCE_ITEMS - 2);
+        assert_eq!(since.landings.len(), 1, "landings go after ended sessions");
+    }
 }

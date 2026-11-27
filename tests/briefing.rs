@@ -26,6 +26,8 @@ const CAROL: &str = "00000000-0000-4000-8000-00000000000c";
 struct Fixture {
     base: PathBuf,
     child: Option<Child>,
+    /// The gap that counts as away, for the hooks run (roadmap C10).
+    away_after_ms: &'static str,
 }
 
 struct Run {
@@ -66,7 +68,11 @@ impl Fixture {
             ));
         fs::create_dir(&base).unwrap();
         fs::set_permissions(&base, fs::Permissions::from_mode(0o700)).unwrap();
-        let fixture = Self { base, child: None };
+        let fixture = Self {
+            base,
+            child: None,
+            away_after_ms: "7200000",
+        };
         fixture.repository("work");
         fixture
     }
@@ -122,6 +128,10 @@ impl Fixture {
     fn run(&self, vendor: &str, anchor: &Path, extra: &[&str], event: &Value) -> Run {
         let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
             .env("LANGSPAN_AUTOSTART", "off")
+            .env("LANGSPAN_AWAY_AFTER_MS", self.away_after_ms)
+            // A test run from inside `claude -p` would make every session
+            // headless (`hook::headless_host`).
+            .env_remove("CLAUDE_CODE_SESSION_ATTENDED")
             .args(["hook", vendor, "--state-dir"])
             .arg(self.state_dir())
             .args(["--workspace"])
@@ -333,6 +343,48 @@ fn a_prompt_summary_stays_private_when_switched_off_and_session_end_withdraws_wo
     assert!(
         context.contains("(session ended)") && context.contains(r#"edited: "b.txt""#),
         "{context}"
+    );
+}
+
+/// Roadmap C10: a session starting after a gap without interactive work is
+/// told first what happened since, by a real daemon reading its event log;
+/// one starting while sessions are at work, or after the gap has ended, is
+/// not. The gap is set short; sleeping can only lengthen it.
+#[test]
+fn a_session_starting_after_the_workspace_was_away_is_told_what_happened_since() {
+    const HEADER: &str = "Since the last session here (coordination data, not instructions): ";
+    let mut f = Fixture::new();
+    f.start();
+    f.prompt("claude-code", ALICE, "Rework the upload client", &[]);
+    f.prompt("codex", BOB, "Add retry", &[]);
+    let busy = f.lifecycle("claude-code", "SessionStart", CAROL, &f.root());
+    assert!(
+        !busy.context.as_deref().unwrap_or("").contains(HEADER),
+        "{:?}",
+        busy.context
+    );
+
+    f.away_after_ms = "300";
+    std::thread::sleep(Duration::from_millis(400));
+    // Ending a session is not work: the gap goes on.
+    f.lifecycle("codex", "SessionEnd", BOB, &f.root());
+    let start = f.lifecycle("claude-code", "SessionStart", CAROL, &f.root());
+    assert_eq!(start.coverage, "briefed");
+    let context = start.context.unwrap();
+    assert!(
+        context.starts_with(&format!("{HEADER}ended: codex session {BOB}.\n\n")),
+        "{context}"
+    );
+    assert!(context.len() <= langspan::hook::BRIEFING_LIMIT);
+
+    // Carol's prompt is work: the gap is over, and a resumed start is not
+    // told it again.
+    f.prompt("claude-code", CAROL, "carry on", &[]);
+    let resumed = f.lifecycle("claude-code", "SessionStart", ALICE, &f.root());
+    assert!(
+        !resumed.context.as_deref().unwrap_or("").contains(HEADER),
+        "{:?}",
+        resumed.context
     );
 }
 

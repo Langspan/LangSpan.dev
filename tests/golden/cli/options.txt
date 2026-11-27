@@ -281,7 +281,7 @@ every other option
 
 ## langspan check run w --name n -- true
 alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
-same: --json --apply --open --allow-network --demo --check-again --rebase --adapt-renames --symbols --publish-as-branch --mine --detail --rank --renamed --recent --all --skill --create --yes --verbose --switch --off --state-dir --request-id --summary --ttl-ms --after --limit --workspace --root --budget-ms --event --settings --prompt-summary --code-briefing --presence --presence-minutes --max-peers --remote --share-task --onto --timeout-s --wait-s --session --to --from --home --hosts --listen -m --message --statusline --deadline-ms --forget --since --sound --depth --path --out --in --before --keep-days --month --format --file --tools --host --mcp-tools --wait-ms --max-hops --mode --outline-reads
+same: --json --apply --since-away --since-seq --open --allow-network --demo --check-again --rebase --adapt-renames --symbols --publish-as-branch --mine --detail --rank --renamed --recent --all --skill --create --yes --verbose --switch --off --state-dir --request-id --summary --ttl-ms --after --limit --workspace --root --budget-ms --event --settings --prompt-summary --code-briefing --presence --presence-minutes --max-peers --remote --share-task --onto --timeout-s --wait-s --session --to --from --home --hosts --listen -m --message --statusline --deadline-ms --forget --since --sound --depth --path --out --in --before --keep-days --month --format --file --tools --host --mcp-tools --wait-ms --max-hops --mode --outline-reads
 --help -h
   exit 0: the help
 --name
@@ -291,7 +291,7 @@ every other option
 
 ## langspan check status w
 alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
-same: --json --apply --open --allow-network --demo --check-again --rebase --adapt-renames --symbols --publish-as-branch --mine --detail --rank --renamed --recent --all --skill --create --yes --verbose --switch --off --state-dir --request-id --summary --ttl-ms --after --limit --workspace --root --budget-ms --event --settings --prompt-summary --code-briefing --presence --presence-minutes --max-peers --remote --name --share-task --onto --timeout-s --wait-s --session --to --from --home --hosts --listen -m --message --statusline --deadline-ms --forget --since --sound --depth --path --out --in --before --keep-days --month --format --file --tools --host --mcp-tools --wait-ms --max-hops --mode --outline-reads
+same: --json --apply --since-away --since-seq --open --allow-network --demo --check-again --rebase --adapt-renames --symbols --publish-as-branch --mine --detail --rank --renamed --recent --all --skill --create --yes --verbose --switch --off --state-dir --request-id --summary --ttl-ms --after --limit --workspace --root --budget-ms --event --settings --prompt-summary --code-briefing --presence --presence-minutes --max-peers --remote --name --share-task --onto --timeout-s --wait-s --session --to --from --home --hosts --listen -m --message --statusline --deadline-ms --forget --since --sound --depth --path --out --in --before --keep-days --month --format --file --tools --host --mcp-tools --wait-ms --max-hops --mode --outline-reads
 --help -h
   exit 0: the help
 every other option
@@ -302,7 +302,7 @@ alone: exit 1: {"level":"error","message":"coordination unavailable: No such fil
 same: --json --apply --off --state-dir --home
 --help -h
   exit 0: the help
---open --allow-network --demo --check-again --rebase --adapt-renames --symbols --publish-as-branch --mine --detail --rank --renamed --recent --all --skill --create --yes --verbose --switch --request-id --summary --ttl-ms --after --limit --workspace --root --budget-ms --event --settings --prompt-summary --code-briefing --presence --presence-minutes --max-peers --remote --share-task --onto --timeout-s --wait-s --session --to --from --hosts --listen -m --message --statusline --deadline-ms --forget --since --sound --depth --path --out --in --before --keep-days --month --format --file --tools --host --mcp-tools --wait-ms --max-hops --mode --outline-reads
+--since-away --since-seq --open --allow-network --demo --check-again --rebase --adapt-renames --symbols --publish-as-branch --mine --detail --rank --renamed --recent --all --skill --create --yes --verbose --switch --request-id --summary --ttl-ms --after --limit --workspace --root --budget-ms --event --settings --prompt-summary --code-briefing --presence --presence-minutes --max-peers --remote --share-task --onto --timeout-s --wait-s --session --to --from --hosts --listen -m --message --statusline --deadline-ms --forget --since --sound --depth --path --out --in --before --keep-days --month --format --file --tools --host --mcp-tools --wait-ms --max-hops --mode --outline-reads
   exit 1: {"level":"error","message":"--name NAME is required: it is how this check's evidence is found again"}
 --name
   exit 1: {"level":"error","message":"give the check command after --, for example: -- cargo test"}
@@ -509,7 +509,7 @@ every other option
 
 ## langspan recap w
 alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
-same: --json --tag --state-dir --request-id
+same: --json --tag --since-away --since-seq --state-dir --request-id
 --apply
   exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
 --help -h

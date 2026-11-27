@@ -1,0 +1,1 @@
+{"version":10,"request_id":"recap-1","replayed":false,"generation":4,"lease_valid":null,"outcome":{"type":"recap","recap":{"workspace_id":"app","root":"/work/app","branch_ref":"refs/heads/main","sessions":[],"omitted_sessions":0,"interface_changes":[],"checks":[],"landings":[],"notes":[],"teammates":[],"publishing":null,"scan_failure":null}}}

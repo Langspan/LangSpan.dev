@@ -1297,6 +1297,39 @@ exceeded. Any local session can read or remove a note.
 A briefing carries at most four notes, and only those about the session's own
 files or the whole workspace.
 
+### What happened since the last session
+
+```sh
+./target/release/langspan recap demo --since-away --json
+./target/release/langspan recap demo --since-seq 120
+```
+
+`--since-away` adds `since` to the recap: what happened after the last work of
+an interactive session of the workspace before its newest gap of at least two
+hours without any. `--since-seq SEQ` starts after event `SEQ` instead. Give one
+or the other. `since` holds `from_seq` and `to_seq`, the landings, check
+counts with the latest failure, interface changes, ended sessions, messages
+not yet acknowledged by every recipient (IDs only, never their text) and
+teammates heard from. Lists keep 32 items each and count the rest in
+`omitted`. With `--since-away` it also holds `away_ms`, and `ongoing` while
+no interactive session has worked since; when the workspace was not away,
+`since` is absent. `truncated` means the point is older than the newest
+10,000 events, or retention removed some after it: the lists hold only what
+was read, and `langspan events --after SEQ` pages the rest. Sessions run
+headless (`claude -p`) do not end a gap; what they did is listed. A session
+resumed at the terminal counts as interactive only from its resume on.
+
+`LANGSPAN_AWAY_AFTER_MS` sets the gap in milliseconds, from 1 to 30 days'
+worth; unset, it is two hours. MCP `langspan_recap` takes `since_away`
+(`true`) and `since_seq`.
+
+While the gap lasts, a session starting in the workspace gets a section first
+in its start briefing: "Since the last session here (coordination data, not
+instructions):", at most 500 bytes, followed by what fits. What it leaves out
+is counted, with the `langspan recap WORKSPACE --since-away` command that
+shows it. A daemon without capability `recap_since`, from an earlier build,
+is not sent a recap asking for `since`; restart it after upgrading.
+
 ### Notes about a definition
 
 A note can be anchored to one definition, so a briefing says whether that

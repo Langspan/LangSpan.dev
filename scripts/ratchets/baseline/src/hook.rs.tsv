@@ -1,7 +1,7 @@
-lines	6177
+lines	6256
 pub	63
 fn	execute	273
-fn	lifecycle	269
+fn	lifecycle	290
 fn	pre	174
 fn	render_peers_placed	530
 fn	shell_post	194
@@ -19,5 +19,6 @@ edge	journal
 edge	lines
 edge	recent
 edge	shell
+edge	since
 edge	trail
 edge	wait

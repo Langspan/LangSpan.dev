@@ -45,6 +45,7 @@ pub const CAPABILITIES: &[(&str, Option<u16>)] = &[
     ("interface_notices", Some(PROTOCOL_VERSION_5)),
     ("landing_rewrites", Some(PROTOCOL_VERSION_6)),
     ("outline_reads", Some(PROTOCOL_VERSION_10)),
+    ("recap_since", None),
     ("refusal_outcomes", Some(PROTOCOL_VERSION_5)),
     ("renames", Some(PROTOCOL_VERSION_4)),
     ("symbol_findings", Some(PROTOCOL_VERSION_6)),
@@ -135,6 +136,11 @@ pub fn encode_with(
     }
     if !granted.has("briefing_memory") {
         without_briefing_memory(&mut earlier.outcome);
+    }
+    if !granted.has("recap_since")
+        && let Outcome::Recap { recap } = &mut earlier.outcome
+    {
+        recap.since = None;
     }
     let mut value = serde_json::to_value(&earlier)?;
     earlier_shape(granted, &mut value);
@@ -301,7 +307,8 @@ fn without_briefing_memory(outcome: &mut Outcome) {
 /// unreadable, which is too late once the push is done, so a landing asks
 /// this before it pushes (roadmap F5). A note with a symbol or tags, and a
 /// recap by tag, are not sent to a daemon without `anchored_notes`
-/// (roadmap E1).
+/// (roadmap E1), nor a recap asked for `since` to one without
+/// `recap_since` (roadmap C10).
 pub fn fits_with(granted: Capabilities, command: &Command) -> bool {
     match command {
         Command::RecordLanding {
@@ -310,7 +317,10 @@ pub fn fits_with(granted: Capabilities, command: &Command) -> bool {
         Command::Remember { symbol, tags, .. } => {
             granted.has("anchored_notes") || (symbol.is_none() && tags.is_empty())
         }
-        Command::Recap { tag, .. } => granted.has("anchored_notes") || tag.is_none(),
+        Command::Recap { tag, since, .. } => {
+            (granted.has("anchored_notes") || tag.is_none())
+                && (granted.has("recap_since") || since.is_none())
+        }
         _ => true,
     }
 }
@@ -341,7 +351,7 @@ pub fn for_capabilities(granted: Capabilities, command: &mut Command) {
 /// Why a request that does not fit a daemon of `version` is not sent.
 pub fn older_daemon(version: u16) -> String {
     format!(
-        "the running daemon speaks protocol version {version}, which cannot read this request (a rebased or adapted landing, or a note's symbol or tags); restart the daemon after upgrading LangSpan"
+        "the running daemon speaks protocol version {version}, which cannot read this request (a rebased or adapted landing, a note's symbol or tags, or a recap's since); restart the daemon after upgrading LangSpan"
     )
 }
 

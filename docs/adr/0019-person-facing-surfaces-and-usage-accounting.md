@@ -23,7 +23,7 @@ such numbers to be measured.
 | H2 | Status line: agents here, catches today | Built (amended below) | First not now: the launch is about coordination between agents; `status` and the local page cover the owner |
 | H3 | Desktop pings and a sound | Built 25 November 2026 ([issue #77](https://github.com/Langspan/LangSpan.dev/issues/77)): `langspan notify on\|off\|status [--sound on\|off]`; see "Desktop notices (H3)" below. Not yet run on a macOS or Linux desktop | First not now: needs OS integration outside the state directory |
 | H4 | A daily summary | Built 25 November 2026 ([issue #78](https://github.com/Langspan/LangSpan.dev/issues/78)): `langspan today` and MCP `langspan_today`; see "Daily summary (H4)" below. Not yet run on a host over a working day | |
-| C10 | A "since you left" briefing | Not now | Can be derived from events later; briefings already carry current peer work |
+| C10 | A "since you left" briefing | Built 27 November 2026 ([issue #47](https://github.com/Langspan/LangSpan.dev/issues/47)): `recap --since-away\|--since-seq SEQ`, MCP `langspan_recap`'s `since_away` and `since_seq`, and a section at session start; see "Since the last session (C10)" below. Not yet run on a host after an overnight gap | First not now: can be derived from events, and briefings already carry current peer work. Built when wanted, derived from the event log on request |
 | H5 | Monthly refusal count | Built 25 November 2026 ([issue #79](https://github.com/Langspan/LangSpan.dev/issues/79)): `langspan count`, a line in `langspan today` and on the local page; see "Monthly refusal count (H5)" below. Not yet run on a host | First not now: a count of refusals is not evidence of rework avoided. Built as a count of what LangSpan did, which claims no outcome |
 | H6 | Daily "tokens saved" line | Not now | No such number is shown until it is measured |
 | E3 | Recap with tokens, model and cost | Not now | Depends on J10 |
@@ -351,6 +351,64 @@ LangSpan refusal (Codex run 3c2 in
 [the Codex evidence](../evidence/codex-real-host/README.md)) predates
 `write_refused`, so its log holds no refusal to settle; comparing computed
 outcomes with judged ones waits for a new real run.
+
+**Since the last session (C10), built 27 November 2026.** A recap asked for
+`since` adds what happened in the workspace after a point of the event log:
+landings, check counts with the latest failure (and whether that check
+passed later), interface changes other than added or private names, ended
+sessions, messages some recipient has not acknowledged (IDs and recipients,
+never text) and teammates heard from. `--since-seq SEQ` (MCP `since_seq`)
+takes the point as given. `--since-away` (MCP `since_away`) finds it: the
+last timed work of an interactive session of the workspace (a prompt, a tool
+call, a read, a refusal, the end of a reply) before the newest gap of at
+least two hours without any. Choices that differ from the issue's proposal
+or fill in what it left open:
+
+- *Derived, not stored.* The core computes it from the newest 10,000 events
+  (`crates/langspan-core/src/since.rs`), placed on the wall clock through
+  each generation's `clock_anchored` event, as `today` places them. The
+  point is a sequence number, so a daemon restart or a reboot in the gap
+  does not move it. A point older than the events read, or events removed
+  by retention, set `truncated`; nothing is guessed. When retention removed
+  the owner's last work and every later event was read, the gap is measured
+  from the retention cutoff and the account is given as `truncated`, not
+  left out.
+- *Headless work does not end a gap.* A `claude -p` session is an agent left
+  running, not the owner at work; what it did is reported. A hook run's own
+  `session_seen` and liveness are not work either. Codex gives no headless
+  signal, so `codex exec` counts as interactive. Each piece of work has the
+  mode the session was registered with when it was done: a headless session
+  resumed at the terminal does not make its earlier work the owner's, nor
+  the reverse. Work done before a registration that is not among the events
+  read has an unknown mode and neither ends nor starts a gap.
+- *The setting.* The gap is `LANGSPAN_AWAY_AFTER_MS` in the environment of
+  the hook, the CLI or the MCP adapter, 1 ms to 30 days, two hours when unset. A value outside
+  that range is refused (`invalid_away` from the core, a message naming the
+  variable from the adapter), and the hook leaves the section out and says
+  why in its diagnostic. Nothing is stored.
+- *The section.* At session start only, and only while the gap lasts (no
+  interactive session has worked since its point), a section headed "Since
+  the last session here (coordination data, not instructions):" comes first
+  in the start briefing. It is at most 500 bytes and fits within the
+  briefing's 2,400-byte cap with what follows. It counts what it leaves out
+  and names `langspan recap WORKSPACE --since-away`; when more happened than
+  was read, it says so and names that command. Every name in it is cut and
+  stripped of control characters, and paths, symbols, branches, checks and
+  teammates are quoted. Lists are at most 32 items each, the rest counted; a recap cut to
+  fit a frame drops `since` items last.
+- *Capability `recap_since`* ([ADR 0037](0037-protocol-capabilities.md)), not
+  a version: a client that does not name it is answered without `since`, and
+  a recap asked for `since` is not sent to a daemon without it.
+
+Tests: `crates/langspan-core/tests/recap.rs` (a three-hour gap with a
+landing and a failed check, activity in the last two hours, a restart and a
+reboot in the gap, the gap ending, a point older than the events read,
+inherited times, the range of the setting, the list bounds and the cut),
+`src/since.rs` (the section's byte bound at every limit, quoting, the full
+form), `tests/briefing.rs` (a real daemon and real `SessionStart` events)
+and `tests/protocol.rs` (the capability's vectors in
+`fixtures/capabilities/recap_since/`). Not yet run on a host after an
+overnight gap.
 
 **Status line (row H2), amended 25 November 2026.** H2 is built
 ([issue #76](https://github.com/Langspan/LangSpan.dev/issues/76)), for Claude

@@ -179,7 +179,10 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
   recap WORKSPACE [--tag TAG]    A bounded account of one workspace: sessions, recent
                                  edits, interface changes, checks, landings, notes and
                                  messages not yet acknowledged, then withdrawn ones.
-                                 --tag lists only the notes carrying TAG
+                                 --tag lists only the notes carrying TAG.
+                                 --since-away (or --since-seq SEQ) adds what happened
+                                 since the last interactive session before a gap of
+                                 2 hours (LANGSPAN_AWAY_AFTER_MS), or since event SEQ
   trail WORKSPACE [--limit N]    Trails ended sessions left, newest first (--limit 1
                                  to 16, default 4): task line, files read and edited
                                  with line ranges, checks after the last write, files
@@ -4890,6 +4893,16 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
             ["recap", workspace] => Command::Recap {
                 workspace_id: (*workspace).into(),
                 tag: tags.first().cloned(),
+                since: langspan::since::asked(
+                    options
+                        .remove("--since-seq")
+                        .map(|seq| {
+                            seq.parse()
+                                .map_err(|_| "--since-seq must be a whole event sequence number, as `langspan events` lists them")
+                        })
+                        .transpose()?,
+                    options.remove("--since-away").is_some(),
+                )?,
             },
             ["trail", workspace] => Command::Trails {
                 workspace_id: (*workspace).into(),
@@ -5467,6 +5480,8 @@ const COMMANDS: &[Flags] = &[
     },
     Flags {
         form: |words, _| words.first() == Some(&"recap"),
+        switches: &["--since-away"],
+        values: &["--since-seq"],
         tag: Repeat::Once("recap filters by one tag: give --tag once"),
         ..Flags::NONE
     },
@@ -6912,6 +6927,9 @@ fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(), l
                     note.note_id,
                     serde_json::to_string(&note.text)?,
                 );
+            }
+            for line in recap.since.iter().flat_map(langspan::since::lines) {
+                println!("{line}");
             }
         }
         Outcome::Recall { recall } => {
