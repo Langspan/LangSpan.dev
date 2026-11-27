@@ -301,4 +301,26 @@ fn a_rename_with_a_peers_uncommitted_caller_is_held_once_and_a_repeat_goes_throu
         reason.contains(r#""parse_config" (removed) is used in worktree"#),
         "{reason}"
     );
+
+    // Deleting the whole file removes the name too (review comment
+    // 4722261554): held for another session the same way.
+    let deleted = w.codex_patch(
+        "erin",
+        "e1",
+        "*** Begin Patch\n*** Delete File: src/config.rs\n*** End Patch",
+    );
+    assert_eq!(deleted.coverage, "held_rename", "{}", deleted.detail);
+    let reason = deleted.reason();
+    assert!(
+        reason.contains(r#""parse_config" (removed) is used in worktree"#),
+        "{reason}"
+    );
+    assert!(!reason.contains("other_name"), "{reason}");
+    // Repeated as a new call, the deletion goes through.
+    let repeated = w.codex_patch(
+        "erin",
+        "e2",
+        "*** Begin Patch\n*** Delete File: src/config.rs\n*** End Patch",
+    );
+    assert_eq!(repeated.coverage, "admitted", "{}", repeated.detail);
 }

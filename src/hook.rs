@@ -203,8 +203,9 @@ pub struct Operation {
     pub snapshot_unknown: bool,
     /// For a shell call, the command and the directory it runs in.
     pub shell: Option<ShellCall>,
-    /// The whole new content of a file the call creates outside `edits` (a
-    /// Codex `Add File`), for the break check before the write
+    /// The whole new content of a file the call creates or deletes outside
+    /// `edits` (a Codex `Add File`, or empty for a `Delete File`), for the
+    /// break check and the rename hold before the write
     /// ([ADR 0029](../docs/adr/0029-break-alerts-at-write-time.md)).
     pub contents: Vec<(String, String)>,
     /// The host gives the model `additionalContext` from a pre-tool reply
@@ -1841,9 +1842,14 @@ enum WaitEnd {
 
 impl Session<'_> {
     fn call(&self, request_id: String, command: Command) -> Result<Response, Failure> {
-        let request = Request::new(request_id, command);
-        let response = client::call_until(&self.config.state_dir, &request, self.deadline)
-            .map_err(|error| {
+        self.call_by(request_id, command, self.deadline)
+    }
+
+    /// `call`, answered `by` then: a step before the admission leaves it time.
+    fn call_by(&self, id: String, command: Command, by: Instant) -> Result<Response, Failure> {
+        let request = Request::new(id, command);
+        let response =
+            client::call_until(&self.config.state_dir, &request, by).map_err(|error| {
                 let text = error.to_string();
                 let coverage = if text.contains("deadline") || text.contains("timed out") {
                     "timeout"

@@ -66,7 +66,8 @@ judgment, and a name match from the index, inform; they never refuse.
 a rename is held once.** One exception to "a name match never refuses", and
 only as a pause. Rule: a Claude Code or Codex file-tool write whose text,
 extracted before and after by the index's parser (both versions parsed
-without error), renames or removes an exported name, while another
+without error; a deleted file's after is empty), renames or removes an
+exported name, while another
 worktree of the same repository has uncommitted files whose index mentions
 that name, is refused once per session, file and name. The refusal names
 those worktrees, sessions and files and suggests the compatible path: keep
@@ -74,7 +75,9 @@ the old name as a forwarding alias until the callers move. Why: in
 issue #194's rerun the caller-side notice reached 0 of 20 callers before
 their write, so the renaming write is the only decision point the
 information reaches in time. Override: repeat the write; it is not held
-again, and nothing is enforced after it. The pause takes no admission, and
+again, and nothing is enforced after it. The pause takes no admission; its
+query must be answered while half the hook budget remains, so the
+admission keeps its time; and
 any failure (no index, an older daemon, a mark that cannot be written)
 lets the write through. Callers committed on a peer's branch, changed
 signatures and shell writes are not held yet.

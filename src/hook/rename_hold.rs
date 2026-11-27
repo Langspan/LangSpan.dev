@@ -71,16 +71,18 @@ impl Session<'_> {
         if names.is_empty() {
             return Some(Err("rename check: held once before".into()));
         }
-        if late() {
+        let Some(start_by) = start_by.filter(|_| !late()) else {
             return Some(Err(LATE.into()));
-        }
-        let checked = self.call(
+        };
+        // Answered by then too, or the admission that follows has no time.
+        let checked = self.call_by(
             wire_id("rename-check", &[self.source, &ids.operation_id]),
             Command::CheckCalls {
                 session_id: ids.session_id.clone(),
                 calls: Vec::new(),
                 renamed: names,
             },
+            start_by,
         );
         let callers = match checked.map(|response| response.outcome) {
             Ok(Outcome::CallBreaks { ready: false, .. }) => {
@@ -318,6 +320,62 @@ mod tests {
             renamed_names("src/config.rs", BEFORE.as_bytes(), broken.as_bytes()),
             []
         );
+    }
+
+    /// Review comment 4722261550: a daemon that does not answer the rename
+    /// check must leave the admission its half of the budget. A real Unix
+    /// socket that is never answered stands in for a slow index query:
+    /// what is verified is the client's timeout on it.
+    #[test]
+    fn a_rename_check_left_unanswered_leaves_the_admission_half_the_budget() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::temp_dir().join(format!("ls-rename-late-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (state, root) = (base.join("state"), base.join("root"));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(root.join("src/config.rs"), BEFORE).unwrap();
+        // Connections queue in the backlog; none is ever answered.
+        let socket = state.join("daemon.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let config = super::super::Config {
+            budget: std::time::Duration::from_secs(4),
+            ..super::super::Config::new(
+                state.clone(),
+                "app",
+                root.clone(),
+                crate::vendor::Vendor::ClaudeCode,
+            )
+        };
+        let deadline = Instant::now() + config.budget;
+        let session = Session {
+            config: &config,
+            deadline,
+            root: &root,
+            source: "claude-code",
+            parent: None,
+            headless: false,
+            unreachable: Default::default(),
+            reached: Default::default(),
+        };
+        let ids = super::super::identities_for("claude-code", "alice", "a1");
+        let key = "src/config.rs".to_owned();
+        let edits = [(
+            key.clone(),
+            crate::regions::Edit::Write(BEFORE.replace("parse_config", "load_config")),
+        )];
+        let note = session.rename_hold(&ids, &[key], &edits, &[]);
+        // Load can only make this later; the wrong value is the deadline
+        // itself, two seconds after the bound.
+        let left = deadline.saturating_duration_since(Instant::now());
+        std::fs::remove_dir_all(&base).unwrap();
+        assert!(
+            matches!(&note, Some(Err(note)) if note.starts_with("rename check unavailable")),
+            "{note:?}"
+        );
+        assert!(!left.is_zero(), "the rename check took the whole budget");
     }
 
     #[test]
