@@ -1519,28 +1519,372 @@ fn the_macos_failure_report_names_the_tests_that_failed_every_try_and_no_other()
 }
 
 #[test]
-fn a_macos_failure_on_main_opens_or_updates_one_issue() {
+fn a_red_or_green_main_runs_the_main_red_report_for_each_platform_with_issues_write_only() {
     let text = workflow("check.yml");
-    // The names come from every shard, through the macOS check.
-    assert!(
-        job(&text, "macos-result").contains("\n      failed: ${{ steps.result.outputs.failed }}\n")
-    );
-    let report = job(&text, "macos-report");
+    let report = job(&text, "main-red");
     for line in [
-        "\n    needs: [macos-result]\n",
-        "\n    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && (needs.macos-result.result == 'failure' || needs.macos-result.result == 'cancelled')\n",
-        "\n      issues: write\n",
-        "TITLE: macOS Rust checks on main failed",
-        "SHA: ${{ github.sha }}",
-        "FAILED: ${{ needs.macos-result.outputs.failed }}",
-        "gh issue comment \"$number\"",
-        "gh issue create --title \"$TITLE\"",
+        "\n    needs: [linux-result, macos-result]\n",
+        // A push to main, or a manual run that asks for a dry run.
+        "\n    if: always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && (inputs.main_red_dry_run == 'Linux' || inputs.main_red_dry_run == 'macOS')))\n",
+        "\n    permissions:\n      issues: write\n    concurrency:\n",
+        "\n      group: main-red-${{ github.event_name }}-${{ matrix.platform }}\n      cancel-in-progress: false\n",
+        "\n        platform: [Linux, macOS]\n",
+        "\n          persist-credentials: false\n",
+        // Each platform reports its own result job; a dry run reports a
+        // failure of the run it names and writes nothing.
+        "\n          RESULT: ${{ github.event_name == 'workflow_dispatch' && 'failure' || (matrix.platform == 'Linux' && needs.linux-result.result || needs.macos-result.result) }}\n",
+        "\n          RUN_ID: ${{ inputs.main_red_run || github.run_id }}\n",
+        "\n          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' }}\n",
+        "\n        run: python3 -I -B scripts/ci-main-red.py",
     ] {
-        assert!(report.contains(line), "macos-report lacks {line}");
+        assert!(report.contains(line), "main-red lacks {line}");
     }
-    // It runs no repository code: nothing is checked out.
-    assert!(!report.contains("actions/checkout"), "{report}");
-    assert!(!report.contains("contents:"), "{report}");
+    // Only the platform a dry run names runs the script.
+    assert_eq!(
+        report
+            .matches(
+                "if: github.event_name == 'push' || inputs.main_red_dry_run == matrix.platform"
+            )
+            .count(),
+        2,
+        "{report}"
+    );
+    // The token can write issues and nothing else.
+    let permissions = report.split("    permissions:\n").nth(1).unwrap();
+    let scopes: Vec<_> = permissions
+        .lines()
+        .take_while(|l| l.starts_with("      "))
+        .collect();
+    assert_eq!(scopes, ["      issues: write"], "{report}");
+    // The dry-run inputs default to no dry run, so the release workflow's
+    // `gh workflow run check.yml` starts none.
+    let on = text.split("\npermissions:").next().unwrap();
+    assert!(on.contains("      main_red_dry_run:\n        description: "));
+    assert!(on.contains(
+        "        type: choice\n        options: [\"off\", Linux, macOS]\n        default: \"off\"\n"
+    ));
+    assert!(on.contains("      main_red_run:\n        description: "));
+    // The old macOS-only report is gone; no other job gained issues: write.
+    assert!(!text.contains("\n  macos-report:\n"));
+    let writers: Vec<_> = ["flaky-report", "nightly-report", "main-red"]
+        .iter()
+        .filter(|id| job(&text, id).contains("issues: write"))
+        .collect();
+    assert_eq!(writers.len(), 3);
+    assert_eq!(text.matches("issues: write").count(), 3, "{text}");
+}
+
+/// What one run of scripts/ci-main-red.py did against the gh stub.
+struct MainRed {
+    ok: bool,
+    stdout: String,
+    stderr: String,
+    /// Every gh call, one per line.
+    calls: String,
+    /// What the issue writes read on stdin.
+    body: String,
+    summary: String,
+}
+
+impl MainRed {
+    fn writes(&self) -> Vec<&str> {
+        self.calls
+            .lines()
+            .filter(|c| {
+                [
+                    "issue create",
+                    "issue comment",
+                    "issue close",
+                    "label create",
+                ]
+                .iter()
+                .any(|w| c.starts_with(w))
+            })
+            .collect()
+    }
+}
+
+/// Runs scripts/ci-main-red.py with tests/fixtures/ci-main-red/gh first on
+/// PATH, for run 200 of repository o/r. `files` go into the stub's override
+/// directory (the open issues are `issue-list.json`). A process test: what
+/// it verifies is the script driving a child gh and what it hands to it.
+fn main_red(platform: &str, result: &str, dry_run: bool, files: &[(&str, &str)]) -> MainRed {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = temp_dir("main-red");
+    let bin = dir.join("bin");
+    let over = dir.join("override");
+    fs::create_dir_all(&bin).unwrap();
+    for (name, text) in files {
+        let path = over.join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+    let fixtures = root().join("tests/fixtures/ci-main-red");
+    fs::copy(fixtures.join("gh"), bin.join("gh")).unwrap();
+    fs::set_permissions(bin.join("gh"), fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let log = dir.join("calls");
+    let summary = dir.join("summary.md");
+    let out = Command::new("python3")
+        .args(["-I", "-B"])
+        .arg(root().join("scripts/ci-main-red.py"))
+        .env("PATH", path)
+        .env("GH_STUB_FIXTURES", &fixtures)
+        .env("GH_STUB_OVERRIDE", &over)
+        .env("GH_STUB_LOG", &log)
+        .env("GITHUB_STEP_SUMMARY", &summary)
+        .env("PLATFORM", platform)
+        .env("RESULT", result)
+        .env("RUN_ID", "200")
+        .env("REPO", "o/r")
+        .env("SERVER_URL", "https://github.com")
+        .env("DRY_RUN", if dry_run { "true" } else { "false" })
+        .env_remove("GH_TOKEN")
+        .output()
+        .expect("python3 runs scripts/ci-main-red.py");
+    let read_or_empty = |p: &Path| fs::read_to_string(p).unwrap_or_default();
+    let run = MainRed {
+        ok: out.status.success(),
+        stdout: String::from_utf8(out.stdout).unwrap(),
+        stderr: String::from_utf8(out.stderr).unwrap(),
+        calls: read_or_empty(&log),
+        body: read_or_empty(&dir.join("calls.body")),
+        summary: read_or_empty(&summary),
+    };
+    let _ = fs::remove_dir_all(&dir);
+    run
+}
+
+const MACOS_TITLE: &str = "main-red: macOS checks failing on main";
+const LINUX_TITLE: &str = "main-red: Linux checks failing on main";
+
+fn open_issues(issues: &[(u32, &str)]) -> String {
+    let rows: Vec<_> = issues
+        .iter()
+        .map(|(n, t)| format!(r#"{{"number": {n}, "title": "{t}"}}"#))
+        .collect();
+    format!("[{}]", rows.join(", "))
+}
+
+#[test]
+fn a_red_platform_with_no_open_issue_opens_one_labelled_main_red_with_the_whole_report() {
+    let run = main_red("macOS", "failure", false, &[]);
+    assert!(run.ok, "{}", run.stderr);
+    let writes = run.writes();
+    assert_eq!(writes.len(), 2, "{}", run.calls);
+    assert!(
+        writes[0].starts_with("label create main-red --repo o/r "),
+        "{writes:?}"
+    );
+    assert_eq!(
+        writes[1],
+        format!("issue create --repo o/r --title {MACOS_TITLE} --label main-red --body-file -")
+    );
+    // The last green run is the newest earlier push run on main whose
+    // `macOS` check passed: 198, since 199's macOS failed and 201 is later
+    // (GitHub filters by `created`; the stub doesn't, so the script must too).
+    assert!(run.calls.contains(
+        "api repos/o/r/actions/workflows/check.yml/runs?branch=main&event=push&status=completed&per_page=20&created=%3C2026-11-27T10:00:00Z\n"
+    ));
+    assert!(
+        run.calls.contains("--pattern junit-macos-*"),
+        "{}",
+        run.calls
+    );
+    let body = &run.body;
+    for part in [
+        // The commit and the run.
+        "[`c0ffee0`](https://github.com/o/r/commit/c0ffee0000000000000000000000000000000003)",
+        "https://github.com/o/r/actions/runs/200",
+        // The failing jobs, the aggregate check last, not a lookalike.
+        "- [macOS tests 2](https://github.com/o/r/actions/runs/200/job/2): failure\n- [macOS](https://github.com/o/r/actions/runs/200/job/3): failure\n",
+        // The failed tests from the JUnit reports.
+        "- `cli_golden every_option_against_every_command`\n",
+        // The first error lines, without the log's timestamps.
+        "\n~~~~text\n--- macOS tests 2\nFAIL [   2.001s] cli_golden every_option_against_every_command\n",
+        "thread 'every_option_against_every_command' panicked at tests/cli_golden.rs:40:5:\n",
+        // The merged pull requests since the last green run.
+        "[run 198](https://github.com/o/r/actions/runs/198)",
+        "- #501 `feat: a thing (#501)`\n",
+        "- #502 `fix: ping @someone about x (#298) (#502)`\n",
+    ] {
+        assert!(body.contains(part), "the body lacks {part:?}:\n{body}");
+    }
+    for absent in [
+        "macOSX lookalike",
+        "Linux build",
+        "help_is_pinned",
+        "The body.",
+    ] {
+        assert!(!body.contains(absent), "the body has {absent:?}:\n{body}");
+    }
+    assert!(body.contains("optional in the merge queue"), "{body}");
+}
+
+#[test]
+fn the_error_lines_are_capped_fenced_and_cleaned_as_log_data() {
+    let mut log =
+        String::from("2026-11-27T10:01:00.0000000Z \u{1b}[31merror\u{1b}[0m: in colour\n");
+    log.push_str(
+        &fs::read_to_string(
+            root().join("tests/fixtures/ci-main-red/api/repos_o_r_actions_jobs_2_logs"),
+        )
+        .unwrap(),
+    );
+    let run = main_red(
+        "macOS",
+        "failure",
+        false,
+        &[("api/repos_o_r_actions_jobs_2_logs", &log)],
+    );
+    assert!(run.ok, "{}", run.stderr);
+    let block = run
+        .body
+        .split("\n~~~~text\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\n~~~~\n").next())
+        .unwrap_or_else(|| panic!("no fenced log block:\n{}", run.body));
+    let lines: Vec<_> = block.lines().filter(|l| !l.starts_with("--- ")).collect();
+    assert_eq!(lines.len(), 15, "{block}");
+    assert_eq!(lines[0], "error: in colour");
+    assert!(lines.iter().all(|l| l.chars().count() <= 300), "{block}");
+    assert!(lines.iter().any(|l| l.starts_with("error: xxx")), "{block}");
+    // A fence in the log can't close the block.
+    assert!(!block.contains("~~~"), "{block}");
+    assert!(block.contains("repeated failure 9\n") || block.ends_with("repeated failure 9"));
+    assert!(!block.contains("repeated failure 10"), "{block}");
+    assert!(run.body.contains("More error lines are in the job logs."));
+}
+
+#[test]
+fn a_red_platform_with_an_open_issue_comments_on_it() {
+    let issues = open_issues(&[
+        (8, "main-red: macOS checks failing on main, again"),
+        (7, MACOS_TITLE),
+    ]);
+    let run = main_red("macOS", "cancelled", false, &[("issue-list.json", &issues)]);
+    assert!(run.ok, "{}", run.stderr);
+    assert_eq!(run.writes(), ["issue comment 7 --repo o/r --body-file -"]);
+    assert!(run.body.contains("ended with cancelled"), "{}", run.body);
+}
+
+#[test]
+fn a_green_platform_closes_its_open_issue_with_the_green_runs_link_and_no_other() {
+    let issues = open_issues(&[(7, MACOS_TITLE), (9, LINUX_TITLE)]);
+    let run = main_red("Linux", "success", false, &[("issue-list.json", &issues)]);
+    assert!(run.ok, "{}", run.stderr);
+    let writes = run.writes();
+    assert_eq!(writes.len(), 1, "{}", run.calls);
+    assert!(
+        writes[0].starts_with("issue close 9 --repo o/r --comment "),
+        "{writes:?}"
+    );
+    assert!(writes[0].contains("https://github.com/o/r/actions/runs/200"));
+    assert!(writes[0].contains("c0ffee0000000000000000000000000000000003"));
+
+    // Green with no open issue for the platform: no write at all.
+    let issues = open_issues(&[(7, MACOS_TITLE)]);
+    let run = main_red("Linux", "success", false, &[("issue-list.json", &issues)]);
+    assert!(run.ok, "{}", run.stderr);
+    assert!(run.writes().is_empty(), "{}", run.calls);
+
+    // A run whose checks were skipped decides nothing.
+    let run = main_red("macOS", "skipped", false, &[("issue-list.json", &issues)]);
+    assert!(run.ok, "{}", run.stderr);
+    assert!(run.writes().is_empty(), "{}", run.calls);
+}
+
+#[test]
+fn a_dry_run_prints_the_issue_and_writes_nothing() {
+    let run = main_red("macOS", "failure", true, &[]);
+    assert!(run.ok, "{}", run.stderr);
+    assert!(run.writes().is_empty(), "{}", run.calls);
+    assert!(
+        run.stdout.starts_with(&format!(
+            "Dry run: would open \"{MACOS_TITLE}\" labelled main-red with this body:\n"
+        )),
+        "{}",
+        run.stdout
+    );
+    assert!(
+        run.stdout
+            .contains("- `cli_golden every_option_against_every_command`")
+    );
+    assert!(run.summary.contains("would open"), "{}", run.summary);
+    assert!(
+        run.summary
+            .contains("cli_golden every_option_against_every_command")
+    );
+}
+
+#[test]
+fn a_report_says_what_it_could_not_find_rather_than_failing() {
+    // No green Linux run among those listed, no Linux JUnit report and no
+    // readable Linux log: the issue still opens, saying so for each.
+    let runs = r#"{"workflow_runs": [{"id": 200, "head_sha": "c0ffee0000000000000000000000000000000003", "html_url": "https://github.com/o/r/actions/runs/200", "created_at": "2026-11-27T10:00:00Z"}]}"#;
+    let run = main_red(
+        "Linux",
+        "failure",
+        false,
+        &[("api/repos_o_r_actions_workflows_check_yml_runs", runs)],
+    );
+    assert!(run.ok, "{}", run.stderr);
+    assert_eq!(run.writes().len(), 2, "{}", run.calls);
+    for part in [
+        "- [Linux build](https://github.com/o/r/actions/runs/200/job/4): failure\n- [Linux](https://github.com/o/r/actions/runs/200/job/5): failure\n",
+        "No failed test was recorded",
+        "Could not read the log of Linux build",
+        "No green Linux run on main among the last 20",
+    ] {
+        assert!(
+            run.body.contains(part),
+            "the body lacks {part:?}:\n{}",
+            run.body
+        );
+    }
+    assert!(
+        !run.body.contains("optional in the merge queue"),
+        "{}",
+        run.body
+    );
+
+    // A download that fails for another reason says so, rather than that
+    // no test failed.
+    let run = main_red(
+        "macOS",
+        "failure",
+        true,
+        &[(
+            "download-error",
+            "HTTP 403: Resource not accessible by integration\n",
+        )],
+    );
+    assert!(run.ok, "{}", run.stderr);
+    assert!(
+        run.stdout.contains(
+            "Could not download the JUnit reports: gh run download exited 1: HTTP 403: Resource not accessible by integration"
+        ),
+        "{}",
+        run.stdout
+    );
+    assert!(!run.stdout.contains("No failed test was recorded"));
+
+    // A run id that isn't a number is refused before any call.
+    let out = Command::new("python3")
+        .args(["-I", "-B"])
+        .arg(root().join("scripts/ci-main-red.py"))
+        .env("PLATFORM", "macOS")
+        .env("RESULT", "failure")
+        .env("RUN_ID", "200; rm -rf /")
+        .env("REPO", "o/r")
+        .env("SERVER_URL", "https://github.com")
+        .env("DRY_RUN", "true")
+        .env("GH_STUB_LOG", "/nonexistent/calls")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("RUN_ID"), "{stderr}");
 }
 
 /// Runs scripts/advisory-ignores.py over `dir` with `args`; returns

@@ -113,10 +113,19 @@ again on `main`, but the queue doesn't wait for it, because waiting doubled
 the time a pull request spent in the queue before the tests ran in shards.
 Requiring it now, so that the ruleset lists `Linux`, `macOS`, `Workflows`
 and `Content`, is the owner's decision. Nor is coverage, the nightly
-run, or the release build. A macOS failure on a push to `main` opens an
-issue titled "macOS Rust checks on main failed", or comments on it while it
-is open, naming the commit and the tests that failed (at most 50). Treat it
-like a failing check on `main` and fix it the same day.
+run, or the release build. When the `Linux` or `macOS` check fails on a
+push to `main`, job `main-red` in `check.yml` opens the issue "main-red:
+macOS checks failing on main" (or Linux), labelled `main-red`, or comments
+on it while it is open. The issue names the commit, the run, the failing jobs,
+the tests that failed every try (at most 50), the first error lines of the
+failing jobs' logs (at most 15) and the pull requests merged since that
+platform's last green run on `main`. When the platform is green on `main`
+again, the job closes the issue with the green run's link. Nothing is
+reverted automatically. Treat the issue like a failing check on `main` and
+fix it the same day. To see the issue a run would file without filing it,
+start `check.yml` by hand with `main_red_dry_run` set to the platform and,
+optionally, `main_red_run` set to the run to report on; the job prints the
+body in its log and summary.
 
 While the Linux check on `main` fails, merge only the fix for that failure.
 

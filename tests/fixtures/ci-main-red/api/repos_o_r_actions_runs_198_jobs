@@ -1,0 +1,4 @@
+{"jobs": [
+  {"id": 21, "name": "Linux", "conclusion": "success", "html_url": "https://github.com/o/r/actions/runs/198/job/21"},
+  {"id": 22, "name": "macOS", "conclusion": "success", "html_url": "https://github.com/o/r/actions/runs/198/job/22"}
+]}
