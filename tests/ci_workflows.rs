@@ -292,6 +292,87 @@ fn check_sh_refuses_an_unknown_lane_before_it_runs_anything() {
 }
 
 #[test]
+fn pull_requests_read_the_build_cache_and_only_main_writes_it() {
+    let text = workflow("check.yml");
+    assert!(
+        !text.contains("Swatinem/rust-cache"),
+        "the build cache has one owner"
+    );
+    for id in ["linux", "macos"] {
+        let job = job(&text, id);
+        let restore = job
+            .split("uses: actions/cache/restore@")
+            .nth(1)
+            .unwrap_or_else(|| panic!("{id} restores no build cache"));
+        // Keyed on the platform, the job, the toolchain and the lockfile.
+        for part in [
+            "key: rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock', 'scripts/install-ci-tools.sh') }}",
+            "path: ${{ env.CACHE_PATHS }}",
+        ] {
+            assert!(restore.contains(part), "{id}'s restore lacks {part}");
+        }
+        // Only main prunes, checks the size and saves, and only when it
+        // found nothing under the key.
+        assert!(job.contains(
+            "if: github.ref == 'refs/heads/main' && steps.changes.outputs.code == 'true' && steps.cache.outputs.cache-hit != 'true'"
+        ), "{id} could save a cache off main");
+        let save = job
+            .split("uses: actions/cache/save@")
+            .nth(1)
+            .unwrap_or_else(|| panic!("{id} saves no build cache"));
+        assert!(
+            job.contains(
+                "if: steps.size.outputs.save == 'true'\n        uses: actions/cache/save@"
+            ),
+            "{id} saves without the size check"
+        );
+        assert!(save.contains("key: ${{ steps.cache.outputs.cache-primary-key }}"));
+    }
+    // The release build uses no cache.
+    let release = workflow("release.yml");
+    for cache in ["actions/cache", "rust-cache", "sccache"] {
+        assert!(!release.contains(cache), "release.yml uses {cache}");
+    }
+}
+
+/// Runs scripts/ci-cache-size.sh over `paths` with `limit_mb`, and returns
+/// (GITHUB_OUTPUT, stdout).
+fn cache_size(paths: &str, limit_mb: &str) -> (String, String) {
+    let dir = temp_dir("cache-size");
+    let output = dir.join("output");
+    let out = Command::new("bash")
+        .arg(root().join("scripts/ci-cache-size.sh"))
+        .env("CACHE_PATHS", paths)
+        .env("LIMIT_MB", limit_mb)
+        .env("GITHUB_OUTPUT", &output)
+        .output()
+        .unwrap();
+    let written = fs::read_to_string(&output).unwrap_or_default();
+    let _ = fs::remove_dir_all(&dir);
+    assert!(out.status.success(), "ci-cache-size.sh failed: {out:?}");
+    (written, String::from_utf8(out.stdout).unwrap())
+}
+
+#[test]
+fn the_build_cache_is_saved_only_within_its_size_limit() {
+    let dir = temp_dir("cache-tree");
+    fs::create_dir_all(dir.join("target/debug")).unwrap();
+    // 3 MiB, in a path the cache would hold, beside one that doesn't exist.
+    fs::write(dir.join("target/debug/big"), vec![7u8; 3 * 1024 * 1024]).unwrap();
+    let paths = format!(
+        "{}\n{}\n",
+        dir.join("target").display(),
+        dir.join("missing").display()
+    );
+    let (output, stdout) = cache_size(&paths, "2");
+    assert_eq!(output, "save=false\n", "{stdout}");
+    assert!(stdout.contains("over the 2 MB limit"), "{stdout}");
+    let (output, stdout) = cache_size(&paths, "64");
+    assert_eq!(output, "save=true\n", "{stdout}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn the_suite_runs_under_nextest_with_retries_only_off_pull_requests() {
     let script = read("scripts/test-foreign-home.sh");
     assert!(script.contains("cargo nextest run --workspace --locked"));

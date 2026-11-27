@@ -23,9 +23,14 @@ env:
   # instead of 21.2 s, and a clean target directory 1.4 GB instead of
   # 1.6 GB (so a smaller cache). Local builds keep full debug info.
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
-  # scripts/check.sh: a pull request or merge-queue commit runs the
-  # demonstration on the debug binary only; main and manual runs also build
-  # the release binary and run it again on that.
+  # No incremental compilation data: a CI job builds each crate once, and
+  # the build cache doesn't keep it. The cache action used before set this
+  # itself.
+  CARGO_INCREMENTAL: 0
+  # scripts/check.sh: a merge-queue commit runs the demonstration on the
+  # debug binary only (a pull request's fast lane leaves it to the queue);
+  # main, nightly and manual runs also build the release binary and run it
+  # again on that.
   LANGSPAN_CHECK_RELEASE: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
   # The lanes (docs/development-process.md#which-tests-run-when). A pull
   # request runs the fast lane on Linux: format, dependency policy, lint
@@ -43,6 +48,19 @@ env:
   # (flaky-report).
   NEXTEST_PROFILE: ${{ github.event_name == 'pull_request' && 'ci-fast' || 'ci' }}
   NEXTEST_RETRIES: ${{ github.event_name == 'pull_request' && '0' || '2' }}
+  # The build cache: the crates registry, the compiled dependencies in
+  # target/ (main prunes the workspace's own crates before saving) and the
+  # cargo-nextest binary. Each job restores it; only main saves it
+  # (docs/security/threat-model.md#ci-build-cache). The key names the
+  # runner's OS and architecture, the job, the toolchain, the lockfile and
+  # the tool versions; bump `v1` in it to drop every entry.
+  CACHE_PATHS: |
+    ~/.cargo/registry/index
+    ~/.cargo/registry/cache
+    ~/.cargo/git/db
+    target
+    ~/.cache/langspan-ci-tools/cargo-nextest
+  CACHE_LIMIT_MB: 2048
 # A newer push to a pull request cancels its older run. Runs on main are
 # never cancelled, so every commit on main keeps its own result; the nightly
 # run has a group of its own, so it never replaces a push's pending run.
@@ -97,17 +115,24 @@ jobs:
           rustup --version
           rustup toolchain install
           rustc --version
-      # Only main saves the cache, so a pull request cannot write an entry
-      # that a later run on main restores.
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # Main restores only an entry under its exact key and otherwise
+      # builds from nothing, so what it saves holds no stale dependency. A
+      # pull request or merge-queue commit falls back to main's latest
+      # entry for the same toolchain, so a lockfile change rebuilds only
+      # the crates it changed. Neither ever saves.
+      - name: Restore the build cache
+        id: cache
         if: steps.changes.outputs.code == 'true'
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          path: ${{ env.CACHE_PATHS }}
+          key: rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock', 'scripts/install-ci-tools.sh') }}
+          restore-keys: ${{ github.ref != 'refs/heads/main' && format('rust-v1-{0}-{1}-{2}-{3}-', runner.os, runner.arch, github.job, hashFiles('rust-toolchain.toml')) || '' }}
       - name: Install the dependency policy and unused-dependency checkers and the test runner
         if: steps.changes.outputs.code == 'true'
         run: |
-          bash scripts/install-ci-tools.sh "$RUNNER_TEMP/ci-tools"
-          echo "$RUNNER_TEMP/ci-tools" >> "$GITHUB_PATH"
+          bash scripts/install-ci-tools.sh "$HOME/.cache/langspan-ci-tools"
+          echo "$HOME/.cache/langspan-ci-tools" >> "$GITHUB_PATH"
       - name: Check formatting, dependencies, lint, real integration tests and the demonstration
         if: steps.changes.outputs.code == 'true'
         env:
@@ -126,6 +151,23 @@ jobs:
           path: target/nextest/${{ env.NEXTEST_PROFILE }}/junit.xml
           if-no-files-found: warn
           retention-days: 14
+      # After a passing run on main that found no entry under its key: drop
+      # what the next run rebuilds anyway (the workspace's own crates, the
+      # release build, test reports), then save if within the limit.
+      - name: Prune the build cache and check its size
+        id: size
+        if: github.ref == 'refs/heads/main' && steps.changes.outputs.code == 'true' && steps.cache.outputs.cache-hit != 'true'
+        env:
+          LIMIT_MB: ${{ env.CACHE_LIMIT_MB }}
+        run: |
+          cargo clean --locked -p langspan -p langspan-core -p langspan-graph
+          rm -rf target/release target/nextest
+          bash scripts/ci-cache-size.sh
+      - if: steps.size.outputs.save == 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ${{ env.CACHE_PATHS }}
+          key: ${{ steps.cache.outputs.cache-primary-key }}
   # The same check on Apple silicon, in the full lane only. `macos-26` is
   # GitHub's current arm64 image (`macos-latest` points at it); a pinned
   # label, so an image change is a deliberate edit here. It starts with
@@ -171,15 +213,21 @@ jobs:
           rustup --version
           rustup toolchain install
           rustc --version
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # The build cache as on Linux: macOS keeps entries of its own (the key
+      # names the job and platform), and only main saves them.
+      - name: Restore the build cache
+        id: cache
         if: steps.changes.outputs.code == 'true'
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          path: ${{ env.CACHE_PATHS }}
+          key: rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock', 'scripts/install-ci-tools.sh') }}
+          restore-keys: ${{ github.ref != 'refs/heads/main' && format('rust-v1-{0}-{1}-{2}-{3}-', runner.os, runner.arch, github.job, hashFiles('rust-toolchain.toml')) || '' }}
       - name: Install the dependency policy and unused-dependency checkers and the test runner
         if: steps.changes.outputs.code == 'true'
         run: |
-          bash scripts/install-ci-tools.sh "$RUNNER_TEMP/ci-tools"
-          echo "$RUNNER_TEMP/ci-tools" >> "$GITHUB_PATH"
+          bash scripts/install-ci-tools.sh "$HOME/.cache/langspan-ci-tools"
+          echo "$HOME/.cache/langspan-ci-tools" >> "$GITHUB_PATH"
       - name: Check formatting, dependencies, lint, real integration tests and the demonstration
         if: steps.changes.outputs.code == 'true'
         env:
@@ -197,6 +245,20 @@ jobs:
           path: target/nextest/${{ env.NEXTEST_PROFILE }}/junit.xml
           if-no-files-found: warn
           retention-days: 14
+      - name: Prune the build cache and check its size
+        id: size
+        if: github.ref == 'refs/heads/main' && steps.changes.outputs.code == 'true' && steps.cache.outputs.cache-hit != 'true'
+        env:
+          LIMIT_MB: ${{ env.CACHE_LIMIT_MB }}
+        run: |
+          cargo clean --locked -p langspan -p langspan-core -p langspan-graph
+          rm -rf target/release target/nextest
+          bash scripts/ci-cache-size.sh
+      - if: steps.size.outputs.save == 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ${{ env.CACHE_PATHS }}
+          key: ${{ steps.cache.outputs.cache-primary-key }}
   # A test that passed only on retry on main opens one issue, or comments
   # on it while it is open, naming the tests. Only this job can write, and
   # only issues; it checks out nothing and runs no repository code. The
