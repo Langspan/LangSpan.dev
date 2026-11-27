@@ -288,7 +288,10 @@ bound is `--time-limit` plus the stagger; the two together are at most 3,600
 seconds, and the stagger at most 600. The record keeps the stagger as
 `stagger_s`, and, per task in the LangSpan arm, `notice_before_write`: whether
 the session's hook log shows LangSpan's notice of the change before the
-session's first write of a file its task owns.
+session's first write of a file its task owns. A notice counts from a hook's
+reply or from the between-step watcher's stderr when it woke the model (exit
+2). A file written through Bash is not seen as a write, so the first Write,
+Edit or MultiEdit can come after it.
 
 ```sh
 python3 benchmarks/coordination/driver.py --arm langspan --family discovered_change \
