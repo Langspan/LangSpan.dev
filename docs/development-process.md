@@ -39,8 +39,7 @@ Limit open work so that each pull request merges quickly:
   [module map](architecture.md#module-map), with the files that hold them
   today:
   - `protocol`, the wire protocol: `src/protocol.rs` and its clients;
-  - `briefing`: `src/hook/render.rs`, `src/since.rs`, `src/recent.rs` and
-    `src/trail.rs`;
+  - `briefing`: `src/briefing.rs` and `src/briefing/`;
   - `install`: `src/install.rs`, `src/user_install.rs` and `src/install/detect.rs`;
   - `cli`, its argument list and flags table: `src/main.rs` and `src/cli/`;
   - `graph`, the source graph: `src/graph.rs`, `src/graph/`,
@@ -258,9 +257,10 @@ In the full lane, the benchmark harness's dry runs (the `dry_run_*` tests
 in `tests/benchmark_harness.rs`) run only when the change touches one of
 the following paths: `benchmarks/`, `tests/benchmark_harness.rs`, the
 daemon, hook and briefing code they drive (`src/daemon.rs`, `src/daemon/`,
-`src/hook.rs`, `src/hook/`, `src/claude_code.rs`, `src/recent.rs` and all
-of `crates/langspan-core/src/`, so code moved into a new module there
-still counts), or what builds and runs the suite
+`src/hook.rs`, `src/hook/`, `src/briefing.rs`, `src/briefing/`,
+`src/text.rs`, `src/text/`, `src/claude_code.rs` and all of
+`crates/langspan-core/src/`, so code moved into a new module there still
+counts), or what builds and runs the suite
 (`Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `.config/nextest.toml`,
 `check.yml`, `scripts/check.sh`, `scripts/test-foreign-home.sh`,
 `scripts/ci-changes.sh`). The dry runs took about 11 minutes of an

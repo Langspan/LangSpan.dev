@@ -32,7 +32,7 @@ set -eu
 BENCH_PATHS='^benchmarks/
 |^tests/benchmark_harness\.rs$
 |^src/(daemon|hook|briefing|text)(/|\.rs$)
-|^src/(claude_code|recent)\.rs$
+|^src/claude_code\.rs$
 |^crates/langspan-core/src/
 |^(Cargo\.toml|Cargo\.lock|rust-toolchain\.toml)$
 |^\.config/nextest\.toml$
