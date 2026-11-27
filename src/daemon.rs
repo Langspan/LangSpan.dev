@@ -2948,6 +2948,9 @@ mod unix {
         loop {
             let (stream, _) = listener.accept().await?;
             activity.touch();
+            if !local::peer_is_owner(&stream) {
+                continue;
+            }
             let Ok(permit) = slots.clone().try_acquire_owned() else {
                 drop(stream);
                 continue;

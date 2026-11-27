@@ -36,6 +36,11 @@ line naming the build needed; the
 [compatibility policy](adr/0038-store-rollback.md#compatibility-policy) says
 what each interface promises across builds.
 
+The daemon answers only its owner's user, and every command is either
+coordination or an owner grant, the commands that act with the owner's
+authority beyond the coordination state
+([ADR 0039](adr/0039-caller-authority.md)).
+
 ## Decisions by milestone
 
 Moved unchanged in substance from AGENTS.md on 26 November 2026. Later
