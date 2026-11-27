@@ -261,8 +261,10 @@ jobs:
           path: ~/.cache/langspan-ci-tools/cargo-audit
           key: ${{ steps.keys.outputs.audit }}
   # The full lane's tests, in shards of the archive the build job made:
-  # nextest's `hash` partition gives each test to one shard by its name, so
-  # every test runs exactly once. Four shards, from the measured test time
+  # scripts/ci-shards.py gives each test to one shard by the measured times
+  # in scripts/ci-test-times.tsv, so every test runs exactly once and the
+  # shards take about as long as each other (docs/evidence/ci/balance.md).
+  # Four shards, from the measured test time
   # (docs/evidence/ci/shards.md); a fifth would mostly wait on the slowest
   # benchmark dry run. Each shard runs on its own standard runner, under the
   # foreign home, with retries and reports as the unsharded run had.
@@ -319,7 +321,7 @@ jobs:
         env:
           LANGSPAN_CHECK_LANE: shard
           LANGSPAN_TEST_ARCHIVE: ${{ runner.temp }}/tests.tar.zst
-          LANGSPAN_TEST_PARTITION: hash:${{ matrix.shard }}/${{ strategy.job-total }}
+          LANGSPAN_TEST_PARTITION: time:${{ matrix.shard }}/${{ strategy.job-total }}
           LANGSPAN_BENCH_DRY_RUNS: ${{ needs.linux.outputs.dry_runs }}
         run: sh scripts/check.sh
       # No test took over 10 s unless it is named `slow_…` (issue #311,
@@ -538,7 +540,7 @@ jobs:
         env:
           LANGSPAN_CHECK_LANE: shard
           LANGSPAN_TEST_ARCHIVE: ${{ runner.temp }}/tests.tar.zst
-          LANGSPAN_TEST_PARTITION: hash:${{ matrix.shard }}/${{ strategy.job-total }}
+          LANGSPAN_TEST_PARTITION: time:${{ matrix.shard }}/${{ strategy.job-total }}
           LANGSPAN_BENCH_DRY_RUNS: ${{ needs.macos.outputs.dry_runs }}
         run: sh scripts/check.sh
       - name: Name the tests that passed only on retry
