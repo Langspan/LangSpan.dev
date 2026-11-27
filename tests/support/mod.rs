@@ -139,3 +139,175 @@ pub fn output_once_not_busy(
     }
     make().output().unwrap()
 }
+
+/// Waits for `ready` to return `Ok`, looking every 20 ms, and returns its
+/// value. After `limit` it fails, naming `what` it waited for and the last
+/// `Err` it saw. Use it, not a fixed sleep, before an assertion (issue
+/// #310): it ends once the condition holds, and on a loaded machine it waits
+/// up to the whole limit instead of a guess.
+#[allow(dead_code)] // Not every test that includes this module waits.
+#[track_caller]
+pub fn wait_for<T>(
+    what: &str,
+    limit: std::time::Duration,
+    mut ready: impl FnMut() -> Result<T, String>,
+) -> T {
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        match ready() {
+            Ok(value) => return value,
+            Err(seen) => assert!(
+                std::time::Instant::now() < deadline,
+                "waited {limit:?} for {what}; last saw: {seen}"
+            ),
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// As [`wait_for`], for a condition with nothing to report.
+#[allow(dead_code)]
+#[track_caller]
+pub fn wait_until(what: &str, limit: std::time::Duration, mut done: impl FnMut() -> bool) {
+    wait_for(what, limit, || {
+        if done() {
+            Ok(())
+        } else {
+            Err("not yet".into())
+        }
+    });
+}
+
+/// Checks that `holds` stays true for the whole `period`, looking every
+/// 20 ms, and fails the first time it doesn't, naming `what`. This is for a
+/// test whose subject is that something does not happen within a stated
+/// time, such as no second run or no fetch during a back-off: the period is
+/// part of the assertion. Wait for a positive sign first where there is one.
+#[allow(dead_code)]
+#[track_caller]
+pub fn holds_for(what: &str, period: std::time::Duration, mut holds: impl FnMut() -> bool) {
+    let started = std::time::Instant::now();
+    loop {
+        assert!(
+            holds(),
+            "{what}: no longer true {:?} into the {period:?} it must hold for",
+            started.elapsed()
+        );
+        if started.elapsed() >= period {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// Waits until `sample` has returned the same value for `quiet`, and returns
+/// that value: for a count a burst of activity raises, read once the burst
+/// is over. Fails after `limit` if it never stays still that long.
+#[allow(dead_code)]
+#[track_caller]
+pub fn settles<T: PartialEq + std::fmt::Debug>(
+    what: &str,
+    quiet: std::time::Duration,
+    limit: std::time::Duration,
+    mut sample: impl FnMut() -> T,
+) -> T {
+    let deadline = std::time::Instant::now() + limit;
+    let mut value = sample();
+    let mut since = std::time::Instant::now();
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let now = sample();
+        if now != value {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{what} was still changing after {limit:?}: {now:?}"
+            );
+            value = now;
+            since = std::time::Instant::now();
+        } else if since.elapsed() >= quiet {
+            return value;
+        }
+    }
+}
+
+/// Waits up to 10 s for the coordinator at `state_dir` to answer a status
+/// request. A socket file alone isn't enough: a killed coordinator leaves
+/// one behind.
+#[allow(dead_code)]
+#[track_caller]
+pub fn daemon_ready(state_dir: &std::path::Path) {
+    let status = langspan::protocol::Request::new("read", langspan_core::Command::Status);
+    wait_for(
+        &format!("the coordinator at {} to answer", state_dir.display()),
+        std::time::Duration::from_secs(10),
+        || {
+            langspan::client::call(state_dir, &status)
+                .map(drop)
+                .map_err(|error| error.to_string())
+        },
+    );
+}
+
+/// Waits up to 30 s for the coordinator at `state_dir` to record an event
+/// that `matches`, and returns it.
+#[allow(dead_code)]
+#[track_caller]
+pub fn event_recorded(
+    state_dir: &std::path::Path,
+    what: &str,
+    mut matches: impl FnMut(&langspan_core::Event) -> bool,
+) -> langspan_core::RecordedEvent {
+    let mut after = 0;
+    wait_for(
+        &format!("the event {what}"),
+        std::time::Duration::from_secs(30),
+        || {
+            let page = langspan::protocol::Request::new(
+                "events",
+                langspan_core::Command::Events { after, limit: 1000 },
+            );
+            let events = match langspan::client::call(state_dir, &page)
+                .map_err(|error| error.to_string())?
+                .outcome
+            {
+                langspan_core::Outcome::Events { events } => events,
+                other => return Err(format!("{other:?}")),
+            };
+            after = events.last().map_or(after, |event| event.seq);
+            events
+                .into_iter()
+                .find(|recorded| matches(&recorded.event))
+                .ok_or_else(|| format!("no such event up to sequence {after}"))
+        },
+    )
+}
+
+/// Waits up to 10 s for process `pid` to end (see [`running`]).
+#[allow(dead_code)]
+#[track_caller]
+pub fn process_gone(pid: i32) {
+    wait_until(
+        &format!("process {pid} to end"),
+        std::time::Duration::from_secs(10),
+        || !running(pid),
+    );
+}
+
+/// Waits until the wall clock reaches the next whole second: for a test of
+/// a window given in RFC 3339 to the second, so what happened before the
+/// call falls in an earlier second than what happens after it.
+#[allow(dead_code)]
+pub fn next_wall_second() {
+    let second = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    };
+    let start = second();
+    wait_until(
+        "the wall clock's next second",
+        std::time::Duration::from_secs(5),
+        || second() > start,
+    );
+}

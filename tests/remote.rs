@@ -381,8 +381,12 @@ fn two_developers_learn_of_each_others_work_through_the_shared_remote_only_when_
             .unwrap();
         String::from_utf8(output.stdout).unwrap()
     };
-    std::thread::sleep(Duration::from_millis(600));
-    assert_eq!(refs(), "", "nothing leaves a machine by default");
+    // Three passes' time.
+    support::holds_for(
+        "nothing leaves a machine by default",
+        Duration::from_millis(600),
+        || refs().is_empty(),
+    );
 
     // Alice publishes with task lines; Bob publishes without.
     let (code, text) = w.alice.cli(&[
@@ -530,10 +534,21 @@ fn two_developers_learn_of_each_others_work_through_the_shared_remote_only_when_
             ],
         );
     }
-    std::thread::sleep(Duration::from_millis(800));
-    let state = w.bob.status();
-    assert_eq!(peers(&state).len(), 1, "{state:#}");
-    assert_eq!(peers(&state)[0]["publication"]["name"], "Alice");
+    // Bob's pass has fetched both, and the passes after it take neither.
+    let forged = forged.replace("refs/langspan/peers/", "refs/langspan/remote/origin/");
+    support::wait_until(
+        "Bob's pass to fetch the junk and the forged ref",
+        WAIT,
+        || {
+            let fetched = hub_refs(&w.bob.clone, "refs/langspan/remote/origin/");
+            fetched.contains("refs/langspan/remote/origin/not-a-participant")
+                && fetched.contains(&forged)
+        },
+    );
+    support::holds_for("Bob shows only Alice", Duration::from_millis(800), || {
+        let state = w.bob.status();
+        peers(&state).len() == 1 && peers(&state)[0]["publication"]["name"] == "Alice"
+    });
 
     // The owner's branches, index and working tree were never touched.
     for developer in [&w.alice, &w.bob] {
@@ -587,10 +602,10 @@ fn an_unreachable_remote_and_a_daemon_restart_leave_local_coordination_working()
     fs::rename(w.hub(), &away).unwrap();
     assert_eq!(w.alice.edits("alice-1", "a2", "README.md", "t"), "admitted");
     assert_eq!(w.bob.edits("bob-1", "b1", "README.md", "t"), "admitted");
-    std::thread::sleep(Duration::from_millis(800));
-    assert!(
-        !recent_of(&w.bob.status()).contains(&"README.md".to_owned()),
-        "nothing arrives while the remote is unreachable"
+    support::holds_for(
+        "nothing arrives while the remote is unreachable",
+        Duration::from_millis(800),
+        || !recent_of(&w.bob.status()).contains(&"README.md".to_owned()),
     );
     // What Bob already held is still shown, with its age, until it goes stale.
     assert!(w.bob.briefing("bob-1").unwrap().contains("last heard"));
@@ -1056,9 +1071,16 @@ fn a_host_that_accepts_only_branches_takes_a_branch_publication_and_says_why_it_
         assert!(Instant::now() < deadline, "Bob's branch was never observed");
         std::thread::sleep(Duration::from_millis(100));
     }
-    std::thread::sleep(Duration::from_millis(800));
-    let before = attempts();
-    std::thread::sleep(Duration::from_millis(1500));
+    // The changed publication's one new attempt, then none.
+    let before = support::settles(
+        "Bob's push attempts",
+        Duration::from_millis(800),
+        WAIT,
+        attempts,
+    );
+    support::holds_for("no new attempt", Duration::from_millis(1500), || {
+        attempts() == before
+    });
     // The host answered, so the pass is not backed off: Bob keeps receiving
     // while only his own push waits.
     for line in w.bob.log().lines().filter(|line| line.contains("refusing")) {
@@ -1316,13 +1338,14 @@ fn a_teammates_publication_with_fields_this_build_does_not_know_is_still_shown()
         carol["publication"].get("added_later").is_none(),
         "unknown fields are ignored, not kept"
     );
-    // One more pass after Carol's: the other two are still not taken.
-    std::thread::sleep(Duration::from_millis(600));
-    let names: Vec<_> = peers(&w.bob.status())
-        .iter()
-        .map(|peer| peer["publication"]["name"].clone())
-        .collect();
-    assert_eq!(names, [json!("Carol")], "{names:?}");
+    // More passes after Carol's: the other two are still not taken.
+    support::holds_for("Bob takes only Carol", Duration::from_millis(600), || {
+        let names: Vec<_> = peers(&w.bob.status())
+            .iter()
+            .map(|peer| peer["publication"]["name"].clone())
+            .collect();
+        names == [json!("Carol")]
+    });
     let context = w.bob.briefing("bob-1").unwrap_or_default();
     assert!(context.contains("Carol"), "{context}");
 }
@@ -1398,14 +1421,16 @@ fn following_the_suggested_branch_command_publishes_at_once_after_a_refusal() {
     let moved = Instant::now();
     w.alice.enable("Alice", &["--publish-as-branch"], "en-a2");
     let alice = w.alice.participant();
-    while hub_refs(&w.hub(), "refs/heads/langspan/").trim()
-        != format!("refs/heads/langspan/peers/{alice}")
-    {
-        assert!(
-            moved.elapsed() < Duration::from_secs(30),
-            "the branch publication waited on the old refusal\n{}",
-            w.alice.log()
-        );
-        std::thread::sleep(Duration::from_millis(200));
-    }
+    support::wait_for(
+        "the branch publication, which must not wait on the old refusal",
+        Duration::from_secs(30).saturating_sub(moved.elapsed()),
+        || {
+            let published = hub_refs(&w.hub(), "refs/heads/langspan/");
+            if published.trim() == format!("refs/heads/langspan/peers/{alice}") {
+                Ok(())
+            } else {
+                Err(format!("{published:?}\n{}", w.alice.log()))
+            }
+        },
+    );
 }

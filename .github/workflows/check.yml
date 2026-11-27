@@ -170,6 +170,12 @@ jobs:
           echo "$RUNNER_TEMP/pytest/bin" >> "$GITHUB_PATH"
           "$RUNNER_TEMP/pytest/bin/python3" -m pytest --version
           go version
+      # No test sleeps a fixed 200 ms or more beyond the per-file counts in
+      # scripts/fixed-sleeps.tsv, which only go down (issue #310). Every
+      # lane, on Linux only: the check reads source, not the platform.
+      - name: Check for fixed sleeps in tests
+        if: steps.changes.outputs.code == 'true'
+        run: python3 -I -B scripts/fixed-sleeps.py tests
       - name: Check formatting, dependencies, lint, real integration tests and the demonstration
         if: steps.changes.outputs.code == 'true'
         env:

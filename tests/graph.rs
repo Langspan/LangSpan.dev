@@ -13,6 +13,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[allow(dead_code)] // Only the wait helpers are used here.
+mod support;
+
 static NEXT: AtomicU64 = AtomicU64::new(0);
 const WAIT: Duration = Duration::from_secs(60);
 
@@ -727,10 +730,13 @@ fn a_changed_exported_signature_is_reported_to_the_session_whose_files_mention_i
     w.wait_for("the body edit indexed", "symbol", "upload", |outcome| {
         outcome["coverage"]["current_files"] == 3
     });
-    std::thread::sleep(Duration::from_millis(300));
-    assert!(
-        w.prompt("alice")
-            .is_none_or(|context| !context.contains("Interface change"))
+    support::holds_for(
+        "alice is not told of a body change",
+        Duration::from_millis(300),
+        || {
+            w.prompt("alice")
+                .is_none_or(|context| !context.contains("Interface change"))
+        },
     );
 
     // Bob changes upload's signature and removes gate.
@@ -749,7 +755,7 @@ fn a_changed_exported_signature_is_reported_to_the_session_whose_files_mention_i
             break context;
         }
         assert!(Instant::now() < deadline, "alice was never told");
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(100));
     };
     assert!(
         context.contains(r#"Interface change in "src/upload.rs""#),
@@ -872,7 +878,7 @@ fn a_java_repository_is_indexed_and_a_changed_method_is_told_to_its_callers_sess
             break context;
         }
         assert!(Instant::now() < deadline, "bob was never told");
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(100));
     };
     assert!(
         context.contains(r#"Interface change in "src/main/java/shop/Orders.java""#),
@@ -986,7 +992,7 @@ fn a_csharp_repository_is_indexed_and_a_changed_method_is_told_to_its_callers_se
             break context;
         }
         assert!(Instant::now() < deadline, "bob was never told");
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(100));
     };
     assert!(
         context.contains(r#"Interface change in "src/Shop/Orders.cs""#),
@@ -1144,9 +1150,20 @@ fn an_index_pass_reporting_after_a_switch_records_no_notice() {
         "switch-1",
     ]);
     assert_eq!(code, 0, "{text}");
-    std::thread::sleep(Duration::from_millis(REPORT_DELAY_MS + 1500));
-    let notices = noticed(&w);
-    assert!(!notices.contains("stale: u16"), "{notices}");
+    no_stale_notice(&w);
+}
+
+/// Past the time the stale pass reports in, no notice of it is recorded.
+fn no_stale_notice(w: &World) {
+    support::holds_for(
+        "no notice from the stale pass",
+        Duration::from_millis(REPORT_DELAY_MS + 1500),
+        || {
+            let notices = noticed(w);
+            assert!(!notices.contains("stale: u16"), "{notices}");
+            true
+        },
+    );
 }
 
 /// The same for a workspace removed and registered again at the same root:
@@ -1175,9 +1192,7 @@ fn an_index_pass_reporting_after_removal_and_registration_again_records_no_notic
         "ws-again",
     ]);
     assert_eq!(code, 0, "{text}");
-    std::thread::sleep(Duration::from_millis(REPORT_DELAY_MS + 1500));
-    let notices = noticed(&w);
-    assert!(!notices.contains("stale: u16"), "{notices}");
+    no_stale_notice(&w);
 }
 
 /// The original `src/upload.rs` of `World::new`.
@@ -1294,7 +1309,7 @@ fn told(w: &World, session: &str, text: &str) -> String {
             return context;
         }
         assert!(Instant::now() < deadline, "{session} was never told {text}");
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(100));
     }
 }
 
@@ -1796,7 +1811,18 @@ fn a_workspace_where_a_session_acts_is_indexed_promptly_among_many() {
     // Let the first scan of every workspace pass first, so the touched one
     // is behind all thirty in round-robin order.
     let main = fs::read_to_string(w.work().join("src/main.rs")).unwrap();
-    std::thread::sleep(Duration::from_secs(3));
+    for n in 0..30 {
+        let id = format!("other-{n:02}");
+        support::wait_for(&format!("the first scan of {id}"), WAIT, || {
+            let (_, text) = w.cli(&["graph", "symbol", &id, "other", "--json"]);
+            let outcome = serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone();
+            if outcome["coverage"]["current_files"] == 1 {
+                Ok(())
+            } else {
+                Err(outcome.to_string())
+            }
+        });
+    }
     let started = Instant::now();
     w.edits(
         "alice",
@@ -1837,6 +1863,19 @@ fn inflight_names(outcome: &Value) -> Vec<String> {
         .collect()
 }
 
+/// `graph inflight` of `app` lists nothing for 3 s: several index passes.
+fn nothing_in_flight_for_3_s(w: &World) {
+    support::holds_for("nothing in flight", Duration::from_secs(3), || {
+        let outcome = w.inflight("app");
+        assert_eq!(
+            inflight_names(&outcome),
+            Vec::<String>::new(),
+            "{outcome:#}"
+        );
+        true
+    });
+}
+
 fn inflight_lines(context: &str) -> Vec<&str> {
     context
         .lines()
@@ -1855,7 +1894,7 @@ fn told_inflight(w: &World, session: &str) -> String {
             return context;
         }
         assert!(Instant::now() < deadline, "{session} was never told");
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(100));
     }
 }
 
@@ -1935,14 +1974,11 @@ fn another_worktrees_uncommitted_signature_is_told_to_the_session_whose_file_men
         "src/quota.rs",
         "pub fn quota(user: &str) -> u64 {\n    user.len() as u64 + 1\n}\n",
     );
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while Instant::now() < deadline {
-        assert!(
-            not_told_inflight(w.prompt("bob")),
-            "an unchanged signature was told again"
-        );
-        std::thread::sleep(Duration::from_millis(200));
-    }
+    support::holds_for(
+        "an unchanged signature is not told again",
+        Duration::from_secs(3),
+        || not_told_inflight(w.prompt("bob")),
+    );
 
     // A signature change is told once more.
     let changed =
@@ -2010,7 +2046,7 @@ fn in_flight_lines_keep_to_their_share_and_the_rest_are_counted_and_told_later()
     while told.len() < 7 {
         assert!(Instant::now() < deadline, "told only {told:?}");
         let Some(context) = w.prompt("bob") else {
-            std::thread::sleep(Duration::from_millis(200));
+            std::thread::sleep(Duration::from_millis(100));
             continue;
         };
         assert!(context.len() <= 2400, "{}", context.len());
@@ -2348,16 +2384,7 @@ fn a_changed_string_default_is_in_flight_but_respacing_is_not() {
         "src/greet.py",
         "def greet( prefix = \"a b\" , name=\"x\" ):\n    return prefix + name\n",
     );
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while Instant::now() < deadline {
-        let outcome = w.inflight("app");
-        assert_eq!(
-            inflight_names(&outcome),
-            Vec::<String>::new(),
-            "{outcome:#}"
-        );
-        std::thread::sleep(Duration::from_millis(200));
-    }
+    nothing_in_flight_for_3_s(&w);
     // The string's content changes: in flight.
     w.edits_in(
         "tree",
@@ -2404,16 +2431,7 @@ fn a_rust_one_element_tuple_becoming_a_scalar_is_in_flight() {
         "src/upload.rs",
         "pub fn upload(\n    path: ( &str, ),\n) -> bool {\n    !path.0.is_empty()\n}\n",
     );
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while Instant::now() < deadline {
-        let outcome = w.inflight("app");
-        assert_eq!(
-            inflight_names(&outcome),
-            Vec::<String>::new(),
-            "{outcome:#}"
-        );
-        std::thread::sleep(Duration::from_millis(200));
-    }
+    nothing_in_flight_for_3_s(&w);
     // The tuple becomes a parenthesized scalar: in flight.
     w.edits_in(
         "tree",
@@ -2460,16 +2478,7 @@ fn a_go_channel_type_joined_into_one_name_is_in_flight() {
         "src/feed.go",
         "package app\n\nfunc Feed( x   chan  int ) {\n}\n",
     );
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while Instant::now() < deadline {
-        let outcome = w.inflight("app");
-        assert_eq!(
-            inflight_names(&outcome),
-            Vec::<String>::new(),
-            "{outcome:#}"
-        );
-        std::thread::sleep(Duration::from_millis(200));
-    }
+    nothing_in_flight_for_3_s(&w);
     // Two words become one: in flight.
     w.edits_in(
         "tree",
@@ -2583,8 +2592,7 @@ fn a_head_version_that_could_not_be_read_is_compared_on_a_later_pass() {
         assert!(Instant::now() < deadline, "never indexed: {outcome:#}");
         std::thread::sleep(Duration::from_millis(100));
     }
-    std::thread::sleep(Duration::from_secs(3));
-    assert_eq!(inflight_names(&w.inflight("app")), Vec::<String>::new());
+    nothing_in_flight_for_3_s(&w);
     // The blob is back: the next pass compares the file and finds it.
     fs::rename(&aside, &loose).unwrap();
     w.wait_for_inflight("the changed gate", "app", |outcome| {
@@ -2763,8 +2771,11 @@ fn an_index_imported_into_a_fresh_state_directory_answers_the_same_without_a_par
         (json!(0), json!(3))
     );
     // An import is a first indexing: no interface change is recorded.
-    std::thread::sleep(Duration::from_millis(2500));
-    assert_eq!(second.interface_events(), 0);
+    support::holds_for(
+        "no interface change recorded",
+        Duration::from_millis(2500),
+        || second.interface_events() == 0,
+    );
 }
 
 #[test]
@@ -3810,7 +3821,7 @@ fn a_rename_notice_lists_a_caller_written_later_in_another_worktree() {
             Instant::now() < deadline,
             "Bob's file never listed: {notice:#}"
         );
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(100));
     }
 }
 
@@ -3928,7 +3939,7 @@ fn a_caller_written_after_a_committed_rename_is_listed_on_its_notice() {
             Instant::now() < deadline,
             "Bob's file never listed: {notice:#}"
         );
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(100));
     }
 }
 
@@ -4070,7 +4081,7 @@ fn a_ranked_briefing_names_a_rename_committed_on_another_worktrees_branch() {
             Instant::now() < deadline,
             "Bob's caller never ranked: {context}"
         );
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(100));
     };
     assert!(
         line.starts_with(

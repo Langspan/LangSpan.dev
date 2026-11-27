@@ -179,6 +179,17 @@ change, run `cargo nextest run -p langspan-core --test decision_golden
 --run-ignored only -E 'test(bless)'` and review the golden diff in the pull
 request.
 
+### Slow tests
+
+A test waits on a condition, not a fixed time: the helpers in
+[`tests/support/mod.rs`](../tests/support/mod.rs) poll toward a deadline and
+fail naming what they waited for. Where a test's subject is that nothing
+happens within a stated time, `holds_for` checks it throughout that time.
+`python3 -I -B scripts/fixed-sleeps.py tests`, run on Linux in every lane,
+fails when a file holds more fixed sleeps of 200 ms or more than
+[`scripts/fixed-sleeps.tsv`](../scripts/fixed-sleeps.tsv) allows it, or
+fewer, so the counts only go down.
+
 ### Coverage
 
 The `Coverage` workflow ([`coverage.yml`](../.github/workflows/coverage.yml))

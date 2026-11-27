@@ -18,7 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[allow(dead_code)] // Only the credential server is used here.
+#[allow(dead_code)] // Only the credential server and the waits are used here.
 mod support;
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -183,9 +183,19 @@ fn refused_credentials_back_off_and_a_failure_on_what_the_remote_sent_does_not()
     let (url, seen) = support::asks_for_credentials();
     git(&w.work(), &["remote", "set-url", "origin", &url]);
     w.enable();
-    std::thread::sleep(Duration::from_secs(3));
-    let requests: Vec<bool> = seen.try_iter().collect();
-    assert!(!requests.is_empty(), "the remote was asked");
+    let mut requests: Vec<bool> = vec![
+        seen.recv_timeout(Duration::from_secs(10))
+            .expect("the remote was asked"),
+    ];
+    // Inside the 5 s wait that the second failure starts.
+    support::holds_for(
+        "at most a few requests in two passes",
+        Duration::from_secs(3),
+        || {
+            requests.extend(seen.try_iter());
+            requests.len() <= 6
+        },
+    );
     assert!(
         requests.len() <= 6,
         "two passes of at most a few requests each, not one every 200 ms: {}",
@@ -239,13 +249,15 @@ fn refused_credentials_back_off_and_a_failure_on_what_the_remote_sent_does_not()
         ],
     );
     w.enable();
-    std::thread::sleep(Duration::from_secs(3));
-    assert!(
-        // Backing off would allow two in 3 s; load can slow passes, so the
-        // bound is far from the 15 an idle machine runs.
-        w.fetches() >= 3,
-        "a pass that reached the remote does not wait: {} fetches in 3 s",
-        w.fetches()
+    // Backing off would allow two in 3 s; load can slow passes, so the
+    // bound is far from the 15 an idle machine runs.
+    support::wait_for(
+        "a third fetch: a pass that reached the remote does not wait",
+        Duration::from_secs(3),
+        || match w.fetches() {
+            3.. => Ok(()),
+            fetches => Err(format!("{fetches} fetches")),
+        },
     );
 }
 
@@ -262,9 +274,17 @@ fn a_background_remote_pass_never_prompts_and_a_successful_one_resets_the_back_o
         &["remote", "set-url", "origin", missing.to_str().unwrap()],
     );
     w.enable();
-    // Two failures, then a 5 s wait.
-    std::thread::sleep(Duration::from_millis(1_500));
-    let failed = w.fetches();
+    // Two failures, then a 5 s wait: the count stops, for longer than the
+    // 200 ms between passes.
+    support::wait_until("the first fetch", Duration::from_secs(10), || {
+        w.fetches() > 0
+    });
+    let failed = support::settles(
+        "the fetches before the back-off",
+        Duration::from_secs(1),
+        Duration::from_secs(10),
+        || w.fetches(),
+    );
     assert!(
         (1..=3).contains(&failed),
         "two tries, then waiting: {failed}"
@@ -285,10 +305,12 @@ fn a_background_remote_pass_never_prompts_and_a_successful_one_resets_the_back_o
         "the fixed remote was reached only after the back-off: {first:?}"
     );
     let reached = w.fetches();
-    std::thread::sleep(Duration::from_secs(3));
-    assert!(
-        w.fetches() >= reached + 2,
-        "after a pass that worked, passes run every 200 ms again: {}",
-        w.fetches() - reached
+    support::wait_for(
+        "two more fetches: after a pass that worked, passes run every 200 ms again",
+        Duration::from_secs(3),
+        || match w.fetches() - reached {
+            2.. => Ok(()),
+            more => Err(format!("{more} more")),
+        },
     );
 }

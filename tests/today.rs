@@ -22,6 +22,9 @@ use rmcp::model::CallToolRequestParams;
 use rmcp::transport::TokioChildProcess;
 use rmcp::{ServiceExt, model::ContentBlock};
 
+#[allow(dead_code)] // Only the wall-clock wait is used here.
+mod support;
+
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 struct World {
@@ -206,10 +209,10 @@ fn a_day_is_summarised_from_events_and_reading_it_acknowledges_nothing() {
         "PreToolUse"
     )));
     w.write_call("bob", "y-hold", "src/held.rs", "PostToolUse");
-    // Midnight.
-    std::thread::sleep(Duration::from_millis(1100));
+    // Midnight, in a second of its own: `--since` counts whole seconds.
+    support::next_wall_second();
     let midnight = now_rfc3339();
-    std::thread::sleep(Duration::from_millis(1100));
+    support::next_wall_second();
     // Today: three files (one of them twice) and two prompts.
     w.lifecycle("alice", "UserPromptSubmit");
     w.edits("alice", "t1", "src/a.rs");
@@ -401,7 +404,9 @@ async fn the_mcp_answer_stays_within_a_briefing_with_twenty_sessions() {
     let state = w.state();
     let root = w.work().to_string_lossy().into_owned();
     let since = now_rfc3339();
-    tokio::time::sleep(Duration::from_millis(1100)).await;
+    tokio::task::spawn_blocking(support::next_wall_second)
+        .await
+        .unwrap();
     let setup = {
         let state = state.clone();
         tokio::task::spawn_blocking(move || {

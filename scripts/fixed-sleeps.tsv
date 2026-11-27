@@ -1,0 +1,20 @@
+# The fixed sleeps of 200 ms or more each test file may still hold
+# (scripts/fixed-sleeps.py, issue #310). A file not listed may hold none.
+# Lower a count as a file's sleeps become waits on a condition; the check
+# fails when a file holds fewer than its count, so the list only shrinks.
+# path	count
+tests/between_steps.rs	9
+tests/briefing.rs	3
+tests/codex.rs	1
+tests/coordinator_lifetime.rs	4
+tests/hook.rs	1
+tests/landing.rs	1
+tests/mcp_hooked.rs	4
+tests/notify.rs	4
+tests/refusal_outcomes.rs	1
+tests/report.rs	2
+tests/repository_shapes.rs	1
+tests/retention.rs	1
+tests/status_line.rs	1
+tests/user_install.rs	4
+tests/wider_checks.rs	2
