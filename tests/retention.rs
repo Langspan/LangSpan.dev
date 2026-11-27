@@ -929,7 +929,8 @@ mod daemon {
 
     #[test]
     fn the_cli_dry_run_reports_and_apply_compacts_months_of_history_in_a_real_daemon() {
-        let mut daemon = Daemon::with_history(150, 40);
+        // The least history that still crosses `--keep-days 90`.
+        let mut daemon = Daemon::with_history(100, 10);
         daemon.start(&[]);
         let before = daemon.events();
         let before_dry = daemon.directory.file("before-dry.sqlite3");

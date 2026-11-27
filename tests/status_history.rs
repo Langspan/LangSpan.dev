@@ -423,24 +423,29 @@ impl Fixture {
         }
     }
 
-    /// So many sessions registered in this generation that the bounded view
-    /// leaves out every history it can, `landings` and `workspace_git`
-    /// included, before it leaves out idle sessions.
-    fn crowd(&self) {
-        for session in 0..800 {
-            let id = format!("crowd-{session:04}");
-            let outcome = self
-                .call(
-                    &format!("register-{id}"),
-                    Command::SessionRegister {
-                        session_id: id,
-                        workspace_id: "w".into(),
-                        parent: None,
-                        headless: false,
-                    },
-                )
-                .outcome;
-            assert!(matches!(outcome, Outcome::Session { .. }), "{outcome:?}");
+    /// An automatic check at its limits in workspace `w`, written through the
+    /// store before the daemon starts: about twice a frame, so the bounded
+    /// view leaves out every history it can, `landings` and `workspace_git`
+    /// included. (One entry, not hundreds of sessions registered over the
+    /// socket: the overflow is the fixture here, not the subject.)
+    fn overflow(&self) {
+        let path = self.state_dir().join("state.sqlite3");
+        let mut store = Store::open(&path).unwrap();
+        let command = Command::AutoCheckEnable {
+            workspace_id: "w".into(),
+            name: "unit".into(),
+            argv: largest_auto_check(),
+            timeout_s: 60,
+            on_interface_change: None,
+        };
+        let outcome = store
+            .execute("overflow", &command, &command, 1)
+            .unwrap()
+            .outcome;
+        assert!(!matches!(outcome, Outcome::Error { .. }), "{outcome:?}");
+        drop(store);
+        for entry in fs::read_dir(self.state_dir()).unwrap() {
+            fs::set_permissions(entry.unwrap().path(), fs::Permissions::from_mode(0o600)).unwrap();
         }
     }
 }
@@ -611,8 +616,8 @@ fn a_retried_landing_is_recognised_when_status_leaves_landings_out() {
             params![serde_json::to_string(&landed).unwrap()],
         )
         .unwrap();
+    f.overflow();
     f.start();
-    f.crowd();
     let Outcome::Status { summary, .. } = f.call("read", Command::Status).outcome else {
         panic!("status failed");
     };
@@ -672,20 +677,23 @@ fn doctor_reports_a_scanned_workspace_when_status_leaves_its_git_out() {
         assert!(status.success(), "git {args:?}");
     }
     f.fill();
+    f.overflow();
     f.start();
-    // The coordinator's own scan finds the repository and branch.
+    // The coordinator's own scan finds the repository and branch, read
+    // whole since the bounded view leaves it out.
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        let Outcome::Status { state, .. } = f.call("read", Command::Status).outcome else {
-            panic!("status failed");
-        };
+        let (state, _) = client::status_from(&f.state_dir(), &["workspace_git"]).unwrap();
         if state.workspace_git.contains_key("w") {
             break;
         }
-        assert!(Instant::now() < deadline, "no scan completed: {state:?}");
+        assert!(
+            Instant::now() < deadline,
+            "no scan completed: {:?}",
+            state.workspace_git
+        );
         std::thread::sleep(Duration::from_millis(50));
     }
-    f.crowd();
     let Outcome::Status { summary, .. } = f.call("read", Command::Status).outcome else {
         panic!("status failed");
     };

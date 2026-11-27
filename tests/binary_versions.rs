@@ -2,9 +2,9 @@
 //! `doctor` compares the version of the running coordinator with the version
 //! recorded in the binary each installed hook names (roadmap I5, ADR 0025).
 //! Two binaries of different versions and a real daemon: the hook binary is
-//! a copy of this build whose version marker is rewritten in place. Doctor
-//! never runs the binary it inspects, so the rewritten copy, whose code
-//! signature no longer matches on macOS, does not need to run.
+//! a copy of this build, then a small file holding another version's
+//! marker at the same path. Doctor never runs the binary it inspects, only
+//! reads the file for its marker, so the stand-in does not need to run.
 
 mod support;
 
@@ -121,23 +121,15 @@ impl Drop for Fixture {
     }
 }
 
-/// Rewrite the version in `binary`'s marker from `from` to `to`, the same
-/// length.
-fn rewrite_version(binary: &Path, from: &str, to: &str) {
-    assert_eq!(to.len(), from.len());
-    let mut bytes = fs::read(binary).unwrap();
-    let mut needle = PREFIX.to_vec();
-    needle.extend_from_slice(from.as_bytes());
-    needle.push(0);
-    let at: Vec<usize> = bytes
-        .windows(needle.len())
-        .enumerate()
-        .filter(|(_, window)| *window == needle.as_slice())
-        .map(|(at, _)| at)
-        .collect();
-    assert_eq!(at.len(), 1, "the binary records version {from} once");
-    let start = at[0] + PREFIX.len();
-    bytes[start..start + to.len()].copy_from_slice(to.as_bytes());
+/// Replace `binary` with a small file that records version `to` as a build
+/// does: the marker between NULs, among other bytes. Doctor only reads the
+/// file for its marker, so this stands in for a whole rewritten build; each
+/// test's doctor also reads the real copy of this build.
+fn rewrite_version(binary: &Path, to: &str) {
+    let mut bytes = b"\x7fELF stand-in\0".to_vec();
+    bytes.extend_from_slice(PREFIX);
+    bytes.extend_from_slice(to.as_bytes());
+    bytes.extend_from_slice(b"\0trailing bytes\0");
     // A new file, as an upgrade writes one: never the inode a process maps.
     let temporary = binary.with_extension("new");
     fs::write(&temporary, bytes).unwrap();
@@ -211,7 +203,7 @@ fn doctor_names_the_coordinator_and_hook_versions_and_fails_when_they_differ() {
 
     // The hooks' binary is upgraded; the coordinator still runs the old one.
     let newer = newer();
-    rewrite_version(&keg, VERSION, &newer);
+    rewrite_version(&keg, &newer);
     let (code, findings) = fixture.doctor(&root);
     assert_eq!(code, Some(1), "{findings:#?}");
     let (ok, text) = version_line(&findings, &keg);
@@ -226,7 +218,7 @@ fn doctor_names_the_coordinator_and_hook_versions_and_fails_when_they_differ() {
 
     // The reverse: the hooks name a binary older than the coordinator.
     let older = older();
-    rewrite_version(&keg, &newer, &older);
+    rewrite_version(&keg, &older);
     let (code, findings) = fixture.doctor(&root);
     assert_eq!(code, Some(1), "{findings:#?}");
     let (ok, text) = version_line(&findings, &keg);
@@ -301,9 +293,8 @@ fn doctor_compares_the_binary_of_every_hook_event_not_only_the_first() {
     let old_bin = fixture.base.join("old/bin");
     fs::create_dir_all(&old_bin).unwrap();
     let old = old_bin.join("langspan");
-    fs::copy(&keg, &old).unwrap();
     let older = older();
-    rewrite_version(&old, VERSION, &older);
+    rewrite_version(&old, &older);
     repoint_event(
         &root.join(".claude/settings.local.json"),
         "PreToolUse",
