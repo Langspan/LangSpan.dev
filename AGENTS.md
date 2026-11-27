@@ -52,3 +52,5 @@ Every capability still to build is a GitHub issue labeled `roadmap` ([the list](
 **Surgical changes.** Don't improve adjacent code or formatting, and don't refactor what isn't broken. Every changed line traces to the task. (A task that is itself a refactor, such as an extraction in the engineering remediation, is the change; keep it to moves.)
 
 **Goal-driven execution.** Define what success looks like and loop until it's verified. For a multi-step task, state a short plan with a check for each step.
+
+**No session links in public text.** Don't put a link to an agent session (a `Claude-Session:` trailer or any `claude.ai/code/session` URL) in commits, pull requests, issues or comments. A `Co-Authored-By:` trailer and a "Generated with Claude Code" line are fine.
