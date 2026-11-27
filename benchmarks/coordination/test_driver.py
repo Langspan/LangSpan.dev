@@ -1746,9 +1746,9 @@ class StandinHooks(Temporary):
                         try:
                             denied = session.fire("PreToolUse", "Write", {"file_path": "x"}, "edit-1")
                             self.assertFalse(denied)
-                            if not (group.exists() and group.read_text().strip() and heartbeat.exists()):
+                            ran = heartbeat.exists() and heartbeat.stat().st_size > 0
+                            if not (ran and group.exists() and group.read_text().strip()):
                                 continue
-                            self.assertGreater(heartbeat.stat().st_size, 0, "the hook's child never ran")
                             self.assert_stopped(group, heartbeat)
                             break
                         finally:
@@ -1826,7 +1826,7 @@ class StandinHooks(Temporary):
         # the hook had started but before the stand-in had recorded it, so
         # the stand-in died and the hook's group ran on. The child here
         # sends itself SIGTERM in that window, every time: right after the
-        # real `Popen` returns, once the hook's heartbeat exists.
+        # real `Popen` returns, once the hook's heartbeat has a write.
         child = textwrap.dedent("""\
             import os, signal, sys, time
             sys.path.insert(0, sys.argv[1])
@@ -1838,7 +1838,8 @@ class StandinHooks(Temporary):
                 with open(group, "w") as file:
                     file.write(str(process.pid))
                 deadline = time.monotonic() + 10
-                while not os.path.exists(heartbeat) and time.monotonic() < deadline:
+                # The shell creates the file before its first write.
+                while not (os.path.exists(heartbeat) and os.path.getsize(heartbeat)) and time.monotonic() < deadline:
                     time.sleep(0.01)
                 os.kill(os.getpid(), signal.SIGTERM)
                 return process
