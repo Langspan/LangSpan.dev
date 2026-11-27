@@ -271,6 +271,36 @@ class Indexing(unittest.TestCase):
         )
         self.assertEqual(ratchets.Source(src).indexing(), (0, 0))
 
+    def test_every_keyword_that_starts_an_array_type_or_pattern_after_a_comment(self):
+        # Each keyword rustfmt can leave before a comment and then `[`: none is an operand.
+        src = (
+            "impl<T> Tr for /* c */ [T] where /* c */ [T; 1]: Sized {}\n"
+            "fn f(p: *const /* c */ [u8], q: *mut /* c */ [u8]) {\n"
+            "    for /* rows */ [a, b] in [[1, 2]] {}\n"
+            "    while let /* c */ [_] = [0] { break /* c */ [0]; }\n"
+            "    let _ = loop { break /* c */ [1]; };\n"
+            "    if /* c */ [1] == [1] {}\n"
+            "    match /* c */ [1] { /* c */ [_] => {} }\n"
+            "    const /* c */ X: [u8; 1] = [0];\n"
+            "}\n"
+        )
+        self.assertEqual(ratchets.Source(src).indexing(), (0, 0))
+
+    def test_a_raw_identifier_spelled_as_a_keyword_is_an_operand(self):
+        # `r#match` is a variable, not the keyword, with or without a comment.
+        src = (
+            "fn f(i: usize) -> u8 {\n"
+            "    let r#match = [1, 2];\n"
+            "    let r#for = [1, 2];\n"
+            "    let a = r#match[i];\n"
+            "    let b = r#for /* c */ [i];\n"
+            "    let c = &r#in[..i];\n"
+            "    let d = r#let /* c */ [1..];\n"
+            "    a + b\n"
+            "}\n"
+        )
+        self.assertEqual(ratchets.Source(src).indexing(), (2, 2))
+
     def test_marking_a_comment_keeps_its_lines(self):
         marked = ratchets.strip("a /* x\ny */ b // z\n", mark=True)
         self.assertEqual(marked, "a " + "\x01" * 4 + "\n" + "\x01" * 4 + " b " + "\x01" * 4 + "\n")

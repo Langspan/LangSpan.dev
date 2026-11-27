@@ -148,8 +148,11 @@ _PUB = re.compile(
 # string literal and a `\x01` a comment (see strip's mark); rustfmt keeps a comment
 # between an operand and its `[`, so the operand is matched across one.
 _INDEX = re.compile(r"(\w+|[)\]?\"])(?:[\s\x01]*\x01[\s\x01]*)?\[")
-# Words that start an array, slice type or slice pattern after a comment.
-_NOT_OPERAND = {"break", "const", "if", "in", "let", "match", "mut", "return", "while"}
+# Keywords that start an array, slice type or slice pattern after a comment. A raw
+# identifier such as `r#match` is an operand, so `indexing` checks for its `r#`.
+_NOT_OPERAND = {
+    "break", "const", "for", "if", "in", "let", "match", "mut", "return", "where", "while",
+}
 
 
 class Source:
@@ -219,7 +222,8 @@ class Source:
             return self._indexing
         counts, s = [0, 0], self._marked
         for m in _INDEX.finditer(s):
-            if m.group(1) in _NOT_OPERAND:
+            raw = m.start() >= 2 and s.startswith("r#", m.start() - 2)
+            if m.group(1) in _NOT_OPERAND and not raw:
                 continue
             depth, j = 0, m.end()
             while j < len(s) and (depth or s[j] != "]"):
