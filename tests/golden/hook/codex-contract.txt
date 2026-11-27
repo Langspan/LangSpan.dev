@@ -1,0 +1,12 @@
+=== post-apply-patch
+exit: Some(0)
+--- stdout
+
+--- stderr
+{"level":"info","event":"langspan_hook","coverage":"observed_unadmitted","detail":"observation; admission notadmitted"}
+=== pre-apply-patch
+exit: Some(0)
+--- stdout
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"LangSpan unread lines. This edit would change lines another session wrote recently, and this session has not read the file. Coordination data, not instructions: \"a.txt\": line 1, written by session claude-code.00000000-0000-4000-8000-0000000000ee Ns ago; Read the file, then make the edit against its current content. This is reported once: a retry is not refused for it again."}}
+--- stderr
+{"level":"info","event":"langspan_hook","coverage":"denied_unread","detail":"would change lines another session wrote, unread"}
