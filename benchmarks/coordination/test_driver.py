@@ -173,6 +173,39 @@ class DriverUnitTests(Temporary):
                              "notice_ids": ["n4"], "via": "briefing"}}]
         self.assertEqual(driver.interface_notices(events), {1: 2, 2: 3})
 
+    def test_a_notice_told_between_steps_counts_as_before_the_write(self):
+        """Issue #194: the between-step watcher tells its notice on stderr,
+        exit 2, which Claude Code shows the model. That counts as before
+        the write when its line comes first; a hook's stderr the model does
+        not see (its log line, or a watcher that ended with exit 0) does not."""
+        task = next(t for t in driver.make_plan("langspan", "rename_vs_new_caller", 2, 1, agent="claude")["tasks"]
+                    if t["role"] == "new_caller")
+        owned = "/work/s1/" + task["owns"][0].split("::", 1)[0]
+        notice = ('In flight in worktree "/work/s2" (claude-code session a2b33574, not committed): function '
+                  '"load_config" (renamed from "parse_config") in "shelf/config.py": "def load_config(text)".\n')
+        log_line = '{"level":"info","event":"langspan_hook","coverage":"no_briefing"}\n'
+
+        def entry(event, stdout="", stderr="", exit_code=0, background=False, tool=None, path=None):
+            return {"at": "2026-11-27T04:34:48+00:00", "event": event, "tool": tool, "file_path": path,
+                    "exit_code": exit_code, "stdout": stdout, "stderr": stderr, "background": background}
+
+        write = entry("PreToolUse", tool="Write", path=owned)
+        cases = {
+            "told between steps": ([entry("UserPromptSubmit", stderr=notice, exit_code=2, background=True), write],
+                                   True),
+            "in a hook reply": ([entry("PostToolUse", stdout=json.dumps({"hookSpecificOutput": {
+                "additionalContext": notice}})), write], True),
+            "a watcher that woke nothing": ([entry("UserPromptSubmit", stderr=notice, background=True), write], False),
+            "a foreground hook's log": ([entry("PostToolUse", stderr=notice + log_line), write], False),
+            "told after the write": ([write, entry("UserPromptSubmit", stderr=notice, exit_code=2, background=True)],
+                                     False),
+        }
+        for name, (entries, expected) in cases.items():
+            with self.subTest(name):
+                log = self.root / "hooks.jsonl"
+                log.write_text("".join(json.dumps(item) + "\n" for item in entries))
+                self.assertIs(driver.notice_before_write(task, log), expected)
+
     def context_record(self, arm, state, sessions=2):
         plan = driver.make_plan(arm, "rename_vs_new_caller", sessions, 1, agent="claude")
         plan.update(run_id="0" * 32, output=str(self.root), plan_path=str(self.root / "plan.json"),

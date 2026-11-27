@@ -1424,13 +1424,27 @@ def hook_context(stdout):
     return context if isinstance(context, str) else ""
 
 
+def told_text(entry):
+    """What one hook-log ENTRY placed in the model's context: its reply's
+    context, and the stderr of a background hook that exited 2, which
+    Claude Code shows the model (LangSpan's between-step watcher, #194).
+    LangSpan's other hooks tell through their reply and exit 0; their
+    stderr is the hook's log line, which the model does not see."""
+    told = hook_context(str(entry.get("stdout") or ""))
+    if entry.get("background") is True and entry.get("exit_code") == 2:
+        told += "\n" + str(entry.get("stderr") or "")
+    return told
+
+
 def notice_before_write(task, hook_log):
     """For a task that expects an interface notice (its `notice`), whether
-    LangSpan's hooks placed one in the session's context before its first
-    Write, Edit or MultiEdit of a file the task owns, in the order the hook
-    log records them. A notice given by that write's own hook (a break
-    alert, read with the write's result) is not before it. None when the
-    task expects no notice, or there is no hook log or no such write."""
+    LangSpan's hooks placed one in the session's context (`told_text`)
+    before its first Write, Edit or MultiEdit of a file the task owns, in
+    the order the hook log records them; a background hook's line is
+    written when it ends, which is when it told. A notice given by that
+    write's own hook (a break alert, read with the write's result) is not
+    before it. None when the task expects no notice, or there is no hook
+    log or no such write."""
     if "notice" not in task or hook_log is None or not hook_log.is_file():
         return None
     owned = tuple("/" + unit.split("::", 1)[0] for unit in task["owns"])
@@ -1447,7 +1461,7 @@ def notice_before_write(task, hook_log):
                   and str(entry.get("file_path") or "").endswith(owned)), None)
     if first is None:
         return None
-    return any(re.search(task["notice"], hook_context(str(entry.get("stdout") or ""))) for entry in entries[:first])
+    return any(re.search(task["notice"], told_text(entry)) for entry in entries[:first])
 
 
 def refusal_items(events):
