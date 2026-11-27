@@ -236,6 +236,62 @@ fn the_agent_file_stays_within_its_word_budget() {
     );
 }
 
+/// The backticked repository files a Markdown text names: a code span that is
+/// one path ending in a file extension, such as `scripts/check.sh`.
+fn named_files(markdown: &str) -> Vec<&str> {
+    markdown
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .filter(|span| {
+            !span.contains(' ')
+                && [".rs", ".py", ".sh", ".toml", ".yml"]
+                    .iter()
+                    .any(|ext| span.ends_with(ext))
+        })
+        .collect()
+}
+
+#[test]
+fn named_files_finds_backticked_paths_only() {
+    assert_eq!(
+        named_files("Run `scripts/a.sh`, not `cargo test` or a.rs; see `deny.toml`."),
+        ["scripts/a.sh", "deny.toml"]
+    );
+}
+
+#[test]
+fn every_rule_in_the_engineering_standard_names_a_check_that_exists() {
+    let standard = read("docs/engineering-standard.md");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let missing: Vec<&str> = named_files(&standard)
+        .into_iter()
+        .filter(|file| !root.join(file).is_file())
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "docs/engineering-standard.md names files that don't exist: {missing:?}. \
+         Point each rule at the check that enforces it now."
+    );
+    let rows: Vec<&str> = standard
+        .lines()
+        .filter(|line| line.starts_with("| ") && !line.starts_with("| Principle"))
+        .filter(|line| !line.starts_with("| ---"))
+        .collect();
+    assert!(
+        rows.len() >= 11,
+        "the principles table has {} rows",
+        rows.len()
+    );
+    for row in rows {
+        let check = row.trim_end_matches('|').rsplit(" | ").next().unwrap_or("");
+        assert!(
+            !named_files(check).is_empty() || check.trim_start().starts_with("Convention:"),
+            "this rule names no check and isn't marked \"Convention:\" with a reason: {row}"
+        );
+    }
+}
+
 /// The folder and archive stem of the stand-in release.
 const RELEASE: &str = "langspan-v9.9.9-aarch64-apple-darwin";
 /// The file in the home that the `langspan` stand-ins append their arguments to.
