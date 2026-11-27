@@ -1,0 +1,4 @@
+# Production line coverage per file, in percent, that the nightly coverage
+# job (scripts/coverage-report.py) holds the ten largest files to, within 2
+# points. One row per file: path, a tab, the percentage. To raise it, see
+# docs/development-process.md#coverage.

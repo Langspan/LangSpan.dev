@@ -730,3 +730,230 @@ fn ci_installs_the_runners_the_real_tool_tests_need_and_requires_them() {
         }
     }
 }
+
+#[test]
+fn coverage_runs_nightly_reports_a_drop_and_is_not_a_required_check() {
+    let text = workflow("coverage.yml");
+    assert!(text.contains("\n  schedule:\n"), "{text}");
+    assert!(
+        !text.contains("merge_group"),
+        "coverage is no merge-queue gate"
+    );
+    let coverage = job(&text, "coverage");
+    for line in [
+        "install-ci-tools.sh \"$HOME/.cache/langspan-ci-tools\" cargo-nextest cargo-llvm-cov",
+        "rustup component add llvm-tools",
+        "run: bash scripts/coverage.sh target/coverage",
+        "cat target/coverage/report.md >> \"$GITHUB_STEP_SUMMARY\"",
+    ] {
+        assert!(coverage.contains(line), "the coverage job lacks {line}");
+    }
+    // A drop opens or comments on the issue a failed nightly check opens.
+    let report = job(&text, "nightly-report");
+    assert!(report.contains("if: github.event_name == 'schedule' && failure()"));
+    assert!(report.contains("TITLE: Nightly Rust checks on main failed"));
+    assert!(
+        job(&workflow("check.yml"), "nightly-report")
+            .contains("TITLE: Nightly Rust checks on main failed")
+    );
+    let script = read("scripts/coverage.sh");
+    for line in [
+        "export LLVM_PROFILE_FILE_NAME='langspan-%c%16m.profraw'",
+        "cargo llvm-cov nextest --workspace --locked --no-report",
+        "export_lcov production.lcov test\n",
+        "export_lcov all.lcov test lib bin proc-macro\n",
+    ] {
+        assert!(script.contains(line), "coverage.sh lacks {line}");
+    }
+}
+
+/// One measured file: its production lines, how many of them integration
+/// tests cover, and how many more only in-file unit tests cover.
+struct Measured(&'static str, usize, usize, usize);
+
+/// A checkout under `dir` with a coverage baseline of `baseline` rows, and
+/// the two exports scripts/coverage.sh writes, for `files`.
+fn coverage_fixture(dir: &Path, files: &[Measured], baseline: &str) -> PathBuf {
+    fs::create_dir_all(dir.join("scripts")).unwrap();
+    fs::write(
+        dir.join("scripts/coverage-baseline.tsv"),
+        format!("# A comment.\n{baseline}"),
+    )
+    .unwrap();
+    let out = dir.join("target/coverage");
+    fs::create_dir_all(&out).unwrap();
+    let (mut production, mut all) = (String::new(), String::new());
+    for Measured(path, lines, covered, unit_only) in files {
+        let source = dir.join(path);
+        production += &format!("SF:{}\n", source.display());
+        all += &format!("SF:{}\n", source.display());
+        for line in 1..=*lines {
+            let integration = usize::from(line <= *covered);
+            let unit = usize::from(line <= covered + unit_only);
+            production += &format!("DA:{line},{integration}\n");
+            all += &format!("DA:{line},{}\n", integration.max(unit));
+        }
+        // A line of an in-file test module: measured only with the unit
+        // tests, so it is not production code.
+        all += &format!("DA:{},1\n", lines + 1);
+        production += "end_of_record\n";
+        all += "end_of_record\n";
+    }
+    // Neither the tests nor the toolchain's sources count.
+    let extra = format!(
+        "SF:{}\nDA:1,0\nend_of_record\nSF:/rustc/abc/library/core/src/lib.rs\nDA:1,0\nend_of_record\n",
+        dir.join("tests/support/mod.rs").display()
+    );
+    fs::write(out.join("production.lcov"), format!("{production}{extra}")).unwrap();
+    fs::write(out.join("all.lcov"), format!("{all}{extra}")).unwrap();
+    out
+}
+
+/// Runs scripts/coverage-report.py; returns (success, stdout, stderr).
+fn coverage_report(dir: &Path, out: &Path, args: &[&str]) -> (bool, String, String) {
+    let run = Command::new("python3")
+        .args(["-I", "-B"])
+        .arg(root().join("scripts/coverage-report.py"))
+        .args(args)
+        .arg(dir)
+        .arg(out)
+        .output()
+        .expect("python3 runs scripts/coverage-report.py");
+    (
+        run.status.success(),
+        String::from_utf8(run.stdout).unwrap(),
+        String::from_utf8(run.stderr).unwrap(),
+    )
+}
+
+/// Eleven files, src/f00.rs the largest; each 95% covered.
+fn eleven(first: Measured, eleventh: Measured) -> Vec<Measured> {
+    const NAMES: [&str; 9] = [
+        "src/f01.rs",
+        "src/f02.rs",
+        "src/f03.rs",
+        "src/f04.rs",
+        "crates/langspan-core/src/f05.rs",
+        "src/f06.rs",
+        "src/f07.rs",
+        "src/f08.rs",
+        "src/daemon/f09.rs",
+    ];
+    let mut files = vec![first];
+    files.extend(NAMES.iter().map(|name| Measured(name, 200, 190, 0)));
+    files.push(eleventh);
+    files
+}
+
+const BASELINE: &str = "src/f00.rs\t95.0\nsrc/f10.rs\t95.0\n";
+
+#[test]
+fn coverage_holds_when_the_total_and_the_largest_files_hold() {
+    let dir = temp_dir("coverage-holds");
+    // Integration tests cover 372 of 400 lines, 2 points under the 95.0
+    // baseline; in-file unit tests cover 8 more, so 95.0 again.
+    let files = eleven(
+        Measured("src/f00.rs", 400, 372, 8),
+        Measured("src/f10.rs", 100, 80, 0),
+    );
+    let out = coverage_fixture(&dir, &files, BASELINE);
+    let (ok, stdout, stderr) = coverage_report(&dir, &out, &[]);
+    assert!(ok, "{stdout}{stderr}");
+    // 2,170 of 2,300 production lines; the test-module lines aren't counted.
+    assert!(
+        stdout.contains("Production lines covered: 94.3% (2170 of 2300); the floor is 90%."),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("| File | Lines | Covered | % | Baseline |"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("| `src/f00.rs` | 400 | 380 | 95.0 | 95.0 |"),
+        "{stdout}"
+    );
+    // The eleventh largest may fall further: only the ten largest are held.
+    assert!(
+        stdout.contains("| `src/f10.rs` | 100 | 80 | 80.0 | 95.0 |"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("tests/support"), "{stdout}");
+    assert!(!stdout.contains("/rustc/"), "{stdout}");
+    // A file among the largest with no row is named, not failed.
+    assert!(
+        stdout.contains("`src/f01.rs` has no baseline row"),
+        "{stdout}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn coverage_fails_under_the_total_floor_or_two_points_under_a_largest_file() {
+    let dir = temp_dir("coverage-drops");
+    // 2.1 points under its baseline.
+    let files = eleven(
+        Measured("src/f00.rs", 1000, 929, 0),
+        Measured("src/f10.rs", 100, 95, 0),
+    );
+    let out = coverage_fixture(&dir, &files, BASELINE);
+    let (ok, stdout, stderr) = coverage_report(&dir, &out, &[]);
+    assert!(!ok, "{stdout}");
+    let message = "`src/f00.rs` covers 92.9% of its production lines, more than 2 points under its baseline of 95.0%";
+    assert!(stdout.contains(message), "{stdout}");
+    assert!(stderr.contains(message), "{stderr}");
+    let _ = fs::remove_dir_all(&dir);
+
+    // Exactly 2 points under holds.
+    let dir = temp_dir("coverage-two-points");
+    let files = eleven(
+        Measured("src/f00.rs", 1000, 930, 0),
+        Measured("src/f10.rs", 100, 95, 0),
+    );
+    let out = coverage_fixture(&dir, &files, BASELINE);
+    let (ok, stdout, _) = coverage_report(&dir, &out, &[]);
+    assert!(ok, "{stdout}");
+    let _ = fs::remove_dir_all(&dir);
+
+    let dir = temp_dir("coverage-total");
+    let files = eleven(
+        Measured("src/f00.rs", 4000, 3200, 0),
+        Measured("src/f10.rs", 100, 95, 0),
+    );
+    let out = coverage_fixture(&dir, &files, "src/f00.rs\t80.0\n");
+    let (ok, stdout, stderr) = coverage_report(&dir, &out, &[]);
+    assert!(!ok, "{stdout}");
+    let message = "the total, 84.8% of production lines, is under the 90% floor";
+    assert!(stderr.contains(message), "{stderr}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn writing_the_coverage_baseline_records_one_row_per_file() {
+    let dir = temp_dir("coverage-write");
+    let files = eleven(
+        Measured("src/f00.rs", 400, 390, 0),
+        Measured("src/f10.rs", 100, 95, 0),
+    );
+    let out = coverage_fixture(&dir, &files, "src/gone.rs\t99.0\n");
+    let (ok, stdout, stderr) = coverage_report(&dir, &out, &["--write-baseline"]);
+    assert!(ok, "{stdout}{stderr}");
+    let written = fs::read_to_string(dir.join("scripts/coverage-baseline.tsv")).unwrap();
+    let rows: Vec<&str> = written.lines().filter(|l| !l.starts_with('#')).collect();
+    assert_eq!(rows.len(), 11, "{written}");
+    assert_eq!(rows[0], "crates/langspan-core/src/f05.rs\t95.0");
+    assert!(rows.contains(&"src/f00.rs\t97.5"), "{written}");
+    assert!(!written.contains("gone.rs"), "{written}");
+    // The written baseline holds at once.
+    let (ok, stdout, _) = coverage_report(&dir, &out, &[]);
+    assert!(ok, "{stdout}");
+    assert!(!stdout.contains("no baseline row"), "{stdout}");
+    let _ = fs::remove_dir_all(&dir);
+
+    // The repository's own baseline is one sorted row per file.
+    let baseline = read("scripts/coverage-baseline.tsv");
+    let rows: Vec<&str> = baseline.lines().filter(|l| !l.starts_with('#')).collect();
+    let mut sorted = rows.clone();
+    sorted.sort_unstable();
+    sorted.dedup_by(|a, b| a.split('\t').next() == b.split('\t').next());
+    assert_eq!(rows, sorted, "rows are sorted, one per file");
+}
