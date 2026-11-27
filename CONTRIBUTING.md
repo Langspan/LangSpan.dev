@@ -79,15 +79,12 @@ LangSpan is licensed under the [Apache License 2.0](LICENSE). Under its
 section 5, a contribution you submit for inclusion is licensed under the same
 terms, unless you say otherwise.
 
-There is no contributor licence agreement. Each commit carries a Developer
-Certificate of Origin sign-off ([developercertificate.org](https://developercertificate.org/)):
-`git commit -s` adds the `Signed-off-by:` line that says you have the right to
-submit it under the project's licence.
+There is no contributor licence agreement.
 
 Contributions written with a coding agent are welcome. Say so in the commit
 (a `Co-Authored-By:` line naming the agent) and in the pull request. They pass
-the same checks and the same human review as any other change, and the person
-who opens the pull request signs off for it and answers for it.
+the same checks and the same automated review as any other change, and the
+person who opens the pull request answers for it.
 
 ## Conduct and security
 

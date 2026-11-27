@@ -233,9 +233,10 @@ jobs:
   # the same way.
   #
   # On a pull request the job passes at once on a standard Linux runner and
-  # says why: the required check reports in seconds, no macOS runner is
+  # says why: the check reports in seconds, no macOS runner is
   # started, and the full macOS run happens on the merge-queue commit. It
-  # passes rather than skips, so the ruleset sees a success either way.
+  # passes rather than skips, so it reports a result either way. macOS is not
+  # a required check: the merge waits for Linux, Workflows and Content.
   macos:
     name: macOS
     runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-24.04' || vars.MACOS_RUNNER || 'macos-26' }}
