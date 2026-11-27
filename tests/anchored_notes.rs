@@ -76,6 +76,7 @@ impl World {
         world.daemon = Some(
             Process::new(env!("CARGO_BIN_EXE_langspan"))
                 .env("LANGSPAN_AUTOSTART", "off")
+                .env("LANGSPAN_TEST_SCAN_EVERY_MS", "200")
                 .args(["daemon", "--state-dir"])
                 .arg(&state)
                 .stdout(Stdio::null())

@@ -109,6 +109,7 @@ impl World {
         self.daemon = Some(
             Process::new(env!("CARGO_BIN_EXE_langspan"))
                 .env("LANGSPAN_AUTOSTART", "off")
+                .env("LANGSPAN_TEST_SCAN_EVERY_MS", "200")
                 .args(["daemon", "--state-dir"])
                 .arg(self.base.join("state"))
                 .envs(self.daemon_env.iter().map(|(key, value)| (key, value)))
@@ -1071,7 +1072,7 @@ fn a_workspace_registered_again_after_removal_is_not_compared_with_its_earlier_i
 /// How long the daemon holds the indexer's notices after a pass, for the
 /// tests below: far longer than the switch or removal they make meanwhile,
 /// a clone and one or two CLI calls.
-const REPORT_DELAY_MS: u64 = 2000;
+const REPORT_DELAY_MS: u64 = 750;
 
 /// A world whose indexer reports `REPORT_DELAY_MS` after each pass.
 fn slow_reporting_world() -> World {
@@ -1861,9 +1862,10 @@ fn inflight_names(outcome: &Value) -> Vec<String> {
         .collect()
 }
 
-/// `graph inflight` of `app` lists nothing for 3 s: several index passes.
-fn nothing_in_flight_for_3_s(w: &World) {
-    support::holds_for("nothing in flight", Duration::from_secs(3), || {
+/// `graph inflight` of `app` lists nothing for 1 s: five index passes at
+/// the daemon's 200 ms `LANGSPAN_TEST_SCAN_EVERY_MS`.
+fn nothing_in_flight_over_several_passes(w: &World) {
+    support::holds_for("nothing in flight", Duration::from_secs(1), || {
         let outcome = w.inflight("app");
         assert_eq!(
             inflight_names(&outcome),
@@ -1963,7 +1965,8 @@ fn another_worktrees_uncommitted_signature_is_told_to_the_session_whose_file_men
     assert!(not_told_inflight(w.prompt("carol")));
     assert!(not_told_inflight(w.prompt_in("tree", &tree, "dave")));
 
-    // A body change keeps the signature: not told again.
+    // A body change keeps the signature: not told again over five index
+    // passes at the 200 ms scan tick.
     w.edits_in(
         "tree",
         &tree,
@@ -1974,7 +1977,7 @@ fn another_worktrees_uncommitted_signature_is_told_to_the_session_whose_file_men
     );
     support::holds_for(
         "an unchanged signature is not told again",
-        Duration::from_secs(3),
+        Duration::from_secs(1),
         || not_told_inflight(w.prompt("bob")),
     );
 
@@ -2382,7 +2385,7 @@ fn a_changed_string_default_is_in_flight_but_respacing_is_not() {
         "src/greet.py",
         "def greet( prefix = \"a b\" , name=\"x\" ):\n    return prefix + name\n",
     );
-    nothing_in_flight_for_3_s(&w);
+    nothing_in_flight_over_several_passes(&w);
     // The string's content changes: in flight.
     w.edits_in(
         "tree",
@@ -2429,7 +2432,7 @@ fn a_rust_one_element_tuple_becoming_a_scalar_is_in_flight() {
         "src/upload.rs",
         "pub fn upload(\n    path: ( &str, ),\n) -> bool {\n    !path.0.is_empty()\n}\n",
     );
-    nothing_in_flight_for_3_s(&w);
+    nothing_in_flight_over_several_passes(&w);
     // The tuple becomes a parenthesized scalar: in flight.
     w.edits_in(
         "tree",
@@ -2476,7 +2479,7 @@ fn a_go_channel_type_joined_into_one_name_is_in_flight() {
         "src/feed.go",
         "package app\n\nfunc Feed( x   chan  int ) {\n}\n",
     );
-    nothing_in_flight_for_3_s(&w);
+    nothing_in_flight_over_several_passes(&w);
     // Two words become one: in flight.
     w.edits_in(
         "tree",
@@ -2590,7 +2593,7 @@ fn a_head_version_that_could_not_be_read_is_compared_on_a_later_pass() {
         assert!(Instant::now() < deadline, "never indexed: {outcome:#}");
         std::thread::sleep(Duration::from_millis(100));
     }
-    nothing_in_flight_for_3_s(&w);
+    nothing_in_flight_over_several_passes(&w);
     // The blob is back: the next pass compares the file and finds it.
     fs::rename(&aside, &loose).unwrap();
     w.wait_for_inflight("the changed gate", "app", |outcome| {
@@ -2616,6 +2619,7 @@ impl Second {
         }
         let mut daemon = Process::new(env!("CARGO_BIN_EXE_langspan"));
         daemon
+            .env("LANGSPAN_TEST_SCAN_EVERY_MS", "200")
             .args(["daemon", "--state-dir"])
             .arg(&state)
             .stdout(Stdio::null())

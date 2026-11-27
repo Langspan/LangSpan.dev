@@ -33,9 +33,14 @@ impl Fixture {
         self.root.join("state")
     }
     fn start(&mut self) {
+        self.start_with(&[]);
+    }
+    fn start_with(&mut self, env: &[(&str, &str)]) {
         self.child = Some(
             Process::new(env!("CARGO_BIN_EXE_langspan"))
                 .env("LANGSPAN_AUTOSTART", "off")
+                .env_remove("LANGSPAN_TEST_SCAN_EVERY_MS")
+                .envs(env.iter().copied())
                 .args(["daemon", "--state-dir"])
                 .arg(self.state_dir())
                 .stdout(Stdio::null())
@@ -569,4 +574,75 @@ fn a_summary_near_its_limit_that_holds_secrets_is_stored_redacted_never_refused(
     for (summary, original) in stored.iter().zip(&prompts) {
         assert_bounded_redaction(summary, original, 512);
     }
+}
+
+/// Rewrites one committed file every 50 ms for 3 s under a coordinator
+/// started with `env`, and returns how many distinct versions of it the
+/// coordinator's Git scans observed. A process test: what it verifies is the
+/// coordinator's real scheduling of real Git scans (#455).
+fn scans_seen_in_three_seconds(env: &[(&str, &str)]) -> usize {
+    let mut f = Fixture::new();
+    let workspace = f.root.join("workspace");
+    let git = |args: &[&str]| {
+        let status = Process::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args(args)
+            .current_dir(&workspace)
+            .stdout(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}: {status}");
+    };
+    git(&["init", "-q"]);
+    fs::write(workspace.join("tick.txt"), "0\n").unwrap();
+    git(&["add", "tick.txt"]);
+    git(&["commit", "-q", "-m", "start"]);
+    f.start_with(env);
+    f.setup();
+    let until = Instant::now() + Duration::from_secs(3);
+    let mut tick = 0u64;
+    while Instant::now() < until {
+        tick += 1;
+        fs::write(workspace.join("tick.txt"), format!("{tick}\n")).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let outcome = f
+        .call(
+            "read",
+            Command::Events {
+                after: 0,
+                limit: 1000,
+            },
+        )
+        .outcome;
+    let Outcome::Events { events } = outcome else {
+        panic!("events: {outcome:?}")
+    };
+    events
+        .into_iter()
+        .filter(|recorded| {
+            matches!(&recorded.event, langspan_core::Event::DiskObserved { observation }
+                if observation.path == "tick.txt")
+        })
+        .count()
+}
+
+#[test]
+fn the_scan_interval_test_setting_shortens_the_scan_tick() {
+    // At the 2 s default, scans start at least 2 s apart, so 3 s hold at
+    // most 3 of them; load only makes them rarer.
+    let seen = scans_seen_in_three_seconds(&[("LANGSPAN_TEST_SCAN_EVERY_MS", "100")]);
+    assert!(
+        seen >= 8,
+        "{seen} scans saw the file change at a 100 ms tick"
+    );
+}
+
+#[test]
+fn without_the_test_setting_scans_are_at_least_two_seconds_apart() {
+    let seen = scans_seen_in_three_seconds(&[]);
+    assert!(
+        seen <= 3,
+        "{seen} scans saw the file change in 3 s at the 2 s tick"
+    );
 }
