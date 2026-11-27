@@ -17,7 +17,7 @@ mod render;
 mod shell_hooks;
 pub use crate::file_state::{MAX_VERSION_BYTES, file_state};
 use crate::file_state::{file_content, version_of};
-pub use crate::ids::{file_key, valid_host_id, wire_id, workspace_request_id};
+pub use crate::ids::{file_key, user_workspace_id, valid_host_id, wire_id, workspace_request_id};
 pub use crate::input::{MAX_EVENT_BYTES, read_stdin_until};
 pub use crate::text::age;
 pub use crate::text::redact::{
@@ -1674,12 +1674,6 @@ pub fn install_at(
             })
             .map(|registration| (path, registration))
     })
-}
-
-/// The workspace ID a user-level hook uses for a repository root: the same
-/// root always gets the same ID, on every run and after every restart.
-pub fn user_workspace_id(root: &Path) -> String {
-    wire_id("root", &[&root.to_string_lossy()])
 }
 
 fn resolve_user_workspace(
