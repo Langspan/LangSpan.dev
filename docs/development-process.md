@@ -132,6 +132,14 @@ release. While its checks run, hold other merges so they don't restart the
 checks. The project's release app opens the release pull request, so its
 checks run like any other pull request's.
 
+After a release, add its golden stores (ADR 0015): build `langspan` from
+the new tag with `--locked`, run `bash scripts/golden-stores.sh VERSION BINARY`,
+write the stores' state snapshots with `LANGSPAN_UPDATE_GOLDEN=1` on
+`tests/golden_stores.rs`, and say in the pull request how the stores were
+made. `every_release_has_a_golden_store_directory` fails for a changelog
+version with no `tests/fixtures/store-VERSION/`, whether or not the release
+changed the event set or the schema.
+
 Before 1.0, a breaking change (`feat!:`) raises the minor version.
 [CONTRIBUTING.md](../CONTRIBUTING.md) lists how each title type affects the
 version.

@@ -64,6 +64,48 @@ fn replay(store: &Path) -> State {
     state
 }
 
+/// The released versions, from the changelog's headings
+/// (`## [0.4.0](...) (date)`, or `## 0.1.0 (date)` for the first).
+fn released() -> Vec<String> {
+    let changelog = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("CHANGELOG.md"))
+        .expect("read CHANGELOG.md");
+    changelog
+        .lines()
+        .filter_map(|line| line.strip_prefix("## "))
+        .map(|heading| {
+            let version = heading.trim_start_matches('[');
+            version[..version.find([']', ' ']).unwrap_or(version.len())].to_string()
+        })
+        .collect()
+}
+
+/// A release that changed nothing the store holds still gets its own
+/// directory: the check is then mechanical, and a release cannot be missed.
+#[test]
+#[ignore = "fails until the stores of 0.2.0, 0.3.0 and 0.4.0 are written (#316)"]
+fn every_release_has_a_golden_store_directory() {
+    let releases = released();
+    let manifest = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(".release-please-manifest.json"),
+    )
+    .expect("read .release-please-manifest.json");
+    let current: serde_json::Value = serde_json::from_str(&manifest).expect("the manifest parses");
+    let current = current["."].as_str().expect("the manifest names a version");
+    assert!(
+        releases.iter().any(|release| release == current),
+        "CHANGELOG.md has no heading for {current}, the version .release-please-manifest.json names"
+    );
+    let missing: Vec<&String> = releases
+        .iter()
+        .filter(|release| !fixtures().join(format!("store-{release}")).is_dir())
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "no golden stores for release {missing:?}: write them with `bash scripts/golden-stores.sh VERSION BINARY` \
+         from that release's own build (docs/development-process.md, Releases)"
+    );
+}
+
 #[test]
 fn every_golden_store_replays_to_its_committed_state() {
     let stores = stores();
