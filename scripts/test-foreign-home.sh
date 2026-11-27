@@ -12,15 +12,51 @@
 # to `cargo nextest run`. The toolchain and the cargo cache keep their own
 # locations, resolved before HOME moves. nextest's per-user configuration
 # is not read, so the run is the same on every machine.
+#
+# CI's full lane builds once and tests in shards (check.yml), through
+# LANGSPAN_TEST_STAGE: `archive` builds the suite into the nextest archive
+# LANGSPAN_TEST_ARCHIVE and runs only the doc tests; `shard` extracts that
+# archive into the checkout, at the paths the build used, and runs the
+# tests the arguments select (a `--partition`), without the doc tests.
+# Unset, it builds and runs everything.
 set -eu
 : "${CARGO_HOME:=${HOME}/.cargo}"
 : "${RUSTUP_HOME:=${HOME}/.rustup}"
 export CARGO_HOME RUSTUP_HOME
 export NEXTEST_USER_CONFIG_FILE=none
+stage=${LANGSPAN_TEST_STAGE:-all}
+case $stage in
+  all) ;;
+  archive | shard)
+    archive=${LANGSPAN_TEST_ARCHIVE:-}
+    if [ -z "$archive" ]; then
+      echo "test-foreign-home.sh: the $stage stage needs LANGSPAN_TEST_ARCHIVE, the nextest archive's path" >&2
+      exit 2
+    fi
+    ;;
+  *)
+    echo "test-foreign-home.sh: LANGSPAN_TEST_STAGE is '$stage'; set it to all, archive or shard" >&2
+    exit 2
+    ;;
+esac
 
 # Build what the suite runs first, target/debug/langspan included: that same
-# build installs the foreign home, and the run below builds nothing more.
-cargo nextest run --workspace --locked --no-run "$@"
+# build installs the foreign home, and the run below builds nothing more. A
+# shard extracts the build instead; the run then reads the extracted
+# metadata, so the archive is unpacked once.
+case $stage in
+  all)
+    cargo nextest run --workspace --locked --no-run "$@"
+    set -- --workspace --locked "$@"
+    ;;
+  archive) cargo nextest archive --workspace --locked --archive-file "$archive" ;;
+  shard)
+    cargo nextest run --archive-file "$archive" --workspace-remap . \
+      --extract-to . --extract-overwrite --no-run
+    set -- --binaries-metadata target/nextest/binaries-metadata.json \
+      --cargo-metadata target/nextest/cargo-metadata.json --workspace-remap . "$@"
+    ;;
+esac
 
 home=$(mktemp -d "${TMPDIR:-/tmp}/langspan-foreign-home.XXXXXX")
 cleanup() {
@@ -40,5 +76,5 @@ foreign() {
     -u CLAUDE_PROJECT_DIR \
     HOME="$home" "$@"
 }
-foreign cargo nextest run --workspace --locked "$@"
-foreign cargo test --doc --workspace --locked
+if [ "$stage" != archive ]; then foreign cargo nextest run "$@"; fi
+if [ "$stage" != shard ]; then foreign cargo test --doc --workspace --locked; fi

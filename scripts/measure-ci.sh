@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Measure the Rust checks (check.yml) from GitHub's run data: workflow
-# completion per event, the merge-queue gate, the Linux and macOS job times, whether each job
+# completion per event, the merge-queue gate, the Linux and macOS build and
+# test-shard job times, whether each build job
 # found its build cache (cold, a fallback entry, or its exact key), and how
 # many dependency crates it compiled. Read-only: it calls `gh api` and
 # changes nothing on GitHub.
@@ -55,14 +56,24 @@ gh api --paginate "repos/$REPO/actions/workflows/content.yml/runs?per_page=100&c
   --jq '.workflow_runs[]' | jq -s '[.[] | select(.status == "completed" and .run_attempt == 1
                                          and .event == "merge_group")]' > "$TMP/content.json"
 
-# One row per job: the run's facts and the job's own times and steps.
+# One row per job: the run's facts and the job's own times and steps. Two
+# layouts: earlier runs built and tested in one `Linux` and one `macOS` job;
+# sharded runs build in `Linux build` and `macOS build`, test in `Linux tests
+# K` and `macOS tests K` (the `Run this shard` step), and report the required
+# `Linux` and `macOS` checks from small result jobs. `built` marks a job that
+# ran the build's check step (so its log has cache and compile facts),
+# `shard` a shard that ran; `group` names the shards of a platform together.
 : > "$TMP/jobs.jsonl"
 for id in $(jq -r '.[].id' "$TMP/runs.json"); do
-  gh api "repos/$REPO/actions/runs/$id/attempts/1/jobs?per_page=50" --jq '.jobs[]
-    | select(.name == "Linux" or .name == "macOS" or .name == "Workflows")
+  gh api "repos/$REPO/actions/runs/$id/attempts/1/jobs?per_page=50" --jq '
+    def ran($prefix): [.steps[] | select((.name | startswith($prefix)) and (.conclusion == "success" or .conclusion == "failure"))] | length > 0;
+    .jobs[]
+    | select(.name | test("^(Linux|macOS)( build| tests [0-9]+)?$|^Workflows$"))
     | {run: .run_id, job: .id, name, conclusion, started_at, completed_at,
-       built: ([.steps[] | select((.name | startswith("Check formatting")) and (.conclusion == "success" or .conclusion == "failure"))] | length > 0),
-       check_s: ([.steps[] | select(.name | startswith("Check formatting")) | select(.completed_at != null and .started_at != null)
+       group: (.name | sub(" tests [0-9]+$"; " tests")),
+       built: ran("Check formatting"), shard: ran("Run this shard"),
+       check_s: ([.steps[] | select((.name | startswith("Check formatting")) or (.name | startswith("Run this shard")))
+                  | select(.completed_at != null and .started_at != null)
                   | (.completed_at | fromdateiso8601) - (.started_at | fromdateiso8601)] | first)}' >> "$TMP/jobs.jsonl"
 done
 
@@ -154,12 +165,12 @@ jq -n --slurpfile runs "$TMP/runs.json" --slurpfile all "$TMP/all.json" --slurpf
     ( [$R[] | select(.event == "merge_group" and .built)] as $q | [$q[] | .gate_s | select(. != null)] as $s
       | "| merge_group | \($s | length) | \($s | median | m) | \($s | p90 | m) | \($s | max | m) | \([$q[] | select(.gate_s == null)] | length) |" ),
     "",
-    "## Job time (job started to job completed), jobs that built",
+    "## Job time (job started to job completed), jobs that built or ran a test shard",
     "",
     "| Event | Job | Cache | n | Median job min | Median check.sh step min | Median dependency crates compiled |",
     "| --- | --- | --- | --- | --- | --- | --- |",
-    ( $JJ | map(select(.built)) | group_by([.event, .name, (.cache // "no log read")])[]
-      | "| \(.[0].event) | \(.[0].name) | \(.[0].cache // "no log read") | \(length) | \([.[].job_s | select(. != null)] | median | m) | \([.[].check_s | select(. != null)] | median | m) | \(if .[0].log then ([.[].deps_compiled] | median | tostring) else "–" end) |" ),
+    ( $JJ | map(select(.built or .shard)) | group_by([.event, .group, (.cache // "no log read")])[]
+      | "| \(.[0].event) | \(.[0].group) | \(.[0].cache // "no log read") | \(length) | \([.[].job_s | select(. != null)] | median | m) | \([.[].check_s | select(. != null)] | median | m) | \(if .[0].log then ([.[].deps_compiled] | median | tostring) else "–" end) |" ),
     "",
     "## Jobs whose log was read",
     "",

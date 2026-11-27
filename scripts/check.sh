@@ -8,6 +8,13 @@
 # ci-fast unless NEXTEST_PROFILE says otherwise), and leaves the other
 # tests and the demonstration to the merge queue.
 #
+# CI splits the full lane in two, so the suite is built once per platform
+# and its tests run in parallel shards (.github/workflows/check.yml):
+# `build` runs everything `full` does except the tests themselves, building
+# them into the nextest archive LANGSPAN_TEST_ARCHIVE instead; `shard` runs
+# only the tests of that archive that the partition LANGSPAN_TEST_PARTITION
+# (`hash:K/N`) selects.
+#
 # LANGSPAN_CHECK_RELEASE=false skips the release build and the demonstration
 # on it. CI sets that except on the nightly run; nothing else reads the
 # release binary, and the release workflow builds its own.
@@ -33,11 +40,29 @@ case $lane in
     : "${NEXTEST_PROFILE:=ci-fast}"
     export NEXTEST_PROFILE
     ;;
+  build | shard)
+    if [ -z "${LANGSPAN_TEST_ARCHIVE:-}" ]; then
+      echo "check.sh: the $lane lane needs LANGSPAN_TEST_ARCHIVE, the nextest archive's path" >&2
+      exit 2
+    fi
+    if [ "$lane" = build ]; then LANGSPAN_TEST_STAGE=archive; else LANGSPAN_TEST_STAGE=shard; fi
+    export LANGSPAN_TEST_STAGE
+    ;;
   *)
-    echo "check.sh: LANGSPAN_CHECK_LANE is '$lane'; set it to fast or full" >&2
+    echo "check.sh: LANGSPAN_CHECK_LANE is '$lane'; set it to fast, full, build or shard" >&2
     exit 2
     ;;
 esac
+partition=${LANGSPAN_TEST_PARTITION:-}
+if [ "$lane" = shard ]; then
+  case $partition in
+    hash:[1-9]*/[1-9]*) ;;
+    *)
+      echo "check.sh: LANGSPAN_TEST_PARTITION is '$partition'; the shard lane needs hash:K/N" >&2
+      exit 2
+      ;;
+  esac
+fi
 
 # Each lane ends here. It fails while a process whose arguments name the
 # build's target directory still runs 5 s after the checks, such as a
@@ -67,6 +92,14 @@ leftovers() {
   done
 }
 
+# A shard runs its part of the tests the build lane archived, under the
+# same foreign home, and nothing else: the build lane ran the other checks.
+if [ "$lane" = shard ]; then
+  sh scripts/test-foreign-home.sh --partition "$partition"
+  leftovers
+  exit 0
+fi
+
 if [ "$portable" = true ]; then
   cargo fmt --all -- --check
   cargo deny --locked check
@@ -90,7 +123,8 @@ if [ "$portable" = true ]; then
 fi
 # The suite under cargo-nextest, with HOME at a read-only home holding a
 # foreign LangSpan install, so no test can depend on the machine's own
-# (issue #108).
+# (issue #108). The build lane only builds the suite into its archive here,
+# and runs the doc tests.
 sh scripts/test-foreign-home.sh
 if [ "$lane" = fast ]; then
   leftovers

@@ -100,9 +100,15 @@ merge, as the ruleset for `main` requires them
    pull request's title and body passed it before the pull request was
    queued.
 
+`Linux` and `macOS` are the jobs that collect each platform's build and
+test shards ([which tests run when](#which-tests-run-when)), so a ruleset
+lists those two names and none of `Linux build` or `Linux tests 1`.
+
 `macOS` isn't required: the full macOS lane runs on the queue's commit and
 again on `main`, but the queue doesn't wait for it, because waiting doubled
-the time a pull request spent in the queue. Nor is coverage, the nightly
+the time a pull request spent in the queue before the tests ran in shards.
+Requiring it now, so that the ruleset lists `Linux`, `macOS`, `Workflows`
+and `Content`, is the owner's decision. Nor is coverage, the nightly
 run, or the release build. A macOS failure on a push to `main` opens an
 issue titled "macOS Rust checks on main failed", or comments on it while it
 is open, naming the commit and the tests that failed (at most 50). Treat it
@@ -140,8 +146,21 @@ the event (`LANGSPAN_CHECK_LANE`):
   Format, dependency policy, advisories, unused dependencies and the docs
   don't depend on the platform, so only Linux runs them
   (`LANGSPAN_CHECK_PORTABLE=false` on macOS); macOS runs lint, the build
-  and every test. Target: **under 8 minutes** in the merge queue. The job
-  stops at 35 minutes there and at 30 on `main` and nightly. Only the
+  and every test. Each platform builds once and tests in parallel: its
+  build job (`Linux build`, `macOS build`; `check.sh`'s `build` lane) runs
+  every check but the tests and builds them into a
+  [nextest archive](https://nexte.st/docs/ci-features/archiving/), and
+  four shard jobs (`Linux tests 1` to `4`, `macOS tests 1` to `4`; the
+  `shard` lane) each run the tests nextest's `hash:K/4` partition gives
+  them, from that archive, under the same foreign home, retries and
+  reports. Every test runs in exactly one shard. The `Linux` and `macOS`
+  checks are jobs of their own that pass only when the build job and
+  every shard passed (`scripts/ci-shard-results.sh`); they name the
+  shards' flaky and failed tests for the issues below. Four shards come
+  from the measured test time
+  ([evidence](evidence/ci/shards.md)). Target: **under 8 minutes** in the
+  merge queue. A build job stops at 35 minutes there and at 30 on `main`
+  and nightly, and a shard at 15. Only the
   nightly run also builds the release binary and runs the demonstration on
   it; nothing else reads it, and the release workflow builds its own. The queue
   merges a pull request only when its full Linux lane passes, so nothing
@@ -190,8 +209,9 @@ The two times are targets the lanes should meet, not gates: a run over
 them still passes. `bash scripts/measure-ci.sh` reports them from GitHub's
 run data: the median and 90th percentile of workflow completion per event,
 the merge-queue gate (run creation to the end of the last required check,
-which leaves out macOS), the Linux and macOS job times by cache state, and
-how many dependency crates each job compiled. `--since` and `--until`
+which leaves out macOS), the Linux and macOS build and test-shard job
+times by cache state, and how many dependency crates each build job
+compiled. It reads runs from before the shards too. `--since` and `--until`
 bound the runs, and `--rows DIR` keeps one row per run, per job and per
 Content run. The latest figures, the gap to each
 target and what would close it are in

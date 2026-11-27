@@ -47,8 +47,12 @@ env:
   # passes at once there. A merge-queue commit, main, the nightly run and a
   # manual run take the full lane on both: every test (`ci` profile) and
   # the demonstration. The merge queue is the gate, so nothing reaches main
-  # without the full lane.
-  LANGSPAN_CHECK_LANE: ${{ github.event_name == 'pull_request' && 'fast' || 'full' }}
+  # without the full lane. The full lane builds once per platform (the
+  # `build` lane: every check but the tests, which it archives) and runs the
+  # archived tests in parallel shards (the `shard` lane, jobs linux-tests
+  # and macos-tests); the required checks Linux and macOS pass only when the
+  # build and every shard passed (scripts/ci-shard-results.sh).
+  LANGSPAN_CHECK_LANE: ${{ github.event_name == 'pull_request' && 'fast' || 'build' }}
   # tests/auto_checks.rs runs real cargo, go and pytest checks. Without a
   # runner a test skips locally and says so; here it fails instead, so a
   # green run means they ran (the steps below install Go and pytest).
@@ -85,14 +89,18 @@ env:
 concurrency:
   group: check-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-# Job names are the check names a ruleset requires: keep them stable.
+# The names of the jobs linux-result and macos-result, `Linux` and `macOS`,
+# are the check names a ruleset requires: keep them stable. The build and
+# shard jobs report under names of their own (`Linux build`, `Linux tests
+# 1`...), which a ruleset need not list.
 #
 # Runners come from the repository variables LINUX_RUNNER and MACOS_RUNNER,
 # so the owner can move a job to a larger (billed) runner without a code
 # change; unset, each job takes GitHub's standard runner.
 #
-# Time limits by lane: the full lane gets 35 minutes in the merge queue and
-# 30 on main and nightly (the nightly run also builds the release binary).
+# Time limits by lane: a build job gets 35 minutes in the merge queue and
+# 30 on main and nightly (the nightly run also builds the release binary;
+# a cold run compiles cargo-nextest and cargo-audit too), and a shard 15.
 # The targets are far lower (docs/development-process.md); these limits
 # only stop a hung run. The fast
 # lane gets 10, not the 6 its 3-minute target suggests, because building
@@ -100,13 +108,14 @@ concurrency:
 # standard runner (scripts/install-ci-tools.sh).
 jobs:
   linux:
-    name: Linux
+    name: Linux build
     runs-on: ${{ vars.LINUX_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: ${{ github.event_name == 'pull_request' && 10 || github.event_name == 'merge_group' && 35 || 30 }}
     permissions:
       contents: read
     outputs:
-      flaky: ${{ steps.flaky.outputs.flaky }}
+      code: ${{ steps.changes.outputs.code }}
+      dry_runs: ${{ steps.changes.outputs.dry_runs }}
     steps:
       # Two commits deep: a pull request's run checks out the merge commit,
       # whose first parent is the base, so the change is HEAD^1..HEAD with
@@ -185,24 +194,6 @@ jobs:
         run: |
           bash scripts/install-ci-tools.sh "$HOME/.cache/langspan-ci-tools"
           echo "$HOME/.cache/langspan-ci-tools" >> "$GITHUB_PATH"
-      # Go and pytest for the tests in tests/auto_checks.rs that run a real
-      # `go test` and pytest; LANGSPAN_REQUIRE_TOOLS fails them without
-      # these. Only the full lane runs those tests. pytest goes into a
-      # virtual environment whose python3 comes first on PATH.
-      - name: Install Go for the real go test check
-        if: steps.changes.outputs.code == 'true' && github.event_name != 'pull_request'
-        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with:
-          go-version: "1.24"
-          cache: false
-      - name: Install pytest for the real pytest check
-        if: steps.changes.outputs.code == 'true' && github.event_name != 'pull_request'
-        run: |
-          python3 -m venv "$RUNNER_TEMP/pytest"
-          "$RUNNER_TEMP/pytest/bin/python3" -m pip install --disable-pip-version-check pytest==8.4.2
-          echo "$RUNNER_TEMP/pytest/bin" >> "$GITHUB_PATH"
-          "$RUNNER_TEMP/pytest/bin/python3" -m pytest --version
-          go version
       # No test sleeps a fixed 200 ms or more beyond the per-file counts in
       # scripts/fixed-sleeps.tsv, which only go down (issue #310). Every
       # lane, on Linux only: the check reads source, not the platform.
@@ -214,28 +205,37 @@ jobs:
         env:
           # `skip` or `run`; tests/benchmark_harness.rs skips on `skip` only.
           LANGSPAN_BENCH_DRY_RUNS: ${{ steps.changes.outputs.dry_runs }}
+          LANGSPAN_TEST_ARCHIVE: ${{ runner.temp }}/tests.tar.zst
         run: sh scripts/check.sh
-      # In the full lane, no test took over 10 s unless it is named
-      # `slow_…` (issue #311, docs/development-process.md#slow-tests). It
-      # reports without failing the job until the slow tests in files this
-      # change left alone (the benchmark harness, between_steps, the Codex
-      # capture, four in graph.rs and one unit test) are shortened or named.
-      - name: Check that no untagged test took over 10 s
-        if: success() && steps.changes.outputs.code == 'true' && env.NEXTEST_PROFILE == 'ci'
-        continue-on-error: true
-        run: python3 -I -B scripts/slow-tests.py target/nextest/ci/junit.xml
+      # The fast lane ran its tests here; the full lane's run in the shards.
       - name: Name the tests that passed only on retry
-        id: flaky
-        if: always() && steps.changes.outputs.code == 'true'
+        if: always() && steps.changes.outputs.code == 'true' && github.event_name == 'pull_request'
         run: python3 -I -B scripts/flaky-tests.py "target/nextest/$NEXTEST_PROFILE/junit.xml"
       - name: Keep the JUnit report
-        if: always() && steps.changes.outputs.code == 'true'
+        if: always() && steps.changes.outputs.code == 'true' && github.event_name == 'pull_request'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: junit-linux
           path: target/nextest/${{ env.NEXTEST_PROFILE }}/junit.xml
           if-no-files-found: warn
           retention-days: 14
+      # The archive and the cargo-nextest that made it, for this run's
+      # shards: they test exactly what this job built, and build nothing.
+      # Already compressed, so stored as is, and kept a day.
+      - name: Put the test runner beside the test archive
+        if: steps.changes.outputs.code == 'true' && github.event_name != 'pull_request'
+        run: cp "$HOME/.cache/langspan-ci-tools/cargo-nextest" "$RUNNER_TEMP/cargo-nextest"
+      - name: Keep the test archive for the shards
+        if: steps.changes.outputs.code == 'true' && github.event_name != 'pull_request'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: tests-linux
+          path: |
+            ${{ runner.temp }}/tests.tar.zst
+            ${{ runner.temp }}/cargo-nextest
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
       # After a run on main that found no entry under its key, whether its
       # checks passed or failed: drop what the next run rebuilds anyway
       # (the workspace's own crates, the release build, test reports), then
@@ -260,6 +260,120 @@ jobs:
         with:
           path: ~/.cache/langspan-ci-tools/cargo-audit
           key: ${{ steps.keys.outputs.audit }}
+  # The full lane's tests, in shards of the archive the build job made:
+  # nextest's `hash` partition gives each test to one shard by its name, so
+  # every test runs exactly once. Four shards, from the measured test time
+  # (docs/evidence/ci/shards.md); a fifth would mostly wait on the slowest
+  # benchmark dry run. Each shard runs on its own standard runner, under the
+  # foreign home, with retries and reports as the unsharded run had.
+  linux-tests:
+    name: Linux tests ${{ matrix.shard }}
+    needs: [linux]
+    if: needs.linux.outputs.code == 'true' && github.event_name != 'pull_request'
+    runs-on: ${{ vars.LINUX_RUNNER || 'ubuntu-24.04' }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: ${{ github.event_name != 'merge_group' && 2 || 0 }}
+      # The tests run real cargo and rustfmt (tests/auto_checks.rs,
+      # tests/shell_concurrent_edits.rs), and nextest runs through cargo.
+      - name: Install the toolchain from rust-toolchain.toml
+        run: |
+          rustup --version
+          rustup toolchain install
+          rustc --version
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: tests-linux
+          path: ${{ runner.temp }}
+      # An artifact keeps no file mode.
+      - name: Put the test runner on PATH
+        run: |
+          chmod 0755 "$RUNNER_TEMP/cargo-nextest"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      # Go and pytest for the tests in tests/auto_checks.rs that run a real
+      # `go test` and pytest; LANGSPAN_REQUIRE_TOOLS fails them without
+      # these. Only the full lane runs those tests. pytest goes into a
+      # virtual environment whose python3 comes first on PATH.
+      - name: Install Go for the real go test check
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.24"
+          cache: false
+      - name: Install pytest for the real pytest check
+        run: |
+          python3 -m venv "$RUNNER_TEMP/pytest"
+          "$RUNNER_TEMP/pytest/bin/python3" -m pip install --disable-pip-version-check pytest==8.4.2
+          echo "$RUNNER_TEMP/pytest/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/pytest/bin/python3" -m pytest --version
+          go version
+      - name: Run this shard of the tests
+        env:
+          LANGSPAN_CHECK_LANE: shard
+          LANGSPAN_TEST_ARCHIVE: ${{ runner.temp }}/tests.tar.zst
+          LANGSPAN_TEST_PARTITION: hash:${{ matrix.shard }}/${{ strategy.job-total }}
+          LANGSPAN_BENCH_DRY_RUNS: ${{ needs.linux.outputs.dry_runs }}
+        run: sh scripts/check.sh
+      # No test took over 10 s unless it is named `slow_…` (issue #311,
+      # docs/development-process.md#slow-tests). It reports without failing
+      # the job until the slow tests in files this change left alone (the
+      # benchmark harness, between_steps, the Codex capture, four in
+      # graph.rs and one unit test) are shortened or named.
+      - name: Check that no untagged test took over 10 s
+        if: success()
+        continue-on-error: true
+        run: python3 -I -B scripts/slow-tests.py target/nextest/ci/junit.xml
+      - name: Name the tests that passed only on retry
+        if: always()
+        run: python3 -I -B scripts/flaky-tests.py "target/nextest/$NEXTEST_PROFILE/junit.xml"
+      - name: Keep the JUnit report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: junit-linux-${{ matrix.shard }}
+          path: target/nextest/${{ env.NEXTEST_PROFILE }}/junit.xml
+          if-no-files-found: warn
+          retention-days: 14
+  # The required check `Linux`: it passes only when the build job and every
+  # shard passed, or when no shard was meant to run (a pull request's fast
+  # lane, or a change that touches no code). It runs whatever they ended
+  # with, so a failed, cancelled or timed-out part fails it rather than
+  # leaving it skipped. It names the shards' flaky tests for flaky-report.
+  linux-result:
+    name: Linux
+    needs: [linux, linux-tests]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      flaky: ${{ steps.result.outputs.flaky }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - if: needs.linux-tests.result != 'skipped'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: junit-linux-*
+          path: ${{ runner.temp }}/junit
+      - name: Pass only when the build and every shard passed
+        id: result
+        env:
+          EVENT: ${{ github.event_name }}
+          CODE: ${{ needs.linux.outputs.code }}
+          BUILD: ${{ needs.linux.result }}
+          TESTS: ${{ needs.linux-tests.result }}
+        run: bash scripts/ci-shard-results.sh "$RUNNER_TEMP/junit"
   # The same check on Apple silicon, in the full lane only. `macos-26` is
   # GitHub's current arm64 image (`macos-latest` points at it); a pinned
   # label, so an image change is a deliberate edit here. It starts with
@@ -269,17 +383,18 @@ jobs:
   # On a pull request the job passes at once on a standard Linux runner and
   # says why: the check reports in seconds, no macOS runner is
   # started, and the full macOS run happens on the merge-queue commit. It
-  # passes rather than skips, so it reports a result either way. macOS is not
-  # a required check: the merge waits for Linux, Workflows and Content.
+  # passes rather than skips, so it reports a result either way, and so
+  # does macos-result after it. In the full lane it builds and archives the
+  # tests as Linux does, and macos-tests runs them in shards.
   macos:
-    name: macOS
+    name: macOS build
     runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-24.04' || vars.MACOS_RUNNER || 'macos-26' }}
     timeout-minutes: ${{ github.event_name == 'pull_request' && 10 || github.event_name == 'merge_group' && 35 || 30 }}
     permissions:
       contents: read
     outputs:
-      flaky: ${{ steps.flaky.outputs.flaky }}
-      failed: ${{ steps.failed.outputs.failed }}
+      code: ${{ steps.changes.outputs.code }}
+      dry_runs: ${{ steps.changes.outputs.dry_runs }}
     steps:
       - name: Pass a pull request at once
         if: github.event_name == 'pull_request'
@@ -338,49 +453,30 @@ jobs:
         run: |
           bash scripts/install-ci-tools.sh "$HOME/.cache/langspan-ci-tools" cargo-nextest
           echo "$HOME/.cache/langspan-ci-tools" >> "$GITHUB_PATH"
-      # Go and pytest for the tests in tests/auto_checks.rs that run a real
-      # `go test` and pytest; LANGSPAN_REQUIRE_TOOLS fails them without
-      # these. Only the full lane runs those tests. pytest goes into a
-      # virtual environment whose python3 comes first on PATH.
-      - name: Install Go for the real go test check
-        if: steps.changes.outputs.code == 'true' && github.event_name != 'pull_request'
-        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with:
-          go-version: "1.24"
-          cache: false
-      - name: Install pytest for the real pytest check
-        if: steps.changes.outputs.code == 'true' && github.event_name != 'pull_request'
-        run: |
-          python3 -m venv "$RUNNER_TEMP/pytest"
-          "$RUNNER_TEMP/pytest/bin/python3" -m pip install --disable-pip-version-check pytest==8.4.2
-          echo "$RUNNER_TEMP/pytest/bin" >> "$GITHUB_PATH"
-          "$RUNNER_TEMP/pytest/bin/python3" -m pytest --version
-          go version
       # Without the portable checks, which Linux runs; the name stays as on
       # Linux, which scripts/measure-ci.sh finds the step by.
       - name: Check formatting, dependencies, lint, real integration tests and the demonstration
         if: steps.changes.outputs.code == 'true'
         env:
           LANGSPAN_BENCH_DRY_RUNS: ${{ steps.changes.outputs.dry_runs }}
+          LANGSPAN_TEST_ARCHIVE: ${{ runner.temp }}/tests.tar.zst
           LANGSPAN_CHECK_PORTABLE: "false"
         run: sh scripts/check.sh
-      - name: Name the tests that passed only on retry
-        id: flaky
-        if: always() && steps.changes.outputs.code == 'true'
-        run: python3 -I -B scripts/flaky-tests.py "target/nextest/$NEXTEST_PROFILE/junit.xml"
-      # For the issue macos-report opens when this job fails on main.
-      - name: Name the tests that failed
-        id: failed
-        if: always() && steps.changes.outputs.code == 'true'
-        run: bash scripts/ci-failed-tests.sh "target/nextest/$NEXTEST_PROFILE/junit.xml"
-      - name: Keep the JUnit report
-        if: always() && steps.changes.outputs.code == 'true'
+      # As on Linux.
+      - name: Put the test runner beside the test archive
+        if: steps.changes.outputs.code == 'true'
+        run: cp "$HOME/.cache/langspan-ci-tools/cargo-nextest" "$RUNNER_TEMP/cargo-nextest"
+      - name: Keep the test archive for the shards
+        if: steps.changes.outputs.code == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: junit-macos
-          path: target/nextest/${{ env.NEXTEST_PROFILE }}/junit.xml
-          if-no-files-found: warn
-          retention-days: 14
+          name: tests-macos
+          path: |
+            ${{ runner.temp }}/tests.tar.zst
+            ${{ runner.temp }}/cargo-nextest
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
       # As on Linux: after a run on main that passed or failed, not one
       # cancelled or timed out.
       - name: Prune the build cache and check its size
@@ -394,14 +490,106 @@ jobs:
         with:
           path: ${{ env.CACHE_PATHS }}
           key: ${{ steps.keys.outputs.build }}
+  # The macOS shards, as on Linux. Four, so a run holds at most four macOS
+  # runners at once (docs/evidence/ci/shards.md).
+  macos-tests:
+    name: macOS tests ${{ matrix.shard }}
+    needs: [macos]
+    if: needs.macos.outputs.code == 'true' && github.event_name != 'pull_request'
+    runs-on: ${{ vars.MACOS_RUNNER || 'macos-26' }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: ${{ github.event_name != 'merge_group' && 2 || 0 }}
+      - name: Install the toolchain from rust-toolchain.toml
+        run: |
+          rustup --version
+          rustup toolchain install
+          rustc --version
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: tests-macos
+          path: ${{ runner.temp }}
+      - name: Put the test runner on PATH
+        run: |
+          chmod 0755 "$RUNNER_TEMP/cargo-nextest"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - name: Install Go for the real go test check
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.24"
+          cache: false
+      - name: Install pytest for the real pytest check
+        run: |
+          python3 -m venv "$RUNNER_TEMP/pytest"
+          "$RUNNER_TEMP/pytest/bin/python3" -m pip install --disable-pip-version-check pytest==8.4.2
+          echo "$RUNNER_TEMP/pytest/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/pytest/bin/python3" -m pytest --version
+          go version
+      - name: Run this shard of the tests
+        env:
+          LANGSPAN_CHECK_LANE: shard
+          LANGSPAN_TEST_ARCHIVE: ${{ runner.temp }}/tests.tar.zst
+          LANGSPAN_TEST_PARTITION: hash:${{ matrix.shard }}/${{ strategy.job-total }}
+          LANGSPAN_BENCH_DRY_RUNS: ${{ needs.macos.outputs.dry_runs }}
+        run: sh scripts/check.sh
+      - name: Name the tests that passed only on retry
+        if: always()
+        run: python3 -I -B scripts/flaky-tests.py "target/nextest/$NEXTEST_PROFILE/junit.xml"
+      - name: Keep the JUnit report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: junit-macos-${{ matrix.shard }}
+          path: target/nextest/${{ env.NEXTEST_PROFILE }}/junit.xml
+          if-no-files-found: warn
+          retention-days: 14
+  # The check `macOS`, as `Linux` is made. It also names the shards' failed
+  # tests for macos-report.
+  macos-result:
+    name: macOS
+    needs: [macos, macos-tests]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      flaky: ${{ steps.result.outputs.flaky }}
+      failed: ${{ steps.result.outputs.failed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - if: needs.macos-tests.result != 'skipped'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: junit-macos-*
+          path: ${{ runner.temp }}/junit
+      - name: Pass only when the build and every shard passed
+        id: result
+        env:
+          EVENT: ${{ github.event_name }}
+          CODE: ${{ needs.macos.outputs.code }}
+          BUILD: ${{ needs.macos.result }}
+          TESTS: ${{ needs.macos-tests.result }}
+        run: bash scripts/ci-shard-results.sh "$RUNNER_TEMP/junit"
   # A test that passed only on retry on main opens one issue, or comments
   # on it while it is open, naming the tests. Only this job can write, and
   # only issues; it checks out nothing and runs no repository code. The
-  # names come from the two jobs' outputs, through the environment.
+  # names come from the two result jobs' outputs, through the environment.
   flaky-report:
     name: Flaky test report
-    needs: [linux, macos]
-    if: always() && github.ref == 'refs/heads/main' && (needs.linux.outputs.flaky != '' || needs.macos.outputs.flaky != '')
+    needs: [linux-result, macos-result]
+    if: always() && github.ref == 'refs/heads/main' && (needs.linux-result.outputs.flaky != '' || needs.macos-result.outputs.flaky != '')
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -414,8 +602,8 @@ jobs:
           TITLE: Flaky tests seen on main
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           SHA: ${{ github.sha }}
-          LINUX_FLAKY: ${{ needs.linux.outputs.flaky }}
-          MACOS_FLAKY: ${{ needs.macos.outputs.flaky }}
+          LINUX_FLAKY: ${{ needs.linux-result.outputs.flaky }}
+          MACOS_FLAKY: ${{ needs.macos-result.outputs.flaky }}
         run: |
           # One line per test: "- `binary test` (Linux)".
           list() {
@@ -438,7 +626,7 @@ jobs:
   # title is fixed text and the body only the commit and the run's link.
   nightly-report:
     name: Nightly failure report
-    needs: [linux, macos]
+    needs: [linux-result, macos-result]
     if: github.event_name == 'schedule' && failure()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -463,16 +651,16 @@ jobs:
             # the report.
             gh issue create --title "$TITLE" --body "$body"
           fi
-  # macOS isn't a required check, so a macOS failure can reach main without
-  # stopping the queue. When the macOS job fails or times out on a push to
+  # Until the ruleset requires macOS, a macOS failure can reach main without
+  # stopping the queue. When the macOS check fails or times out on a push to
   # main, this opens one issue, or comments on it while it is open, naming
   # the commit and the tests that failed. As in nightly-report: only this
   # job can write, and only issues; it checks out nothing and runs no
   # repository code, and the names reach it through the environment.
   macos-report:
     name: macOS failure report
-    needs: [macos]
-    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && (needs.macos.result == 'failure' || needs.macos.result == 'cancelled')
+    needs: [macos-result]
+    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && (needs.macos-result.result == 'failure' || needs.macos-result.result == 'cancelled')
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -485,8 +673,8 @@ jobs:
           TITLE: macOS Rust checks on main failed
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           SHA: ${{ github.sha }}
-          RESULT: ${{ needs.macos.result }}
-          FAILED: ${{ needs.macos.outputs.failed }}
+          RESULT: ${{ needs.macos-result.result }}
+          FAILED: ${{ needs.macos-result.outputs.failed }}
         run: |
           tests=$(printf '%s\n' "$FAILED" | while IFS= read -r name; do
             if [ -n "$name" ]; then printf -- '- `%s`\n' "$name"; fi

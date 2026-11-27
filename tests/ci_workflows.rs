@@ -241,6 +241,202 @@ fn linux_and_macos_start_together() {
 }
 
 #[test]
+fn the_full_lane_builds_once_per_platform_and_tests_the_archive_in_every_shard() {
+    let text = workflow("check.yml");
+    for (build, tests, runner, platform) in [
+        (
+            "linux",
+            "linux-tests",
+            "vars.LINUX_RUNNER || 'ubuntu-24.04'",
+            "linux",
+        ),
+        (
+            "macos",
+            "macos-tests",
+            "vars.MACOS_RUNNER || 'macos-26'",
+            "macos",
+        ),
+    ] {
+        let built = job(&text, build);
+        let shards = job(&text, tests);
+        // The build job archives the tests with the runner that will run
+        // them, and the shards take both from this run's artifact.
+        assert!(
+            built.contains(&format!(
+                "          name: tests-{platform}\n          path: |\n            ${{{{ runner.temp }}}}/tests.tar.zst\n            ${{{{ runner.temp }}}}/cargo-nextest\n          if-no-files-found: error\n"
+            )),
+            "{build} keeps no test archive"
+        );
+        assert!(built.contains("LANGSPAN_TEST_ARCHIVE: ${{ runner.temp }}/tests.tar.zst\n"));
+        assert!(built.contains("      code: ${{ steps.changes.outputs.code }}\n"));
+        for line in [
+            format!("\n    needs: [{build}]\n"),
+            format!(
+                "\n    if: needs.{build}.outputs.code == 'true' && github.event_name != 'pull_request'\n"
+            ),
+            format!("\n    runs-on: ${{{{ {runner} }}}}\n"),
+            "\n      fail-fast: false\n".into(),
+            format!("          name: tests-{platform}\n"),
+            "          LANGSPAN_CHECK_LANE: shard\n".into(),
+            "          LANGSPAN_TEST_ARCHIVE: ${{ runner.temp }}/tests.tar.zst\n".into(),
+            // The partition's total is the matrix's own size, so adding a
+            // shard can't leave a test in none.
+            "          LANGSPAN_TEST_PARTITION: hash:${{ matrix.shard }}/${{ strategy.job-total }}\n"
+                .into(),
+            format!("          LANGSPAN_BENCH_DRY_RUNS: ${{{{ needs.{build}.outputs.dry_runs }}}}\n"),
+            format!("          name: junit-{platform}-${{{{ matrix.shard }}}}\n"),
+        ] {
+            assert!(shards.contains(&line), "{tests} lacks {line}");
+        }
+        // Shards 1 to N, each once.
+        let matrix = shards
+            .split("\n        shard: [")
+            .nth(1)
+            .and_then(|rest| rest.split(']').next())
+            .unwrap_or_else(|| panic!("{tests} has no shard matrix"));
+        let numbers: Vec<usize> = matrix.split(", ").map(|n| n.parse().unwrap()).collect();
+        assert_eq!(numbers, (1..=numbers.len()).collect::<Vec<_>>(), "{matrix}");
+        assert!(numbers.len() > 1, "{tests} runs one shard");
+        // A shard neither restores nor saves the build cache.
+        assert!(
+            !shards.contains("actions/cache"),
+            "{tests} uses the build cache"
+        );
+    }
+}
+
+#[test]
+fn the_required_checks_wait_for_the_build_and_every_shard_whatever_they_ended_with() {
+    let text = workflow("check.yml");
+    for (id, name, build, tests) in [
+        ("linux-result", "Linux", "linux", "linux-tests"),
+        ("macos-result", "macOS", "macos", "macos-tests"),
+    ] {
+        let result = job(&text, id);
+        for line in [
+            format!("\n    name: {name}\n"),
+            format!("\n    needs: [{build}, {tests}]\n"),
+            // Not `!cancelled()`: a skipped required check counts as passed.
+            "\n    if: always()\n".into(),
+            format!("          BUILD: ${{{{ needs.{build}.result }}}}\n"),
+            format!("          TESTS: ${{{{ needs.{tests}.result }}}}\n"),
+            format!("          CODE: ${{{{ needs.{build}.outputs.code }}}}\n"),
+            "        run: bash scripts/ci-shard-results.sh \"$RUNNER_TEMP/junit\"".into(),
+        ] {
+            assert!(result.contains(&line), "{id} lacks {line}");
+        }
+        // Only the result jobs carry the required names.
+        assert_eq!(
+            text.matches(&format!("\n    name: {name}\n")).count(),
+            1,
+            "another job is named {name}"
+        );
+    }
+    for id in ["flaky-report", "nightly-report"] {
+        assert!(job(&text, id).contains("\n    needs: [linux-result, macos-result]\n"));
+    }
+}
+
+/// Runs scripts/ci-shard-results.sh over `dir` with the given results;
+/// returns (success, GITHUB_OUTPUT, stderr).
+fn shard_results(dir: &Path, env: &[(&str, &str)]) -> (bool, String, String) {
+    let output = dir.join("output");
+    let _ = fs::remove_file(&output);
+    let out = Command::new("bash")
+        .arg(root().join("scripts/ci-shard-results.sh"))
+        .arg(dir.join("junit"))
+        .env("GITHUB_OUTPUT", &output)
+        .env_remove("GITHUB_STEP_SUMMARY")
+        .envs(env.iter().copied())
+        .output()
+        .unwrap();
+    let written = fs::read_to_string(&output).unwrap_or_default();
+    (
+        out.status.success(),
+        written,
+        String::from_utf8(out.stderr).unwrap(),
+    )
+}
+
+/// The value of output `name` in a GITHUB_OUTPUT file.
+fn output_value(written: &str, name: &str) -> String {
+    let mut lines = written.lines();
+    let delimiter = lines
+        .find_map(|l| l.strip_prefix(&format!("{name}<<")))
+        .unwrap_or_else(|| panic!("no {name} in {written:?}"));
+    lines
+        .take_while(|l| *l != delimiter)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn a_platform_check_passes_only_when_its_build_and_every_shard_passed() {
+    // A shell script deciding from GitHub's job results, so it runs here as
+    // check.yml runs it.
+    let dir = temp_dir("shard-results");
+    let ok = |event: &str, code: &str, build: &str, tests: &str| {
+        let env = [
+            ("EVENT", event),
+            ("CODE", code),
+            ("BUILD", build),
+            ("TESTS", tests),
+        ];
+        shard_results(&dir, &env).0
+    };
+    assert!(ok("merge_group", "true", "success", "success"));
+    // No shard runs on a pull request (the build job ran the fast lane) or
+    // for a change that touches no code.
+    assert!(ok("pull_request", "true", "success", "skipped"));
+    assert!(ok("merge_group", "false", "success", "skipped"));
+    for tests in ["failure", "cancelled"] {
+        assert!(!ok("merge_group", "true", "success", tests), "{tests}");
+        assert!(!ok("pull_request", "true", "success", tests), "{tests}");
+    }
+    // Shards skipped when they should have run: the tests didn't run.
+    assert!(!ok("merge_group", "true", "success", "skipped"));
+    assert!(!ok("push", "true", "success", "skipped"));
+    for build in ["failure", "cancelled", "skipped", ""] {
+        assert!(!ok("merge_group", "true", build, "skipped"), "{build}");
+        assert!(!ok("pull_request", "true", build, "skipped"), "{build}");
+    }
+
+    // The names of flaky and failed tests come from every shard's report:
+    // two shards, each with one of each.
+    for shard in [1, 2] {
+        let to = dir.join(format!("junit/junit-macos-{shard}"));
+        fs::create_dir_all(&to).unwrap();
+        fs::copy(
+            root().join("tests/fixtures/nextest/junit-retries.xml"),
+            to.join("junit.xml"),
+        )
+        .unwrap();
+    }
+    let env = [
+        ("EVENT", "push"),
+        ("CODE", "true"),
+        ("BUILD", "success"),
+        ("TESTS", "failure"),
+    ];
+    let (passed, written, stderr) = shard_results(&dir, &env);
+    let _ = fs::remove_dir_all(&dir);
+    assert!(!passed);
+    assert!(
+        stderr.contains("the test shards ended with 'failure'"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("flaky_sample fails_every_try"), "{stderr}");
+    assert_eq!(
+        output_value(&written, "failed"),
+        "flaky_sample fails_every_try\nflaky_sample fails_every_try"
+    );
+    assert_eq!(
+        output_value(&written, "flaky"),
+        "flaky_sample passes_on_its_second_try\nflaky_sample passes_on_its_second_try"
+    );
+}
+
+#[test]
 fn each_job_takes_its_runner_from_a_repository_variable() {
     let text = workflow("check.yml");
     assert!(
@@ -268,7 +464,7 @@ fn profile(config: &str, name: &str) -> String {
 fn a_pull_request_runs_the_fast_lane_and_a_queued_commit_every_test() {
     let text = workflow("check.yml");
     for line in [
-        "LANGSPAN_CHECK_LANE: ${{ github.event_name == 'pull_request' && 'fast' || 'full' }}",
+        "LANGSPAN_CHECK_LANE: ${{ github.event_name == 'pull_request' && 'fast' || 'build' }}",
         "NEXTEST_PROFILE: ${{ github.event_name == 'pull_request' && 'ci-fast' || 'ci' }}",
     ] {
         assert!(text.contains(line), "check.yml lacks {line}");
@@ -322,9 +518,61 @@ fn check_sh_refuses_an_unknown_lane_before_it_runs_anything() {
     assert_eq!(out.status.code(), Some(2), "{out:?}");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("LANGSPAN_CHECK_LANE is 'quick'; set it to fast or full"),
+        stderr.contains("LANGSPAN_CHECK_LANE is 'quick'; set it to fast, full, build or shard"),
         "{stderr}"
     );
+}
+
+/// Runs check.sh outside the repository with `env`; returns (exit code,
+/// stderr). A refusal must come before any check, which would fail there.
+fn check_sh_refusal(name: &str, env: &[(&str, &str)]) -> (Option<i32>, String) {
+    let dir = temp_dir(name);
+    let out = Command::new("sh")
+        .arg(root().join("scripts/check.sh"))
+        .current_dir(&dir)
+        .env_remove("LANGSPAN_TEST_ARCHIVE")
+        .env_remove("LANGSPAN_TEST_PARTITION")
+        .envs(env.iter().copied())
+        .output()
+        .unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    (
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr).into(),
+    )
+}
+
+#[test]
+fn check_sh_refuses_a_build_or_shard_lane_without_its_archive_or_partition() {
+    for lane in ["build", "shard"] {
+        let (code, stderr) = check_sh_refusal("check-archive", &[("LANGSPAN_CHECK_LANE", lane)]);
+        assert_eq!(code, Some(2), "{stderr}");
+        assert!(
+            stderr.contains(&format!(
+                "the {lane} lane needs LANGSPAN_TEST_ARCHIVE, the nextest archive's path"
+            )),
+            "{stderr}"
+        );
+    }
+    // A shard runs only the part its partition names; without one, or with
+    // one nextest would read as a different scheme, it would run them all.
+    for partition in ["", "1/4", "count:1/4", "hash:0/4", "hash:1"] {
+        let (code, stderr) = check_sh_refusal(
+            "check-partition",
+            &[
+                ("LANGSPAN_CHECK_LANE", "shard"),
+                ("LANGSPAN_TEST_ARCHIVE", "/nonexistent/tests.tar.zst"),
+                ("LANGSPAN_TEST_PARTITION", partition),
+            ],
+        );
+        assert_eq!(code, Some(2), "{partition}: {stderr}");
+        assert!(
+            stderr.contains(&format!(
+                "LANGSPAN_TEST_PARTITION is '{partition}'; the shard lane needs hash:K/N"
+            )),
+            "{stderr}"
+        );
+    }
 }
 
 #[test]
@@ -791,18 +1039,18 @@ fn the_macos_failure_report_names_the_tests_that_failed_every_try_and_no_other()
 #[test]
 fn a_macos_failure_on_main_opens_or_updates_one_issue() {
     let text = workflow("check.yml");
-    assert!(job(&text, "macos").contains("\n      failed: ${{ steps.failed.outputs.failed }}\n"));
-    assert!(job(&text, "macos").contains(
-        "if: always() && steps.changes.outputs.code == 'true'\n        run: bash scripts/ci-failed-tests.sh \"target/nextest/$NEXTEST_PROFILE/junit.xml\"\n"
-    ));
+    // The names come from every shard, through the macOS check.
+    assert!(
+        job(&text, "macos-result").contains("\n      failed: ${{ steps.result.outputs.failed }}\n")
+    );
     let report = job(&text, "macos-report");
     for line in [
-        "\n    needs: [macos]\n",
-        "\n    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && (needs.macos.result == 'failure' || needs.macos.result == 'cancelled')\n",
+        "\n    needs: [macos-result]\n",
+        "\n    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && (needs.macos-result.result == 'failure' || needs.macos-result.result == 'cancelled')\n",
         "\n      issues: write\n",
         "TITLE: macOS Rust checks on main failed",
         "SHA: ${{ github.sha }}",
-        "FAILED: ${{ needs.macos.outputs.failed }}",
+        "FAILED: ${{ needs.macos-result.outputs.failed }}",
         "gh issue comment \"$number\"",
         "gh issue create --title \"$TITLE\"",
     ] {
@@ -955,9 +1203,12 @@ fn check_sh_denies_doc_warnings_and_ends_each_lane_with_no_process_left() {
         check.contains("RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --locked\n"),
         "{check}"
     );
-    // Both lanes end by looking for leftovers: the fast lane before it
-    // exits, the full lane on its last line.
+    // Every lane ends by looking for leftovers: the fast lane and a shard
+    // before they exit, the full and build lanes on the last line.
     assert!(check.contains("  leftovers\n  echo \"check.sh: fast lane done"));
+    assert!(check.contains(
+        "  sh scripts/test-foreign-home.sh --partition \"$partition\"\n  leftovers\n  exit 0\n"
+    ));
     assert!(check.trim_end().ends_with("\nleftovers"), "{check}");
 }
 
@@ -1018,7 +1269,8 @@ fn ci_installs_the_runners_the_real_tool_tests_need_and_requires_them() {
         text.contains("\n  LANGSPAN_REQUIRE_TOOLS: \"1\"\n"),
         "check.yml lets tests/auto_checks.rs skip a missing runner"
     );
-    for id in ["linux", "macos"] {
+    // The shards run the tests; the build jobs run none of these.
+    for id in ["linux-tests", "macos-tests"] {
         let job = job(&text, id);
         for line in [
             "uses: actions/setup-go@",
