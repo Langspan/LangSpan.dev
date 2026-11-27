@@ -1572,7 +1572,7 @@ mod unix {
                     named.clone_from(&request.capabilities);
                     // Clients redact before sending; a client that did not
                     // still cannot have a secret recorded.
-                    crate::hook::redact_command(&mut request.command);
+                    crate::text::redact::redact_command(&mut request.command);
                     let id = request.request_id.clone();
                     let transfer = is_transfer(&request.command);
                     let (tx, rx) = oneshot::channel();
