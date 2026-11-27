@@ -87,7 +87,8 @@ Conventional Commits titles of merged pull requests
 ([`release.yml`](../.github/workflows/release.yml)). Merge the release pull
 request as soon as its checks pass; merging it tags and publishes the
 release. While its checks run, hold other merges so they don't restart the
-checks.
+checks. The project's release app opens the release pull request, so its
+checks run like any other pull request's.
 
 Before 1.0, a breaking change (`feat!:`) raises the minor version.
 [CONTRIBUTING.md](../CONTRIBUTING.md) lists how each title type affects the
