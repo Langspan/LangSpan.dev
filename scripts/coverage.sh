@@ -13,8 +13,11 @@
 # `cargo llvm-cov report` covers only the root crate of this workspace, so
 # llvm-cov exports the counts itself over every test binary nextest lists,
 # plus the langspan binary the tests start: production.lcov over the
-# integration-test binaries (their libraries have no #[cfg(test)] code),
-# all.lcov over every one.
+# integration-test binaries, all.lcov over every one. Their libraries have
+# no #[cfg(test)] code, but a test that includes a source with #[path]
+# compiles its test modules; `coverage-report.py --prepare` drops those
+# lines, here, against the sources just built, and makes the source paths
+# relative so a downloaded artifact reads the same in any checkout.
 #
 # Needs cargo-llvm-cov and cargo-nextest (scripts/install-ci-tools.sh) and
 # rustup's llvm-tools component. Usage: bash scripts/coverage.sh [DIR]
@@ -84,6 +87,7 @@ for b in json.load(open(sys.argv[1]))["rust-binaries"].values():
 }
 export_lcov production.lcov test
 export_lcov all.lcov test lib bin proc-macro
+python3 -I -B scripts/coverage-report.py --prepare . "$out"
 
 report=0
 python3 -I -B scripts/coverage-report.py . "$out" >"$out/report.md" || report=$?

@@ -187,8 +187,10 @@ pull request that changes the measurement. It isn't a required check. The
 script runs the suite once under cargo-llvm-cov and cargo-nextest, with the
 profile written continuously, so coordinators that tests stop with SIGKILL
 still count. It counts production lines only (`src/` and `crates/*/src/`,
-without `#[cfg(test)]` code); in-file unit tests still cover them. The run
-summary has the per-file table.
+without `#[cfg(test)]` code, even where an integration test includes a
+source with `#[path]`); in-file unit tests still cover them. The exports
+name sources relative to the checkout, so a downloaded artifact reads the
+same in yours. The run summary has the per-file table.
 
 The floor: production lines 90% covered or more, and none of the ten files
 with the most production lines more than 2 points under its row in

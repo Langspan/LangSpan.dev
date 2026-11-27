@@ -763,6 +763,7 @@ fn coverage_runs_nightly_reports_a_drop_and_is_not_a_required_check() {
         "cargo nextest run --workspace --locked || status=$?",
         "export_lcov production.lcov test\n",
         "export_lcov all.lcov test lib bin proc-macro\n",
+        "python3 -I -B scripts/coverage-report.py --prepare . \"$out\"\n",
     ] {
         assert!(script.contains(line), "coverage.sh lacks {line}");
     }
@@ -797,7 +798,7 @@ fn coverage_fixture(dir: &Path, files: &[Measured], baseline: &str) -> PathBuf {
         // A line of an in-file test module: measured only with the unit
         // tests, so it is not production code.
         all += &format!("DA:{},1\n", lines + 1);
-        production += "end_of_record\n";
+        production += &format!("LF:{lines}\nLH:{covered}\nend_of_record\n");
         all += "end_of_record\n";
     }
     // Neither the tests nor the toolchain's sources count.
@@ -807,6 +808,9 @@ fn coverage_fixture(dir: &Path, files: &[Measured], baseline: &str) -> PathBuf {
     );
     fs::write(out.join("production.lcov"), format!("{production}{extra}")).unwrap();
     fs::write(out.join("all.lcov"), format!("{all}{extra}")).unwrap();
+    // As scripts/coverage.sh does in the checkout it built.
+    let (ok, stdout, stderr) = coverage_report(dir, &out, &["--prepare"]);
+    assert!(ok, "{stdout}{stderr}");
     out
 }
 
@@ -948,7 +952,47 @@ fn writing_the_coverage_baseline_records_one_row_per_file() {
     let (ok, stdout, _) = coverage_report(&dir, &out, &[]);
     assert!(ok, "{stdout}");
     assert!(!stdout.contains("no baseline row"), "{stdout}");
+
+    // A nightly artifact measured in another checkout updates this one's
+    // baseline: the prepared exports name repository-relative sources.
+    let elsewhere = temp_dir("coverage-elsewhere");
+    let artifact = elsewhere.join("target/coverage");
+    fs::create_dir_all(&artifact).unwrap();
+    fs::create_dir_all(elsewhere.join("scripts")).unwrap();
+    fs::write(
+        elsewhere.join("scripts/coverage-baseline.tsv"),
+        "# A comment.\n",
+    )
+    .unwrap();
+    for name in ["production.lcov", "all.lcov"] {
+        let text = fs::read_to_string(out.join(name)).unwrap();
+        assert!(!text.contains(&*dir.to_string_lossy()), "{text}");
+        fs::write(artifact.join(name), text).unwrap();
+    }
+    let (ok, stdout, stderr) = coverage_report(&elsewhere, &artifact, &["--write-baseline"]);
+    assert!(ok, "{stdout}{stderr}");
+    let moved = fs::read_to_string(elsewhere.join("scripts/coverage-baseline.tsv")).unwrap();
+    assert_eq!(moved, written, "the same rows in either checkout");
     let _ = fs::remove_dir_all(&dir);
+
+    // Exports never prepared, from another checkout, fail and say why.
+    let dir = temp_dir("coverage-unprepared");
+    let raw = format!(
+        "SF:{}\nDA:1,1\nend_of_record\n",
+        dir.join("src/f00.rs").display()
+    );
+    fs::write(artifact.join("production.lcov"), &raw).unwrap();
+    fs::write(artifact.join("all.lcov"), &raw).unwrap();
+    let (ok, _, stderr) = coverage_report(&elsewhere, &artifact, &[]);
+    assert!(!ok);
+    assert!(
+        stderr.contains("no production lines")
+            && stderr.contains("1 source outside the checkout")
+            && stderr.contains("coverage-report.py --prepare"),
+        "{stderr}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&elsewhere);
 
     // The repository's own baseline is one sorted row per file.
     let baseline = read("scripts/coverage-baseline.tsv");
@@ -957,4 +1001,120 @@ fn writing_the_coverage_baseline_records_one_row_per_file() {
     sorted.sort_unstable();
     sorted.dedup_by(|a, b| a.split('\t').next() == b.split('\t').next());
     assert_eq!(rows, sorted, "rows are sorted, one per file");
+}
+
+#[test]
+fn coverage_drops_test_only_items_that_integration_tests_compile() {
+    // A source an integration test includes with #[path], so its #[cfg(test)]
+    // items are measured with the production lines. Each line is production
+    // code (P) or test-only (T).
+    let source = [
+        "pub fn a() {}",                           // P
+        "#[cfg(test)]",                            // T: a module
+        "mod tests {",                             // T
+        "    fn t() { let _ = \"}\"; }",           // T: a brace in a string
+        "}",                                       // T
+        "#[cfg(test)]",                            // T: stacked attributes
+        "#[path = \"../tests/support/shape.rs\"]", // T
+        "mod shape;",                              // T
+        "pub fn b() {",                            // P
+        "    #[cfg(test)]",                        // T: a statement
+        "    COUNT.with(|c| c.set(1));",           // T
+        "    let x = 1;",                          // P
+        "    #[cfg(all(test, unix))]",             // T: an indented module
+        "    mod inner {",                         // T
+        "        fn u() {}",                       // T
+        "    }",                                   // T
+        "    #[cfg(test)]",                        // T: a multi-line call
+        "    record(",                             // T
+        "        x,",                              // T
+        "    );",                                  // T
+        "}",                                       // P
+        "#[cfg(test)]",                            // T: a multi-line signature
+        "pub(crate) fn helper(",                   // T
+        "    a: u8,",                              // T
+        ") -> u8 {",                               // T
+        "    a",                                   // T
+        "}",                                       // T
+        "#[cfg(any(test, feature = \"x\"))]",      // P: also built without tests
+        "pub fn c() {}",                           // P
+        "#[cfg(not(test))]",                       // P
+        "pub fn d() {}",                           // P
+        "#[cfg(test)]",                            // T: literals at column 0
+        "mod literals {",                          // T
+        "    const RAW: &str = r#\"",              // T
+        "}",                                       // T: in a raw string
+        "#[cfg(test)]",                            // T: not an attribute
+        "\"#;",                                    // T
+        "    const TEXT: &str = \"",               // T
+        "} \\\" {",                                // T: in a string
+        "\";",                                     // T
+        "    const OPEN: char = '{';",             // T: a char
+        "    fn f<'a>(x: &'a str) -> &'a str {",   // T: lifetimes
+        "        x // }",                          // T: in a comment
+        "    }",                                   // T
+        "    /* } */",                             // T
+        "}",                                       // T
+        "pub const S: &str = \"#[cfg(test)]\";",   // P: in a string
+        "pub fn e() -> u8 {",                      // P
+        "    #[cfg(test)]",                        // T: a final expression
+        "    { 1 }",                               // T
+        "}",                                       // P
+    ];
+    let test_only = |n| matches!(n, 2..=8 | 10..=11 | 13..=20 | 22..=27 | 32..=46 | 49..=50);
+    let production: Vec<usize> = (1..=source.len()).filter(|&n| !test_only(n)).collect();
+    let dir = temp_dir("coverage-test-only");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("src/m.rs"), source.join("\n") + "\n").unwrap();
+    let measured = [Measured("src/m.rs", source.len(), source.len(), 0)];
+    let out = coverage_fixture(&dir, &measured, "");
+    let prepared = fs::read_to_string(out.join("production.lcov")).unwrap();
+    assert_eq!(kept_lines(&prepared, "src/m.rs"), production, "{prepared}");
+    // The record's totals count what it keeps.
+    let totals = format!("LF:{0}\nLH:{0}\nend_of_record\n", production.len());
+    assert!(prepared.contains(&totals), "{prepared}");
+    let (_, stdout, _) = coverage_report(&dir, &out, &[]);
+    let row = format!(
+        "| `src/m.rs` | {0} | {0} | 100.0 | none |",
+        production.len()
+    );
+    assert!(stdout.contains(&row), "{stdout}");
+    // A second preparation changes nothing.
+    let (ok, _, stderr) = coverage_report(&dir, &out, &["--prepare"]);
+    assert!(ok, "{stderr}");
+    let again = fs::read_to_string(out.join("production.lcov")).unwrap();
+    assert_eq!(again, prepared);
+    let _ = fs::remove_dir_all(&dir);
+
+    // tests/parser_properties.rs includes src/hook/redact.rs: from its first
+    // #[cfg(test)] to the end, only the blank lines between test items stay.
+    let dir = temp_dir("coverage-redact");
+    let text = read("src/hook/redact.rs");
+    let source: Vec<&str> = text.lines().collect();
+    let first = 1 + source.iter().position(|l| *l == "#[cfg(test)]").unwrap();
+    fs::create_dir_all(dir.join("src/hook")).unwrap();
+    fs::write(dir.join("src/hook/redact.rs"), &text).unwrap();
+    let measured = [Measured("src/hook/redact.rs", source.len(), 0, 0)];
+    let out = coverage_fixture(&dir, &measured, "");
+    let prepared = fs::read_to_string(out.join("production.lcov")).unwrap();
+    let kept = kept_lines(&prepared, "src/hook/redact.rs");
+    let (before, after): (Vec<usize>, Vec<usize>) = kept.iter().partition(|&&n| n < first);
+    assert_eq!(before, (1..first).collect::<Vec<_>>());
+    assert!(
+        after.len() == 1 && source[after[0] - 1].is_empty(),
+        "{after:?}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// The line numbers the record of `file` in a prepared export keeps.
+fn kept_lines(export: &str, file: &str) -> Vec<usize> {
+    export
+        .split("end_of_record\n")
+        .find(|record| record.starts_with(&format!("SF:{file}\n")))
+        .unwrap_or_else(|| panic!("no record of {file} in {export}"))
+        .lines()
+        .filter_map(|line| line.strip_prefix("DA:"))
+        .map(|da| da.split(',').next().unwrap().parse().unwrap())
+        .collect()
 }
