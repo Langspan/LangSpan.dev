@@ -1941,3 +1941,73 @@ fn uninstall_signals_no_process_when_no_coordinator_holds_the_lock() {
     assert!(alive, "{said}");
     assert!(!said.contains("Stopped the coordinator."), "{said}");
 }
+
+/// A state directory holding `daemon.lock`, which the returned file locks,
+/// as a coordinator does from before it binds its socket.
+fn held_lock(home: &Home) -> (PathBuf, fs::File) {
+    fs::create_dir(home.home().join(".claude")).unwrap();
+    let state = home.state_dir();
+    fs::create_dir(&state).unwrap();
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(state.join("daemon.lock"))
+        .unwrap();
+    lock.set_permissions(fs::Permissions::from_mode(0o600))
+        .unwrap();
+    lock.try_lock().unwrap();
+    (state, lock)
+}
+
+/// Review of #418: a coordinator that is starting holds `daemon.lock` before
+/// it binds its socket. Uninstall treats a held lock as a running coordinator
+/// whether or not it answers: one that never answers fails the uninstall with
+/// the state directory kept, and a dry run says it would be stopped.
+#[test]
+fn uninstall_refuses_to_purge_while_a_silent_coordinator_holds_the_lock() {
+    let home = Home::new();
+    let (state, _lock) = held_lock(&home);
+    let dry = home.ok(&["uninstall", "--purge"]);
+    assert!(dry.contains("The coordinator would be stopped."), "{dry}");
+
+    let refused = home.langspan(&["uninstall", "--purge", "--apply"]);
+    assert!(!refused.status.success(), "{refused:?}");
+    let said = String::from_utf8(refused.stderr).unwrap();
+    assert!(said.contains("holds daemon.lock"), "{said}");
+    assert!(state.join("daemon.lock").is_file(), "{said}");
+}
+
+/// A coordinator that frees `daemon.lock` while uninstall waits for it to
+/// answer has stopped: the purge goes ahead and signals no process.
+#[test]
+fn uninstall_purges_once_a_silent_coordinator_frees_the_lock() {
+    let home = Home::new();
+    let (state, lock) = held_lock(&home);
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        drop(lock);
+    });
+    let purged = home.ok(&["uninstall", "--purge", "--apply"]);
+    release.join().unwrap();
+    assert!(!state.exists(), "{purged}");
+    assert!(!purged.contains("Stopped the coordinator."), "{purged}");
+}
+
+/// A state directory without `daemon.lock`, or none at all, has no
+/// coordinator to stop.
+#[test]
+fn uninstall_stops_nothing_without_a_state_directory_or_its_lock() {
+    let home = Home::new();
+    fs::create_dir(home.home().join(".claude")).unwrap();
+    let said = home.ok(&["uninstall", "--apply"]);
+    assert!(!said.contains("coordinator"), "{said}");
+    let state = home.state_dir();
+    fs::create_dir(&state).unwrap();
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+    let said = home.ok(&["uninstall", "--purge", "--apply"]);
+    assert!(!said.contains("coordinator"), "{said}");
+    assert!(!state.exists(), "{said}");
+}

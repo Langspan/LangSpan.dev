@@ -1940,8 +1940,7 @@ fn remove_service(home: &UserHome, apply: bool) -> Result<usize, langspan::Error
 fn stop_coordinator(state_dir: &std::path::Path, apply: bool) -> Result<usize, langspan::Error> {
     use std::time::{Duration, Instant};
     if !apply {
-        let runs =
-            langspan::client::accepts(state_dir, Instant::now() + Duration::from_millis(100));
+        let runs = langspan::autostart::running(state_dir)?;
         if runs {
             println!("The coordinator would be stopped.");
         }

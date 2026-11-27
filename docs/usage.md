@@ -227,7 +227,9 @@ through a symbolic link (`/tmp` and `/private/tmp` on macOS) is the same
 coordinator, and only a genuinely different directory is reported.
 `langspan uninstall --apply` removes the user-level entries it recognizes,
 stops and removes the coordinator's login service if `setup` installed one,
-stops the coordinator however it was started, removes the `~/.claude/skills` folder when
+stops the coordinator however it was started (one that holds `daemon.lock`
+but doesn't answer within 5 seconds fails the uninstall with nothing removed),
+removes the `~/.claude/skills` folder when
 the skill was all it held, and leaves the coordination state directory in
 place. It then prints the `rm` commands for the binary and the state directory.
 `--purge` removes the state directory as well; it refuses a directory that
