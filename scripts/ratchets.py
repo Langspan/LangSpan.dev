@@ -155,6 +155,30 @@ _NOT_OPERAND = {
 }
 
 
+def _is_attribute_end(s, i):
+    """Whether the `]` at i closes an attribute `#[...]` or `#![...]`."""
+    depth = 0
+    for j in range(i, -1, -1):
+        depth += {"]": 1, "[": -1}.get(s[j], 0)
+        if not depth:
+            k = j - 1
+            while k >= 0 and s[k].isspace():
+                k -= 1
+            k -= k >= 0 and s[k] == "!"
+            return k >= 0 and s[k] == "#"
+    return False
+
+
+def _not_operand(s, m):
+    """Whether the word or `]` matched by _INDEX starts what follows, not indexes it."""
+    word, at = m.group(1), m.start()
+    if word == "]":
+        return _is_attribute_end(s, at)
+    if s[at - 1 : at] == "'":  # a lifetime or a label; strip blanks character literals
+        return True
+    return word in _NOT_OPERAND and not (at >= 2 and s.startswith("r#", at - 2))
+
+
 class Source:
     """One Rust file reduced to its production code."""
 
@@ -222,8 +246,7 @@ class Source:
             return self._indexing
         counts, s = [0, 0], self._marked
         for m in _INDEX.finditer(s):
-            raw = m.start() >= 2 and s.startswith("r#", m.start() - 2)
-            if m.group(1) in _NOT_OPERAND and not raw:
+            if _not_operand(s, m):
                 continue
             depth, j = 0, m.end()
             while j < len(s) and (depth or s[j] != "]"):

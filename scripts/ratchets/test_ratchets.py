@@ -301,6 +301,43 @@ class Indexing(unittest.TestCase):
         )
         self.assertEqual(ratchets.Source(src).indexing(), (2, 2))
 
+    def test_a_lifetime_or_label_before_a_comment_is_not_an_operand(self):
+        # A lifetime starts a slice type and a label a break value; neither is indexed.
+        src = (
+            "pub fn f(v: &'static /* bytes */ [u8]) {}\n"
+            "fn g<'a>(v: &'a /* c */ [u8], w: &'a1 /* c */ [u8]) {}\n"
+            "fn h() -> [u8; 1] {\n"
+            "    'out: loop { break 'out /* result */ [1]; }\n"
+            "}\n"
+        )
+        self.assertEqual(ratchets.Source(src).indexing(), (0, 0))
+
+    def test_an_attribute_before_a_comment_is_not_an_operand(self):
+        # An attribute's `]` ends the attribute, so the `[` after the comment starts
+        # a pattern or an array, however deeply the attribute nests its brackets.
+        src = (
+            "fn f(v: [u8; 2]) {\n"
+            "    match v { #[allow(unused_variables)] /* row */ [a, b] => {} }\n"
+            "    match v { #[cfg_attr(all(), allow(unused))] /* c */ [a, _] => {} }\n"
+            '    #[doc = "x[1]"] /* c */ [1, 2];\n'
+            "    #[rustfmt::skip] /* c */ [1, 2];\n"
+            "    let _ = vec![#[allow(unused)] /* c */ [1]];\n"
+            "}\n"
+        )
+        self.assertEqual(ratchets.Source(src).indexing(), (0, 0))
+
+    def test_a_bracket_that_closes_an_expression_before_a_comment_is_an_operand(self):
+        # Only an attribute's `]` is excluded: an array or an index still gets indexed.
+        src = (
+            "fn f(x: [[u8; 2]; 2], i: usize) -> u8 {\n"
+            "    let a = [1, 2] /* c */ [i];\n"
+            "    let b = x[0] /* c */ [1];\n"
+            "    let c = &x[0] /* c */ [..i];\n"
+            "    a + b\n"
+            "}\n"
+        )
+        self.assertEqual(ratchets.Source(src).indexing(), (4, 1))
+
     def test_marking_a_comment_keeps_its_lines(self):
         marked = ratchets.strip("a /* x\ny */ b // z\n", mark=True)
         self.assertEqual(marked, "a " + "\x01" * 4 + "\n" + "\x01" * 4 + " b " + "\x01" * 4 + "\n")
