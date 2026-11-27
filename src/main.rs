@@ -4451,19 +4451,11 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
         json,
         apply,
     } = parse_options(input)?;
-    let action = args.first().map(String::as_str);
-    if !symbols.is_empty() && !matches!(action, Some("check-write" | "remember")) {
-        return Err("option --symbol is not valid for this command".into());
-    }
-    if action == Some("remember") && symbols.len() > 1 {
-        return Err("a note is anchored to one definition: give --symbol once".into());
-    }
-    if !tags.is_empty() && !matches!(action, Some("remember" | "recap")) {
-        return Err("option --tag is not valid for this command".into());
-    }
-    if action == Some("recap") && tags.len() > 1 {
-        return Err("recap filters by one tag: give --tag once".into());
-    }
+    let words: Vec<&str> = args.iter().map(String::as_str).collect();
+    let before_command = &words[..words.len() - command.len()];
+    let flags = flags_of(&words, before_command);
+    flags.symbol.check("--symbol", symbols.len())?;
+    flags.tag.check("--tag", tags.len())?;
     if let [action] = args.as_slice()
         && (action == "install" || action == "uninstall")
     {
@@ -4503,8 +4495,6 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
     let home_option = options.remove("--home").map(PathBuf::from);
     let state_option = options.get("--state-dir").cloned();
     let state_dir = state_dir(&mut options)?;
-    let words: Vec<&str> = args.iter().map(String::as_str).collect();
-    let before_command = &words[..words.len() - command.len()];
     match before_command {
         ["doctor"] => {
             let root = options.remove("--root").map(PathBuf::from);
@@ -4579,12 +4569,7 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
     {
         return hooks(vendor, *action == "install", state_dir, &mut options, apply);
     }
-    let takes_apply = before_command == ["compact"]
-        || matches!(
-            words.as_slice(),
-            ["workspace", "remove", _] | ["graph", "import", _]
-        );
-    if apply && !takes_apply {
+    if apply && !flags.apply {
         return Err(
             "--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"
                 .into(),
@@ -5102,6 +5087,152 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
     })
 }
 
+/// The flags one command takes, read once its words are known.
+struct Flags {
+    /// Flags without a value.
+    switches: &'static [&'static str],
+    /// Flags that take a value.
+    values: &'static [&'static str],
+    /// Whether `run` lets `--apply` through to the command.
+    apply: bool,
+    symbol: Repeat,
+    tag: Repeat,
+}
+
+/// How often a command takes `--symbol` or `--tag`.
+#[derive(Clone, Copy)]
+enum Repeat {
+    No,
+    /// At most once; the text says why.
+    Once(&'static str),
+    Any,
+}
+
+impl Repeat {
+    fn check(self, name: &str, given: usize) -> Result<(), langspan::Error> {
+        match self {
+            Repeat::No if given > 0 => {
+                Err(format!("option {name} is not valid for this command").into())
+            }
+            Repeat::Once(why) if given > 1 => Err(why.into()),
+            _ => Ok(()),
+        }
+    }
+}
+
+const SWITCHES: &[&str] = &[
+    "--open",
+    "--allow-network",
+    "--demo",
+    "--check-again",
+    "--rebase",
+    "--adapt-renames",
+    "--symbols",
+    "--publish-as-branch",
+    "--mine",
+    "--detail",
+    "--rank",
+    "--renamed",
+    "--recent",
+    "--all",
+    "--skill",
+    "--create",
+    "--yes",
+    "--switch",
+    "--off",
+];
+
+const VALUES: &[&str] = &[
+    "--state-dir",
+    "--request-id",
+    "--summary",
+    "--ttl-ms",
+    "--after",
+    "--limit",
+    "--workspace",
+    "--root",
+    "--budget-ms",
+    "--event",
+    "--settings",
+    "--prompt-summary",
+    "--code-briefing",
+    "--presence",
+    "--presence-minutes",
+    "--max-peers",
+    "--remote",
+    "--name",
+    "--share-task",
+    "--onto",
+    "--timeout-s",
+    "--wait-s",
+    "--session",
+    "--to",
+    "--from",
+    "--home",
+    "--hosts",
+    "--listen",
+    "-m",
+    "--message",
+    "--statusline",
+    "--deadline-ms",
+    "--forget",
+    "--since",
+    "--sound",
+    "--depth",
+    "--path",
+    "--out",
+    "--in",
+    "--before",
+    "--keep-days",
+    "--month",
+    "--format",
+    "--file",
+    "--tools",
+    "--host",
+    "--mcp-tools",
+    "--wait-ms",
+    "--max-hops",
+    "--mode",
+    "--outline-reads",
+];
+
+/// The flags of the command `words` name: all the words, and `before`,
+/// those before a `--`.
+fn flags_of(words: &[&str], before: &[&str]) -> Flags {
+    Flags {
+        switches: SWITCHES,
+        values: VALUES,
+        apply: before == ["compact"]
+            || matches!(words, ["workspace", "remove", _] | ["graph", "import", _]),
+        symbol: match words.first() {
+            Some(&"check-write") => Repeat::Any,
+            Some(&"remember") => {
+                Repeat::Once("a note is anchored to one definition: give --symbol once")
+            }
+            _ => Repeat::No,
+        },
+        tag: match words.first() {
+            Some(&"remember") => Repeat::Any,
+            Some(&"recap") => Repeat::Once("recap filters by one tag: give --tag once"),
+            _ => Repeat::No,
+        },
+    }
+}
+
+/// Whether some command declares `name` as a flag that takes a value
+/// (`Some(true)`) or none (`Some(false)`). The parser reads this before
+/// the command's words are known.
+fn takes_value(name: &str) -> Option<bool> {
+    let flags = flags_of(&[], &[]);
+    if flags.switches.contains(&name) {
+        Some(false)
+    } else if flags.values.contains(&name) {
+        Some(true)
+    } else {
+        None
+    }
+}
+
 struct ParsedOptions {
     args: Vec<String>,
     /// Everything after a literal `--`: a check's command line.
@@ -5138,46 +5269,15 @@ fn parse_options(input: Vec<String>) -> Result<ParsedOptions, langspan::Error> {
             "--symbol" => symbols.push(input.next().ok_or("--symbol needs a value")?),
             "--tag" => tags.push(input.next().ok_or("--tag needs a value")?),
             "--apply" => apply = true,
-            // Flags, kept with the options so that only the commands that take
-            // them accept them (`dashboard`: `--open`, `--allow-network`, `--demo`;
-            // `land`: `--check-again`; `land` and `integrate check`:
-            // `--rebase`, `--adapt-renames`; `integrate check`: `--symbols`;
-            // `remote enable`: `--publish-as-branch`;
-            // `install` and `hooks install cursor`: `--skill`; `status`: `--all`;
-            // `graph symbol`: `--detail`, `--rank`, `--renamed`; `brief`: `--recent`;
-            // `setup`: `--yes`; `guidance install`: `--create`).
-            "--open"
-            | "--allow-network"
-            | "--demo"
-            | "--check-again"
-            | "--rebase"
-            | "--adapt-renames"
-            | "--symbols"
-            | "--publish-as-branch"
-            | "--mine"
-            | "--detail"
-            | "--rank"
-            | "--renamed"
-            | "--recent"
-            | "--all"
-            | "--skill"
-            | "--create"
-            | "--yes"
-            | "--switch"
-            | "--off" => {
+            // A flag some command declares. Its words are not known yet, so
+            // these are kept with the options, and only the commands that
+            // read them accept them.
+            name if takes_value(name) == Some(false) => {
                 if options.insert(arg.clone(), String::new()).is_some() {
                     return Err(format!("duplicate option {arg}").into());
                 }
             }
-            "--state-dir" | "--request-id" | "--summary" | "--ttl-ms" | "--after" | "--limit"
-            | "--workspace" | "--root" | "--budget-ms" | "--event" | "--settings"
-            | "--prompt-summary" | "--code-briefing" | "--presence" | "--presence-minutes"
-            | "--max-peers" | "--remote" | "--name" | "--share-task" | "--onto" | "--timeout-s"
-            | "--wait-s" | "--session" | "--to" | "--from" | "--home" | "--hosts" | "--listen"
-            | "-m" | "--message" | "--statusline" | "--deadline-ms" | "--forget" | "--since"
-            | "--sound" | "--depth" | "--path" | "--out" | "--in" | "--before" | "--keep-days"
-            | "--month" | "--format" | "--file" | "--tools" | "--host" | "--mcp-tools"
-            | "--wait-ms" | "--max-hops" | "--mode" | "--outline-reads" => {
+            name if takes_value(name) == Some(true) => {
                 let arg = if arg == "-m" {
                     "--message".to_owned()
                 } else {
