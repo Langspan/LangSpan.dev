@@ -639,7 +639,7 @@ mod unix {
                         .transpose()?;
                     Ok((symbols, references, levels))
                 }
-                _ => unreachable!("matched above"),
+                _ => Err("not a source index query".into()),
             })
             .map_err(failed)?;
         let mut truncated = symbols.len() > limit as usize
@@ -2099,7 +2099,7 @@ mod unix {
             bytes,
         } = &command
         else {
-            unreachable!("matched by the caller");
+            return error(request_id, generation, "internal", "not an outline read");
         };
         let answer =
             |outline: Option<(u32, Vec<langspan_core::OutlineEntry>)>, skipped: &str| Response {

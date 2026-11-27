@@ -299,7 +299,7 @@ fn simple_command(tokens: &[Token], targets: &mut BTreeSet<String>) -> Result<()
                     targets.insert(literal_path(target)?);
                 }
             }
-            Token::Separator => unreachable!("split on separators"),
+            Token::Separator => return Err("a separator inside one command"),
         }
     }
     let Some((&name, args)) = words.split_first() else {
