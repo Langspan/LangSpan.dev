@@ -4,10 +4,11 @@
 ``run`` runs driver.py once per trial (family, session count, seed and arm),
 each into its own directory under ``--output``, one after another. It keeps
 going past a failed, timed-out or refused trial and appends one line per
-trial to ``matrix.jsonl``. A trial whose directory already holds a record is
-kept, not repeated, so an interrupted matrix resumes; a directory without
-one is reported as incomplete and left as it is. ``--plan-only`` prints the
-trials and the session counts and runs nothing. ``--agent standin`` (the
+trial to ``matrix.jsonl``. A trial whose directory already holds a record
+from the same agent is kept, not repeated, so an interrupted matrix resumes;
+a directory without one, or with another agent's record, is reported and
+left as it is. A timeout or a signal stops the driver and its sessions.
+``--plan-only`` prints the trials and the session counts and runs nothing. ``--agent standin`` (the
 default) makes no model call; ``--agent claude`` passes through to the
 driver, which keeps its own sign-in folder and permission checks.
 
@@ -39,7 +40,9 @@ import tasks as families  # noqa: E402
 TRIAL_SECONDS = 4 * 3600
 Z95 = 1.959963984540054
 TOKEN_ORDER = ("input", "cache_read", "cache_creation", "output")
-MISSING = ("incomplete", "no_record", "timed_out")
+MISSING = ("incomplete", "no_record", "timed_out", "agent_mismatch", "unusable_record")
+# How long a stopped driver and its sessions get to exit before SIGKILL.
+STOP_SECONDS = 30
 
 
 def trials(family_list, session_counts, seeds, arms):
@@ -66,22 +69,95 @@ def driver_argv(trial, output, agent, langspan):
     return argv
 
 
+def process_groups(root):
+    """The process groups of ROOT and of every descendant, from one `ps`
+    listing: the driver starts its sessions and coordinator in groups of
+    their own. Only ROOT's group when `ps` fails."""
+    try:
+        listing = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,pgid="], stdin=subprocess.DEVNULL,
+                                 capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError) as error:
+        print("matrix: cannot list the trial's processes (%s); stopping only the driver's group" % error,
+              file=sys.stderr)
+        listing = ""
+    children, group_of = {}, {}
+    for line in listing.splitlines():
+        fields = line.split()
+        if len(fields) == 3 and all(field.isdigit() for field in fields):
+            pid, ppid, pgid = map(int, fields)
+            children.setdefault(ppid, []).append(pid)
+            group_of[pid] = pgid
+    found, pending = {root}, [root]
+    while pending:
+        for pid in children.get(pending.pop(), ()):
+            if pid not in found:
+                found.add(pid)
+                pending.append(pid)
+    return ({group_of.get(pid, root) for pid in found} | {root}) - {0, 1, os.getpgrp()}
+
+
+def signal_groups(groups, signum):
+    """Signal each of GROUPS; a group that has already exited is skipped."""
+    for group in groups:
+        try:
+            os.killpg(group, signum)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
+def stop_trial(child, grace=STOP_SECONDS):
+    """Stop CHILD and every process group under it: SIGTERM, then after
+    GRACE seconds SIGKILL, listing the groups again so that one started
+    meanwhile is stopped too."""
+    groups = process_groups(child.pid)
+    signal_groups(groups, signal.SIGTERM)
+    try:
+        child.wait(timeout=grace)
+    except subprocess.TimeoutExpired:
+        pass
+    signal_groups(groups | process_groups(child.pid), signal.SIGKILL)
+    try:
+        child.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        print("matrix: driver %d survived SIGKILL for 10 s" % child.pid, file=sys.stderr)
+
+
+def raise_interrupt(signum, _frame):
+    raise KeyboardInterrupt("signal %d" % signum)
+
+
 def run_trial(argv, log, timeout=TRIAL_SECONDS):
     """Run one driver; its exit code, or None when it outlived TIMEOUT and
-    was stopped."""
-    with open(log, "wb") as sink:
-        child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=sink, stderr=subprocess.STDOUT,
-                                 start_new_session=True)
-        try:
-            return child.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            os.killpg(child.pid, signal.SIGTERM)
+    was stopped. SIGINT, SIGTERM or SIGHUP stops the driver and its
+    sessions, then raises KeyboardInterrupt."""
+    previous = {signum: signal.signal(signum, raise_interrupt) for signum in (signal.SIGTERM, signal.SIGHUP)}
+    try:
+        with open(log, "wb") as sink:
+            child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=sink, stderr=subprocess.STDOUT,
+                                     start_new_session=True)
             try:
-                child.wait(timeout=30)
+                return child.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
-                os.killpg(child.pid, signal.SIGKILL)
-                child.wait()
-            return None
+                stop_trial(child)
+                return None
+            except BaseException:
+                stop_trial(child)
+                raise
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+
+
+def kept_outcome(source, agent):
+    """`kept` when SOURCE is a record this version reads, made by AGENT;
+    otherwise why the trial cannot be reused."""
+    try:
+        found, _ = runner.bounded_json(source, driver.MAX_CONFIG_BYTES)
+    except (OSError, ValueError):
+        return "unusable_record"
+    if not isinstance(found, dict) or found.get("schema_version") != driver.SCHEMA_VERSION:
+        return "unusable_record"
+    return "kept" if found.get("agent") == driver.record_agent(agent) else "agent_mismatch"
 
 
 def run_matrix(planned, output, agent, langspan):
@@ -96,7 +172,7 @@ def run_matrix(planned, output, agent, langspan):
             started_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
             started, exit_code = time.monotonic(), None
             if (directory / "record.json").is_file():
-                outcome = "kept"
+                outcome = kept_outcome(directory / "record.json", agent)
             elif directory.exists():
                 outcome = "incomplete"
             else:
@@ -271,6 +347,10 @@ def main(argv=None):
     except (OSError, ValueError, KeyError, TypeError) as error:
         print(json.dumps({"error": "%s: %s" % (type(error).__name__, error)}), file=sys.stderr)
         return 2
+    except KeyboardInterrupt:
+        print(json.dumps({"error": "interrupted; the trial that was running has no record, and running the same "
+                                   "command again reports it as incomplete"}), file=sys.stderr)
+        return 130
     print(json.dumps({"journal": str(output / "matrix.jsonl"), "trials": len(planned), "without_record": missing}))
     return 1 if missing else 0
 

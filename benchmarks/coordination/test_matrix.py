@@ -9,9 +9,11 @@ No model runs.
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 import driver
@@ -167,6 +169,99 @@ class MatrixTests(unittest.TestCase):
             self.assertEqual(kept["status"], "refused")
         self.assertEqual((out.stat().st_mode & 0o777), 0o700)
         self.assertEqual(((out / "matrix.jsonl").stat().st_mode & 0o777), 0o600)
+
+    def test_a_kept_record_is_reused_only_for_the_same_agent_and_schema(self):
+        # In process: every case here is decided before any driver starts.
+        live, dry = json.dumps(record("worktrees", 1, dry_run=False)), json.dumps(record("worktrees", 1))
+        cases = [("standin", dry, "kept"), ("claude", live, "kept"), ("claude", dry, "agent_mismatch"),
+                 ("standin", live, "agent_mismatch"), ("claude", "{", "unusable_record"),
+                 ("standin", "[]", "unusable_record"), ("standin", json.dumps({"schema_version": 6}),
+                                                         "unusable_record"),
+                 ("standin", json.dumps(dict(record("worktrees", 1), agent=None)), "agent_mismatch")]
+        for index, (agent, body, outcome) in enumerate(cases):
+            with self.subTest(agent=agent, outcome=outcome, case=index):
+                out = self.root / ("out%d" % index)
+                (out / "discovered_change-n2-s1-worktrees").mkdir(parents=True)
+                (out / "discovered_change-n2-s1-worktrees" / "record.json").write_text(body)
+                planned = matrix.trials(["discovered_change"], [2], [1], ["worktrees"])
+                missing = matrix.run_matrix(planned, out, agent, None)
+                line = json.loads((out / "matrix.jsonl").read_text())
+                self.assertEqual((line["outcome"], line["exit_code"], missing), (outcome, None, outcome != "kept"))
+                self.assertFalse((out / "discovered_change-n2-s1-worktrees.driver.log").exists())
+
+
+class StopTests(unittest.TestCase):
+    """Child processes: what is verified is that stopping a trial stops the
+    driver and the sessions it started in process groups of their own."""
+
+    DRIVER = ("import subprocess, sys, time\n"
+              "kid = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(600)'], "
+              "start_new_session=True)\n"
+              "open(sys.argv[1] + '.tmp', 'w').write('%d %d' % (__import__('os').getpid(), kid.pid))\n"
+              "__import__('os').rename(sys.argv[1] + '.tmp', sys.argv[1])\n"
+              "time.sleep(600)\n")
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="langspan-matrix-stop-")
+        self.root = Path(self.temp.name)
+        (self.root / "driver.py").write_text(self.DRIVER)
+        self.pids = self.root / "pids"
+        self.argv = [sys.executable, "-I", "-B", str(self.root / "driver.py"), str(self.pids)]
+
+    def tearDown(self):
+        for pid in self.started():
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        self.temp.cleanup()
+
+    def started(self):
+        return [int(pid) for pid in self.pids.read_text().split()] if self.pids.is_file() else []
+
+    def wait_for_pids(self):
+        deadline = time.monotonic() + 30
+        while not self.pids.is_file():
+            self.assertLess(time.monotonic(), deadline, "the stand-in driver did not start")
+            time.sleep(.05)
+        return self.started()
+
+    def assert_gone(self, pids):
+        deadline = time.monotonic() + 15
+        for pid in pids:
+            while True:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+                self.assertLess(time.monotonic(), deadline, "process %d is still running" % pid)
+                time.sleep(.05)
+        # Gone: tearDown must not signal these PIDs, which may be reused.
+        self.pids.unlink()
+
+    def test_a_timed_out_trial_stops_the_sessions_in_their_own_groups(self):
+        self.assertIsNone(matrix.run_trial(self.argv, self.root / "log", timeout=2))
+        self.assert_gone(self.started())
+
+    def test_an_interrupted_or_terminated_matrix_stops_its_trial_and_exits(self):
+        for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            with self.subTest(signal=signum):
+                self.pids.unlink(missing_ok=True)
+                code = "import sys; sys.path.insert(0, sys.argv[1]); import matrix; matrix.run_trial(%r, %r)" % (
+                    self.argv, str(self.root / "log"))
+                harness = subprocess.Popen([sys.executable, "-I", "-B", "-c", code, str(HERE)],
+                                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                           start_new_session=True)
+                try:
+                    pids = self.wait_for_pids()
+                    os.kill(harness.pid, signum)
+                    _, stderr = harness.communicate(timeout=60)
+                finally:
+                    if harness.poll() is None:
+                        harness.kill()
+                        harness.wait()
+                self.assertIn(b"KeyboardInterrupt", stderr)
+                self.assert_gone(pids)
 
 
 class MatrixDryRun(unittest.TestCase):

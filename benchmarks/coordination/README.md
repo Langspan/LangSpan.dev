@@ -600,12 +600,18 @@ another, with the driver's output in `OUTPUT/FAMILY-nN-sSEED-ARM.driver.log`.
 `--arms` defaults to all three; within each family, N and seed the arm order
 rotates with the seed. `OUTPUT/matrix.jsonl` gets one line per trial each
 time the matrix runs: the trial, its `outcome` (`ran`, `kept` when its
-directory already held a record, `incomplete` when its directory had none,
-`no_record` when the driver wrote none, `timed_out` past 4 hours) and the
-driver's `exit_code`. The matrix never stops at a failed, refused or
+directory already held a record from the same `--agent`, `agent_mismatch`
+when that record came from another agent, `unusable_record` when the record
+is unreadable or of another schema version, `incomplete` when its directory
+had none, `no_record` when the driver wrote none, `timed_out` past 4 hours)
+and the driver's `exit_code`. The matrix never stops at a failed, refused or
 timed-out trial, never deletes a directory and never repeats a trial whose
 directory exists, so running the same command again resumes an interrupted
-matrix. It exits 1 when any trial has no record.
+matrix. To run live trials after a stand-in matrix, give them a new
+`--output`. It exits 1 when any trial has no usable record. A timeout, or
+SIGINT, SIGTERM or SIGHUP to the matrix, stops the running driver and every
+process group under it, its sessions and coordinator included: SIGTERM, then
+SIGKILL 30 seconds later. After a signal the matrix exits 130.
 
 The report lists every trial, refused, failed and `change_not_made` included,
 with why the comparison excludes it ([`summarize`](#cost-to-a-correct-result)

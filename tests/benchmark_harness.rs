@@ -207,6 +207,11 @@ fn matrix_plan_report_and_kept_refusals() {
 }
 
 #[test]
+fn matrix_stops_a_trial_and_its_session_groups() {
+    python_suite("test_matrix.py", Some("StopTests"));
+}
+
+#[test]
 fn dry_run_matrix_keeps_every_trial_and_resumes() {
     dry_run_suite("test_matrix.py", "MatrixDryRun");
 }
