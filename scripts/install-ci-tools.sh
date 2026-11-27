@@ -2,7 +2,8 @@
 # Installs the prebuilt cargo-deny and cargo-machete that CI runs, from their
 # upstream GitHub releases, each checked against a pinned SHA-256 before it
 # is unpacked. Compiling them with `cargo install` took four to six minutes
-# per job; a download takes seconds.
+# per job; a download takes seconds. Then cargo-nextest, pinned by version
+# (see below).
 #
 # Usage: bash scripts/install-ci-tools.sh DIR
 # Puts the binaries in DIR (created if missing); add DIR to PATH after.
@@ -16,6 +17,7 @@ set -euo pipefail
 dir=${1:?usage: install-ci-tools.sh DIR}
 deny=0.22.1
 machete=0.10.1
+nextest=0.9.152
 
 case "$(uname -s)-$(uname -m)" in
   Linux-x86_64)
@@ -59,3 +61,19 @@ fetch cargo-machete "https://github.com/bnjbvr/cargo-machete/releases/download/v
 
 "$dir/cargo-deny" --version
 "$dir/cargo-machete" --version
+
+# cargo-nextest, the test runner, is built from its crates.io release with
+# `cargo install --locked`: cargo checks each downloaded crate against the
+# checksum in the registry index and builds the dependency versions the
+# release's own lockfile pins. Compiling takes minutes, so a copy of the
+# same version already in DIR (restored from the job's cache) is kept.
+case "$("$dir/cargo-nextest" nextest --version 2>/dev/null || true)" in
+  "cargo-nextest $nextest "*)
+    echo "cargo-nextest $nextest is already in $dir"
+    ;;
+  *)
+    cargo install --locked --root "$work/nextest" --version "$nextest" cargo-nextest
+    install -m 0755 "$work/nextest/bin/cargo-nextest" "$dir/cargo-nextest"
+    ;;
+esac
+"$dir/cargo-nextest" nextest --version
