@@ -107,6 +107,9 @@ mod unix {
                 )
             })?;
         let mut value: serde_json::Value = serde_json::from_slice(&frame)?;
+        // A response's fields this build does not know, such as how many
+        // events a later daemon left out (`withheld`), are ignored as it is
+        // read (`tolerant_responses`).
         let granted = match value
             .as_object_mut()
             .and_then(|f| f.shift_remove("capabilities"))

@@ -339,9 +339,10 @@ folders! {
 }
 
 /// The folders of `fixtures/` that hold no host's hook events.
-const OTHER_FOLDERS: [&str; 1] = [
+const OTHER_FOLDERS: [&str; 2] = [
     // Protocol capability vectors, pinned in `tests/protocol.rs`.
     "capabilities",
+    "event-types", // Event types each release reads, pinned in `tests/protocol.rs`.
 ];
 
 /// The goldens in `tests/golden/hook/` that are not a fixtures folder's.

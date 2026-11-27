@@ -49,7 +49,9 @@ pub const CAPABILITIES: &[(&str, Option<u16>)] = &[
     ("refusal_outcomes", Some(PROTOCOL_VERSION_5)),
     ("renames", Some(PROTOCOL_VERSION_4)),
     ("symbol_findings", Some(PROTOCOL_VERSION_6)),
+    ("tolerant_responses", None),
     ("trails", Some(PROTOCOL_VERSION_4)),
+    ("withheld_events", None),
 ];
 
 const _: () = assert!(CAPABILITIES.len() <= 64, "Capabilities is a 64-bit set");
@@ -86,6 +88,20 @@ impl Capabilities {
         bit.is_some_and(|bit| self.0 & (1 << bit) != 0)
     }
 
+    /// Whether a client granted this set reads what `needs` names. One of
+    /// version V that names none holds exactly the capabilities whose
+    /// "since" is at most V, and each version from 4 to 10 added one, so
+    /// holding all of them is holding version V or later.
+    fn reads(self, needs: Needs) -> bool {
+        match needs {
+            Needs::Version(version) => {
+                let of = Self::negotiate(version, None).0;
+                self.0 & of == of
+            }
+            Needs::Capability(name) => self.has(name),
+        }
+    }
+
     /// The granted names, in the table's order.
     pub fn names(self) -> Vec<String> {
         CAPABILITIES
@@ -111,10 +127,12 @@ pub fn encode_for(version: u16, response: &Response) -> Result<Vec<u8>, crate::E
 /// `response` as one frame for a client granted `granted`, which named
 /// `named`. Clients read the objects with `deny_unknown_fields`, so an
 /// answer carrying a field they lack would fail to read as a whole: theirs
-/// is encoded without the fields of each capability it lacks. When the
-/// client named one this build does not know, the frame also carries
-/// `capabilities`, the names granted. A state record given in parts is
-/// encoded by `encode_record_with` before it is cut.
+/// is encoded without the fields of each capability it lacks. An event
+/// page leaves out each event whose type the client cannot read
+/// (`event_needs`); a client with `withheld_events` is told how many in
+/// `withheld`. When the client named one this build does not know, the
+/// frame also carries `capabilities`, the names granted. A state record
+/// given in parts is encoded by `encode_record_with` before it is cut.
 pub fn encode_with(
     granted: Capabilities,
     named: Option<&[String]>,
@@ -126,6 +144,7 @@ pub fn encode_with(
         return encode(response);
     }
     let mut earlier = response.clone();
+    let withheld = without_unread_events(granted, &mut earlier.outcome);
     if !granted.has("outline_reads") {
         without_outline_reads(&mut earlier.outcome);
     }
@@ -144,10 +163,27 @@ pub fn encode_with(
     }
     let mut value = serde_json::to_value(&earlier)?;
     earlier_shape(granted, &mut value);
-    if answer && let Value::Object(fields) = &mut value {
-        fields.insert("capabilities".into(), names.into());
+    if let Value::Object(fields) = &mut value {
+        if answer {
+            fields.insert("capabilities".into(), names.into());
+        }
+        if withheld > 0 && granted.has("withheld_events") {
+            fields.insert("withheld".into(), withheld.into());
+        }
     }
     encode(&value)
+}
+
+/// `outcome`'s event page without the events `granted` cannot read: how
+/// many were left out. A client of a frozen version reads events with
+/// `deny_unknown_fields`, so one type it lacks would fail the whole page.
+fn without_unread_events(granted: Capabilities, outcome: &mut Outcome) -> usize {
+    let (Outcome::Events { events } | Outcome::Changes { events, .. }) = outcome else {
+        return 0;
+    };
+    let before = events.len();
+    events.retain(|recorded| granted.reads(event_needs(&recorded.event)));
+    before - events.len()
 }
 
 /// `record`'s JSON as a client of `version` that names no capabilities
@@ -209,6 +245,109 @@ fn earlier_shape(granted: Capabilities, value: &mut Value) {
     }
 }
 
+/// What a client needs to read an event type (issue #331).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Needs {
+    /// A client of this version or later; every client that names
+    /// capabilities is.
+    Version(u16),
+    /// A client granted this capability of `CAPABILITIES`.
+    Capability(&'static str),
+}
+
+/// The "since" table: what a client needs to read `event`'s type. A type
+/// gets the first version whose every build has it, or the capability that
+/// added it; one added from now on gets a capability of its own, which no
+/// frozen version has. The match is exhaustive, so a new type does not
+/// compile until it has an entry. `fixtures/event-types/` holds the types
+/// each release reads.
+fn event_needs(event: &Event) -> Needs {
+    use Event as E;
+    match event {
+        E::ContextAdded { .. } | E::ToldForgotten { .. } => Needs::Capability("briefing_memory"),
+        E::NoteAnchorChanged { .. } => Needs::Capability("anchored_notes"),
+        E::ReadOutlined { .. } => Needs::Capability("outline_reads"),
+        // Added at version 5 without a new version (#214).
+        E::InterfaceNoticesTold { .. } => Needs::Version(6),
+        // Added at version 4 without a new version (roadmap B28 and C9).
+        E::WriteWaited { .. }
+        | E::RefusalSettled { .. }
+        | E::PolicySet { .. }
+        | E::TrailRecorded { .. }
+        | E::TrailTaken { .. } => Needs::Version(5),
+        // Added in 0.2.0, which still spoke version 3.
+        E::WorkspaceMoved { .. }
+        | E::WorkspaceRemoved { .. }
+        | E::SessionSeen { .. }
+        | E::PresenceObserved { .. }
+        | E::PresenceSet { .. }
+        | E::SessionAdopted { .. }
+        | E::InflightDelivered { .. }
+        | E::TestsRecorded { .. }
+        | E::FlakyTestForgotten { .. }
+        | E::InterfaceDependentsFound { .. }
+        | E::MessageRetracted { .. }
+        | E::RetractionDelivered { .. }
+        | E::CheckoutRunObserved { .. }
+        | E::UncoordinatedChanged { .. }
+        | E::UncoordinatedDelivered { .. } => Needs::Version(4),
+        // Release 0.1.0's.
+        E::Booted { .. }
+        | E::ClockAnchored { .. }
+        | E::WriteRefused { .. }
+        | E::WorkspaceRegistered { .. }
+        | E::SessionRegistered { .. }
+        | E::SessionLivenessObserved { .. }
+        | E::IntentSet { .. }
+        | E::IntentEnded { .. }
+        | E::LeaseGranted { .. }
+        | E::LeaseCompleted { .. }
+        | E::LeaseExpired { .. }
+        | E::OperationObserved { .. }
+        | E::DiskObserved { .. }
+        | E::BranchObserved { .. }
+        | E::WorkspaceGitObserved { .. }
+        | E::SessionPrompted { .. }
+        | E::PromptTargetsSet { .. }
+        | E::SessionEnded { .. }
+        | E::SessionStopped { .. }
+        | E::ToolBatchObserved { .. }
+        | E::BriefingDelivered { .. }
+        | E::InterfaceAlerted { .. }
+        | E::SourceObserved { .. }
+        | E::RemoteEnabled { .. }
+        | E::RemoteDisabled { .. }
+        | E::RemotePublished { .. }
+        | E::RemoteObserved { .. }
+        | E::RemoteForgotten { .. }
+        | E::RemoteWithdrawn { .. }
+        | E::CheckRecorded { .. }
+        | E::AutoCheckEnabled { .. }
+        | E::AutoCheckDisabled { .. }
+        | E::CheckReported { .. }
+        | E::CheckDelivered { .. }
+        | E::Landed { .. }
+        | E::TurnTaken { .. }
+        | E::TurnReleased { .. }
+        | E::TurnRenewed { .. }
+        | E::TurnExpired { .. }
+        | E::TurnQueueJoined { .. }
+        | E::TurnQueueSeen { .. }
+        | E::TurnQueueLeft { .. }
+        | E::InterfaceChanged { .. }
+        | E::Remembered { .. }
+        | E::Forgotten { .. }
+        | E::MessageSent { .. }
+        | E::MessageAcknowledged { .. }
+        | E::ScanFailed { .. }
+        | E::ScanRecovered { .. }
+        | E::ScanCoverageObserved { .. }
+        | E::CheckoutChanged { .. }
+        | E::HostNotInstalled { .. }
+        | E::HostCleared { .. } => Needs::Version(OLDEST_PROTOCOL_VERSION),
+    }
+}
+
 /// `value` without `keys` in each object `is` picks.
 fn strip(value: &mut Value, is: fn(&Map<String, Value>) -> bool, keys: &[&str]) {
     match value {
@@ -265,30 +404,22 @@ fn reshape(
 }
 
 /// `outcome` without `outline_reads` (roadmap A11): a session activity's
-/// `outlined`, and the `read_outlined` event, which a client without it
-/// has no variant for, left out of an event page. No such client sends
-/// `outline_read`, so its `read_outline` answer needs no earlier shape.
+/// `outlined`. Its `read_outlined` event is left out of an event page by
+/// `without_unread_events`. No such client sends `outline_read`, so its
+/// `read_outline` answer needs no earlier shape.
 fn without_outline_reads(outcome: &mut Outcome) {
-    reshape(outcome, activity_without_outline_reads, |page| {
-        page.retain(|recorded| !matches!(recorded.event, Event::ReadOutlined { .. }));
-    });
+    reshape(outcome, activity_without_outline_reads, |_| {});
 }
 
 /// `outcome` without `briefing_memory` (issue #222). Every field it added
-/// is skipped when empty, so emptying it leaves it out; the
-/// `context_added` and `told_forgotten` events, which a client without it
-/// has no variant for, are left out of an event page.
+/// is skipped when empty, so emptying it leaves it out. Its
+/// `context_added` and `told_forgotten` events are left out of an event
+/// page by `without_unread_events`.
 fn without_briefing_memory(outcome: &mut Outcome) {
     if let Outcome::Briefing { briefing } = outcome {
         briefing.unchanged = 0;
     }
     reshape(outcome, activity_without_briefing_memory, |events| {
-        events.retain(|recorded| {
-            !matches!(
-                recorded.event,
-                Event::ContextAdded { .. } | Event::ToldForgotten { .. }
-            )
-        });
         for recorded in events {
             if let Event::BriefingDelivered {
                 told, told_at_ms, ..
@@ -511,8 +642,9 @@ impl Request {
 /// An answer. On the wire, the answer to a request that named a
 /// capability the daemon does not know also carries `capabilities`, the
 /// names granted (`encode_with`); the client reads it before the response.
+/// A client ignores the fields it does not know in a response, its outcome
+/// and the objects only responses carry (`tolerant_responses`, ADR 0015).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct Response {
     pub version: u16,
     pub request_id: String,
@@ -581,5 +713,40 @@ mod tests {
         assert_eq!(older.version, 3);
         assert_eq!(older.request_id, "r-1");
         assert_eq!(older.capabilities, None);
+    }
+
+    /// Issue #331: every event type has an entry in the "since" table
+    /// (`event_needs`, an exhaustive match, so a new type does not compile
+    /// without one). A type the newest release does not read needs a
+    /// capability no frozen version has, so it reaches only a client that
+    /// names it.
+    #[test]
+    fn an_event_type_no_release_reads_needs_a_capability_of_its_own() {
+        let newest: Vec<&str> = include_str!("../fixtures/event-types/0.5.1.txt")
+            .lines()
+            .collect();
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if !path.to_string_lossy().ends_with("-event-v10.json") {
+                continue;
+            }
+            let event: Event = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            let name = serde_json::to_value(&event).unwrap()["type"].clone();
+            let needs = event_needs(&event);
+            if let Needs::Capability(capability) = needs {
+                assert!(
+                    CAPABILITIES.iter().any(|(known, _)| *known == capability),
+                    "{name}: {capability}"
+                );
+            }
+            if !newest.contains(&name.as_str().unwrap()) {
+                assert!(
+                    matches!(needs, Needs::Capability(capability)
+                        if CAPABILITIES.contains(&(capability, None))),
+                    "{name} is read by no release: {needs:?}"
+                );
+            }
+        }
     }
 }
