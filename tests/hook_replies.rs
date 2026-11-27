@@ -21,7 +21,7 @@ use std::{
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicU64, AtomicUsize, Ordering},
     time::{Duration, Instant},
 };
 
@@ -304,19 +304,42 @@ fn events(folder: &str) -> Vec<(String, String)> {
 
 /// The golden replies of every recorded event of one folder, each against
 /// a new coordinator in the fixed state, in `tests/golden/hook/<folder>.txt`
-/// under a heading per event.
+/// under a heading per event. The fixed state is a live peer of the
+/// coordinator's current generation, so it is built again for each event,
+/// not copied from one coordinator to the next. Each fixture has its own
+/// directories and coordinator, so four are run at a time.
 fn pin_folder(folder: &str) {
     let host = host(folder);
     let events = events(folder);
     assert!(!events.is_empty(), "fixtures/{folder} holds no event");
-    let mut transcript = String::new();
-    for (name, body) in &events {
-        let parsed: Value = serde_json::from_str(body).unwrap();
-        let event = (host == "antigravity").then(|| antigravity_event(name, &parsed));
-        let reply = Fixture::new().reply(host, event.as_deref(), body);
-        let under = event.map(|e| format!(" as {e}")).unwrap_or_default();
-        transcript.push_str(&format!("=== {name}{under}\n{reply}"));
-    }
+    let next = AtomicUsize::new(0);
+    let mut replies: Vec<(usize, String)> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..4)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut done = Vec::new();
+                    loop {
+                        let at = next.fetch_add(1, Ordering::Relaxed);
+                        let Some((name, body)) = events.get(at) else {
+                            return done;
+                        };
+                        let parsed: Value = serde_json::from_str(body).unwrap();
+                        let event =
+                            (host == "antigravity").then(|| antigravity_event(name, &parsed));
+                        let reply = Fixture::new().reply(host, event.as_deref(), body);
+                        let under = event.map(|e| format!(" as {e}")).unwrap_or_default();
+                        done.push((at, format!("=== {name}{under}\n{reply}")));
+                    }
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|worker| worker.join().unwrap())
+            .collect()
+    });
+    replies.sort();
+    let transcript: String = replies.into_iter().map(|(_, reply)| reply).collect();
     golden::check(&format!("hook/{folder}.txt"), &transcript);
 }
 
