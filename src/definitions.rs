@@ -105,7 +105,7 @@ fn family(language: Language) -> Language {
 /// `limit` bytes.
 fn clean(text: &str, limit: usize) -> String {
     let mut out = String::new();
-    for c in crate::hook::redact(text).chars() {
+    for c in crate::text::redact::redact(text).chars() {
         let c = if c.is_control() { ' ' } else { c };
         if out.len() + c.len_utf8() > limit {
             break;

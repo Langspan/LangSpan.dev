@@ -8,7 +8,7 @@ pub type Error = Box<dyn std::error::Error + Send + Sync>;
 // Utility layer.
 
 // text
-mod text;
+pub mod text;
 
 // ids
 mod ids;
@@ -127,4 +127,3 @@ use hosts::tool_names;
 use hosts::vendor;
 use ids::registration;
 use ids::sha256;
-use text::redact;

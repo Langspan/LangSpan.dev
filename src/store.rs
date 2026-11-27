@@ -430,7 +430,7 @@ const TAP_LIMIT: usize = 64;
 /// into state, into an event page and from a receipt.
 fn redact_event(event: &mut Event) {
     if let Event::CheckRecorded { check, .. } = event {
-        crate::hook::redact_check(check);
+        crate::text::redact::redact_check(check);
     }
 }
 
@@ -934,9 +934,9 @@ impl Store {
         // receipt (a check's command line), so the identical retry arrives in
         // a form its receipt does not hold. Both sides are compared as the
         // daemon now records them; redaction is a fixed point on its output.
-        crate::hook::redact_command(&mut recorded);
+        crate::text::redact::redact_command(&mut recorded);
         let mut retry = original.clone();
-        crate::hook::redact_command(&mut retry);
+        crate::text::redact::redact_command(&mut retry);
         if !recorded.same_request(&retry) {
             return Ok(Some(self.execution(
                 Outcome::Error {
@@ -952,7 +952,7 @@ impl Store {
             return unreadable();
         };
         if let Outcome::CheckRecorded { check } = &mut outcome {
-            crate::hook::redact_check(check);
+            crate::text::redact::redact_check(check);
         }
         // A retried adoption rewrites the line journal from its answer, so it
         // is decided again: the ended session may have resumed since, or a
@@ -994,7 +994,7 @@ impl Store {
         now_ms: u64,
     ) -> StoreResult<Execution> {
         // Refused before a receipt or an event could hold it.
-        if let Some(refused) = crate::hook::refuse_secret(original) {
+        if let Some(refused) = crate::text::redact::refuse_secret(original) {
             return Ok(self.execution(refused, false, now_ms));
         }
         if let Some(replayed) = self.replay(request_id, original, now_ms)? {

@@ -28,9 +28,6 @@ use crate::file_state::{file_content, version_of};
 pub use crate::ids::{file_key, user_workspace_id, valid_host_id, wire_id, workspace_request_id};
 pub use crate::input::{MAX_EVENT_BYTES, read_stdin_until};
 pub use crate::text::age;
-pub use crate::text::redact::{
-    contains_secret, redact, redact_check, redact_command, refuse_secret,
-};
 pub(crate) use crate::text::{SUMMARY_LIMIT, clean, quoted, truncate};
 pub(crate) use admit::*;
 pub(crate) use deny::*;

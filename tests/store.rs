@@ -1090,7 +1090,7 @@ fn a_check_recorded_before_redaction_is_answered_when_retried_after_upgrade() {
         // The daemon redacts every request on receipt, so the identical
         // retry reaches the store in its redacted form.
         let mut retry = record.clone();
-        langspan::hook::redact_command(&mut retry);
+        langspan::text::redact::redact_command(&mut retry);
         let mut store = Store::open(&database.path()).unwrap();
         let replayed = store.replay("old-check", &retry, 2).unwrap().unwrap();
         let Outcome::CheckRecorded { check: answered } = &replayed.outcome else {

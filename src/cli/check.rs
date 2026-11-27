@@ -120,7 +120,7 @@ pub(crate) fn evidence(
     let tests = match (&result, &output) {
         (CheckResult::Inconclusive {}, _) | (_, None) => None,
         _ if writes_before.is_none() => None,
-        _ if langspan::hook::contains_secret(&command.join(" ")) => None,
+        _ if langspan::text::redact::contains_secret(&command.join(" ")) => None,
         (result, Some(bytes)) => {
             langspan::test_output::read(bytes, false, matches!(result, CheckResult::Passed {}), &[])
         }

@@ -1,7 +1,7 @@
 //! Prompt analysis: what a hook takes from the owner's prompt (its summary,
 //! line digests, candidate identifiers and qualifiers). Pure text handling.
-use crate::redact::redact;
 use crate::sha256;
+use crate::text::redact::redact;
 use crate::text::{SUMMARY_LIMIT, clean};
 
 /// The marker of a prompt's own task line, compared without regard to case.
