@@ -1,0 +1,1 @@
+{"version":10,"request_id":"status-records-1","replayed":false,"generation":4,"lease_valid":null,"outcome":{"type":"status_records","records":[{"kind":"workspace","key":"example","workspace":{"workspace_id":"app","root":"/work/app"}}],"next":"example"}}

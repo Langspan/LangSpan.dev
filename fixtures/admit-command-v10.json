@@ -1,0 +1,1 @@
+{"version":10,"request_id":"admit-1","command":{"op":"admit","session_id":"claude-code.alice","paths":["src/api.rs"],"ttl_ms":5000}}

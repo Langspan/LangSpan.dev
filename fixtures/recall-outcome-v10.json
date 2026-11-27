@@ -1,0 +1,1 @@
+{"version":10,"request_id":"recall-1","replayed":false,"generation":4,"lease_valid":null,"outcome":{"type":"recall","recall":{"workspace_id":"app","query":"example","notes":[{"note_id":"note-1","author":"codex.bob","text":"Rework the session handler","paths":["src/api.rs"]}],"truncated":true}}}

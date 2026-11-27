@@ -1,0 +1,1 @@
+{"version":10,"request_id":"count-1","replayed":false,"generation":4,"lease_valid":null,"outcome":{"type":"count","count":{"from_ms":5000,"to_ms":5000,"refusals":1,"by_kind":{"by-kind-1":1},"by_workspace":{"app":1},"retried_through":1,"repeats":1,"truncated":true}}}

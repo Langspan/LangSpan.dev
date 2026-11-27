@@ -1,0 +1,1 @@
+{"version":10,"request_id":"retract-message-1","command":{"op":"retract_message","workspace_id":"app","from":"codex.bob","message_id":"message-1"}}

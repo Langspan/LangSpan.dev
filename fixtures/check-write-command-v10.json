@@ -1,0 +1,1 @@
+{"version":10,"request_id":"check-write-1","command":{"op":"check_write","session_id":"claude-code.alice","paths":["src/api.rs"]}}

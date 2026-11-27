@@ -1,0 +1,1 @@
+{"version":10,"request_id":"message-sent-1","replayed":false,"generation":4,"lease_valid":null,"outcome":{"type":"message_sent","message":{"message_id":"message-1","workspace_id":"app","from":"codex.bob","to":{"kind":"session","session_id":"claude-code.alice"},"text":"Rework the session handler","paths":["src/api.rs"]}}}

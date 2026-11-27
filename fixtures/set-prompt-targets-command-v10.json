@@ -1,0 +1,1 @@
+{"version":10,"request_id":"set-prompt-targets-1","command":{"op":"set_prompt_targets","session_id":"claude-code.alice","paths":["src/api.rs"]}}

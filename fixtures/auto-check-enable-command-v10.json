@@ -1,0 +1,1 @@
+{"version":10,"request_id":"auto-check-enable-1","command":{"op":"auto_check_enable","workspace_id":"app","name":"parse","argv":["example"],"timeout_s":1}}

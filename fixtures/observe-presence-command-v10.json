@@ -1,0 +1,1 @@
+{"version":10,"request_id":"observe-presence-1","command":{"op":"observe_presence","session_id":"claude-code.alice","kind":"read","paths":["src/api.rs"]}}

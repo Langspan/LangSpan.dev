@@ -1,0 +1,1 @@
+{"version":10,"request_id":"record-wait-1","command":{"op":"record_wait","session_id":"claude-code.alice","paths":["src/api.rs"],"waited_ms":5000,"result":"admitted"}}

@@ -1,0 +1,1 @@
+{"version":10,"request_id":"handoff-1","command":{"op":"handoff","session_id":"claude-code.alice","text":"Rework the session handler","paths":["src/api.rs"]}}

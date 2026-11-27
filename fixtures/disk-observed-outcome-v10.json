@@ -1,0 +1,1 @@
+{"version":10,"request_id":"disk-observed-1","replayed":false,"generation":4,"lease_valid":null,"outcome":{"type":"disk_observed","observation":{"observation_id":"observation-1","workspace_id":"app","path":"src/api.rs","before":{"type":"missing"},"after":{"type":"missing"},"related_operation_ids":["related-operation-1"],"observed_at_ms":5000,"generation":2}}}
