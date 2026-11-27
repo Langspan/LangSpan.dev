@@ -3,7 +3,9 @@
 //! argument dispatch and help text.
 
 pub mod doctor;
+pub mod options;
 pub mod render;
+pub mod setup;
 
 use langspan_core::{Command, Outcome};
 
