@@ -1392,14 +1392,43 @@ fn sentence<'a>(text: &'a str, start: &str) -> &'a str {
     &rest[..rest.find(".\n").map_or(rest.len(), |end| end + 1)]
 }
 
-/// Whether a runner is found and runs; if not, the test says why it skips.
+#[test]
+#[should_panic(expected = "LANGSPAN_REQUIRE_TOOLS=1 needs no-such-runner-on-this-machine")]
+fn a_missing_runner_fails_the_test_when_tools_are_required() {
+    available(&["no-such-runner-on-this-machine", "--version"], true);
+}
+
+#[test]
+fn a_missing_runner_skips_the_test_otherwise() {
+    assert!(!available(
+        &["no-such-runner-on-this-machine", "--version"],
+        false
+    ));
+}
+
+/// Whether a runner is found and runs. If not, the test says why it skips,
+/// or fails when LANGSPAN_REQUIRE_TOOLS=1 (CI sets it), so a runner missing
+/// there can't pass the test unseen.
 fn runner(argv: &[&str]) -> bool {
+    available(
+        argv,
+        std::env::var_os("LANGSPAN_REQUIRE_TOOLS").is_some_and(|v| v == "1"),
+    )
+}
+
+fn available(argv: &[&str], required: bool) -> bool {
     let found = Process::new(argv[0])
         .args(&argv[1..])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
         .is_ok_and(|status| status.success());
+    if !found && required {
+        panic!(
+            "LANGSPAN_REQUIRE_TOOLS=1 needs {} to run this test; install it, or unset the variable to skip",
+            argv.join(" ")
+        );
+    }
     if !found {
         eprintln!(
             "skipped: {} is not available on this machine",

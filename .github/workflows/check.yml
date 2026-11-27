@@ -40,6 +40,10 @@ env:
   # the demonstration. The merge queue is the gate, so nothing reaches main
   # without the full lane.
   LANGSPAN_CHECK_LANE: ${{ github.event_name == 'pull_request' && 'fast' || 'full' }}
+  # tests/auto_checks.rs runs real cargo, go and pytest checks. Without a
+  # runner a test skips locally and says so; here it fails instead, so a
+  # green run means they ran (the steps below install Go and pytest).
+  LANGSPAN_REQUIRE_TOOLS: "1"
   # cargo-nextest (.config/nextest.toml) writes
   # target/nextest/<profile>/junit.xml. No retry on a pull request, so a
   # flaky test shows there; two in the merge queue and on main, so one
@@ -135,6 +139,24 @@ jobs:
         run: |
           bash scripts/install-ci-tools.sh "$HOME/.cache/langspan-ci-tools"
           echo "$HOME/.cache/langspan-ci-tools" >> "$GITHUB_PATH"
+      # Go and pytest for the tests in tests/auto_checks.rs that run a real
+      # `go test` and pytest; LANGSPAN_REQUIRE_TOOLS fails them without
+      # these. Only the full lane runs those tests. pytest goes into a
+      # virtual environment whose python3 comes first on PATH.
+      - name: Install Go for the real go test check
+        if: steps.changes.outputs.code == 'true' && github.event_name != 'pull_request'
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.24"
+          cache: false
+      - name: Install pytest for the real pytest check
+        if: steps.changes.outputs.code == 'true' && github.event_name != 'pull_request'
+        run: |
+          python3 -m venv "$RUNNER_TEMP/pytest"
+          "$RUNNER_TEMP/pytest/bin/python3" -m pip install --disable-pip-version-check pytest==8.4.2
+          echo "$RUNNER_TEMP/pytest/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/pytest/bin/python3" -m pytest --version
+          go version
       - name: Check formatting, dependencies, lint, real integration tests and the demonstration
         if: steps.changes.outputs.code == 'true'
         env:
@@ -230,6 +252,24 @@ jobs:
         run: |
           bash scripts/install-ci-tools.sh "$HOME/.cache/langspan-ci-tools"
           echo "$HOME/.cache/langspan-ci-tools" >> "$GITHUB_PATH"
+      # Go and pytest for the tests in tests/auto_checks.rs that run a real
+      # `go test` and pytest; LANGSPAN_REQUIRE_TOOLS fails them without
+      # these. Only the full lane runs those tests. pytest goes into a
+      # virtual environment whose python3 comes first on PATH.
+      - name: Install Go for the real go test check
+        if: steps.changes.outputs.code == 'true' && github.event_name != 'pull_request'
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.24"
+          cache: false
+      - name: Install pytest for the real pytest check
+        if: steps.changes.outputs.code == 'true' && github.event_name != 'pull_request'
+        run: |
+          python3 -m venv "$RUNNER_TEMP/pytest"
+          "$RUNNER_TEMP/pytest/bin/python3" -m pip install --disable-pip-version-check pytest==8.4.2
+          echo "$RUNNER_TEMP/pytest/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/pytest/bin/python3" -m pytest --version
+          go version
       - name: Check formatting, dependencies, lint, real integration tests and the demonstration
         if: steps.changes.outputs.code == 'true'
         env:

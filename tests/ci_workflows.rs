@@ -646,3 +646,87 @@ fn cargo_audit_may_not_keep_an_ignore_list_of_its_own() {
         "{stderr}"
     );
 }
+
+#[test]
+fn check_sh_denies_doc_warnings_and_ends_each_lane_with_no_process_left() {
+    let check = read("scripts/check.sh");
+    assert!(
+        check.contains("RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --locked\n"),
+        "{check}"
+    );
+    // Both lanes end by looking for leftovers: the fast lane before it
+    // exits, the full lane on its last line.
+    assert!(check.contains("  leftovers\n  echo \"check.sh: fast lane done"));
+    assert!(check.trim_end().ends_with("\nleftovers"), "{check}");
+}
+
+/// Runs check.sh's `leftovers` function in `dir`, whose target directory
+/// is `dir/target`; returns (success, stderr).
+fn leftovers(dir: &Path) -> (bool, String) {
+    let check = read("scripts/check.sh");
+    let start = check
+        .find("\nleftovers() {\n")
+        .expect("check.sh defines leftovers");
+    let body = &check[start..];
+    let function = &body[..body.find("\n}\n").expect("leftovers ends") + 3];
+    let out = Command::new("sh")
+        .arg("-c")
+        .arg(format!("{function}leftovers"))
+        .current_dir(dir)
+        // As a shell started there would have it, so `pwd` gives the path
+        // as written (macOS's temporary directory is behind a symlink).
+        .env("PWD", dir)
+        .env_remove("CARGO_TARGET_DIR")
+        .output()
+        .unwrap();
+    (out.status.success(), String::from_utf8(out.stderr).unwrap())
+}
+
+#[test]
+fn check_sh_fails_while_a_process_started_from_the_target_directory_runs() {
+    let dir = temp_dir("leftovers");
+    fs::create_dir_all(dir.join("target/debug")).unwrap();
+    assert_eq!(leftovers(&dir), (true, String::new()));
+
+    // A stand-in for a coordinator a test left running: its arguments name
+    // the target directory, by the path the test used, not the resolved one.
+    // It waits in the shell's own `read`, so killing it leaves no child.
+    let fake = dir.join("target/debug/langspan");
+    let mut child = Command::new("sh")
+        .args(["-c", "read line"])
+        .arg(&fake)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let (ok, stderr) = leftovers(&dir);
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(!ok, "a leftover process passed: {stderr}");
+    assert!(stderr.contains(&child.id().to_string()), "{stderr}");
+    assert!(stderr.contains("stop them with kill PID"), "{stderr}");
+    assert_eq!(leftovers(&dir), (true, String::new()));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ci_installs_the_runners_the_real_tool_tests_need_and_requires_them() {
+    let text = workflow("check.yml");
+    assert!(
+        text.contains("\n  LANGSPAN_REQUIRE_TOOLS: \"1\"\n"),
+        "check.yml lets tests/auto_checks.rs skip a missing runner"
+    );
+    for id in ["linux", "macos"] {
+        let job = job(&text, id);
+        for line in [
+            "uses: actions/setup-go@",
+            "cache: false",
+            "python3 -m venv \"$RUNNER_TEMP/pytest\"",
+            "-m pip install --disable-pip-version-check pytest==",
+            "-m pytest --version",
+        ] {
+            assert!(job.contains(line), "the {id} job lacks {line}");
+        }
+    }
+}
