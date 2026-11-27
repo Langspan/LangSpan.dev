@@ -815,15 +815,36 @@ def hook_log_main(log, command, timeout=HOOK_LOG_SECONDS, background=False):
         return refused
     at, started = utc_now(), time.monotonic()
     timed_out = False
+    # The hook runs in its own process group so that ending it at the bound
+    # ends every process it started too: a surviving child could act (for
+    # the watcher, record a notice as told) after the host hook has ended.
+    hook = []
+
+    def end_group():
+        try:
+            os.killpg(hook[0].pid, signal.SIGKILL)
+        except (IndexError, OSError):
+            pass  # Not started yet, or the group has already gone.
+
+    # Its own group no longer receives a signal the host sends to the
+    # wrapper's group: end the hook's group too, then end as that signal
+    # would. Set before the hook starts, so no signal finds it unhandled.
+    def forward(signum, _frame):
+        end_group()
+        os._exit(128 + signum)
+
+    for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(signum, forward)
     process = subprocess.Popen(["/bin/sh", "-c", command], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE)
+                               stderr=subprocess.PIPE, start_new_session=True)
+    hook.append(process)
     try:
         stdout, stderr = process.communicate(payload, timeout=timeout)
         code = process.returncode
     except subprocess.TimeoutExpired:
         timed_out = True
-        process.kill()
-        # A child the hook started can keep its pipes open: wait for the
+        end_group()
+        # A child that left the group can keep the pipes open: wait for the
         # output briefly, then go on without it.
         try:
             process.communicate(timeout=HOOK_LOG_DRAIN_SECONDS)

@@ -1107,6 +1107,44 @@ class DriverUnitTests(Temporary):
                                    str(log), "true"], input="", capture_output=True, text=True, timeout=30)
             self.assertNotEqual(done.returncode, 0, options)
 
+    def test_the_hook_log_ends_the_hooks_children_at_its_bound(self):
+        """A hook past the wrapper's bound is ended with every process it
+        started, so none of them acts after the wrapper has returned: a
+        surviving watcher could record a notice as told after the host hook
+        ended. Covers a child holding the hook's pipes and one that let them
+        go, for a background and a foreground hook."""
+        log = self.root / "hooks.jsonl"
+        cases = []
+        for index, redirect in enumerate(("", " >/dev/null 2>&1 </dev/null")):
+            for options in (["--background"], []):
+                late = self.root / ("late-%d-%d" % (index, len(options)))
+                command = "cat >/dev/null; (sleep 2; echo late > %s)%s & sleep 20" % (shlex.quote(str(late)), redirect)
+                done, elapsed = self.hook_log(log, command, *options, "--timeout", "1")
+                self.assertEqual(done.returncode, 0 if options else 2, done.stderr)
+                self.assertLess(elapsed, 10)
+                cases.append(late)
+        # The host ending the wrapper ends the hook's group as well, though
+        # that group no longer receives the host's signal to the wrapper's.
+        for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            late = self.root / ("late-signal-%d" % signum)
+            started = self.root / ("started-%d" % signum)
+            command = "cat >/dev/null; (sleep 2; echo late > %s) & touch %s; sleep 20" % (
+                shlex.quote(str(late)), shlex.quote(str(started)))
+            wrapper = subprocess.Popen([sys.executable, "-I", "-B", str(HERE / "driver.py"), "hook-log",
+                                        "--background", "--timeout", "30", str(log), command],
+                                       stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            wrapper.stdin.close()
+            deadline = time.monotonic() + 20
+            while not started.exists() and time.monotonic() < deadline:
+                time.sleep(.05)
+            self.assertTrue(started.exists())
+            wrapper.send_signal(signum)
+            self.assertEqual(wrapper.wait(timeout=10), 128 + signum)
+            cases.append(late)
+        time.sleep(3)
+        for late in cases:
+            self.assertFalse(late.exists(), late)
+
     def test_notes_and_merge_logs_survive_a_failed_merge(self):
         work = self.root / "work"
         work.mkdir()
