@@ -50,7 +50,8 @@ env:
   NEXTEST_RETRIES: ${{ github.event_name == 'pull_request' && '0' || '2' }}
   # The build cache: the crates registry, the compiled dependencies in
   # target/ (main prunes the workspace's own crates before saving) and the
-  # cargo-nextest binary. Each job restores it; only main saves it
+  # cargo-audit and cargo-nextest binaries, which are built, not downloaded.
+  # Each job restores it; only main saves it
   # (docs/security/threat-model.md#ci-build-cache). The key names the
   # runner's OS and architecture, the job, the toolchain, the lockfile and
   # the tool versions; bump `v1` in it to drop every entry.
@@ -59,6 +60,7 @@ env:
     ~/.cargo/registry/cache
     ~/.cargo/git/db
     target
+    ~/.cache/langspan-ci-tools/cargo-audit
     ~/.cache/langspan-ci-tools/cargo-nextest
   CACHE_LIMIT_MB: 2048
 # A newer push to a pull request cancels its older run. Runs on main are
@@ -128,7 +130,7 @@ jobs:
           path: ${{ env.CACHE_PATHS }}
           key: rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock', 'scripts/install-ci-tools.sh') }}
           restore-keys: ${{ github.ref != 'refs/heads/main' && format('rust-v1-{0}-{1}-{2}-{3}-', runner.os, runner.arch, github.job, hashFiles('rust-toolchain.toml')) || '' }}
-      - name: Install the dependency policy and unused-dependency checkers and the test runner
+      - name: Install the dependency policy, advisory and unused-dependency checkers and the test runner
         if: steps.changes.outputs.code == 'true'
         run: |
           bash scripts/install-ci-tools.sh "$HOME/.cache/langspan-ci-tools"
@@ -223,7 +225,7 @@ jobs:
           path: ${{ env.CACHE_PATHS }}
           key: rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock', 'scripts/install-ci-tools.sh') }}
           restore-keys: ${{ github.ref != 'refs/heads/main' && format('rust-v1-{0}-{1}-{2}-{3}-', runner.os, runner.arch, github.job, hashFiles('rust-toolchain.toml')) || '' }}
-      - name: Install the dependency policy and unused-dependency checkers and the test runner
+      - name: Install the dependency policy, advisory and unused-dependency checkers and the test runner
         if: steps.changes.outputs.code == 'true'
         run: |
           bash scripts/install-ci-tools.sh "$HOME/.cache/langspan-ci-tools"
@@ -318,7 +320,7 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           SHA: ${{ github.sha }}
         run: |
-          body=$(printf 'The nightly Rust checks failed on main at %s.\n\nRun: %s\n\nThe nightly run includes the benchmark harness dry runs, which pull requests skip when they touch no benchmark, briefing, hook or daemon code. Fix the failure the same day (docs/development-process.md).' "$SHA" "$RUN_URL")
+          body=$(printf 'The nightly Rust checks failed on main at %s.\n\nRun: %s\n\nThe nightly run includes the benchmark harness dry runs, which pull requests skip when they touch no benchmark, briefing, hook or daemon code, and checks the unchanged lockfile against the latest RustSec advisories with cargo-deny and cargo-audit; the job log names any new advisory. Fix the failure the same day (docs/development-process.md).' "$SHA" "$RUN_URL")
           number=$(gh issue list --state open --search "\"$TITLE\" in:title" --json number,title \
             --jq 'map(select(.title == env.TITLE)) | .[0].number // empty')
           if [ -n "$number" ]; then

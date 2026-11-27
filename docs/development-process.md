@@ -105,7 +105,8 @@ child process holding its output. The checks run in two lanes, chosen by
 the event (`LANGSPAN_CHECK_LANE`):
 
 - **The fast lane: a pull request.** On Linux only: format, dependency
-  policy, unused dependencies, lint, and the tests nextest's `ci-fast`
+  policy and advisories (cargo-deny and cargo-audit, with the one ignore
+  list in `deny.toml`), unused dependencies, lint, and the tests nextest's `ci-fast`
   profile selects: every unit test, every test of `langspan-core` and
   `langspan-graph`, and the integration tests of the protocol, the store,
   Git output, MCP framing, the workflows and the docs. None of those

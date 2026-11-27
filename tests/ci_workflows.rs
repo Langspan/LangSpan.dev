@@ -511,3 +511,138 @@ fn the_flaky_report_says_so_when_no_test_or_no_report_is_there() {
     assert_eq!(stdout, "");
     assert!(summary.contains("No JUnit report"), "{summary}");
 }
+
+/// Runs scripts/advisory-ignores.py over `dir` with `args`; returns
+/// (success, stdout, stderr).
+fn advisory_ignores(dir: &Path, args: &[&str]) -> (bool, String, String) {
+    let out = Command::new("python3")
+        .args(["-I", "-B"])
+        .arg(root().join("scripts/advisory-ignores.py"))
+        .args(args)
+        .arg(dir)
+        .output()
+        .expect("python3 runs scripts/advisory-ignores.py");
+    (
+        out.status.success(),
+        String::from_utf8(out.stdout).unwrap(),
+        String::from_utf8(out.stderr).unwrap(),
+    )
+}
+
+/// A new directory holding a deny.toml whose advisory ignores are `entries`.
+fn deny_toml(entries: &str) -> PathBuf {
+    let dir = temp_dir("advisories");
+    let text = format!(
+        "[advisories]\nyanked = \"deny\"\nignore = [\n{entries}]\n\n[licenses]\nallow = []\n"
+    );
+    fs::write(dir.join("deny.toml"), text).unwrap();
+    dir
+}
+
+#[test]
+fn cargo_audit_takes_its_ignores_from_deny_toml() {
+    let (ok, stdout, stderr) = advisory_ignores(root(), &["--audit-flags"]);
+    assert!(ok, "{stderr}");
+    let deny = read("deny.toml");
+    let mut flags = 0;
+    for line in stdout.lines() {
+        let id = line
+            .strip_prefix("--ignore ")
+            .unwrap_or_else(|| panic!("not a cargo-audit flag: {line}"));
+        assert!(
+            deny.contains(&format!("id = \"{id}\"")),
+            "{id} is not in deny.toml"
+        );
+        flags += 1;
+    }
+    assert_eq!(flags, deny.matches("{ id = \"RUSTSEC-").count(), "{stdout}");
+    let check = read("scripts/check.sh");
+    for line in [
+        "cargo deny --locked check\n",
+        "audit_flags=$(python3 -I -B scripts/advisory-ignores.py --audit-flags)\n",
+        "cargo audit --deny warnings $audit_flags\n",
+    ] {
+        assert!(check.contains(line), "check.sh lacks {line}");
+    }
+    assert!(
+        !root().join(".cargo/audit.toml").exists(),
+        "cargo-audit's ignores come from deny.toml alone"
+    );
+}
+
+#[test]
+fn an_advisory_ignore_needs_a_reason_and_a_review_date_still_ahead() {
+    let good = concat!(
+        "  { id = \"RUSTSEC-2026-0001\", reason = \"No fix upstream. Review by 2999-01-31.\" },\n",
+        "  # A comment between entries.\n",
+        "  { id = \"RUSTSEC-2026-0002\", reason = \"Only in a build tool. Review by 2999-06-30.\" },\n",
+    );
+    let dir = deny_toml(good);
+    let (ok, stdout, stderr) = advisory_ignores(&dir, &["--audit-flags"]);
+    assert!(ok, "{stderr}");
+    assert_eq!(
+        stdout,
+        "--ignore RUSTSEC-2026-0001\n--ignore RUSTSEC-2026-0002\n"
+    );
+    let (ok, stdout, stderr) = advisory_ignores(&dir, &[]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("2 advisory ignores in deny.toml"),
+        "{stdout}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+
+    for (entry, expected) in [
+        (
+            "  { id = \"RUSTSEC-2026-0003\", reason = \"No fix upstream.\" },",
+            "RUSTSEC-2026-0003 has no review date",
+        ),
+        (
+            "  { id = \"RUSTSEC-2026-0004\", reason = \"Review by 2001-02-03.\" },",
+            "RUSTSEC-2026-0004 was due for review on 2001-02-03",
+        ),
+        (
+            "  { id = \"RUSTSEC-2026-0005\", reason = \"\" },",
+            "RUSTSEC-2026-0005 has no reason",
+        ),
+        (
+            "  { id = \"RUSTSEC-2026-0006\" },",
+            "can't read this ignore",
+        ),
+        ("  \"RUSTSEC-2026-0008\",", "can't read this ignore"),
+        (
+            concat!(
+                "  { id = \"RUSTSEC-2026-0007\", reason = \"Review by 2999-01-01.\" },\n",
+                "  { id = \"RUSTSEC-2026-0007\", reason = \"Review by 2999-01-01.\" },",
+            ),
+            "RUSTSEC-2026-0007 is listed twice",
+        ),
+    ] {
+        let dir = deny_toml(&format!("{entry}\n"));
+        for args in [&[][..], &["--audit-flags"][..]] {
+            let (ok, stdout, stderr) = advisory_ignores(&dir, args);
+            assert!(!ok, "{entry} passed: {stdout}");
+            assert_eq!(stdout, "", "a failed check prints no flags");
+            assert!(stderr.contains(expected), "{entry}: {stderr}");
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[test]
+fn cargo_audit_may_not_keep_an_ignore_list_of_its_own() {
+    let dir = deny_toml("  { id = \"RUSTSEC-2026-0001\", reason = \"Review by 2999-01-31.\" },\n");
+    fs::create_dir_all(dir.join(".cargo")).unwrap();
+    fs::write(
+        dir.join(".cargo/audit.toml"),
+        "[advisories]\nignore = [\"RUSTSEC-2026-0009\"]\n",
+    )
+    .unwrap();
+    let (ok, _, stderr) = advisory_ignores(&dir, &[]);
+    let _ = fs::remove_dir_all(&dir);
+    assert!(!ok);
+    assert!(
+        stderr.contains(".cargo/audit.toml lists advisories to ignore"),
+        "{stderr}"
+    );
+}

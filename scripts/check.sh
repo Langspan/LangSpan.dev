@@ -27,6 +27,12 @@ case $lane in
 esac
 cargo fmt --all -- --check
 cargo deny --locked check
+# cargo-audit reads the RustSec database too, with the ignores deny.toml
+# lists (the script checks each has a reason and a review date still ahead).
+# Its warnings (unmaintained, unsound, yanked) fail, as cargo-deny's do.
+audit_flags=$(python3 -I -B scripts/advisory-ignores.py --audit-flags)
+# shellcheck disable=SC2086 # each flag and id is one word
+cargo audit --deny warnings $audit_flags
 cargo machete
 cargo clippy --workspace --all-targets --locked -- -D warnings
 # The suite under cargo-nextest, with HOME at a read-only home holding a
