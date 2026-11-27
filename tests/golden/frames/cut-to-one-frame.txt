@@ -1,0 +1,2 @@
+graph symbol --detail: 64558 bytes, 87 of 210 definitions, truncated true
+graph blind-spots: 64161 bytes, 74 of 200 partial files, truncated true
