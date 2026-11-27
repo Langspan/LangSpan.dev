@@ -1,5 +1,7 @@
 //! Wire and host identifiers, and workspace file keys.
-use crate::sha256;
+pub(crate) mod registration;
+pub(crate) mod sha256;
+
 use std::{
     fs, io,
     path::{Component, Path},
@@ -23,6 +25,24 @@ pub fn wire_id(kind: &str, fields: &[&str]) -> String {
 
 pub fn workspace_request_id(workspace_id: &str, root: &str) -> String {
     wire_id("workspace", &[workspace_id, root])
+}
+
+/// The workspace ID a user-level hook uses for a repository root: the same
+/// root always gets the same ID, on every run and after every restart.
+pub fn user_workspace_id(root: &Path) -> String {
+    wire_id("root", &[&root.to_string_lossy()])
+}
+
+/// The request ID, and so the admission ID, of the admission asked for
+/// after a wait.
+pub fn admission_id(first: &str) -> String {
+    crate::ids::wire_id("admit-waited", &[first])
+}
+
+/// The request ID of the record of how the wait that `first` started
+/// ended.
+pub fn record_id(first: &str) -> String {
+    crate::ids::wire_id("waited", &[first])
 }
 
 pub fn valid_host_id(id: &str) -> bool {
