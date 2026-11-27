@@ -2895,7 +2895,7 @@ mod tests {
         // The window starts now as the report places events: on the
         // daemon's clock through this generation's anchor, which a long test
         // may see drift from the wall clock.
-        let anchor = store.state.clock_anchor.unwrap();
+        let anchor = store.state.clock_anchor().unwrap();
         let from_ms = anchor.wall_ms + (crate::clock::now_ms() - anchor.clock_ms);
         run(
             &mut store,

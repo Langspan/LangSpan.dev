@@ -482,9 +482,9 @@ fn a_run_whose_write_count_moved_before_it_was_recorded_is_no_baseline() {
         failing(&["parser::keeps_order"], &["parser::rejects_empty"]),
     );
     assert!(
-        state.kept_tests.is_empty(),
+        state.kept_tests().is_empty(),
         "kept as a baseline: {:?}",
-        state.kept_tests
+        state.kept_tests()
     );
     write(&mut state, "alice", "w2");
     record(
@@ -500,7 +500,7 @@ fn a_run_whose_write_count_moved_before_it_was_recorded_is_no_baseline() {
     let notice = notice(&state, "alice");
     assert_eq!(notice.baseline_check_id, None);
     assert_eq!(classes(notice), [("parser::keeps_order".into(), None)]);
-    assert_eq!(replayed().kept_tests, state.kept_tests);
+    assert_eq!(replayed().kept_tests(), state.kept_tests());
 }
 
 #[test]
@@ -537,7 +537,7 @@ fn an_older_record_whose_write_count_had_moved_is_no_baseline_on_replay() {
             .iter()
             .any(|record| record.check_id == "c0")
     );
-    assert!(state.kept_tests.is_empty(), "{:?}", state.kept_tests);
+    assert!(state.kept_tests().is_empty(), "{:?}", state.kept_tests());
 }
 
 #[test]

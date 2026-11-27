@@ -2124,10 +2124,8 @@ mod tests {
     /// host, and activity in two generations.
     fn hooked_state() -> langspan_core::State {
         use langspan_core::{SessionActivity, State, Workspace};
-        let mut state = State {
-            generation: 2,
-            ..State::default()
-        };
+        let mut state = State::default();
+        state.set_generation(2);
         for (id, root) in [("outer", "/r"), ("inner", "/r/nested"), ("other", "/o")] {
             state.workspaces.insert(
                 id.into(),

@@ -375,7 +375,7 @@ pull request.
 
 `tests/ratchets.rs` runs `python3 -I -B scripts/ratchets.py --check .` in
 the full lane. It measures production code only: `#[cfg(test)]` items and
-files outside `src/` and `crates/*/src/` don't count. It checks five
+files outside `src/` and `crates/*/src/` don't count. It checks six
 numbers, each against `scripts/ratchets/baseline/<source path>.tsv`:
 
 - **File size.** A file may not grow past its `lines` row. A file without a
@@ -385,6 +385,13 @@ numbers, each against `scripts/ratchets/baseline/<source path>.tsv`:
 - **Public surface.** A crate may not have more declared `pub` items than
   the sum of its files' `pub` rows. `pub use` and `pub(crate)` don't count,
   so moving an item between files of a crate passes.
+- **Public fields.** A struct named in a `fields STRUCT N` row of its
+  file may not have more than N `pub` fields; `pub(crate)` fields don't
+  count. A row is added by hand, `--record` keeps it, and a struct the row
+  names that is gone fails. `State`'s row in
+  `crates/langspan-core/src/state.rs` heads for zero (issue #373), so code
+  outside the core reads its fields through accessors and cannot write
+  them.
 - **Index and slice expressions.** A crate may not have more `x[i]`
   expressions than the sum of its files' `index` rows, or more `x[a..b]`
   expressions than the sum of their `slice` rows. Either can panic on

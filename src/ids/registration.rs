@@ -22,7 +22,7 @@ impl Registration {
             workspace_id: workspace_id.to_owned(),
             root: workspace.root.clone().into(),
             revision: state
-                .workspace_revisions
+                .workspace_revisions()
                 .get(workspace_id)
                 .copied()
                 .unwrap_or(0),

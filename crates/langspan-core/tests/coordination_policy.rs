@@ -422,12 +422,12 @@ fn a_refusal_is_settled_by_the_next_admitted_write_or_the_stop() {
             ..
         }
     ));
-    assert!(state.unsettled.is_empty());
+    assert!(state.unsettled().is_empty());
 
     // A daemon restart leaves earlier refusals unsettled for good.
     admit(&mut state, "a2", "alice", "src/x.rs", 100);
     admit(&mut state, "b5", "bob", "src/x.rs", 110);
-    assert!(!state.unsettled.is_empty());
+    assert!(!state.unsettled().is_empty());
     apply(&mut state, &Event::Booted { generation: 2 }).unwrap();
-    assert!(state.unsettled.is_empty());
+    assert!(state.unsettled().is_empty());
 }
