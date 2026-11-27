@@ -1,6 +1,9 @@
 name: Rust checks
 on:
   pull_request:
+  # The merge queue's commits: each pull request on top of main and of
+  # every pull request queued ahead of it, under the same job names.
+  merge_group:
   push:
     branches: [main]
   # The release workflow starts this on release-please's branch: a pull
@@ -20,10 +23,10 @@ env:
   # instead of 21.2 s, and a clean target directory 1.4 GB instead of
   # 1.6 GB (so a smaller cache). Local builds keep full debug info.
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
-  # scripts/check.sh: a pull request runs the demonstration on the debug
-  # binary only; main and manual runs also build the release binary and run
-  # it again on that.
-  LANGSPAN_CHECK_RELEASE: ${{ github.event_name != 'pull_request' }}
+  # scripts/check.sh: a pull request or merge-queue commit runs the
+  # demonstration on the debug binary only; main and manual runs also build
+  # the release binary and run it again on that.
+  LANGSPAN_CHECK_RELEASE: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
 # A newer push to a pull request cancels its older run. Runs on main are
 # never cancelled, so every commit on main keeps its own result; the nightly
 # run has a group of its own, so it never replaces a push's pending run.
@@ -45,13 +48,16 @@ jobs:
       # Two commits deep: a pull request's run checks out the merge commit,
       # whose first parent is the base, so the change is HEAD^1..HEAD with
       # no further fetch (none could authenticate without kept credentials).
+      # A merge-queue commit can sit several commits above its group's base,
+      # one per pull request queued ahead, so that run fetches all history.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          fetch-depth: 2
-      # A pull request that changes only Markdown builds nothing: no test or
-      # build step reads a .md file. Other files under docs/ count as code,
-      # since a test replays a recorded host session kept in docs/evidence/.
+          fetch-depth: ${{ github.event_name != 'merge_group' && 2 || 0 }}
+      # A pull request or merge-queue commit that changes only Markdown
+      # builds nothing: no test or build step reads a .md file. Other files
+      # under docs/ count as code, since a test replays a recorded host
+      # session kept in docs/evidence/.
       # The jobs still run and pass, so a required check is never left
       # waiting, as it would be with a workflow-level paths filter. Pushes
       # to main, manual runs and the nightly run always check.
@@ -60,14 +66,18 @@ jobs:
       # about 11 minutes of macOS's 18 (issue #286). They run only when the
       # change touches a path in BENCH_PATHS: the harness, the briefing,
       # hook and daemon code it drives, and what builds or runs the suite.
-      # A pull request is HEAD^1..HEAD; a push to main is that too when it
-      # adds one commit (a squash merge), and otherwise runs them. Manual
-      # and nightly runs always run them. Anything unsure runs them.
+      # A pull request is HEAD^1..HEAD. A merge-queue commit is its group's
+      # base..head, so the pull requests queued ahead count too. A push to
+      # main is HEAD^1..HEAD when it adds one commit (a squash merge), and
+      # otherwise runs them. Manual and nightly runs always run them.
+      # Anything unsure runs them.
       - name: Decide what the change touches
         id: changes
         env:
           EVENT: ${{ github.event_name }}
           BEFORE: ${{ github.event.before }}
+          BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ github.event.merge_group.head_sha }}
           BENCH_PATHS: >-
             ^benchmarks/
             |^tests/benchmark_harness\.rs$
@@ -82,15 +92,19 @@ jobs:
           # reading as "nothing changed".
           code=true
           dry_runs=run
-          diff=false
+          from=
+          to=HEAD
           if [ "$EVENT" = pull_request ]; then
-            diff=true
+            from=HEAD^1
+          elif [ "$EVENT" = merge_group ] && [ -n "$BASE_SHA" ] && [ -n "$HEAD_SHA" ]; then
+            from=$BASE_SHA
+            to=$HEAD_SHA
           elif [ "$EVENT" = push ] && [ "$(git rev-parse HEAD^1)" = "$BEFORE" ]; then
-            diff=true
+            from=HEAD^1
           fi
-          if [ "$diff" = true ]; then
-            changed=$(git diff --name-only HEAD^1 HEAD)
-            if [ "$EVENT" = pull_request ] && [ -n "$changed" ] && ! printf '%s\n' "$changed" | grep -Ev '\.md$' | grep -q .; then
+          if [ -n "$from" ]; then
+            changed=$(git diff --name-only "$from" "$to")
+            if [ "$EVENT" != push ] && [ -n "$changed" ] && ! printf '%s\n' "$changed" | grep -Ev '\.md$' | grep -q .; then
               code=false
             fi
             pattern=$(printf '%s' "$BENCH_PATHS" | tr -d ' ')
