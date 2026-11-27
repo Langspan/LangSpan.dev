@@ -1072,6 +1072,18 @@ threat to rule out is a pull request writing an entry that a later run on
 | **Denial of service**: an entry that grows until it evicts the others | Main prunes the workspace's own crates, the release build and test reports, then saves only when the total is at most `CACHE_LIMIT_MB` (2,048 MB), and otherwise saves nothing and warns (`scripts/ci-cache-size.sh`). An entry is saved once per key. | A cold cache slows a run: it builds every dependency and cargo-nextest, which the fast lane's 10-minute limit is set to allow. |
 | **Elevation of privilege** | The cache needs no token permission beyond `contents: read`. The flaky test, nightly and macOS failure reports, the only other writers in `check.yml`, hold `issues: write`, check out nothing and run no repository code; the test names they write come from the jobs' outputs through the environment, at most 50 failed tests. | A test name is repository text; it reaches the issue as data. |
 
+The full lane's test shards run code another job built: the build job
+uploads its nextest archive and the cargo-nextest that made it as an
+artifact of the same run (`tests-linux`, `tests-macos`, kept one day), and
+each shard runs them. That artifact is no wider a boundary than the build
+itself. Only jobs of the same run can write it, every one of them runs the
+commit under test with `contents: read`, and shards never run on a pull
+request, so a fork's code never reaches one. A shard restores and saves no
+build cache. The `Linux` and `macOS` checks read only the shards' JUnit
+reports, bounded at 64 MiB each by the scripts that parse them, and fail
+unless the build and every shard passed. A cancelled or timed-out part
+fails them; it doesn't leave them skipped.
+
 ## Mixed versions and `doctor`'s version check
 
 Roadmap I5 ([ADR 0025](../adr/0025-distribution-lifecycle-and-store-beyond-the-first-release.md#i5-mixed-versions-as-built))

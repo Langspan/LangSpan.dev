@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Prints one row per Linux or macOS job of the given Rust checks runs, with
-# the times of the steps that cost the most, in seconds: the wait from the
-# run's creation to the job's start, the whole job, restoring the build
-# cache, installing the CI tools, and the scripts/check.sh step. Read-only:
-# it calls `gh run view` and changes nothing on GitHub.
+# Prints one row per Linux or macOS job of the given Rust checks runs (the
+# build job, each test shard and the required check that collects them),
+# with the times of the steps that cost the most, in seconds: the wait from
+# the run's creation to the job's start, the whole job, restoring the build
+# cache, installing the CI tools, and the scripts/check.sh step (a shard's
+# tests, in a shard). Read-only: it calls `gh run view` and changes nothing
+# on GitHub.
 #
 #   bash scripts/ci-step-times.sh RUN_ID...
 #
@@ -22,11 +24,11 @@ for run in "$@"; do
     def secs($s): if $s and $s.startedAt and $s.completedAt and $s.conclusion != "skipped"
       then ($s.completedAt | t) - ($s.startedAt | t) else 0 end;
     def step($j; $re): secs([$j.steps[] | select(.name | test($re))] | first);
-    . as $r | .jobs[] | select(.name == "Linux" or .name == "macOS") | . as $j
+    . as $r | .jobs[] | select(.name | test("^(Linux|macOS)( build| tests [0-9]+)?$")) | . as $j
     | [$r.databaseId, $r.event, $r.headSha[0:8], .name, (.conclusion // "-"),
        (if .startedAt then (.startedAt | t) - ($r.createdAt | t) else "-" end),
        (if .startedAt and .completedAt then (.completedAt | t) - (.startedAt | t) else "-" end),
        step($j; "^Restore the build cache"), step($j; "^Install the (dependency|test runner)"),
-       step($j; "^Check formatting")]
+       step($j; "^(Check formatting|Run this shard)")]
     | map(tostring) | join("\t")'
 done

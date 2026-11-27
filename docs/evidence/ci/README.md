@@ -7,7 +7,9 @@ release before `publish`.
 
 The per-step times before and after the change to concurrency, the build
 cache, the release build and the macOS checks are in
-[pipeline.md](pipeline.md).
+[pipeline.md](pipeline.md). The full lane's times before and after it
+built the tests once per platform and ran them in shards are in
+[shards.md](shards.md).
 
 ## Workflow completion, the merge-queue gate and job times
 
