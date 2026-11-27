@@ -58,7 +58,7 @@ pub fn mark(_: &Path, _: &str) -> Result<(), String> {
 }
 
 #[cfg(unix)]
-fn prune(dir: &Path) {
+pub(crate) fn prune(dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };

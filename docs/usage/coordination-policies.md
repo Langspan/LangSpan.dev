@@ -14,6 +14,21 @@ prints the table in effect, `--json` as rows, and the MCP tool
 | `commit_held`: a commit would take another live session's changes | Refuse | No |
 | `landing_not_ready`: `land` without passing evidence on the exact tree (exit code 6) | Refuse | No |
 
+One more pause is not in the table yet: a rename held once
+([issue #213](https://github.com/Langspan/LangSpan.dev/issues/213),
+[ADR 0035](../adr/0035-semantic-layer.md)). A Claude Code or Codex write
+that renames or removes an exported name (deleting its file with Codex's
+`*** Delete File:` removes every name in it), while another worktree of the
+repository has uncommitted files that mention it, is refused once
+("LangSpan: rename held once.", diagnostic coverage `held_rename`). The
+reply names the worktree, its live sessions and the files, matched by name,
+and suggests keeping the old name as a forwarding alias calling the new one
+until those callers move. Repeating the write goes through: it is held once
+per session, file and name (marks under `STATE/rename-held/`, removed after
+a day). Without such callers, or when the index or coordinator cannot
+answer, the write goes on to admission as usual, with a note in the
+diagnostic. It is not configurable.
+
 Only the policy for a current holder can be set, per workspace:
 
 ```sh
