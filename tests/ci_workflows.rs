@@ -344,8 +344,16 @@ fn pull_requests_read_the_build_cache_and_only_main_writes_it() {
         // Every run, main's included, falls back to main's latest entry for
         // the toolchain, so main isn't left to build from nothing.
         for part in [
-            "key: rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock', 'scripts/install-ci-tools.sh') }}",
-            "restore-keys: rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('rust-toolchain.toml') }}-\n",
+            "BUILD_PREFIX: rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('rust-toolchain.toml') }}-\n",
+            "BUILD_HASH: ${{ hashFiles('Cargo.lock', 'scripts/install-ci-tools.sh') }}\n",
+            "echo \"build-prefix=$BUILD_PREFIX\"\n",
+            "echo \"build=$BUILD_PREFIX$BUILD_HASH\"\n",
+        ] {
+            assert!(job.contains(part), "{id}'s cache keys lack {part}");
+        }
+        for part in [
+            "key: ${{ steps.keys.outputs.build }}\n",
+            "restore-keys: ${{ steps.keys.outputs.build-prefix }}\n",
             "path: ${{ env.CACHE_PATHS }}",
         ] {
             assert!(restore.contains(part), "{id}'s restore lacks {part}");
@@ -370,7 +378,7 @@ fn pull_requests_read_the_build_cache_and_only_main_writes_it() {
             ),
             "{id} saves without the size check"
         );
-        assert!(save.contains("key: ${{ steps.cache.outputs.cache-primary-key }}"));
+        assert!(save.contains("key: ${{ steps.keys.outputs.build }}"));
     }
     // The release build uses no cache.
     let release = workflow("release.yml");
@@ -399,9 +407,17 @@ fn cargo_audit_has_its_own_cache_and_the_build_cache_paths_stay_put() {
         .nth(1)
         .expect("linux doesn't restore cargo-audit");
     for part in [
+        "AUDIT_PREFIX: cargo-audit-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-\n",
+        "AUDIT_HASH: ${{ hashFiles('scripts/install-ci-tools.sh') }}\n",
+        "echo \"audit-prefix=$AUDIT_PREFIX\"\n",
+        "echo \"audit=$AUDIT_PREFIX$AUDIT_HASH\"\n",
+    ] {
+        assert!(job.contains(part), "the cargo-audit cache keys lack {part}");
+    }
+    for part in [
         "path: ~/.cache/langspan-ci-tools/cargo-audit\n",
-        "key: cargo-audit-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('scripts/install-ci-tools.sh') }}",
-        "restore-keys: cargo-audit-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-\n",
+        "key: ${{ steps.keys.outputs.audit }}\n",
+        "restore-keys: ${{ steps.keys.outputs.audit-prefix }}\n",
     ] {
         assert!(
             restore.contains(part),
@@ -420,7 +436,65 @@ fn cargo_audit_has_its_own_cache_and_the_build_cache_paths_stay_put() {
     assert!(save.starts_with(
         "        if: ${{ !cancelled() && github.ref == 'refs/heads/main' && steps.tools.outcome == 'success' && steps.audit-cache.outputs.cache-hit != 'true' }}\n"
     ), "cargo-audit could be saved off main, or not after a failed test");
-    assert!(save.contains("key: ${{ steps.audit-cache.outputs.cache-primary-key }}"));
+    assert!(save.contains("key: ${{ steps.keys.outputs.audit }}"));
+}
+
+/// The steps of a job, each from its `- ` line to the next.
+fn steps(job: &str) -> Vec<String> {
+    job.split("\n      - ")
+        .skip(1)
+        .map(|step| format!("- {step}"))
+        .collect()
+}
+
+#[test]
+fn a_cold_run_on_main_saves_under_keys_the_skipped_restores_did_not_name() {
+    // A cold manual run skips both restores, and a skipped step has no
+    // outputs, so a save keyed on a restore's `cache-primary-key` gets an
+    // empty key and the cache action saves nothing. The keys come from a
+    // step of their own that a cold run still runs.
+    let text = workflow("check.yml");
+    assert!(
+        !text.contains("cache-primary-key"),
+        "a save reads a key from a restore that a cold run skips"
+    );
+    for (id, kinds) in [
+        ("linux", &["build", "audit"][..]),
+        ("macos", &["build"][..]),
+    ] {
+        let job = job(&text, id);
+        let steps = steps(&job);
+        let keys = steps
+            .iter()
+            .position(|step| step.contains("\n        id: keys\n"))
+            .unwrap_or_else(|| panic!("{id} names no cache keys"));
+        assert!(
+            steps[keys].contains("if: steps.changes.outputs.code == 'true'\n"),
+            "{id}: {}",
+            steps[keys]
+        );
+        assert!(
+            !steps[keys].contains("inputs.cold"),
+            "{id}: {}",
+            steps[keys]
+        );
+        for kind in kinds {
+            let key = format!("key: ${{{{ steps.keys.outputs.{kind} }}}}");
+            let prefix = format!("restore-keys: ${{{{ steps.keys.outputs.{kind}-prefix }}}}");
+            let restore = steps
+                .iter()
+                .position(|step| step.contains("actions/cache/restore@") && step.contains(&key))
+                .unwrap_or_else(|| panic!("{id} restores no {kind} cache under the named key"));
+            assert!(steps[restore].contains(&prefix), "{id}: {}", steps[restore]);
+            assert!(keys < restore, "{id} names the keys after restoring");
+            assert!(
+                steps
+                    .iter()
+                    .any(|step| step.contains("actions/cache/save@") && step.contains(&key)),
+                "{id} saves no {kind} cache under the named key"
+            );
+        }
+    }
 }
 
 #[test]

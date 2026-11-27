@@ -135,6 +135,25 @@ jobs:
           rustup --version
           rustup toolchain install
           rustc --version
+      # The cache keys, named apart from the restores: a cold manual run
+      # skips those, and a skipped step has no outputs, so the saves below
+      # read their keys from here. A cold run on main therefore still saves
+      # an entry main lacks.
+      - name: Name the cache keys
+        id: keys
+        if: steps.changes.outputs.code == 'true'
+        env:
+          BUILD_PREFIX: rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('rust-toolchain.toml') }}-
+          BUILD_HASH: ${{ hashFiles('Cargo.lock', 'scripts/install-ci-tools.sh') }}
+          AUDIT_PREFIX: cargo-audit-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
+          AUDIT_HASH: ${{ hashFiles('scripts/install-ci-tools.sh') }}
+        run: |
+          {
+            echo "build-prefix=$BUILD_PREFIX"
+            echo "build=$BUILD_PREFIX$BUILD_HASH"
+            echo "audit-prefix=$AUDIT_PREFIX"
+            echo "audit=$AUDIT_PREFIX$AUDIT_HASH"
+          } >> "$GITHUB_OUTPUT"
       # Every run falls back to main's latest entry for the same toolchain
       # when none is under its exact key, so a lockfile change rebuilds only
       # the crates it changed; main too, which then saves the result under
@@ -147,8 +166,8 @@ jobs:
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ env.CACHE_PATHS }}
-          key: rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock', 'scripts/install-ci-tools.sh') }}
-          restore-keys: rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('rust-toolchain.toml') }}-
+          key: ${{ steps.keys.outputs.build }}
+          restore-keys: ${{ steps.keys.outputs.build-prefix }}
       # cargo-audit is built, not downloaded, so it is cached too, in an
       # entry of its own that leaves CACHE_PATHS alone. The same rules: only
       # main saves, and every run falls back to main's latest entry.
@@ -158,8 +177,8 @@ jobs:
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ~/.cache/langspan-ci-tools/cargo-audit
-          key: cargo-audit-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('scripts/install-ci-tools.sh') }}
-          restore-keys: cargo-audit-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
+          key: ${{ steps.keys.outputs.audit }}
+          restore-keys: ${{ steps.keys.outputs.audit-prefix }}
       - name: Install the dependency policy, advisory and unused-dependency checkers and the test runner
         id: tools
         if: steps.changes.outputs.code == 'true'
@@ -234,13 +253,13 @@ jobs:
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ env.CACHE_PATHS }}
-          key: ${{ steps.cache.outputs.cache-primary-key }}
+          key: ${{ steps.keys.outputs.build }}
       - name: Save cargo-audit
         if: ${{ !cancelled() && github.ref == 'refs/heads/main' && steps.tools.outcome == 'success' && steps.audit-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ~/.cache/langspan-ci-tools/cargo-audit
-          key: ${{ steps.audit-cache.outputs.cache-primary-key }}
+          key: ${{ steps.keys.outputs.audit }}
   # The same check on Apple silicon, in the full lane only. `macos-26` is
   # GitHub's current arm64 image (`macos-latest` points at it); a pinned
   # label, so an image change is a deliberate edit here. It starts with
@@ -288,6 +307,18 @@ jobs:
           rustup --version
           rustup toolchain install
           rustc --version
+      # As on Linux, apart from the restore, which a cold run skips.
+      - name: Name the cache keys
+        id: keys
+        if: steps.changes.outputs.code == 'true'
+        env:
+          BUILD_PREFIX: rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('rust-toolchain.toml') }}-
+          BUILD_HASH: ${{ hashFiles('Cargo.lock', 'scripts/install-ci-tools.sh') }}
+        run: |
+          {
+            echo "build-prefix=$BUILD_PREFIX"
+            echo "build=$BUILD_PREFIX$BUILD_HASH"
+          } >> "$GITHUB_OUTPUT"
       # The build cache as on Linux: macOS keeps entries of its own (the key
       # names the job and platform), every run falls back to main's latest,
       # and only main saves them.
@@ -297,8 +328,8 @@ jobs:
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ env.CACHE_PATHS }}
-          key: rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock', 'scripts/install-ci-tools.sh') }}
-          restore-keys: rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('rust-toolchain.toml') }}-
+          key: ${{ steps.keys.outputs.build }}
+          restore-keys: ${{ steps.keys.outputs.build-prefix }}
       # Only the test runner: format, dependency policy, advisories, unused
       # dependencies and the docs don't depend on the platform, so only
       # Linux runs them (LANGSPAN_CHECK_PORTABLE below).
@@ -362,7 +393,7 @@ jobs:
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ env.CACHE_PATHS }}
-          key: ${{ steps.cache.outputs.cache-primary-key }}
+          key: ${{ steps.keys.outputs.build }}
   # A test that passed only on retry on main opens one issue, or comments
   # on it while it is open, naming the tests. Only this job can write, and
   # only issues; it checks out nothing and runs no repository code. The

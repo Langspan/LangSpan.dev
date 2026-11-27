@@ -159,7 +159,8 @@ job and toolchain, its exact key first. `main` saves under its own key
 after a run whose checks passed or failed, but not after a cancelled or
 timed-out run, or one that built no tests
 ([threat model](security/threat-model.md#ci-build-cache)). A manual run
-with `cold` set restores nothing, to measure a build from nothing.
+with `cold` set restores nothing, to measure a build from nothing; on
+`main`, it still saves an entry that `main` lacks.
 
 In the full lane, the benchmark harness's dry runs (the `dry_run_*` tests
 in `tests/benchmark_harness.rs`) run only when the change touches one of
