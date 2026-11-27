@@ -200,7 +200,7 @@ the event (`LANGSPAN_CHECK_LANE`):
   (`tests/cli_transcript.rs`, `tests/cli_golden.rs`), so that output that
   differs on Linux shows on the pull request. The `macOS` check passes at once and says that the
   full run happens in the merge queue. Target: a result **under 3
-  minutes** from push. The job stops at 10 minutes.
+  minutes** from push. The job stops at 6 minutes.
 - **The full lane: a merge-queue commit, a push to `main`, the nightly run
   and a manual run.** On Linux and macOS side by side: everything in the
   fast lane, every other test (the `ci` profile, which leaves none out),
@@ -227,8 +227,13 @@ the event (`LANGSPAN_CHECK_LANE`):
   shards' flaky and failed tests for the issues below. Four shards come
   from the measured test time
   ([evidence](evidence/ci/shards.md)). Target: **under 8 minutes** in the
-  merge queue. A build job stops at 35 minutes there and at 30 on `main`
-  and nightly, and a shard at 15. Only the
+  merge queue. A build job stops at 15 minutes there and at 30 on `main`
+  and nightly, and a shard at 15. A build that restores no cache takes
+  longer than 6 minutes and can take longer than 15, so a pull request
+  that changes `rust-toolchain.toml` or a tool version in
+  `scripts/install-ci-tools.sh` raises both limits in `check.yml`, and the
+  next pull request lowers them once `main` has saved the new cache
+  ([evidence](evidence/ci/lanes.md)). Only the
   nightly run also builds the release binary and runs the demonstration on
   it; nothing else reads it, and the release workflow builds its own. The queue
   merges a pull request only when its full Linux lane passes, so nothing
