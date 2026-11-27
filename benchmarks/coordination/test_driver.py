@@ -2040,8 +2040,10 @@ class WatcherDryRun(Temporary):
                     self.assertFalse(session.fire("SessionStart", source="startup"))
                     prompt = {"session_id": session.session_id, "cwd": session.cwd,
                               "hook_event_name": "UserPromptSubmit", "prompt": "Task: shorten the summary"}
+                    # As an interactive host runs it (#534), whatever session runs this test.
                     watcher = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
-                                               stderr=subprocess.PIPE, cwd=session.cwd, start_new_session=True)
+                                               stderr=subprocess.PIPE, cwd=session.cwd, start_new_session=True,
+                                               env={**os.environ, "CLAUDE_CODE_ENTRYPOINT": "cli"})
                     self.addCleanup(lambda process=watcher: process.returncode is None
                                     and standin_agent.kill_group(process))
                     watcher.stdin.write(json.dumps(prompt).encode())
