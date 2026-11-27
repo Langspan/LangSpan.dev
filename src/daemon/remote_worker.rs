@@ -189,7 +189,7 @@ fn remote_pass(
         let attempt = ATTEMPT
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             .to_string();
-        crate::hook::wire_id(kind, &[&link.workspace_id, subject, &generation, &attempt])
+        crate::ids::wire_id(kind, &[&link.workspace_id, subject, &generation, &attempt])
     };
     let deadline = Instant::now() + REMOTE_DEADLINE;
     let received = crate::remote::fetch(root, link, deadline).map_err(network("fetch"))?;
@@ -350,7 +350,7 @@ fn remote_withdraw(
     else {
         ask(
             sender,
-            crate::hook::wire_id(
+            crate::ids::wire_id(
                 "remote-withdrawn",
                 &[
                     &link.workspace_id,
@@ -378,7 +378,7 @@ fn remote_withdraw(
                 // it and enabling again never reuses the number.
                 if let Some(Outcome::Error { code, message }) = ask(
                     sender,
-                    crate::hook::wire_id(
+                    crate::ids::wire_id(
                         "remote-published",
                         &[
                             &link.workspace_id,

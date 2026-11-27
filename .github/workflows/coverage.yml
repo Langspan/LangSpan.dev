@@ -1,10 +1,13 @@
 name: Coverage
-# Line coverage of the workspace every night on main, held to a floor
-# (scripts/coverage.sh, scripts/coverage-report.py;
-# docs/development-process.md#coverage). Not a required check. A pull
-# request that changes the measurement runs it too, so the change shows its
-# own result.
+# Line coverage of the workspace on every push to main and every night,
+# held to a floor (scripts/coverage.sh, scripts/coverage-report.py;
+# docs/development-process.md#coverage). Not a required check. The push
+# runs give the gate figures for current main, which a baseline row is
+# written from. A pull request that changes the measurement runs it too, so
+# the change shows its own result.
 on:
+  push:
+    branches: [main]
   schedule:
     - cron: "41 4 * * *"
   workflow_dispatch:

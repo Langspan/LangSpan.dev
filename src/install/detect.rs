@@ -270,7 +270,7 @@ pub fn not_installed(reports: &[HostReport], roots: &[PathBuf], state_dir: &Path
         .filter(|vendor| {
             !roots
                 .iter()
-                .any(|root| crate::hook::install_at(*vendor, state_dir, root).is_some())
+                .any(|root| super::install_at(*vendor, state_dir, root).is_some())
         })
         .collect()
 }

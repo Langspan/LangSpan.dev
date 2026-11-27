@@ -15,9 +15,10 @@
 
 use crate::{
     commit::{is_live, is_own},
-    hook::{Config, REASON_LIMIT, ShellCall, clean, truncate},
+    hook::{Config, REASON_LIMIT, ShellCall},
     journal::{Entry, Lines},
     shell::{Formatting, Reach, Snapshot},
+    text::{clean, truncate},
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -128,7 +129,7 @@ pub fn notice(
         fields.extend(paths.iter().map(|path| format!("{session}\0{path}")));
     }
     let fields: Vec<&str> = fields.iter().map(String::as_str).collect();
-    let fingerprint = crate::hook::wire_id("formatter-notice", &fields);
+    let fingerprint = crate::ids::wire_id("formatter-notice", &fields);
     let files: usize = candidates.values().map(BTreeSet::len).sum();
     if crate::journal::told(&config.state_dir, me, &fingerprint) {
         return Some(Notice::quiet(format!(
@@ -211,7 +212,7 @@ fn text(found: &BTreeMap<String, BTreeSet<String>>) -> String {
         if !shown.is_empty() {
             theirs.push(format!(
                 "{}: {}",
-                crate::hook::session_label(session),
+                crate::text::session_label(session),
                 shown.join(", ")
             ));
         }

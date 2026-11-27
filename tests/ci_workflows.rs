@@ -2214,6 +2214,12 @@ fn ci_installs_the_runners_the_real_tool_tests_need_and_requires_them() {
 fn coverage_runs_nightly_reports_a_drop_and_is_not_a_required_check() {
     let text = workflow("coverage.yml");
     assert!(text.contains("\n  schedule:\n"), "{text}");
+    // Every push to main is measured too, so the gate has current main.
+    assert!(text.contains("\n  push:\n    branches: [main]\n"), "{text}");
+    assert!(
+        text.contains("cancel-in-progress: ${{ github.event_name == 'pull_request' }}"),
+        "a run on main is never cancelled"
+    );
     assert!(
         !text.contains("merge_group"),
         "coverage is no merge-queue gate"
@@ -2310,42 +2316,54 @@ fn coverage_report(dir: &Path, out: &Path, args: &[&str]) -> (bool, String, Stri
     )
 }
 
+/// The files `eleven` measures between the first and the eleventh.
+const MIDDLE: [&str; 9] = [
+    "src/f01.rs",
+    "src/f02.rs",
+    "src/f03.rs",
+    "src/f04.rs",
+    "crates/langspan-core/src/f05.rs",
+    "src/f06.rs",
+    "src/f07.rs",
+    "src/f08.rs",
+    "src/daemon/f09.rs",
+];
+
 /// Eleven files, src/f00.rs the largest; each 95% covered.
 fn eleven(first: Measured, eleventh: Measured) -> Vec<Measured> {
-    const NAMES: [&str; 9] = [
-        "src/f01.rs",
-        "src/f02.rs",
-        "src/f03.rs",
-        "src/f04.rs",
-        "crates/langspan-core/src/f05.rs",
-        "src/f06.rs",
-        "src/f07.rs",
-        "src/f08.rs",
-        "src/daemon/f09.rs",
-    ];
     let mut files = vec![first];
-    files.extend(NAMES.iter().map(|name| Measured(name, 200, 190, 0)));
+    files.extend(MIDDLE.iter().map(|name| Measured(name, 200, 190, 0)));
     files.push(eleventh);
     files
 }
 
-const BASELINE: &str = "src/f00.rs\t95.0\nsrc/f10.rs\t95.0\n";
+/// A 95.0 row for each of `eleven`'s files, src/f00.rs at `first`.
+fn rows(first: &str) -> String {
+    let mut rows = format!("src/f00.rs\t{first}\n");
+    for name in MIDDLE.iter().chain(&["src/f10.rs"]) {
+        rows += &format!("{name}\t95.0\n");
+    }
+    rows
+}
 
 #[test]
-fn coverage_holds_when_the_total_and_the_largest_files_hold() {
+fn coverage_holds_when_the_total_and_every_row_hold() {
     let dir = temp_dir("coverage-holds");
     // Integration tests cover 372 of 400 lines, 2 points under the 95.0
-    // baseline; in-file unit tests cover 8 more, so 95.0 again.
-    let files = eleven(
+    // baseline; in-file unit tests cover 8 more, so 95.0 again. The
+    // eleventh file, the smallest, is held to its row too: 93.0 is 2 under.
+    let mut files = eleven(
         Measured("src/f00.rs", 400, 372, 8),
-        Measured("src/f10.rs", 100, 80, 0),
+        Measured("src/f10.rs", 100, 93, 0),
     );
-    let out = coverage_fixture(&dir, &files, BASELINE);
+    // Under 100 production lines, a file needs no row.
+    files.push(Measured("src/small.rs", 99, 50, 0));
+    let out = coverage_fixture(&dir, &files, &rows("95.0"));
     let (ok, stdout, stderr) = coverage_report(&dir, &out, &[]);
     assert!(ok, "{stdout}{stderr}");
-    // 2,170 of 2,300 production lines; the test-module lines aren't counted.
+    // 2,233 of 2,399 production lines; the test-module lines aren't counted.
     assert!(
-        stdout.contains("Production lines covered: 94.3% (2170 of 2300); the floor is 90%."),
+        stdout.contains("Production lines covered: 93.1% (2233 of 2399); the floor is 90%."),
         "{stdout}"
     );
     assert!(
@@ -2356,44 +2374,47 @@ fn coverage_holds_when_the_total_and_the_largest_files_hold() {
         stdout.contains("| `src/f00.rs` | 400 | 380 | 95.0 | 95.0 |"),
         "{stdout}"
     );
-    // The eleventh largest may fall further: only the ten largest are held.
     assert!(
-        stdout.contains("| `src/f10.rs` | 100 | 80 | 80.0 | 95.0 |"),
+        stdout.contains("| `src/f10.rs` | 100 | 93 | 93.0 | 95.0 |"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("| `src/small.rs` | 99 | 50 | 50.5 | none |"),
         "{stdout}"
     );
     assert!(!stdout.contains("tests/support"), "{stdout}");
     assert!(!stdout.contains("/rustc/"), "{stdout}");
-    // A file among the largest with no row is named, not failed.
-    assert!(
-        stdout.contains("`src/f01.rs` has no baseline row"),
-        "{stdout}"
-    );
     let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn coverage_fails_under_the_total_floor_or_two_points_under_a_largest_file() {
+fn coverage_fails_under_the_total_floor_or_two_points_under_any_row() {
     let dir = temp_dir("coverage-drops");
-    // 2.1 points under its baseline.
+    // The largest file is 2.1 points under its row; the eleventh, outside
+    // the ten largest, 3 points.
     let files = eleven(
         Measured("src/f00.rs", 1000, 929, 0),
-        Measured("src/f10.rs", 100, 95, 0),
+        Measured("src/f10.rs", 100, 92, 0),
     );
-    let out = coverage_fixture(&dir, &files, BASELINE);
+    let out = coverage_fixture(&dir, &files, &rows("95.0"));
     let (ok, stdout, stderr) = coverage_report(&dir, &out, &[]);
     assert!(!ok, "{stdout}");
-    let message = "`src/f00.rs` covers 92.9% of its production lines, more than 2 points under its baseline of 95.0%";
-    assert!(stdout.contains(message), "{stdout}");
-    assert!(stderr.contains(message), "{stderr}");
+    for (file, now) in [("src/f00.rs", "92.9"), ("src/f10.rs", "92.0")] {
+        let message = format!(
+            "`{file}` covers {now}% of its production lines, more than 2 points under its baseline of 95.0%"
+        );
+        assert!(stdout.contains(&message), "{stdout}");
+        assert!(stderr.contains(&message), "{stderr}");
+    }
     let _ = fs::remove_dir_all(&dir);
 
     // Exactly 2 points under holds.
     let dir = temp_dir("coverage-two-points");
     let files = eleven(
         Measured("src/f00.rs", 1000, 930, 0),
-        Measured("src/f10.rs", 100, 95, 0),
+        Measured("src/f10.rs", 100, 93, 0),
     );
-    let out = coverage_fixture(&dir, &files, BASELINE);
+    let out = coverage_fixture(&dir, &files, &rows("95.0"));
     let (ok, stdout, _) = coverage_report(&dir, &out, &[]);
     assert!(ok, "{stdout}");
     let _ = fs::remove_dir_all(&dir);
@@ -2403,7 +2424,7 @@ fn coverage_fails_under_the_total_floor_or_two_points_under_a_largest_file() {
         Measured("src/f00.rs", 4000, 3200, 0),
         Measured("src/f10.rs", 100, 95, 0),
     );
-    let out = coverage_fixture(&dir, &files, "src/f00.rs\t80.0\n");
+    let out = coverage_fixture(&dir, &files, &rows("80.0"));
     let (ok, stdout, stderr) = coverage_report(&dir, &out, &[]);
     assert!(!ok, "{stdout}");
     let message = "the total, 84.8% of production lines, is under the 90% floor";
@@ -2412,12 +2433,85 @@ fn coverage_fails_under_the_total_floor_or_two_points_under_a_largest_file() {
 }
 
 #[test]
+fn coverage_fails_for_a_row_without_its_file_or_a_large_file_without_a_row() {
+    // src/f05.rs was split: its row stays behind and the new file has none.
+    let dir = temp_dir("coverage-moved");
+    let mut files = eleven(
+        Measured("src/f00.rs", 400, 380, 0),
+        Measured("src/f10.rs", 100, 95, 0),
+    );
+    files.push(Measured("src/f05/part.rs", 100, 95, 0));
+    // A row whose file exists but measures no production lines.
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("src/tests_only.rs"), "#[cfg(test)]\nmod t {}\n").unwrap();
+    let baseline = rows("95.0") + "src/f05.rs\t95.0\nsrc/tests_only.rs\t90.0\n";
+    let out = coverage_fixture(&dir, &files, &baseline);
+    let (ok, stdout, stderr) = coverage_report(&dir, &out, &[]);
+    assert!(!ok, "{stdout}");
+    for message in [
+        "`src/f05.rs` has a baseline row but no longer exists; move its row to the files its lines went to",
+        "`src/tests_only.rs` has a baseline row but no production lines measured; remove the row",
+        "`src/f05/part.rs` has 100 production lines and no baseline row; add one",
+    ] {
+        assert!(stdout.contains(message), "{stdout}");
+        assert!(stderr.contains(message), "{stderr}");
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn coverage_fails_for_a_row_whose_record_keeps_no_production_lines() {
+    // The export has a record for src/tests_only.rs, but --prepare drops
+    // every line of it as test-only: the row fails as if the record were
+    // absent, and the file isn't counted as 100% covered.
+    let dir = temp_dir("coverage-emptied");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("src/tests_only.rs"), "#[cfg(test)]\nmod t {}\n").unwrap();
+    let mut files = eleven(
+        Measured("src/f00.rs", 400, 380, 0),
+        Measured("src/f10.rs", 100, 95, 0),
+    );
+    files.push(Measured("src/tests_only.rs", 2, 2, 0));
+    let baseline = rows("95.0") + "src/tests_only.rs\t90.0\n";
+    let out = coverage_fixture(&dir, &files, &baseline);
+    let prepared = fs::read_to_string(out.join("production.lcov")).unwrap();
+    assert!(
+        kept_lines(&prepared, "src/tests_only.rs").is_empty(),
+        "{prepared}"
+    );
+    let (ok, stdout, stderr) = coverage_report(&dir, &out, &[]);
+    assert!(!ok, "{stdout}");
+    let message =
+        "`src/tests_only.rs` has a baseline row but no production lines measured; remove the row";
+    assert!(stdout.contains(message), "{stdout}");
+    assert!(stderr.contains(message), "{stderr}");
+    assert!(!stdout.contains("| `src/tests_only.rs` |"), "{stdout}");
+    let _ = fs::remove_dir_all(&dir);
+
+    // Every record emptied: no production lines at all, which fails like an
+    // export with no records instead of passing at 100%.
+    let dir = temp_dir("coverage-all-emptied");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("src/tests_only.rs"), "#[cfg(test)]\nmod t {}\n").unwrap();
+    let files = [Measured("src/tests_only.rs", 2, 2, 0)];
+    let out = coverage_fixture(&dir, &files, "");
+    for args in [&[][..], &["--write-baseline"]] {
+        let (ok, stdout, stderr) = coverage_report(&dir, &out, args);
+        assert!(!ok, "{args:?}: {stdout}");
+        assert!(stderr.contains("no production lines"), "{args:?}: {stderr}");
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn writing_the_coverage_baseline_records_one_row_per_file() {
     let dir = temp_dir("coverage-write");
-    let files = eleven(
+    let mut files = eleven(
         Measured("src/f00.rs", 400, 390, 0),
         Measured("src/f10.rs", 100, 95, 0),
     );
+    // Under 100 production lines: no row.
+    files.push(Measured("src/small.rs", 99, 50, 0));
     let out = coverage_fixture(&dir, &files, "src/gone.rs\t99.0\n");
     let (ok, stdout, stderr) = coverage_report(&dir, &out, &["--write-baseline"]);
     assert!(ok, "{stdout}{stderr}");
@@ -2427,6 +2521,7 @@ fn writing_the_coverage_baseline_records_one_row_per_file() {
     assert_eq!(rows[0], "crates/langspan-core/src/f05.rs\t95.0");
     assert!(rows.contains(&"src/f00.rs\t97.5"), "{written}");
     assert!(!written.contains("gone.rs"), "{written}");
+    assert!(!written.contains("small.rs"), "{written}");
     // The written baseline holds at once.
     let (ok, stdout, _) = coverage_report(&dir, &out, &[]);
     assert!(ok, "{stdout}");
