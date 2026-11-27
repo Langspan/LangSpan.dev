@@ -2646,8 +2646,10 @@ impl World {
     }
 }
 
+/// Slow (about 19 s): the two branches hold one commit more than
+/// `MAX_REWRITTEN` between them, made and rebased with real Git.
 #[test]
-fn a_rebase_landing_bounds_the_rewritten_commits_of_all_its_branches_together() {
+fn slow_a_rebase_landing_bounds_the_rewritten_commits_of_all_its_branches_together() {
     use langspan_core::MAX_REWRITTEN;
     let w = World::new();
     let half = MAX_REWRITTEN / 2;

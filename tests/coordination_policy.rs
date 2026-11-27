@@ -14,6 +14,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[allow(dead_code)] // Only the wait helpers are used here.
+mod support;
+
 static NEXT: AtomicU64 = AtomicU64::new(0);
 const ALICE: &str = "00000000-0000-4000-8000-00000000000a";
 const BOB: &str = "00000000-0000-4000-8000-00000000000b";
@@ -275,6 +278,25 @@ impl Fixture {
             ),
         )
     }
+    /// Returns once the hook run `run` of `session` (`vendor.id`) has
+    /// reached the coordinator and then gone on waiting for 400 ms, twice
+    /// the 200 ms a test finds recorded as waited. Its session is registered
+    /// before it asks for the admission it waits on.
+    fn waits(&self, session: &str, run: &std::thread::ScopedJoinHandle<'_, Run>) {
+        support::event_recorded(
+            &self.base.join("state"),
+            &format!("{session} registered"),
+            |event| {
+                matches!(event, langspan_core::Event::SessionRegistered { session: s }
+                    if s.session_id == session)
+            },
+        );
+        support::holds_for(
+            &format!("{session}'s edit waiting"),
+            Duration::from_millis(400),
+            || !run.is_finished(),
+        );
+    }
     fn wait_policy(&self, extra: &[&str]) {
         let (code, text) = self.cli(
             &[
@@ -335,7 +357,7 @@ fn a_wait_admits_the_edit_once_the_holder_ends_its_admission_with_the_file_uncha
     f.alice_holds("alice-1");
     let bob = std::thread::scope(|scope| {
         let bob = scope.spawn(|| f.codex(BOB, "bob-1", "PreToolUse", Some(4000)));
-        std::thread::sleep(Duration::from_millis(400));
+        f.waits(&format!("codex.{BOB}"), &bob);
         f.alice_ends("alice-1", false);
         bob.join().unwrap()
     });
@@ -377,7 +399,7 @@ fn a_pre_tool_event_delivered_again_after_a_wait_keeps_its_admission() {
     f.alice_holds("alice-1");
     let bob = std::thread::scope(|scope| {
         let bob = scope.spawn(|| f.codex(BOB, "bob-1", "PreToolUse", Some(4000)));
-        std::thread::sleep(Duration::from_millis(400));
+        f.waits(&format!("codex.{BOB}"), &bob);
         f.alice_ends("alice-1", false);
         bob.join().unwrap()
     });
@@ -436,7 +458,7 @@ fn a_wait_whose_holder_writes_the_file_ends_in_a_stale_refusal_naming_it() {
     f.alice_holds("alice-1");
     let bob = std::thread::scope(|scope| {
         let bob = scope.spawn(|| f.claude_write(BOB, "bob-1", "a.txt", "bob\n", Some(4000)));
-        std::thread::sleep(Duration::from_millis(400));
+        f.waits(&format!("claude-code.{BOB}"), &bob);
         f.alice_ends("alice-1", true);
         bob.join().unwrap()
     });

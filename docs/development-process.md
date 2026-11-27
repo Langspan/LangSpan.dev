@@ -179,6 +179,25 @@ change, run `cargo nextest run -p langspan-core --test decision_golden
 --run-ignored only -E 'test(bless)'` and review the golden diff in the pull
 request.
 
+### Slow tests
+
+A test waits on a condition, not a fixed time: the helpers in
+[`tests/support/mod.rs`](../tests/support/mod.rs) poll toward a deadline and
+fail naming what they waited for. Where a test's subject is that nothing
+happens within a stated time, `holds_for` checks it throughout that time.
+`python3 -I -B scripts/fixed-sleeps.py tests`, run on Linux in every lane,
+fails when a file holds more fixed sleeps of 200 ms or more than
+[`scripts/fixed-sleeps.tsv`](../scripts/fixed-sleeps.tsv) allows it, or
+fewer, so the counts only go down.
+
+Where a product delay is the subject, a test shortens it with the
+`LANGSPAN_TEST_*_MS` setting the code already reads. A test that must still
+take long is named `slow_…`, with a comment saying why. The fast lane leaves
+it out (a filter in `.config/nextest.toml`); the full lane runs it. In the
+full lane on Linux, `scripts/slow-tests.py` names every test not so named
+that took over 10 s. It doesn't fail the job yet: tests in files no change
+has reached still take longer (issue #311).
+
 ### Coverage
 
 The `Coverage` workflow ([`coverage.yml`](../.github/workflows/coverage.yml))

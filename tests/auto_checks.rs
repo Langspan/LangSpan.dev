@@ -554,9 +554,11 @@ fn with_the_automatic_check_off_nothing_runs_after_a_batch_of_writes() {
     let (_, shown, _) = f.cli(&["check", "auto", "work"]);
     assert!(shown.contains("Automatic check is off"), "{shown}");
     f.write_batch("call-2", "two\n");
-    std::thread::sleep(Duration::from_millis(1500));
+    // Fifteen times the debounce.
+    support::holds_for("no check ran", Duration::from_millis(1500), || {
+        f.log_lines().is_empty()
+    });
     assert!(f.checks().is_empty());
-    assert!(f.log_lines().is_empty(), "{:?}", f.log_lines());
     assert!(f.prompt("p1").context().is_none());
 }
 
@@ -602,12 +604,16 @@ fn a_batch_of_writes_runs_one_check_on_that_exact_tree_and_its_failure_is_delive
         again.stdout
     );
     // Nothing more was run.
-    std::thread::sleep(Duration::from_millis(500));
-    assert_eq!(f.log_lines(), ["run"]);
+    support::holds_for("one run only", Duration::from_millis(500), || {
+        f.log_lines() == ["run"]
+    });
 }
 
+/// Slow (about 13 s): the 5 s debounce must stay far longer than the gaps
+/// in a burst on a loaded machine, and the test then watches for a second
+/// run for longer than the debounce.
 #[test]
-fn a_burst_of_batches_runs_one_check_on_the_tree_it_left() {
+fn slow_a_burst_of_batches_runs_one_check_on_the_tree_it_left() {
     // Far longer than the gaps between the three batches below.
     let f = Fixture::new(5000);
     // It logs as it starts and then takes a second, so a run started
@@ -617,13 +623,19 @@ fn a_burst_of_batches_runs_one_check_on_the_tree_it_left() {
         f.write_batch(&format!("call-{n}"), content);
         // Longer than a snapshot of this checkout takes, so a check started
         // at the first batch would see the next one change its tree.
-        std::thread::sleep(Duration::from_millis(400));
+        support::holds_for(
+            "no check started during the burst",
+            Duration::from_millis(400),
+            || f.log_lines().is_empty(),
+        );
     }
     let tree = f.tree();
     let checks = f.wait_for_checks(1);
     assert_eq!(checks[0].tree_oid, tree);
-    std::thread::sleep(Duration::from_millis(5500));
-    assert_eq!(f.log_lines(), ["run"], "one burst, one run");
+    // Longer than the debounce, so a run the burst started late would show.
+    support::holds_for("one burst, one run", Duration::from_millis(5500), || {
+        f.log_lines() == ["run"]
+    });
     assert_eq!(f.checks().len(), 1);
     // The result reaches the session at its next batch, mid-turn.
     // The result reaches the session at its next briefing point, mid-turn:
@@ -675,8 +687,11 @@ fn the_hook_never_waits_for_the_check_and_turning_it_off_stops_one_running() {
     assert_eq!(f.cli(&["check", "auto", "work", "--off"]).0, 0);
     assert!(stops(pid), "turning the check off stops it");
     // Long enough for the worker to hear that the run ended.
-    std::thread::sleep(Duration::from_millis(1500));
-    assert!(f.checks().is_empty(), "a cancelled run records nothing");
+    support::holds_for(
+        "a cancelled run records nothing",
+        Duration::from_millis(1500),
+        || f.checks().is_empty(),
+    );
 }
 
 /// Waits up to 10 s for the fixture's daemon to exit by itself, and returns
@@ -817,8 +832,11 @@ fn switching_the_workspace_stops_a_check_running_in_the_old_checkout() {
     let pid = f.pid("check.pid");
     switch_to_a_clone(&f);
     assert!(stops(pid), "the old checkout's run is stopped");
-    std::thread::sleep(Duration::from_millis(1500));
-    assert!(f.checks().is_empty(), "nothing reported about the new root");
+    support::holds_for(
+        "nothing reported about the new root",
+        Duration::from_millis(1500),
+        || f.checks().is_empty(),
+    );
     // The setting itself stays for writes in the new checkout.
     assert!(f.state().auto_checks.contains_key("work"));
 }
@@ -830,8 +848,12 @@ fn switching_the_workspace_forgets_a_check_waiting_to_run_in_the_old_checkout() 
     f.enable(60, FAILING);
     f.write_batch("call-1", "one\n");
     switch_to_a_clone(&f);
-    std::thread::sleep(Duration::from_millis(4500));
-    assert!(f.log_lines().is_empty(), "ran: {:?}", f.log_lines());
+    // Past the debounce of the batch before the switch.
+    support::holds_for(
+        "nothing ran in the old checkout",
+        Duration::from_millis(4500),
+        || f.log_lines().is_empty(),
+    );
     assert!(f.checks().is_empty());
 }
 
@@ -910,8 +932,11 @@ fn a_check_that_changes_the_tree_itself_is_recorded_inconclusive_and_said_so() {
     let checks = f.wait_for_checks(1);
     assert_eq!(checks[0].result, CheckResult::Inconclusive {});
     assert_eq!(checks[0].tree_oid, tree, "the tree it started on");
-    std::thread::sleep(Duration::from_millis(1000));
-    assert_eq!(f.log_lines(), ["run"], "no session wrote: not run again");
+    support::holds_for(
+        "no session wrote: not run again",
+        Duration::from_millis(1000),
+        || f.log_lines() == ["run"],
+    );
     let context = f.prompt("p1").context().expect("delivered");
     assert!(context.contains("was inconclusive"), "{context}");
 }
@@ -1031,11 +1056,10 @@ fn a_rerun_that_would_take_longer_than_its_bound_is_not_started() {
     let checks = f.wait_for_checks(1);
     assert_eq!(checks[0].result, CheckResult::Failed { exit_code: 101 });
     assert!(checks[0].duration_ms > 1000, "{}", checks[0].duration_ms);
-    std::thread::sleep(Duration::from_millis(1500));
-    assert_eq!(
-        f.log_lines().len(),
-        1,
-        "the 1.5 s failure was not run again"
+    support::holds_for(
+        "the 1.5 s failure was not run again",
+        Duration::from_millis(1500),
+        || f.log_lines().len() == 1,
     );
     assert_eq!(learned(&f, "net::times_out"), None);
 }
