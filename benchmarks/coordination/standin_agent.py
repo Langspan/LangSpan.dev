@@ -24,8 +24,10 @@ LangSpan arm's dry run passes through LangSpan's real hooks, coordinator and
 event log. Unlike a host, it waits for each hook's decision past the hook's
 configured timeout (see HOOK_SECONDS), so the dry run's result does not
 depend on how loaded the machine is. When a hook returns, any process it
-left in its group is killed, and a signal that stops the stand-in first
-kills the hook it is running. A ``follow`` session there whose task depends
+left in its group is ended, and a signal that stops the stand-in first
+ends the hook it is running: SIGTERM, then SIGKILL (see TERM_SECONDS), so
+that the driver's ``hook-log`` wrapper can end the hook it runs in a group
+of its own. A ``follow`` session there whose task depends
 on a peer's first waits, within a bound, until LangSpan has told it every
 peer's task. Before it ends it waits until every peer shows edits and
 LangSpan's interface notice its task expects (the task's ``notice``) has
@@ -54,8 +56,14 @@ import uuid
 # configured timeout (5 s for LangSpan's) and goes on without it; the
 # stand-in waits for its decision up to this bound instead, so a loaded
 # machine that starts a hook late does not change what the dry run does.
-# A hook still running at the bound is killed with every process it started.
+# A hook still running at the bound is ended with every process it started.
 HOOK_SECONDS = 30
+# How long a hook's process group has to end after SIGTERM, before SIGKILL.
+# The driver's `hook-log` wrapper runs its hook in another group, which no
+# signal to the wrapper's group reaches: on SIGTERM the wrapper ends that
+# group, and SIGKILL at once would leave it running. The wait ends as soon
+# as the group is empty.
+TERM_SECONDS = 2
 BRIEF_SECONDS = 10
 # How long a following session waits to hear from its peers, per phase, when
 # its plan gives no session time limit. With one, every wait may run until
@@ -87,18 +95,37 @@ def hook_commands(settings, event, tool):
 RUNNING = []
 
 
-def kill_group(process):
+def signal_group(process, signum):
+    """Whether SIGNUM reached a member of PROCESS's group."""
     try:
-        os.killpg(process.pid, signal.SIGKILL)
+        os.killpg(process.pid, signum)
+        return True
     except (ProcessLookupError, PermissionError):
-        pass
+        return False
+
+
+def kill_group(process):
+    """End every process in PROCESS's group: SIGTERM, then SIGKILL to
+    whatever is left after TERM_SECONDS. A group already empty gets
+    neither, so a reused ID is not signaled."""
+    if not signal_group(process, signal.SIGTERM):
+        return
+    deadline = time.monotonic() + TERM_SECONDS
+    while time.monotonic() < deadline:
+        # An unreaped leader would keep the group in existence.
+        process.poll()
+        if not signal_group(process, 0):
+            return
+        time.sleep(0.01)
+    signal_group(process, signal.SIGKILL)
 
 
 def run_hook(command, payload, cwd):
     """Run one hook in a process group of its own, for up to HOOK_SECONDS.
-    Returns its stdout and exit code, or ("", None) when it was killed.
-    Every process left in the hook's group when it returns is killed too,
-    so a background child the hook started cannot act after the call."""
+    Returns its stdout and exit code, or ("", None) when it was ended.
+    Every process left in the hook's group when it returns is ended too
+    (see kill_group), so a background child the hook started cannot act
+    after the call."""
     process = subprocess.Popen(["/bin/sh", "-c", command], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE, cwd=cwd, text=True, start_new_session=True)
     RUNNING.append(process)
@@ -120,7 +147,9 @@ def stop_on_signal(signum, _frame):
     """End the running hook's process group, then die of SIGNUM. The runner
     stops an attempt by signaling the stand-in's group, which does not
     reach the hook's. SIGKILL cannot be caught; the runner sends SIGTERM
-    first."""
+    first. The hook's group has its SIGTERM before any wait, so a wrapper
+    there ends its own hook even when the runner kills the stand-in
+    during the wait."""
     for process in list(RUNNING):
         # A reaped leader's PID can be reused; its group is no longer ours.
         if process.returncode is None:

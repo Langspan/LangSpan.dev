@@ -356,13 +356,20 @@ stand-in prints a first line listing its arm's tools, which the tool guard
 checks as it checks Claude Code's.
 
 Unlike a host, the stand-in waits for each hook's decision past the hook's
-configured timeout, for up to 30 seconds, and then kills the hook with every
+configured timeout, for up to 30 seconds, and then ends the hook with every
 process it started. A slow machine therefore cannot change a dry run's
 result. A hook slower than its configured timeout is logged as `late`. Each
 hook runs in a process group of its own, so when the runner stops the
-stand-in with SIGTERM, SIGINT or SIGHUP, the stand-in first kills the running
+stand-in with SIGTERM, SIGINT or SIGHUP, the stand-in first ends the running
 hook's group. A SIGKILL sent to the stand-in alone can leave that hook
 running; the runner always sends SIGTERM first.
+
+The stand-in ends a hook's group with SIGTERM, and with SIGKILL only if
+the group is still there 2 seconds later. In the LangSpan arm each hook
+runs behind the hook log wrapper ([Where records go](#where-records-go)),
+in a further group
+that no signal to the wrapper's group reaches: the SIGTERM lets the
+wrapper end that group, where SIGKILL at once would leave it running.
 
 The test suite runs every mode and checks what reaches the sessions and that
 the oracle tells the arms apart:
@@ -497,6 +504,21 @@ the transcript and the same `tool_use_id` in `hooks-sN.jsonl`: its
 delivered after it, and `at` orders them against the other sessions' calls.
 Hook context does not appear in `stream-json`, so the hook log is the only
 copy of what LangSpan said.
+
+Each line also says whether the hook ran in the background (`background`)
+and whether the wrapper ended it at its bound (`timed_out`). A foreground
+hook still running after 900 s is refused (exit 2), as a failed safety
+control must be. A background hook, such as LangSpan's between-step
+watcher (`asyncRewake`), gets 60 s more than its entry's own `timeout`, so
+Claude Code ends it first; if it still runs past that, the wrapper ends it
+with exit 0 and refuses nothing (issue #288). Ending a hook ends every
+process in its process group, so no child it started acts after the
+wrapper returns; the wrapper also ends that group when the hook returns
+by itself, and when the host ends the wrapper with `SIGTERM`, `SIGINT` or
+`SIGHUP`. `SIGKILL` ends the wrapper alone and can leave the hook
+running, so the stand-in sends `SIGTERM` first. The watcher's notice
+goes to stderr, which the log does not keep; the coordinator's event log
+records it as `interface_notices_told` with `via` `between_steps`.
 
 Nothing is committed automatically. Review transcripts before committing any
 record under `docs/evidence/`.

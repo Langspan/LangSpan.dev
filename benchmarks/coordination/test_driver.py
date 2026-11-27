@@ -1070,6 +1070,100 @@ class DriverUnitTests(Temporary):
         self.assertEqual(entry["stdout"], '{"decision":"deny"}')
         self.assertEqual(os.stat(self.root / "hooks.jsonl").st_mode & 0o777, 0o600)
 
+    def hook_log(self, log, command, *options, payload="{}"):
+        started = time.monotonic()
+        done = subprocess.run([sys.executable, "-I", "-B", str(HERE / "driver.py"), "hook-log", *options,
+                               str(log), command], input=payload, capture_output=True, text=True, timeout=60)
+        return done, time.monotonic() - started
+
+    def test_the_hook_log_fails_open_for_a_background_hook_past_its_bound(self):
+        """Issue #288: a background hook (`asyncRewake`, LangSpan's
+        between-step watcher) still running at the wrapper's bound ends with
+        exit 0, logged as timed out. A foreground hook there is refused
+        (exit 2), as a failed safety control must be. A child that keeps the
+        hook's pipes open does not hold the wrapper past its bound."""
+        command = "cat >/dev/null; sleep 20; exit 2"
+        payload = json.dumps({"hook_event_name": "UserPromptSubmit", "session_id": "s"})
+        log = self.root / "hooks.jsonl"
+        done, elapsed = self.hook_log(log, command, "--background", "--timeout", "1", payload=payload)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("ran past 1 s", done.stderr)
+        self.assertLess(elapsed, 10)
+        done, elapsed = self.hook_log(log, command, "--timeout", "1", payload=payload)
+        self.assertEqual(done.returncode, 2, done.stderr)
+        self.assertIn("did not finish in time", done.stderr)
+        self.assertLess(elapsed, 10)
+        background, foreground = (json.loads(line) for line in log.read_text().splitlines())
+        self.assertEqual((background["exit_code"], background["timed_out"], background["background"]), (0, True, True))
+        self.assertEqual((foreground["exit_code"], foreground["timed_out"], foreground["background"]),
+                         (2, True, False))
+        # Within its bound, a background hook's own exit code passes through:
+        # 2 is how the watcher wakes the model.
+        done, _ = self.hook_log(log, "cat >/dev/null; echo told >&2; exit 2", "--background", "--timeout", "30")
+        self.assertEqual((done.returncode, done.stderr), (2, "told\n"))
+        self.assertFalse(json.loads(log.read_text().splitlines()[-1])["timed_out"])
+        for options in (["--timeout"], ["--timeout", "0"], ["--timeout", "x"], ["--later"]):
+            done = subprocess.run([sys.executable, "-I", "-B", str(HERE / "driver.py"), "hook-log", *options,
+                                   str(log), "true"], input="", capture_output=True, text=True, timeout=30)
+            self.assertNotEqual(done.returncode, 0, options)
+
+    def test_the_hook_log_ends_the_hooks_children_at_its_bound(self):
+        """A hook past the wrapper's bound is ended with every process it
+        started, so none of them acts after the wrapper has returned: a
+        surviving watcher could record a notice as told after the host hook
+        ended. Covers a child holding the hook's pipes and one that let them
+        go, for a background and a foreground hook."""
+        log = self.root / "hooks.jsonl"
+        cases = []
+        for index, redirect in enumerate(("", " >/dev/null 2>&1 </dev/null")):
+            for options in (["--background"], []):
+                late = self.root / ("late-%d-%d" % (index, len(options)))
+                command = "cat >/dev/null; (sleep 2; echo late > %s)%s & sleep 20" % (shlex.quote(str(late)), redirect)
+                done, elapsed = self.hook_log(log, command, *options, "--timeout", "1")
+                self.assertEqual(done.returncode, 0 if options else 2, done.stderr)
+                self.assertLess(elapsed, 10)
+                cases.append(late)
+        # The host ending the wrapper ends the hook's group as well, though
+        # that group no longer receives the host's signal to the wrapper's.
+        for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            late = self.root / ("late-signal-%d" % signum)
+            started = self.root / ("started-%d" % signum)
+            command = "cat >/dev/null; (sleep 2; echo late > %s) & touch %s; sleep 20" % (
+                shlex.quote(str(late)), shlex.quote(str(started)))
+            wrapper = subprocess.Popen([sys.executable, "-I", "-B", str(HERE / "driver.py"), "hook-log",
+                                        "--background", "--timeout", "30", str(log), command],
+                                       stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            wrapper.stdin.close()
+            deadline = time.monotonic() + 20
+            while not started.exists() and time.monotonic() < deadline:
+                time.sleep(.05)
+            self.assertTrue(started.exists())
+            wrapper.send_signal(signum)
+            self.assertEqual(wrapper.wait(timeout=10), 128 + signum)
+            cases.append(late)
+        # A signal that arrives while the hook starts, before the wrapper
+        # knows its group, still ends that group. The signal is sent from
+        # inside the call that starts the hook.
+        late = self.root / "late-starting"
+        script = (
+            "import os, signal, subprocess, sys\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "import driver\n"
+            "class Signaled(subprocess.Popen):\n"
+            "    def __init__(self, *args, **kwargs):\n"
+            "        super().__init__(*args, **kwargs)\n"
+            "        os.kill(os.getpid(), signal.SIGTERM)\n"
+            "subprocess.Popen = Signaled\n"
+            "sys.exit(driver.hook_log_main(sys.argv[2], sys.argv[3], 30, True))\n")
+        done = subprocess.run([sys.executable, "-I", "-B", "-c", script, str(HERE), str(log),
+                               "cat >/dev/null; sleep 2; echo late > %s" % shlex.quote(str(late))],
+                              input="", capture_output=True, text=True, timeout=30)
+        self.assertEqual(done.returncode, 128 + signal.SIGTERM, done.stderr)
+        cases.append(late)
+        time.sleep(3)
+        for late in cases:
+            self.assertFalse(late.exists(), late)
+
     def test_notes_and_merge_logs_survive_a_failed_merge(self):
         work = self.root / "work"
         work.mkdir()
@@ -1477,6 +1571,15 @@ class StandinHooks(Temporary):
         self.addCleanup(log.close)
         return standin_agent.Session(settings, log, str(self.root)), log
 
+    def commands(self, command):
+        """COMMAND as a hook entry gives it, bare and behind the driver's
+        `hook-log` wrapper, as `install_hooks` writes every LangSpan hook.
+        The wrapper runs COMMAND in a process group of its own, which a
+        signal to the wrapper's group does not reach."""
+        wrapper = [sys.executable, "-I", "-B", str(HERE / "driver.py"), "hook-log", str(self.root / "hooks.jsonl")]
+        return (("bare", command),
+                ("wrapped", " ".join(shlex.quote(part) for part in wrapper) + " " + shlex.quote(command)))
+
     def test_a_following_wait_lasts_until_just_before_the_session_limit(self):
         # A fixed wait ran out on a loaded machine before LangSpan's notice
         # arrived, and the session ended uninformed. Every wait now shares
@@ -1511,40 +1614,50 @@ class StandinHooks(Temporary):
         # The child's heartbeat shows whether it still acts. Its PID alone
         # does not: where PID 1 does not reap orphans, a killed child stays
         # a zombie and `kill(pid, 0)` still succeeds.
-        heartbeat, group = self.root / "heartbeat", self.root / "group"
-        command = "echo $$ > %s; while :; do printf x >> %s; sleep 0.05; done & wait" % (
-            shlex.quote(str(group)), shlex.quote(str(heartbeat)))
-        session, _ = self.session(command, 1)
+        # The same holds behind the `hook-log` wrapper, whose hook the
+        # stand-in's SIGKILL does not reach, and for a child that ignores
+        # the SIGTERM sent first.
         original = standin_agent.HOOK_SECONDS
         standin_agent.HOOK_SECONDS = 2
-        try:
-            denied = session.fire("PreToolUse", "Write", {"file_path": "x"}, "edit-1")
-            self.assertFalse(denied)
-            self.assertGreater(heartbeat.stat().st_size, 0, "the hook's child never ran")
-            self.assert_stopped(heartbeat)
-        finally:
-            standin_agent.HOOK_SECONDS = original
-            self.kill_groups(group)
+        self.addCleanup(setattr, standin_agent, "HOOK_SECONDS", original)
+        for trap in ("", "trap '' TERM; "):
+            for kind, command in self.commands(
+                    "echo $$ > %s; " + trap + "while :; do printf x >> %s; sleep 0.05; done & wait"):
+                with self.subTest(kind=kind, trap=trap):
+                    name = "%s-%d" % (kind, len(trap))
+                    heartbeat, group = self.root / ("heartbeat-" + name), self.root / ("group-" + name)
+                    session, _ = self.session(command % (shlex.quote(str(group)), shlex.quote(str(heartbeat))), 1)
+                    try:
+                        denied = session.fire("PreToolUse", "Write", {"file_path": "x"}, "edit-1")
+                        self.assertFalse(denied)
+                        self.assertGreater(heartbeat.stat().st_size, 0, "the hook's child never ran")
+                        self.assert_stopped(heartbeat)
+                    finally:
+                        self.kill_groups(group)
 
     def test_a_hook_that_exits_leaves_no_background_child_running(self):
         # A hook can start a child with its streams redirected and exit 0.
         # The child is in the hook's process group, outside the runner's, so
         # once the hook returns nothing else would stop it.
-        heartbeat, group = self.root / "heartbeat", self.root / "group"
-        command = "echo $$ > %s; (while :; do printf x >> %s; sleep 0.05; done) </dev/null >/dev/null 2>&1 & " \
-                  "sleep 0.3; exit 0" % (shlex.quote(str(group)), shlex.quote(str(heartbeat)))
-        session, log = self.session(command, 5)
-        try:
-            denied = session.fire("PreToolUse", "Write", {"file_path": "x"}, "edit-1")
-            log.flush()
-            entry = json.loads((self.root / "standin.jsonl").read_text().splitlines()[0])
-            self.assertFalse(denied, entry)
-            self.assertEqual(entry["exit_code"], 0, entry)
-            self.assertEqual(standin_agent.RUNNING, [])
-            self.assertGreater(heartbeat.stat().st_size, 0, "the hook's child never ran")
-            self.assert_stopped(heartbeat)
-        finally:
-            self.kill_groups(group)
+        # Behind the `hook-log` wrapper the child is in a group only the
+        # wrapper can end, so the wrapper ends it when the hook returns.
+        for kind, command in self.commands(
+                "echo $$ > %s; (while :; do printf x >> %s; sleep 0.05; done) </dev/null >/dev/null 2>&1 & "
+                "sleep 0.3; exit 0"):
+            with self.subTest(kind=kind):
+                heartbeat, group = self.root / ("heartbeat-" + kind), self.root / ("group-" + kind)
+                session, log = self.session(command % (shlex.quote(str(group)), shlex.quote(str(heartbeat))), 5)
+                try:
+                    denied = session.fire("PreToolUse", "Write", {"file_path": "x"}, "edit-1")
+                    log.flush()
+                    entry = json.loads((self.root / "standin.jsonl").read_text().splitlines()[0])
+                    self.assertFalse(denied, entry)
+                    self.assertEqual(entry["exit_code"], 0, entry)
+                    self.assertEqual(standin_agent.RUNNING, [])
+                    self.assertGreater(heartbeat.stat().st_size, 0, "the hook's child never ran")
+                    self.assert_stopped(heartbeat)
+                finally:
+                    self.kill_groups(group)
 
     def kill_groups(self, group_file, *groups):
         """Kill GROUPS and the hook's group named in GROUP_FILE, so a failed
@@ -1574,31 +1687,36 @@ class StandinHooks(Temporary):
         # The runner ends an attempt by signaling the stand-in's process
         # group. Each hook runs in a group of its own, so the stand-in must
         # end the running hook's group before it exits.
-        heartbeat = self.root / "heartbeat"
-        started = self.root / "started"
-        command = "echo $$ > %s; while :; do printf x >> %s; sleep 0.05; done" % (
-            shlex.quote(str(started)), shlex.quote(str(heartbeat)))
-        settings = {"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": command}]}]}}
+        # A hook behind the `hook-log` wrapper is a group further away:
+        # the stand-in's signal lets the wrapper end it.
         (self.root / ".claude").mkdir()
-        (self.root / ".claude" / "settings.local.json").write_text(json.dumps(settings))
         plan = {"sessions": 1, "prompts": ["p"],
                 "tasks": [{"task": "t", "details": "d", "standin": {"ignore": [], "follow": []}}]}
         (self.root / "plan.json").write_text(json.dumps(plan))
         env = dict(os.environ, LANGSPAN_BENCH_RUN_DIR=str(self.root))
-        standin = subprocess.Popen([sys.executable, str(HERE / "standin_agent.py"), "plan.json", "1", "ignore"],
-                                   cwd=self.root, env=env, stdout=subprocess.DEVNULL,
-                                   stderr=subprocess.DEVNULL, start_new_session=True)
-        try:
-            deadline = time.monotonic() + 10
-            while not (started.exists() and started.read_text().strip() and heartbeat.exists()):
-                self.assertLess(time.monotonic(), deadline, "the hook never started")
-                time.sleep(0.05)
-            os.killpg(standin.pid, signal.SIGTERM)
-            standin.wait(timeout=10)
-            self.assert_stopped(heartbeat)
-        finally:
-            self.kill_groups(started, standin.pid)
-            standin.wait()
+        for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            for kind, command in self.commands("echo $$ > %s; while :; do printf x >> %s; sleep 0.05; done"):
+                with self.subTest(kind=kind, signum=signum):
+                    heartbeat = self.root / ("heartbeat-%s-%d" % (kind, signum))
+                    started = self.root / ("started-%s-%d" % (kind, signum))
+                    command = command % (shlex.quote(str(started)), shlex.quote(str(heartbeat)))
+                    settings = {"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": command}]}]}}
+                    (self.root / ".claude" / "settings.local.json").write_text(json.dumps(settings))
+                    standin = subprocess.Popen(
+                        [sys.executable, str(HERE / "standin_agent.py"), "plan.json", "1", "ignore"],
+                        cwd=self.root, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        start_new_session=True)
+                    try:
+                        deadline = time.monotonic() + 10
+                        while not (started.exists() and started.read_text().strip() and heartbeat.exists()):
+                            self.assertLess(time.monotonic(), deadline, "the hook never started")
+                            time.sleep(0.05)
+                        os.killpg(standin.pid, signum)
+                        self.assertEqual(standin.wait(timeout=10), -signum)
+                        self.assert_stopped(heartbeat)
+                    finally:
+                        self.kill_groups(started, standin.pid)
+                        standin.wait()
 
 
 class RefusalCollection(Temporary):
@@ -1700,6 +1818,76 @@ class RefusalCollection(Temporary):
         self.assertIn("lease_granted", [record.get("event", {}).get("type") for record in events], seen)
         self.assertGreaterEqual(session.late_hooks, 1, seen)
         self.assertIn("no owner", target.read_text())
+
+
+class WatcherDryRun(Temporary):
+    def test_dry_run_with_the_watcher_installed_a_session_takes_its_turn(self):
+        """Issue #288: with LangSpan's between-step watcher installed, run as
+        Claude Code runs it (in the background, from the prompt, through its
+        hook-log wrapper), a stand-in session's prompt is not refused and its
+        turn goes on. The watcher ends with exit 0 at the turn's end, and
+        also when the turn outlasts the wrapper's bound (here shortened to
+        2 s): it is logged as timed out and refuses nothing."""
+        work = self.root / "work"
+        work.mkdir()
+        _, _, clones = driver.prepare_fixture(work, 1, "langspan")
+        state = Path(tempfile.mkdtemp(prefix="lsb-", dir="/tmp"))
+        self.addCleanup(shutil.rmtree, state, True)
+        hook_log = self.root / "hook-log.jsonl"
+        driver.install_hooks(langspan_binary(), state, 1, clones[0], hook_log)
+        settings = json.loads((clones[0] / ".claude" / "settings.local.json").read_text())
+        prompt_hooks = [hook for entry in settings["hooks"]["UserPromptSubmit"] for hook in entry["hooks"]]
+        watchers = [hook for hook in prompt_hooks if hook.get("asyncRewake")]
+        self.assertEqual(len(watchers), 1, prompt_hooks)
+        argv = shlex.split(watchers[0]["command"])
+        self.assertIn("--mode between-steps", argv[-1])
+        self.assertIn("--background", argv)
+        # The wrapper outlasts the entry's own timeout, so the host, not the
+        # wrapper, ends a watcher that runs that long.
+        self.assertGreater(int(argv[argv.index("--timeout") + 1]), watchers[0]["timeout"])
+        for hook in prompt_hooks:
+            if not hook.get("asyncRewake"):
+                self.assertNotIn("--background", shlex.split(hook["command"]), hook)
+        target = (clones[0] / "shelf" / "report.py").resolve()
+        coordinator = driver.Coordinator(langspan_binary(), state, self.root / "coordinator.log")
+        try:
+            for turn, bound in enumerate((None, 2)):
+                command = argv
+                if bound is not None:
+                    command = list(argv)
+                    command[command.index("--timeout") + 1] = str(bound)
+                with self.subTest(bound=bound), open(self.root / "hooks.jsonl", "a") as log:
+                    session = standin_agent.Session(settings, log, str(clones[0].resolve()))
+                    self.assertFalse(session.fire("SessionStart", source="startup"))
+                    prompt = {"session_id": session.session_id, "cwd": session.cwd,
+                              "hook_event_name": "UserPromptSubmit", "prompt": "Task: shorten the summary"}
+                    watcher = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                               stderr=subprocess.PIPE, cwd=session.cwd, start_new_session=True)
+                    self.addCleanup(lambda process=watcher: process.returncode is None
+                                    and standin_agent.kill_group(process))
+                    watcher.stdin.write(json.dumps(prompt).encode())
+                    watcher.stdin.close()
+                    self.assertFalse(session.fire("UserPromptSubmit", prompt=prompt["prompt"]), "prompt refused")
+                    # The turn runs past the shortened bound before it edits.
+                    time.sleep(4)
+                    session.read(target)
+                    old, new = ("one-line summary", "short summary") if turn == 0 else ("short summary", "summary")
+                    self.assertTrue(session.edit(target, "Edit", {"file_path": str(target), "old_string": old,
+                                                                  "new_string": new, "replace_all": False},
+                                                 lambda: target.write_text(target.read_text().replace(old, new))))
+                    session.fire("Stop", stop_hook_active=False)
+                    self.assertEqual(watcher.wait(timeout=30), 0, watcher.stderr.read())
+                    watcher.stderr.close()
+                    session.fire("SessionEnd", reason="other")
+                    self.assertEqual(session.refusals, [])
+                    entries = [json.loads(line) for line in hook_log.read_text().splitlines()]
+                    logged = [entry for entry in entries
+                              if entry["background"] and entry["session_id"] == session.session_id]
+                    self.assertEqual(len(logged), 1, entries)
+                    self.assertEqual((logged[0]["event"], logged[0]["exit_code"], logged[0]["timed_out"]),
+                                     ("UserPromptSubmit", 0, bound is not None))
+        finally:
+            coordinator.stop()
 
 
 class DryRun(Temporary):

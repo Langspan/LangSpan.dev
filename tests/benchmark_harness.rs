@@ -126,6 +126,11 @@ fn dry_run_with_stagger_tells_dependents_before_their_first_write() {
 }
 
 #[test]
+fn dry_run_with_the_watcher_installed_a_session_takes_its_turn() {
+    python_suite("test_driver.py", Some("WatcherDryRun"));
+}
+
+#[test]
 fn dry_run_records_an_ignored_option() {
     dry_run("a_dry_run_records_an_option_its_arm_ignores");
 }
