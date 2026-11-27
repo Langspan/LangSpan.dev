@@ -231,7 +231,7 @@ pull request.
 
 `tests/ratchets.rs` runs `python3 -I -B scripts/ratchets.py --check .` in
 the full lane. It measures production code only: `#[cfg(test)]` items and
-files outside `src/` and `crates/*/src/` don't count. It checks four
+files outside `src/` and `crates/*/src/` don't count. It checks five
 numbers, each against `scripts/ratchets/baseline/<source path>.tsv`:
 
 - **File size.** A file may not grow past its `lines` row. A file without a
@@ -241,6 +241,13 @@ numbers, each against `scripts/ratchets/baseline/<source path>.tsv`:
 - **Public surface.** A crate may not have more declared `pub` items than
   the sum of its files' `pub` rows. `pub use` and `pub(crate)` don't count,
   so moving an item between files of a crate passes.
+- **Index and slice expressions.** A crate may not have more `x[i]`
+  expressions than the sum of its files' `index` rows, or more `x[a..b]`
+  expressions than the sum of their `slice` rows. Either can panic on
+  input it wasn't written for; use `.get(i)` or `.get(a..b)` and handle the
+  missing value. Like `pub`, moving one between files of a crate passes.
+  The `indexing_slicing` lint stays off until the recorded count is low
+  enough to turn it on.
 - **Module dependencies** in the `langspan` crate. An edge from one
   top-level module to another may not join a cycle, or point outward,
   unless the module's root file lists it as an `edge` row. A module states
