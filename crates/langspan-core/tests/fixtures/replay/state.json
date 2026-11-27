@@ -1,0 +1,644 @@
+{
+  "clock_anchor": {
+    "clock_ms": 0,
+    "generation": 2,
+    "wall_ms": 1795000100000
+  },
+  "conflict_waits": {
+    "work": 400
+  },
+  "first_writes": {
+    "alice": 0,
+    "bob": 2
+  },
+  "kept_tests": {
+    "work": {
+      "auto-1": {
+        "command_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "results": {
+          "failed": [
+            "net::times_out"
+          ],
+          "passed": [
+            "api::uploads"
+          ]
+        },
+        "writes_before": 3
+      },
+      "check-1": {
+        "command_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "results": {
+          "all_passed": true,
+          "passed": [
+            "api::uploads",
+            "net::times_out"
+          ]
+        },
+        "writes_before": 3
+      }
+    }
+  },
+  "path_refusals": [
+    {
+      "at_ms": 70,
+      "generation": 1,
+      "paths": [
+        "src/api.rs"
+      ],
+      "workspace_id": "work"
+    },
+    {
+      "at_ms": 45,
+      "generation": 1,
+      "paths": [
+        "src/api.rs"
+      ],
+      "workspace_id": "work"
+    }
+  ],
+  "refusals": [
+    {
+      "wall_ms": 1795000000070,
+      "workspace_id": "work"
+    },
+    {
+      "wall_ms": 1795000000045,
+      "workspace_id": "work"
+    }
+  ],
+  "renames": {
+    "work": [
+      {
+        "after": "fn send()",
+        "after_name": "transmit",
+        "evidence": "same_body",
+        "kind": "function",
+        "name": "send",
+        "path": "src/net.rs"
+      }
+    ]
+  },
+  "state": {
+    "activity": {
+      "alice": {
+        "briefed": "e570324e363bbf76+0000000000000000000400000000080400200000000000",
+        "ended": true,
+        "generation": 1,
+        "known": [
+          {
+            "at_ms": 0,
+            "path": "src/api.rs",
+            "state": {
+              "digest": "2222222222222222222222222222222222222222222222222222222222222222",
+              "type": "present"
+            }
+          }
+        ],
+        "last_hook_ms": 22,
+        "last_ms": 50,
+        "looking": [
+          {
+            "at_ms": 33,
+            "kind": "read",
+            "path": "src/api.rs"
+          }
+        ],
+        "outlined": [
+          {
+            "digest": "3333333333333333333333333333333333333333333333333333333333333333",
+            "path": "src/big.rs"
+          }
+        ],
+        "prompt_targets": {
+          "at_ms": 32,
+          "paths": [
+            "src/api.rs"
+          ]
+        },
+        "session_id": "alice",
+        "summary": "change upload to take a stream",
+        "told": [
+          5122270038844973103,
+          4740437054453460583,
+          12163789538057641963,
+          10021502573866829698
+        ],
+        "told_at_ms": 134,
+        "touched": [
+          {
+            "at_ms": 50,
+            "path": "src/api.rs"
+          }
+        ]
+      },
+      "bob": {
+        "generation": 2,
+        "known": [
+          {
+            "at_ms": 0,
+            "path": "src/client.rs",
+            "state": {
+              "digest": "5555555555555555555555555555555555555555555555555555555555555555",
+              "type": "present"
+            }
+          }
+        ],
+        "last_hook_ms": 11,
+        "last_ms": 0,
+        "session_id": "bob"
+      },
+      "codex.0198c0de-0000-7000-8000-000000000001": {
+        "briefed": "2dfeca274ee17b00+0000000000000000000400000000080400200000000000",
+        "generation": 1,
+        "last_ms": 0,
+        "session_id": "codex.0198c0de-0000-7000-8000-000000000001",
+        "told": [
+          5122270038844973103,
+          4740437054453460583,
+          12163789538057641963,
+          10021502573866829698,
+          16855862699291930776,
+          2398305748137872996
+        ],
+        "told_at_ms": 10205
+      },
+      "dana": {
+        "briefed": "a2b75e7ee297f4da+0000000000000000000400000000080400200000000000",
+        "generation": 1,
+        "last_ms": 0,
+        "session_id": "dana",
+        "told": [
+          5122270038844973103,
+          4740437054453460583,
+          12163789538057641963,
+          10021502573866829698,
+          4097930131021135676,
+          2398305748137872996
+        ],
+        "told_at_ms": 10305
+      },
+      "erin": {
+        "alerted": [
+          "iface"
+        ],
+        "generation": 1,
+        "inflight_told": [
+          "d9fe8ae0e686acb5"
+        ],
+        "last_ms": 0,
+        "notices_told": [
+          {
+            "notice_id": "iface",
+            "via": "briefing"
+          }
+        ],
+        "session_id": "erin"
+      }
+    },
+    "adoptions": {
+      "alice": {
+        "at_ms": 10303,
+        "from": "alice",
+        "generation": 1,
+        "reason": {
+          "kind": "handoff",
+          "message_id": "msg-1"
+        },
+        "session_id": "bob",
+        "workspace_id": "work"
+      }
+    },
+    "checkout_runs": {
+      "work": [
+        {
+          "command": "git pull",
+          "finished_ms": 10203,
+          "generation": 1,
+          "run_id": "checkout-run",
+          "session_id": "alice",
+          "started_ms": 10193,
+          "to_branch": "refs/heads/main",
+          "to_head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "workspace_id": "work"
+        }
+      ]
+    },
+    "checkouts": {
+      "work": [
+        {
+          "at_ms": 10202,
+          "change_id": "checkout",
+          "files": 2,
+          "from_branch": "refs/heads/main",
+          "from_head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "generation": 1,
+          "to_branch": "refs/heads/main",
+          "to_head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "workspace_id": "work"
+        }
+      ]
+    },
+    "checks": {
+      "work": [
+        {
+          "check_id": "auto-1",
+          "command": "cargo test",
+          "duration_ms": 900,
+          "generation": 1,
+          "head_oid": null,
+          "inputs": [],
+          "name": "fast",
+          "recorded_ms": 132,
+          "result": {
+            "exit_code": 101,
+            "type": "failed"
+          },
+          "tree_oid": "1111111111111111111111111111111111111111",
+          "workspace_id": "work"
+        },
+        {
+          "check_id": "check-1",
+          "command": "cargo test",
+          "duration_ms": 900,
+          "generation": 1,
+          "head_oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "inputs": [],
+          "name": "tests",
+          "recorded_ms": 130,
+          "result": {
+            "type": "passed"
+          },
+          "tree_oid": "1111111111111111111111111111111111111111",
+          "workspace_id": "work"
+        }
+      ]
+    },
+    "generation": 2,
+    "intents": {},
+    "interface_notices": {
+      "work": [
+        {
+          "at_ms": 80,
+          "by_session": null,
+          "changes": [
+            {
+              "after": "fn send()",
+              "after_name": "transmit",
+              "before": "fn send()",
+              "before_name": "send",
+              "change": "renamed",
+              "evidence": "same_body",
+              "kind": "function",
+              "name": "send"
+            }
+          ],
+          "dependents": [],
+          "generation": 1,
+          "notice_id": "iface-rename",
+          "path": "src/net.rs",
+          "workspace_id": "work"
+        },
+        {
+          "at_ms": 80,
+          "by_session": "alice",
+          "changes": [
+            {
+              "after": "fn upload(stream: Stream)",
+              "before": "fn upload(bytes: &[u8])",
+              "change": "signature_changed",
+              "kind": "function",
+              "name": "upload"
+            }
+          ],
+          "dependents": [
+            "src/client.rs"
+          ],
+          "elsewhere": [
+            {
+              "path": "src/caller.rs",
+              "workspace_id": "tree"
+            }
+          ],
+          "generation": 1,
+          "notice_id": "iface",
+          "path": "src/api.rs",
+          "workspace_id": "work"
+        }
+      ]
+    },
+    "landings": {
+      "work": [
+        {
+          "check_id": "check-1",
+          "commit_oid": "3333333333333333333333333333333333333333",
+          "inputs": [],
+          "landing_id": "land",
+          "onto": "main",
+          "tree_oid": "1111111111111111111111111111111111111111",
+          "workspace_id": "work"
+        }
+      ]
+    },
+    "leases": {
+      "lease-alice": {
+        "expires_at_ms": 30040,
+        "generation": 1,
+        "lease_id": "lease-alice",
+        "operation": {
+          "input_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "operation_id": "op-a1",
+          "source": "test",
+          "tool": "Edit"
+        },
+        "paths": [
+          "src/api.rs"
+        ],
+        "session_id": "alice",
+        "status": "completed",
+        "workspace_id": "work"
+      },
+      "short-lease": {
+        "expires_at_ms": 66,
+        "generation": 1,
+        "lease_id": "short-lease",
+        "paths": [
+          "src/other.rs"
+        ],
+        "session_id": "bob",
+        "status": "expired",
+        "workspace_id": "work"
+      }
+    },
+    "message_history": {
+      "work": [
+        {
+          "acknowledged": [
+            "bob"
+          ],
+          "from": "alice",
+          "message_id": "msg-2",
+          "paths": [],
+          "retracted": true,
+          "text": "ignore the last one",
+          "to": {
+            "kind": "session",
+            "session_id": "bob"
+          },
+          "workspace_id": "work"
+        },
+        {
+          "acknowledged": [
+            "bob"
+          ],
+          "from": "alice",
+          "message_id": "msg-1",
+          "paths": [
+            "src/api.rs"
+          ],
+          "text": "upload takes a stream now",
+          "to": {
+            "kind": "session",
+            "session_id": "bob"
+          },
+          "workspace_id": "work"
+        }
+      ]
+    },
+    "notes": {
+      "work": [
+        {
+          "anchor": {
+            "body_digest": "6666666666666666666666666666666666666666666666666666666666666666",
+            "kind": "function",
+            "line": 10,
+            "name": "upload",
+            "path": "src/api.rs"
+          },
+          "anchor_state": "current",
+          "author": "alice",
+          "note_id": "note-1",
+          "paths": [
+            "src/api.rs"
+          ],
+          "text": "upload streams; callers must not buffer",
+          "workspace_id": "work"
+        }
+      ]
+    },
+    "presence": {
+      "bob": {
+        "shown": true,
+        "window_ms": 120000
+      }
+    },
+    "remote_links": {
+      "work": {
+        "enabled": false,
+        "name": "Alice",
+        "participant": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "remote": "origin",
+        "sequence": 1,
+        "share_task": true,
+        "signature": "sig-1",
+        "withdrawn": true,
+        "workspace_id": "work"
+      }
+    },
+    "scan_coverage": {
+      "work": {
+        "omitted": 0,
+        "skip_worktree": 0,
+        "submodules": 0,
+        "too_large": 1,
+        "too_large_paths": [
+          "assets/big.bin"
+        ]
+      }
+    },
+    "session_liveness": {
+      "alice": {
+        "generation": 1,
+        "observed_at_ms": 21,
+        "process": {
+          "pid": 4,
+          "start_token": "t"
+        },
+        "session_id": "alice",
+        "status": "unknown"
+      }
+    },
+    "sessions": {
+      "alice": {
+        "generation": 1,
+        "session_id": "alice",
+        "workspace_id": "work"
+      },
+      "bob": {
+        "generation": 2,
+        "session_id": "bob",
+        "workspace_id": "work"
+      },
+      "codex.0198c0de-0000-7000-8000-000000000001": {
+        "generation": 1,
+        "session_id": "codex.0198c0de-0000-7000-8000-000000000001",
+        "workspace_id": "work"
+      },
+      "dana": {
+        "generation": 1,
+        "session_id": "dana",
+        "workspace_id": "work"
+      },
+      "erin": {
+        "generation": 1,
+        "session_id": "erin",
+        "workspace_id": "tree"
+      }
+    },
+    "test_learning": {
+      "work": {
+        "last": {
+          "fast": {
+            "command_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "results": {
+              "all_passed": true,
+              "passed": [
+                "api::uploads"
+              ],
+              "skipped": [
+                "net::times_out"
+              ]
+            },
+            "tree_oid": "1111111111111111111111111111111111111111",
+            "writes": 3
+          },
+          "tests": {
+            "command_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "results": {
+              "all_passed": true,
+              "passed": [
+                "api::uploads"
+              ],
+              "skipped": [
+                "net::times_out"
+              ]
+            },
+            "tree_oid": "1111111111111111111111111111111111111111",
+            "writes": 3
+          }
+        }
+      }
+    },
+    "uncoordinated": {
+      "work": [
+        {
+          "at_ms": 10204,
+          "change_id": "unreported",
+          "delivered": [
+            "codex.0198c0de-0000-7000-8000-000000000001",
+            "dana"
+          ],
+          "files": [
+            {
+              "path": "src/upload.rs",
+              "state": {
+                "digest": "4444444444444444444444444444444444444444444444444444444444444444",
+                "type": "present"
+              }
+            }
+          ],
+          "generation": 1,
+          "sessions": [
+            "codex.0198c0de-0000-7000-8000-000000000001"
+          ],
+          "workspace_id": "work"
+        }
+      ]
+    },
+    "workspace_git": {
+      "tree": {
+        "branch_ref": "refs/heads/feature",
+        "repository_id": "repo",
+        "workspace_id": "tree"
+      },
+      "work": {
+        "branch_ref": "refs/heads/main",
+        "repository_id": "repo",
+        "workspace_id": "work"
+      }
+    },
+    "workspaces": {
+      "tree": {
+        "root": "/repos/tree",
+        "workspace_id": "tree"
+      },
+      "work": {
+        "root": "/repos/work",
+        "workspace_id": "work"
+      }
+    },
+    "writes": {
+      "work": 3
+    }
+  },
+  "trails": {
+    "work": [
+      {
+        "at_ms": 10302,
+        "checks": [
+          {
+            "name": "fast",
+            "result": {
+              "exit_code": 101,
+              "type": "failed"
+            }
+          },
+          {
+            "name": "tests",
+            "result": {
+              "type": "passed"
+            }
+          }
+        ],
+        "edited": [
+          {
+            "lines": [
+              {
+                "end_line": 14,
+                "start_line": 10
+              }
+            ],
+            "path": "src/api.rs"
+          }
+        ],
+        "generation": 1,
+        "read": [
+          "src/api.rs"
+        ],
+        "session_id": "alice",
+        "summary": "change upload to take a stream",
+        "taken_by": "dana",
+        "uncommitted": [
+          "src/api.rs"
+        ],
+        "workspace_id": "work"
+      }
+    ]
+  },
+  "workspace_revisions": {
+    "spare": 2
+  },
+  "write_runs": {
+    "work": [
+      {
+        "first": 1,
+        "last": 1,
+        "session_id": "alice"
+      },
+      {
+        "first": 3,
+        "last": 3,
+        "session_id": "bob"
+      }
+    ]
+  }
+}
