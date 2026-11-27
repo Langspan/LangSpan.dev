@@ -1161,3 +1161,66 @@ fn kept_lines(export: &str, file: &str) -> Vec<usize> {
         .map(|da| da.split(',').next().unwrap().parse().unwrap())
         .collect()
 }
+
+/// Runs scripts/github-drift.py against a saved observed state; returns
+/// (exit code, stdout).
+fn github_drift(observed: &Path) -> (i32, String) {
+    let out = Command::new("python3")
+        .args(["-I", "-B"])
+        .arg(root().join("scripts/github-drift.py"))
+        .arg("--settings")
+        .arg(root().join(".github/desired-settings.json"))
+        .arg("--observed")
+        .arg(observed)
+        .output()
+        .expect("python3 runs scripts/github-drift.py");
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8(out.stdout).unwrap(),
+    )
+}
+
+#[test]
+fn the_settings_drift_audit_names_each_changed_setting() {
+    let desired = read(".github/desired-settings.json");
+    for word in ["ghp_", "github_pat_", "ghs_", "\"token\"", "\"key\""] {
+        assert!(
+            !desired.contains(word),
+            "desired-settings.json holds {word}"
+        );
+    }
+    let dir = temp_dir("github-drift");
+    let same = dir.join("same.json");
+    fs::write(&same, &desired).unwrap();
+    let (code, stdout) = github_drift(&same);
+    assert_eq!(code, 0, "{stdout}");
+
+    let drifted = desired
+        .replacen(
+            "\"delete_branch_on_merge\": false",
+            "\"delete_branch_on_merge\": true",
+            1,
+        )
+        .replacen(
+            "\"required_approving_review_count\": 0",
+            "\"required_approving_review_count\": 1",
+            1,
+        );
+    assert_ne!(drifted, desired);
+    let changed = dir.join("changed.json");
+    fs::write(&changed, drifted).unwrap();
+    let (code, stdout) = github_drift(&changed);
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(code, 1, "{stdout}");
+    assert!(
+        stdout.contains("repo.delete_branch_on_merge: want false, GitHub has true"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "rulesets.main.rules.pull_request.required_approving_review_count: want 0, GitHub has 1"
+        ),
+        "{stdout}"
+    );
+    assert_eq!(stdout.lines().count(), 2, "{stdout}");
+}
