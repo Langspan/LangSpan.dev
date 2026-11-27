@@ -322,7 +322,7 @@ fn insert_path(paths: &mut BTreeSet<String>, path: &str) -> Result<(), &'static 
 /// Extract the complete resource set from the supported local patch grammar.
 /// Unknown directives reject the whole patch; shell and remote forms are not
 /// inferred. This parser does not read file content or attempt to apply a patch.
-fn patch_paths(patch: &str) -> Result<Vec<String>, &'static str> {
+pub fn patch_paths(patch: &str) -> Result<Vec<String>, &'static str> {
     if patch.len() > MAX_PATCH_BYTES {
         return Err("apply_patch exceeds the 4 MiB supported patch limit");
     }
@@ -413,7 +413,7 @@ fn patch_paths(patch: &str) -> Result<Vec<String>, &'static str> {
 /// The hunks of each `Update File` section of a patch that `patch_paths`
 /// accepted. A file that is added, deleted, moved or named in more than one
 /// section has no entry and is held whole.
-fn patch_edits(patch: &str) -> Vec<(String, crate::regions::Edit)> {
+pub fn patch_edits(patch: &str) -> Vec<(String, crate::regions::Edit)> {
     use crate::regions::{Edit, Hunk, HunkLine};
     let mut sections: Vec<(String, Option<Vec<Hunk>>)> = Vec::new();
     for line in patch.trim().lines() {
