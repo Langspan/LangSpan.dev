@@ -1631,7 +1631,7 @@ class StandinHooks(Temporary):
                         denied = session.fire("PreToolUse", "Write", {"file_path": "x"}, "edit-1")
                         self.assertFalse(denied)
                         self.assertGreater(heartbeat.stat().st_size, 0, "the hook's child never ran")
-                        self.assert_stopped(heartbeat)
+                        self.assert_stopped(group, heartbeat)
                     finally:
                         self.kill_groups(group)
 
@@ -1655,7 +1655,7 @@ class StandinHooks(Temporary):
                     self.assertEqual(entry["exit_code"], 0, entry)
                     self.assertEqual(standin_agent.RUNNING, [])
                     self.assertGreater(heartbeat.stat().st_size, 0, "the hook's child never ran")
-                    self.assert_stopped(heartbeat)
+                    self.assert_stopped(group, heartbeat)
                 finally:
                     self.kill_groups(group)
 
@@ -1670,19 +1670,30 @@ class StandinHooks(Temporary):
             except (ProcessLookupError, PermissionError):
                 pass
 
-    def assert_stopped(self, group, heartbeat):
-        """Every process in the hook's process GROUP is gone within a bound,
-        and HEARTBEAT doesn't change after that. Waiting for the writer to
-        exit, not for a quiet spell, keeps a write in flight when the signal
-        landed from failing the test."""
+    @staticmethod
+    def live_members(group):
+        """PIDs of the processes in process GROUP that can still run. A
+        zombie can't write; where PID 1 does not reap orphans it stays in
+        the group, so `killpg(group, 0)` alone would wait for it forever."""
+        listing = subprocess.run(["ps", "-A", "-o", "pid=,pgid=,stat="], capture_output=True,
+                                 text=True, check=True, timeout=10).stdout
+        return [int(pid) for pid, pgid, stat in (line.split()[:3] for line in listing.splitlines() if line.strip())
+                if int(pgid) == group and not stat.startswith("Z")]
+
+    def assert_stopped(self, group_file, heartbeat):
+        """The hook's process group, named in GROUP_FILE, has no live process
+        within a bound, and HEARTBEAT doesn't grow after that. Waiting for
+        the writer to exit, not for a quiet spell, means a write in flight
+        when the signal landed can't fail the test, and a writer that only
+        paused can't pass it."""
+        group = int(group_file.read_text())
         deadline = time.monotonic() + 10
         while True:
-            try:
-                os.killpg(group, 0)
-            except ProcessLookupError:
+            live = self.live_members(group)
+            if not live:
                 break
             self.assertLess(time.monotonic(), deadline,
-                            "the hook's process group %d is still running" % group)
+                            "the hook's process group %d still runs %s" % (group, live))
             time.sleep(0.05)
         size = heartbeat.stat().st_size
         time.sleep(0.2)
@@ -1718,7 +1729,7 @@ class StandinHooks(Temporary):
                             time.sleep(0.05)
                         os.killpg(standin.pid, signum)
                         self.assertEqual(standin.wait(timeout=10), -signum)
-                        self.assert_stopped(heartbeat)
+                        self.assert_stopped(started, heartbeat)
                     finally:
                         self.kill_groups(started, standin.pid)
                         standin.wait()
