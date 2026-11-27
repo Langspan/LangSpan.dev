@@ -7013,973 +7013,275 @@ fn decide_checked(
 ) -> Result<Decision, CoreError> {
     validate_request_id(request_id)?;
     match command {
-        Command::WorkspaceRegister { workspace_id, root }
-        | Command::WorkspaceRegisterVerified {
-            workspace_id, root, ..
+        // ---- domain: messages ----
+        Command::SendMessage {
+            workspace_id,
+            from,
+            to,
+            text,
+            paths,
         } => {
-            let verified_overlaps = if let Command::WorkspaceRegisterVerified {
-                verified_overlaps,
-                ..
-            } = command
+            validate_known_workspace(state, workspace_id)?;
+            if let Some(from) = from
+                && known_session(state, from)?.workspace_id != *workspace_id
             {
-                let links = normalized_workspace_links(verified_overlaps)?;
-                validate_workspace_link_targets(state, workspace_id, root, &links)?;
-                links
-            } else {
-                Vec::new()
+                return Err(error(
+                    "sender_not_in_workspace",
+                    "The sending session belongs to another workspace; send from a session of this one, or leave out the sender to send as the owner",
+                ));
+            }
+            let to = match to {
+                Some(to) => {
+                    validate_id(to, "session ID")?;
+                    if state
+                        .sessions
+                        .get(to)
+                        .is_none_or(|session| session.workspace_id != *workspace_id)
+                    {
+                        return Err(error(
+                            "recipient_not_found",
+                            "The recipient is not a session of this workspace; `langspan recap WORKSPACE` lists them",
+                        ));
+                    }
+                    if from.as_ref() == Some(to) {
+                        return Err(error(
+                            "invalid_message",
+                            "A session cannot send a message to itself; use `remember` for a note",
+                        ));
+                    }
+                    Recipient::Session {
+                        session_id: to.clone(),
+                    }
+                }
+                None => Recipient::Everyone {},
             };
-            let workspace = Workspace {
-                workspace_id: workspace_id.clone(),
-                root: root.clone(),
-                verified_overlaps: state
-                    .workspaces
-                    .get(workspace_id)
-                    .map(|old| old.verified_overlaps.clone())
-                    .unwrap_or(verified_overlaps),
-            };
-            validate_workspace(state, &workspace)?;
-            let events = if state.workspaces.contains_key(workspace_id) {
-                Vec::new()
-            } else {
-                vec![Event::WorkspaceRegistered {
-                    workspace: workspace.clone(),
-                }]
-            };
+            sent(
+                request_id,
+                now_ms,
+                state.generation,
+                workspace_id,
+                from.clone(),
+                to,
+                text,
+                paths,
+            )
+        }
+        Command::Handoff {
+            session_id,
+            text,
+            paths,
+        } => {
+            let session = known_session(state, session_id)?;
+            sent(
+                request_id,
+                now_ms,
+                state.generation,
+                &session.workspace_id,
+                Some(session_id.clone()),
+                Recipient::NextSession {},
+                text,
+                paths,
+            )
+        }
+        Command::AckMessage {
+            session_id,
+            message_id,
+        } => {
+            let session = known_session(state, session_id)?;
+            validate_request_id(message_id)?;
+            let owed = state
+                .messages
+                .get(&session.workspace_id)
+                .and_then(|messages| {
+                    messages
+                        .iter()
+                        .find(|message| &message.message_id == message_id)
+                })
+                .is_some_and(|message| owed_to(message, session_id, true));
             Ok(Decision {
-                events,
-                outcome: Outcome::Workspace { workspace },
+                events: if owed {
+                    vec![Event::MessageAcknowledged {
+                        workspace_id: session.workspace_id.clone(),
+                        message_id: message_id.clone(),
+                        session_id: session_id.clone(),
+                        via: Some(Delivery::Ack),
+                        at_ms: Some(now_ms),
+                        generation: Some(state.generation),
+                    }]
+                } else {
+                    Vec::new()
+                },
+                outcome: Outcome::MessageAcknowledged {
+                    message_id: message_id.clone(),
+                    acknowledged: owed,
+                },
             })
         }
-        Command::WorkspaceList { after } => {
-            let (workspaces, next) = workspaces::list(state, after.as_deref())?;
+        Command::RetractMessage {
+            workspace_id,
+            from,
+            message_id,
+        } => retract(state, workspace_id, from.as_deref(), message_id.as_deref()),
+        Command::Remember {
+            workspace_id,
+            author,
+            text,
+            paths,
+            symbol,
+            tags,
+        } => decide_checked(
+            state,
+            &Command::RememberPrepared {
+                workspace_id: workspace_id.clone(),
+                author: author.clone(),
+                text: text.clone(),
+                paths: paths.clone(),
+                symbol: symbol.clone(),
+                tags: tags.clone(),
+                index: None,
+            },
+            request_id,
+            now_ms,
+        ),
+        Command::ObserveNoteAnchors { workspace_id } => {
+            validate_known_workspace(state, workspace_id)?;
             Ok(Decision {
                 events: Vec::new(),
-                outcome: Outcome::Workspaces { workspaces, next },
+                outcome: Outcome::NoteAnchorsObserved { changed: 0 },
             })
         }
-        Command::WorkspaceMove {
-            workspace_id, root, ..
-        } => workspaces::decide_move(state, workspace_id, root, &[], now_ms),
-        Command::WorkspaceMoveVerified {
+        Command::NoteAnchorsPrepared {
             workspace_id,
-            root,
-            verified_overlaps,
-        } => workspaces::decide_move(state, workspace_id, root, verified_overlaps, now_ms),
-        Command::WorkspaceRemove {
-            workspace_id,
-            apply,
-        } => workspaces::decide_remove(state, workspace_id, *apply, now_ms),
-        Command::SessionRegister {
-            session_id,
-            workspace_id,
-            parent,
-            headless,
+            index,
         } => {
-            let session = Session {
-                session_id: session_id.clone(),
-                workspace_id: workspace_id.clone(),
-                generation: state.generation,
-                parent: parent.clone(),
-                headless: *headless,
-            };
-            validate_session_registration(state, &session)?;
-            let events = if state.sessions.get(session_id) == Some(&session) {
-                Vec::new()
-            } else {
-                vec![Event::SessionRegistered {
-                    session: session.clone(),
-                }]
-            };
-            Ok(Decision {
-                events,
-                outcome: Outcome::Session { session },
-            })
-        }
-        Command::ObserveSessionLiveness {
-            session_id,
-            process,
-            status,
-        } => {
-            let liveness = SessionLiveness {
-                session_id: session_id.clone(),
-                process: process.clone(),
-                status: *status,
-                observed_at_ms: now_ms,
-                generation: state.generation,
-            };
-            validate_session_liveness(state, &liveness)?;
-            let events = if state.session_liveness.get(session_id) == Some(&liveness) {
-                Vec::new()
-            } else {
-                vec![Event::SessionLivenessObserved {
-                    liveness: liveness.clone(),
-                }]
-            };
-            Ok(Decision {
-                events,
-                outcome: Outcome::SessionLiveness { liveness },
-            })
-        }
-        Command::SessionSeen { session_id } => {
-            current_session(state, session_id)?;
-            let due = session_seen_due(state, session_id, now_ms);
-            let last = state
-                .activity
-                .get(session_id)
-                .filter(|activity| activity.generation == state.generation)
-                .map_or(0, |activity| activity.last_hook_ms);
-            let events = if due {
-                vec![Event::SessionSeen {
-                    session_id: session_id.clone(),
-                    at_ms: now_ms,
-                    generation: state.generation,
-                }]
-            } else {
-                Vec::new()
-            };
-            Ok(Decision {
-                events,
-                outcome: Outcome::SessionSeen {
-                    session_id: session_id.clone(),
-                    last_hook_ms: if due { now_ms } else { last },
-                },
-            })
-        }
-        Command::RecordContext {
-            session_id,
-            bytes,
-            turn,
-        } => {
-            current_session(state, session_id)?;
-            if *bytes > MAX_CONTEXT_RECORD_BYTES || (*bytes == 0 && !*turn) {
-                return Err(error(
-                    "invalid_request",
-                    "A context record names at most 1 MiB, and zero bytes only at a turn's start",
-                ));
-            }
-            let event = Event::ContextAdded {
-                session_id: session_id.clone(),
-                bytes: *bytes,
-                turn: *turn,
-                generation: state.generation,
-            };
-            let mut after = state
-                .activity
-                .get(session_id)
-                .filter(|activity| activity.generation == state.generation)
-                .map(|activity| activity.context)
-                .unwrap_or_default();
-            after.add(*bytes, *turn);
-            Ok(Decision {
-                events: vec![event],
-                outcome: Outcome::ContextRecorded {
-                    session_id: session_id.clone(),
-                    context: after,
-                },
-            })
-        }
-        Command::ForgetTold { session_id, keys } => {
-            current_session(state, session_id)?;
-            if keys.len() > MAX_TOLD {
-                return Err(error(
-                    "invalid_request",
-                    "Forget at most 256 briefing item keys at once",
-                ));
-            }
-            let named: BTreeSet<u64> = keys.iter().copied().collect();
-            let told: Vec<u64> = state
-                .activity
-                .get(session_id)
-                .filter(|activity| activity.generation == state.generation)
-                .map(|activity| {
-                    activity
-                        .told
-                        .iter()
-                        .copied()
-                        .filter(|key| named.contains(key))
-                        .collect()
+            validate_known_workspace(state, workspace_id)?;
+            let events: Vec<Event> = state
+                .notes
+                .get(workspace_id)
+                .into_iter()
+                .flatten()
+                .filter_map(|note| {
+                    let (anchor, held) = note.anchor.as_ref().zip(note.anchor_state)?;
+                    let (anchor_now, state_now) = anchors::observe(anchor, &note.paths, index);
+                    (anchor_now != *anchor || state_now != held).then(|| Event::NoteAnchorChanged {
+                        workspace_id: workspace_id.clone(),
+                        note_id: note.note_id.clone(),
+                        anchor: anchor_now,
+                        state: state_now,
+                    })
                 })
-                .unwrap_or_default();
-            let forgotten = u32::try_from(told.len()).unwrap_or(u32::MAX);
+                .collect();
             Ok(Decision {
-                // A retry, or keys never told, record nothing.
-                events: if told.is_empty() {
-                    Vec::new()
-                } else {
-                    vec![Event::ToldForgotten {
-                        session_id: session_id.clone(),
-                        keys: told,
+                outcome: Outcome::NoteAnchorsObserved {
+                    changed: u32::try_from(events.len()).unwrap_or(u32::MAX),
+                },
+                events,
+            })
+        }
+        Command::RememberPrepared {
+            workspace_id,
+            author,
+            text,
+            paths,
+            symbol,
+            tags,
+            index,
+        } => {
+            validate_known_workspace(state, workspace_id)?;
+            if let Some(author) = author {
+                known_session(state, author)?;
+            }
+            let paths = if paths.is_empty() {
+                Vec::new()
+            } else {
+                normalized_paths(paths)?
+            };
+            let tags = anchors::validate_tags(tags)?;
+            let (anchor, anchor_state) = match symbol {
+                Some(name) => {
+                    let (anchor, held) = anchors::resolve(name, &paths, index.as_ref())?;
+                    (Some(anchor), Some(held))
+                }
+                None => (None, None),
+            };
+            let note = Note {
+                note_id: request_id.into(),
+                workspace_id: workspace_id.clone(),
+                author: author.clone(),
+                text: text.clone(),
+                paths,
+                anchor,
+                anchor_state,
+                tags,
+            };
+            validate_note(&note)?;
+            Ok(Decision {
+                events: vec![Event::Remembered {
+                    note: note.clone(),
+                    at: Some(Stamp {
+                        at_ms: now_ms,
+                        generation: state.generation,
+                    }),
+                }],
+                outcome: Outcome::Remembered { note },
+            })
+        }
+        Command::Forget {
+            workspace_id,
+            note_id,
+        } => {
+            validate_known_workspace(state, workspace_id)?;
+            validate_request_id(note_id)?;
+            let removed = state
+                .notes
+                .get(workspace_id)
+                .is_some_and(|notes| notes.iter().any(|note| &note.note_id == note_id));
+            Ok(Decision {
+                events: if removed {
+                    vec![Event::Forgotten {
+                        workspace_id: workspace_id.clone(),
+                        note_id: note_id.clone(),
                     }]
+                } else {
+                    Vec::new()
                 },
-                outcome: Outcome::ToldForgotten {
-                    session_id: session_id.clone(),
-                    forgotten,
-                },
-            })
-        }
-        Command::IntentSet {
-            session_id,
-            paths,
-            summary,
-        } => {
-            let session = current_session(state, session_id)?;
-            validate_summary(summary)?;
-            let intent = Intent {
-                session_id: session_id.clone(),
-                workspace_id: session.workspace_id.clone(),
-                paths: normalized_paths(paths)?,
-                summary: summary.clone(),
-                generation: state.generation,
-            };
-            let events = if state.intents.get(session_id) == Some(&intent) {
-                Vec::new()
-            } else {
-                vec![Event::IntentSet {
-                    intent: intent.clone(),
-                }]
-            };
-            Ok(Decision {
-                events,
-                outcome: Outcome::Intent { intent },
-            })
-        }
-        Command::IntentEnd { session_id } => {
-            current_session(state, session_id)?;
-            let events = if state.intents.contains_key(session_id) {
-                vec![Event::IntentEnded {
-                    session_id: session_id.clone(),
-                }]
-            } else {
-                Vec::new()
-            };
-            Ok(Decision {
-                events,
-                outcome: Outcome::IntentEnded {
-                    session_id: session_id.clone(),
+                outcome: Outcome::Forgotten {
+                    note_id: note_id.clone(),
+                    removed,
                 },
             })
         }
-        Command::Admit {
-            session_id,
-            paths,
-            ttl_ms,
-        }
-        | Command::AdmitTool {
-            session_id,
-            paths,
-            ttl_ms,
-            ..
-        } => {
-            let (operation, base, regions, overwrites) = if let Command::AdmitTool {
-                operation,
-                base,
-                regions,
-                overwrites,
-                ..
-            } = command
-            {
-                validate_tool_identity(operation)?;
-                (
-                    Some(operation.clone()),
-                    Some(normalized_files(base)?),
-                    regions.as_slice(),
-                    overwrites.as_slice(),
-                )
-            } else {
-                (None, None, &[][..], &[][..])
-            };
-            let session = current_session(state, session_id)?;
-            let paths = normalized_paths(paths)?;
-            lines::validate_overwrites(overwrites, &paths)?;
-            let regions = trusted_regions(regions, &paths, base.iter().flatten())?;
-            if !(1..=60_000).contains(ttl_ms) {
-                return Err(error(
-                    "invalid_ttl",
-                    "Lease TTL must be between 1 and 60000 milliseconds",
-                ));
-            }
-            let expires_at_ms = now_ms.checked_add(*ttl_ms).ok_or_else(|| {
-                error(
-                    "invalid_deadline",
-                    "Lease deadline overflows the supplied clock; use a valid monotonic timestamp",
-                )
-            })?;
-            if state.leases.contains_key(request_id) {
-                return Err(error(
-                    "lease_id_reused",
-                    "This lease ID already exists; replay the original request through storage or use a new request ID",
-                ));
-            }
-            // A host's tool call is never held back by an earlier tool call
-            // of the same session. That earlier call may still sit at a
-            // permission prompt the owner refused, which sends no post-tool
-            // event; denying the session its own file until the admission
-            // expires helps nobody. A manual admission stays exclusive, as
-            // ADR 0001 defines.
-            let tool_call = operation.is_some();
-            let holders = holders_of(
-                state,
-                session_id,
-                &session.workspace_id,
-                &paths,
-                &regions,
-                tool_call,
-                now_ms,
-            );
-            // Each refusal is one event, stored with the refusal's receipt:
-            // the same request again is answered from it and adds none.
-            let refused = |kind, peer: Option<&String>| Event::WriteRefused {
-                session_id: session_id.clone(),
-                workspace_id: session.workspace_id.clone(),
-                kind,
-                paths: paths.iter().take(REFUSAL_PATHS).cloned().collect(),
-                peer_session_id: peer.cloned(),
-                input_digest: operation
-                    .as_ref()
-                    .map(|operation| operation.input_digest.clone()),
-                at_ms: now_ms,
-                generation: state.generation,
-            };
-            if !holders.is_empty() {
-                // A hook's tool call; a manual `admit` refused is not a write.
-                // Where the workspace waits for a holder, the hook records
-                // the refusal when its wait ends without an admission.
-                let waits = policy::conflict_wait_ms(state, &session.workspace_id) > 0;
-                return Ok(Decision {
-                    events: (tool_call && !waits)
-                        .then(|| {
-                            refused(
-                                RefusalKind::Conflict,
-                                holders.first().map(|holder| &holder.session_id),
-                            )
-                        })
-                        .into_iter()
-                        .collect(),
-                    outcome: Outcome::Conflict { holders },
-                });
-            }
-            let mut base_unknown = Vec::new();
-            if let Some(base) = &base {
-                if let Some(extra) = base
-                    .iter()
-                    .find(|file| paths.binary_search(&file.path).is_err())
-                {
-                    return Err(error(
-                        "invalid_base",
-                        &format!(
-                            "Base version names {:?}, which this admission does not request",
-                            extra.path
-                        ),
-                    ));
-                }
-                let stale = stale_files(state, session, base);
-                if !stale.is_empty() {
-                    // One refusal per change. The session is told; what it was
-                    // told about becomes its known version, so a host with no
-                    // reported read, or a file that no longer exists to be
-                    // read, cannot be refused for the same change forever.
-                    return Ok(Decision {
-                        events: vec![
-                            Event::SourceObserved {
-                                session_id: session_id.clone(),
-                                files: stale
-                                    .iter()
-                                    .map(|file| ObservedFile {
-                                        path: file.path.clone(),
-                                        state: file.current.clone(),
-                                    })
-                                    .collect(),
-                                origin: SourceOrigin::Refused,
-                                at_ms: now_ms,
-                                generation: state.generation,
-                            },
-                            refused(
-                                RefusalKind::StaleBase,
-                                stale.iter().find_map(|file| file.changed_by.as_ref()),
-                            ),
-                        ],
-                        outcome: Outcome::StaleBase { stale },
-                    });
-                }
-                let unread = lines::unread_lines(state, session, base, overwrites);
-                if !unread.is_empty() {
-                    // Refused once, like a stale base: what the session was
-                    // told about becomes its known version, so the retry, or
-                    // any edit after it reads the file, is admitted.
-                    let told: Vec<ObservedFile> = base
-                        .iter()
-                        .filter(|file| unread.iter().any(|lines| lines.path == file.path))
-                        .cloned()
-                        .collect();
-                    return Ok(Decision {
-                        events: vec![
-                            Event::SourceObserved {
-                                session_id: session_id.clone(),
-                                files: told,
-                                origin: SourceOrigin::Refused,
-                                at_ms: now_ms,
-                                generation: state.generation,
-                            },
-                            refused(
-                                RefusalKind::UnreadLines,
-                                unread.first().map(|lines| &lines.session_id),
-                            ),
-                        ],
-                        outcome: Outcome::UnreadLines { lines: unread },
-                    });
-                }
-                let known = known_versions(state, session_id);
-                base_unknown = paths
-                    .iter()
-                    .filter(|path| {
-                        let supplied = base.iter().find(|file| &file.path == *path);
-                        // A file that does not exist yet has no earlier version to miss.
-                        !matches!(supplied.map(|file| &file.state), Some(FileState::Missing))
-                            && !(supplied.is_some()
-                                && known.iter().any(|version| &version.path == *path))
-                    })
-                    .cloned()
-                    .collect();
-            }
-            let lease = Lease {
-                lease_id: request_id.into(),
-                session_id: session_id.clone(),
-                workspace_id: session.workspace_id.clone(),
-                paths,
-                generation: state.generation,
-                expires_at_ms,
-                status: LeaseStatus::Active,
-                operation,
-                base_unknown,
-                regions,
-            };
-            Ok(Decision {
-                events: vec![Event::LeaseGranted {
-                    lease: lease.clone(),
-                }],
-                outcome: Outcome::Admitted { lease },
-            })
-        }
-        Command::Complete {
-            session_id,
-            lease_id,
-        } => {
-            current_session(state, session_id)?;
-            validate_id(lease_id, "lease ID")?;
-            let lease = state.leases.get(lease_id).ok_or_else(|| {
-                error(
-                    "lease_not_found",
-                    "Lease does not exist; inspect status for the active lease ID",
-                )
-            })?;
-            if lease.session_id != *session_id {
-                return Err(error(
-                    "not_holder",
-                    "Only the session holding this lease can complete it",
-                ));
-            }
-            if lease.generation != state.generation || lease.status == LeaseStatus::Invalidated {
-                return Err(error(
-                    "stale_lease",
-                    "The lease belongs to a previous daemon generation; request a new admission",
-                ));
-            }
-            if lease.status == LeaseStatus::Expired
-                || (lease.status == LeaseStatus::Active && lease.expires_at_ms <= now_ms)
-            {
-                return Err(error(
-                    "lease_expired",
-                    "The lease has expired; request a new admission before continuing work",
-                ));
-            }
-            if lease.status != LeaseStatus::Active {
-                return Err(error(
-                    "lease_not_active",
-                    "The lease is no longer active; replay completion through storage or request a new admission",
-                ));
-            }
-            Ok(Decision {
-                events: vec![Event::LeaseCompleted {
-                    lease_id: lease_id.clone(),
-                }],
-                outcome: Outcome::Completed {
-                    lease_id: lease_id.clone(),
-                },
-            })
-        }
-        Command::Observe {
-            session_id,
-            operation_id,
-            source,
-            tool,
-            paths,
-            result,
-            lease_id,
-        } => decide_observation(
-            state,
-            ObservationInput {
-                session_id,
-                operation_id,
-                source,
-                tool,
-                paths,
-                result: *result,
-                lease_id: lease_id.as_deref(),
-                operation: None,
-            },
-            request_id,
-            now_ms,
-        ),
-        Command::ObserveTool {
-            session_id,
-            operation,
-            paths,
-            result,
-            lease_id,
-        } => decide_observation(
-            state,
-            ObservationInput {
-                session_id,
-                operation_id: &operation.operation_id,
-                source: &operation.source,
-                tool: &operation.tool,
-                paths,
-                result: *result,
-                lease_id: lease_id.as_deref(),
-                operation: Some(operation),
-            },
-            request_id,
-            now_ms,
-        ),
-        Command::ObserveDisk {
+        Command::Recap {
             workspace_id,
+            tag,
+            since,
+        } => {
+            validate_known_workspace(state, workspace_id)?;
+            if let Some(tag) = tag {
+                anchors::validate_tag(tag)?;
+            }
+            // What happened since is read from the event log by the store.
+            since::validate(since.as_ref())?;
+            Ok(Decision {
+                events: Vec::new(),
+                outcome: Outcome::Recap {
+                    recap: recap(state, workspace_id, tag.as_deref(), now_ms),
+                },
+            })
+        }
+        Command::Recall {
+            workspace_id,
+            query,
             path,
-            before,
-            after,
-            related_operation_ids,
-        } => {
-            let observation = DiskObservation {
-                observation_id: request_id.into(),
-                workspace_id: workspace_id.clone(),
-                path: path.clone(),
-                before: before.clone(),
-                after: after.clone(),
-                related_operation_ids: normalized_related_ids(related_operation_ids)?,
-                observed_at_ms: now_ms,
-                generation: state.generation,
-            };
-            validate_disk_observation(state, &observation)?;
-            Ok(Decision {
-                events: vec![Event::DiskObserved {
-                    observation: observation.clone(),
-                }],
-                outcome: Outcome::DiskObserved { observation },
-            })
-        }
-        Command::ObserveBranch {
-            workspace_id,
-            branch_ref,
-            head_oid,
-            tree_oid,
-        } => {
-            let observation = BranchObservation {
-                observation_id: request_id.into(),
-                workspace_id: workspace_id.clone(),
-                branch_ref: branch_ref.clone(),
-                head_oid: head_oid.clone(),
-                tree_oid: tree_oid.clone(),
-                observed_at_ms: now_ms,
-                generation: state.generation,
-            };
-            validate_branch_observation(state, &observation)?;
-            Ok(Decision {
-                events: vec![Event::BranchObserved {
-                    observation: observation.clone(),
-                }],
-                outcome: Outcome::BranchObserved { observation },
-            })
-        }
-        Command::ObserveWorkspaceGit {
-            workspace_id,
-            repository_id,
-            branch_ref,
-        } => {
-            let git = WorkspaceGit {
-                workspace_id: workspace_id.clone(),
-                repository_id: repository_id.clone(),
-                branch_ref: branch_ref.clone(),
-            };
-            validate_workspace_git(state, &git)?;
-            let events = if state.workspace_git.get(workspace_id) == Some(&git) {
-                Vec::new()
-            } else {
-                vec![Event::WorkspaceGitObserved { git: git.clone() }]
-            };
-            Ok(Decision {
-                events,
-                outcome: Outcome::WorkspaceGit { git },
-            })
-        }
-        // The summary is the adapter's one line; the digests let it learn,
-        // without any peer's words, whether a live peer's prompt began the
-        // same way, so that it can name this prompt by where it differs.
-        Command::SessionPrompt {
-            session_id,
-            summary,
-            line_digests,
-        } => {
-            current_session(state, session_id)?;
-            validate_prompt_summary(summary)?;
-            validate_line_digests(line_digests)?;
-            Ok(Decision {
-                events: vec![Event::SessionPrompted {
-                    session_id: session_id.clone(),
-                    summary: summary.clone(),
-                    line_digests: line_digests.clone(),
-                    at_ms: now_ms,
-                    generation: state.generation,
-                }],
-                outcome: Outcome::SessionPrompted {
-                    session_id: session_id.clone(),
-                    shared_lines: shared_prompt_lines(state, session_id, line_digests),
-                },
-            })
-        }
-        Command::SetPromptTargets { session_id, paths } => {
-            current_session(state, session_id)?;
-            let paths = prompt_target_paths(paths)?;
-            // Recorded again when unchanged: naming the same code again
-            // renews how recent the targets are.
-            Ok(Decision {
-                events: vec![Event::PromptTargetsSet {
-                    session_id: session_id.clone(),
-                    paths: paths.clone(),
-                    at_ms: now_ms,
-                    generation: state.generation,
-                }],
-                outcome: Outcome::PromptTargets {
-                    session_id: session_id.clone(),
-                    paths,
-                },
-            })
-        }
-        Command::ObservePresence {
-            session_id,
-            kind,
-            paths,
-        } => {
-            current_session(state, session_id)?;
-            let paths = presence_paths(*kind, paths)?;
-            if !presence_setting(state, session_id).shown {
-                return Err(error(
-                    "presence_off",
-                    "This session's presence is off; nothing it looks at is recorded",
-                ));
-            }
-            Ok(Decision {
-                events: vec![Event::PresenceObserved {
-                    session_id: session_id.clone(),
-                    kind: *kind,
-                    paths: paths.clone(),
-                    at_ms: now_ms,
-                    generation: state.generation,
-                }],
-                outcome: Outcome::PresenceObserved {
-                    session_id: session_id.clone(),
-                    paths: u32::try_from(paths.len()).unwrap_or(u32::MAX),
-                },
-            })
-        }
-        Command::SetPresence {
-            session_id,
-            shown,
-            window_ms,
-        } => {
-            known_session(state, session_id)?;
-            let setting = PresenceSetting {
-                shown: *shown,
-                window_ms: *window_ms,
-            };
-            validate_presence_setting(&setting)?;
-            let events = if presence_setting(state, session_id) == setting {
-                Vec::new()
-            } else {
-                vec![Event::PresenceSet {
-                    session_id: session_id.clone(),
-                    setting,
-                }]
-            };
-            Ok(Decision {
-                events,
-                outcome: Outcome::Presence {
-                    session_id: session_id.clone(),
-                    setting,
-                },
-            })
-        }
-        Command::SessionEnd { session_id, trail } => {
-            let session = known_session(state, session_id)?;
-            if let Some(facts) = trail {
-                trail::validate_facts(facts)?;
-            }
-            let ending = state
-                .activity
-                .get(session_id)
-                .is_none_or(|activity| !activity.ended);
-            let mut events = if ending || state.intents.contains_key(session_id) {
-                vec![Event::SessionEnded {
-                    session_id: session_id.clone(),
-                }]
-            } else {
-                Vec::new()
-            };
-            // A trail is built once per end, from the state before it.
-            if ending && let Some(trail) = trail::build(state, session, trail.as_ref(), now_ms) {
-                events.push(Event::TrailRecorded { trail });
-            }
-            Ok(Decision {
-                events,
-                outcome: Outcome::SessionEnded {
-                    session_id: session_id.clone(),
-                },
-            })
-        }
-        Command::SessionStop {
-            session_id,
-            failure,
-            prompt_id,
-        } => {
-            known_session(state, session_id)?;
-            if let Some(failure) = failure {
-                validate_failure(failure)?;
-            }
-            if let Some(prompt_id) = prompt_id {
-                validate_request_id(prompt_id)?;
-            }
-            // Only what the session's own tool calls hold, in this
-            // generation, and not already past its deadline (that is the
-            // expiry sweep's). An admission asked for by hand is not part of
-            // a reply and stays until it is completed or expires.
-            let released: Vec<String> = state
-                .leases
-                .values()
-                .filter(|lease| {
-                    lease.session_id == *session_id
-                        && lease.status == LeaseStatus::Active
-                        && lease.generation == state.generation
-                        && lease.operation.is_some()
-                        && lease.expires_at_ms > now_ms
-                })
-                .map(|lease| lease.lease_id.clone())
-                .collect();
-            let mut events: Vec<Event> = released
-                .iter()
-                .map(|lease_id| Event::LeaseCompleted {
-                    lease_id: lease_id.clone(),
-                })
-                .collect();
-            events.push(Event::SessionStopped {
-                session_id: session_id.clone(),
-                released: released.clone(),
-                failure: failure.clone(),
-                at_ms: now_ms,
-                generation: state.generation,
-                prompt_id: prompt_id.clone(),
-            });
-            Ok(Decision {
-                events,
-                outcome: Outcome::SessionStopped {
-                    session_id: session_id.clone(),
-                    released,
-                    wrote: wrote_since_boundary(state, session_id),
-                },
-            })
-        }
-        Command::AcknowledgeInterface {
-            session_id,
-            notice_ids,
-        } => {
-            current_session(state, session_id)?;
-            validate_alerted(notice_ids)?;
-            Ok(Decision {
-                events: vec![Event::InterfaceAlerted {
-                    session_id: session_id.clone(),
-                    notice_ids: notice_ids.clone(),
-                }],
-                outcome: Outcome::InterfaceAcknowledged {
-                    session_id: session_id.clone(),
-                    notice_ids: notice_ids.clone(),
-                },
-            })
-        }
-        Command::InterfaceShown {
-            session_id,
-            notice_ids,
-        } => {
-            current_session(state, session_id)?;
-            validate_told(notice_ids)?;
-            // A notice told before, either way, is not recorded twice.
-            let newly_told: Vec<String> = notice_ids
-                .iter()
-                .filter(|id| !told_notices(state, session_id).any(|told| told.notice_id == **id))
-                .cloned()
-                .collect();
-            let events = if newly_told.is_empty() {
-                Vec::new()
-            } else {
-                vec![Event::InterfaceNoticesTold {
-                    session_id: session_id.clone(),
-                    notice_ids: newly_told,
-                    via: NoticeVia::Briefing,
-                }]
-            };
-            Ok(Decision {
-                events,
-                outcome: Outcome::InterfaceAcknowledged {
-                    session_id: session_id.clone(),
-                    notice_ids: notice_ids.clone(),
-                },
-            })
-        }
-        // The daemon sends this only for a file it found large and indexed
-        // whole at `digest`; here the session's own record decides.
-        Command::OutlineRead {
-            session_id,
-            path,
-            digest,
-            ..
-        } => {
-            current_session(state, session_id)?;
-            validate_outlined(path, digest)?;
-            if was_outlined(state, session_id, path, digest) {
-                return Ok(Decision {
-                    events: Vec::new(),
-                    outcome: Outcome::ReadOutline {
-                        outline: None,
-                        definitions: 0,
-                        skipped: Some("shown".into()),
-                    },
-                });
-            }
-            Ok(Decision {
-                events: vec![Event::ReadOutlined {
-                    session_id: session_id.clone(),
-                    path: path.clone(),
-                    digest: digest.clone(),
-                }],
-                outcome: Outcome::ReadOutline {
-                    outline: Some(Vec::new()),
-                    definitions: 0,
-                    skipped: None,
-                },
-            })
-        }
-        Command::BetweenSteps {
-            session_id,
-            stops,
-            prompt_id,
-        } => {
-            let me = known_session(state, session_id)?;
-            if let Some(prompt_id) = prompt_id {
-                validate_request_id(prompt_id)?;
-            }
-            let activity = state
-                .activity
-                .get(session_id)
-                .filter(|activity| activity.generation == state.generation);
-            let now_stops = activity.map_or(0, |activity| activity.stops);
-            // The watcher's turn is over once its own prompt's reply
-            // finished, whenever its first answer came, or once any reply
-            // finished after its first ask; an ended or earlier-generation
-            // session has none.
-            let open = me.generation == state.generation
-                && !activity.is_some_and(|activity| activity.ended)
-                && !prompt_id.as_ref().is_some_and(|prompt| {
-                    activity.is_some_and(|activity| activity.stopped_prompts.contains(prompt))
-                })
-                && stops.is_none_or(|stops| stops == now_stops);
-            let (notice_ids, interface_changes): (Vec<String>, Vec<InterfaceImpact>) = if open {
-                let alerted = activity.map_or(&[][..], |activity| activity.alerted.as_slice());
-                let concerned = concerned_paths(state, session_id, now_ms);
-                interface_impacts(state, me, &concerned, now_ms)
-                    .filter(|(id, _)| {
-                        !alerted.contains(id)
-                            && !told_notices(state, session_id).any(|told| told.notice_id == *id)
-                    })
-                    .take(BRIEF_INTERFACE_NOTICES)
-                    .unzip()
-            } else {
-                (Vec::new(), Vec::new())
-            };
-            let events = if notice_ids.is_empty() {
-                Vec::new()
-            } else {
-                vec![Event::InterfaceNoticesTold {
-                    session_id: session_id.clone(),
-                    notice_ids,
-                    via: NoticeVia::BetweenSteps,
-                }]
-            };
-            Ok(Decision {
-                events,
-                outcome: Outcome::BetweenSteps {
-                    session_id: session_id.clone(),
-                    open,
-                    stops: now_stops,
-                    interface_changes,
-                },
-            })
-        }
-        Command::ObserveToolBatch {
-            session_id,
-            operation_ids,
-            calls,
-        } => {
-            current_session(state, session_id)?;
-            validate_batch(operation_ids, *calls)?;
-            Ok(Decision {
-                events: vec![Event::ToolBatchObserved {
-                    session_id: session_id.clone(),
-                    operation_ids: operation_ids.clone(),
-                    calls: *calls,
-                    at_ms: now_ms,
-                    generation: state.generation,
-                }],
-                outcome: Outcome::ToolBatchObserved {
-                    session_id: session_id.clone(),
-                    calls: *calls,
-                    wrote: wrote_since_boundary(state, session_id),
-                },
-            })
-        }
-        Command::ObserveSource {
-            session_id,
-            files,
-            origin,
-        } => {
-            current_session(state, session_id)?;
-            let files = normalized_files(files)?;
-            if files.is_empty() {
-                return Err(error(
-                    "invalid_path",
-                    "Name at least one observed file version",
-                ));
-            }
-            let count = u32::try_from(files.len()).unwrap_or(u32::MAX);
-            Ok(Decision {
-                events: vec![Event::SourceObserved {
-                    session_id: session_id.clone(),
-                    files,
-                    origin: *origin,
-                    at_ms: now_ms,
-                    generation: state.generation,
-                }],
-                outcome: Outcome::SourceObserved {
-                    session_id: session_id.clone(),
-                    files: count,
-                },
-            })
-        }
+            limit,
+        } => Ok(Decision {
+            events: Vec::new(),
+            outcome: Outcome::Recall {
+                recall: recall_notes(state, workspace_id, query, path.as_deref(), *limit)?,
+            },
+        }),
+        // ---- end domain: messages ----
+        // ---- domain: remote ----
         Command::RemoteEnable {
             workspace_id,
             remote,
@@ -8199,6 +7501,32 @@ fn decide_checked(
                 },
             })
         }
+        Command::ForgetRemote {
+            workspace_id,
+            participant,
+        } => {
+            remote_link(state, workspace_id)?;
+            validate_participant(participant, "-")?;
+            let held = state
+                .remote_peers
+                .contains_key(&remote_key(workspace_id, participant));
+            Ok(Decision {
+                events: if held {
+                    vec![Event::RemoteForgotten {
+                        workspace_id: workspace_id.clone(),
+                        participant: participant.clone(),
+                    }]
+                } else {
+                    Vec::new()
+                },
+                outcome: Outcome::RemoteObserved {
+                    participant: participant.clone(),
+                    accepted: held,
+                },
+            })
+        }
+        // ---- end domain: remote ----
+        // ---- domain: checks ----
         Command::RecordCheck {
             workspace_id,
             name,
@@ -8764,31 +8092,1405 @@ fn decide_checked(
                 },
             })
         }
-        Command::ForgetRemote {
+        // ---- end domain: checks ----
+        // ---- domain: observation ----
+        Command::Observe {
+            session_id,
+            operation_id,
+            source,
+            tool,
+            paths,
+            result,
+            lease_id,
+        } => decide_observation(
+            state,
+            ObservationInput {
+                session_id,
+                operation_id,
+                source,
+                tool,
+                paths,
+                result: *result,
+                lease_id: lease_id.as_deref(),
+                operation: None,
+            },
+            request_id,
+            now_ms,
+        ),
+        Command::ObserveTool {
+            session_id,
+            operation,
+            paths,
+            result,
+            lease_id,
+        } => decide_observation(
+            state,
+            ObservationInput {
+                session_id,
+                operation_id: &operation.operation_id,
+                source: &operation.source,
+                tool: &operation.tool,
+                paths,
+                result: *result,
+                lease_id: lease_id.as_deref(),
+                operation: Some(operation),
+            },
+            request_id,
+            now_ms,
+        ),
+        Command::ObserveDisk {
             workspace_id,
-            participant,
+            path,
+            before,
+            after,
+            related_operation_ids,
         } => {
-            remote_link(state, workspace_id)?;
-            validate_participant(participant, "-")?;
-            let held = state
-                .remote_peers
-                .contains_key(&remote_key(workspace_id, participant));
+            let observation = DiskObservation {
+                observation_id: request_id.into(),
+                workspace_id: workspace_id.clone(),
+                path: path.clone(),
+                before: before.clone(),
+                after: after.clone(),
+                related_operation_ids: normalized_related_ids(related_operation_ids)?,
+                observed_at_ms: now_ms,
+                generation: state.generation,
+            };
+            validate_disk_observation(state, &observation)?;
             Ok(Decision {
-                events: if held {
-                    vec![Event::RemoteForgotten {
+                events: vec![Event::DiskObserved {
+                    observation: observation.clone(),
+                }],
+                outcome: Outcome::DiskObserved { observation },
+            })
+        }
+        Command::ObserveBranch {
+            workspace_id,
+            branch_ref,
+            head_oid,
+            tree_oid,
+        } => {
+            let observation = BranchObservation {
+                observation_id: request_id.into(),
+                workspace_id: workspace_id.clone(),
+                branch_ref: branch_ref.clone(),
+                head_oid: head_oid.clone(),
+                tree_oid: tree_oid.clone(),
+                observed_at_ms: now_ms,
+                generation: state.generation,
+            };
+            validate_branch_observation(state, &observation)?;
+            Ok(Decision {
+                events: vec![Event::BranchObserved {
+                    observation: observation.clone(),
+                }],
+                outcome: Outcome::BranchObserved { observation },
+            })
+        }
+        Command::ObserveWorkspaceGit {
+            workspace_id,
+            repository_id,
+            branch_ref,
+        } => {
+            let git = WorkspaceGit {
+                workspace_id: workspace_id.clone(),
+                repository_id: repository_id.clone(),
+                branch_ref: branch_ref.clone(),
+            };
+            validate_workspace_git(state, &git)?;
+            let events = if state.workspace_git.get(workspace_id) == Some(&git) {
+                Vec::new()
+            } else {
+                vec![Event::WorkspaceGitObserved { git: git.clone() }]
+            };
+            Ok(Decision {
+                events,
+                outcome: Outcome::WorkspaceGit { git },
+            })
+        }
+        Command::ObserveScan {
+            workspace_id,
+            failure,
+            coverage,
+        } => {
+            validate_known_workspace(state, workspace_id)?;
+            let held = state.scan_failures.get(workspace_id);
+            let mut events = match failure {
+                Some(detail) => {
+                    let detail: String = detail
+                        .chars()
+                        .map(|c| if c.is_control() { ' ' } else { c })
+                        .take(200)
+                        .collect();
+                    // The same failure repeated is one fact, not many.
+                    if held.is_some_and(|held| {
+                        held.detail == detail && held.generation == state.generation
+                    }) {
+                        Vec::new()
+                    } else {
+                        vec![Event::ScanFailed {
+                            failure: ScanFailure {
+                                workspace_id: workspace_id.clone(),
+                                detail,
+                                at_ms: now_ms,
+                                generation: state.generation,
+                            },
+                        }]
+                    }
+                }
+                None if held.is_some() => vec![Event::ScanRecovered {
+                    workspace_id: workspace_id.clone(),
+                }],
+                None => Vec::new(),
+            };
+            // Coverage is of the last completed scan: a failed attempt
+            // leaves it as it was, and an unchanged one is not a new fact.
+            if failure.is_none() {
+                let coverage = coverage
+                    .clone()
+                    .filter(|coverage| coverage != &ScanCoverage::default());
+                if let Some(coverage) = &coverage {
+                    validate_coverage(coverage)?;
+                }
+                if state.scan_coverage.get(workspace_id) != coverage.as_ref() {
+                    events.push(Event::ScanCoverageObserved {
                         workspace_id: workspace_id.clone(),
-                        participant: participant.clone(),
-                    }]
-                } else {
-                    Vec::new()
+                        coverage,
+                    });
+                }
+            }
+            Ok(Decision {
+                events,
+                outcome: Outcome::ScanObserved {
+                    workspace_id: workspace_id.clone(),
+                    failed: failure.is_some(),
                 },
-                outcome: Outcome::RemoteObserved {
-                    participant: participant.clone(),
-                    accepted: held,
+            })
+        }
+        Command::ObserveHosts { not_installed } => {
+            if not_installed.len() > MAX_HOSTS {
+                return Err(error(
+                    "invalid_hosts",
+                    &format!("a host check names at most {MAX_HOSTS} hosts"),
+                ));
+            }
+            let now_missing: BTreeSet<&str> = not_installed.iter().map(String::as_str).collect();
+            if now_missing.len() != not_installed.len() {
+                return Err(error("invalid_hosts", "a host is named more than once"));
+            }
+            for host in &now_missing {
+                validate_host_name(host)?;
+            }
+            // Each change of a host's state is one fact; an unchanged
+            // host is not recorded again.
+            let mut events: Vec<Event> = state
+                .uninstalled_hosts
+                .keys()
+                .filter(|host| !now_missing.contains(host.as_str()))
+                .map(|host| Event::HostCleared { host: host.clone() })
+                .collect();
+            events.extend(
+                now_missing
+                    .iter()
+                    .filter(|host| !state.uninstalled_hosts.contains_key(**host))
+                    .map(|host| Event::HostNotInstalled {
+                        host: UninstalledHost {
+                            host: (*host).into(),
+                            at_ms: now_ms,
+                            generation: state.generation,
+                        },
+                    }),
+            );
+            Ok(Decision {
+                events,
+                outcome: Outcome::HostsObserved {
+                    not_installed: now_missing.iter().map(|host| (*host).into()).collect(),
+                },
+            })
+        }
+        Command::ObserveCheckout {
+            workspace_id,
+            from_branch,
+            to_branch,
+            from_head,
+            to_head,
+            files,
+        } => {
+            let change = CheckoutChange {
+                change_id: request_id.into(),
+                workspace_id: workspace_id.clone(),
+                from_branch: from_branch.clone(),
+                to_branch: to_branch.clone(),
+                from_head: from_head.clone(),
+                to_head: to_head.clone(),
+                files: *files,
+                at_ms: now_ms,
+                generation: state.generation,
+            };
+            validate_checkout(state, &change)?;
+            Ok(Decision {
+                events: vec![Event::CheckoutChanged {
+                    change: change.clone(),
+                }],
+                outcome: Outcome::CheckoutObserved { change },
+            })
+        }
+        Command::ObserveCheckoutRun {
+            session_id,
+            command,
+            to_branch,
+            to_head,
+            ran_ms,
+            finished_ago_ms,
+            files_unchanged,
+        } => {
+            let Some(session) = state.sessions.get(session_id) else {
+                return Err(error(
+                    "unknown_session",
+                    "A checkout run names a registered session; register it first",
+                ));
+            };
+            // When the command ran, not when its report arrived: a
+            // redelivered report credits no later change. Placed back from
+            // the daemon's own now by durations, so never after it; a run
+            // two hours at most, a shell call's lifetime.
+            let finished_ms = now_ms.saturating_sub(*finished_ago_ms);
+            let run = CheckoutRun {
+                run_id: request_id.into(),
+                workspace_id: session.workspace_id.clone(),
+                session_id: session_id.clone(),
+                command: command.clone(),
+                to_branch: to_branch.clone(),
+                to_head: to_head.clone(),
+                started_ms: finished_ms.saturating_sub((*ran_ms).min(MAX_CHECKOUT_RUN_MS)),
+                finished_ms,
+                generation: state.generation,
+                files_unchanged: *files_unchanged,
+            };
+            validate_checkout_run(state, &run)?;
+            Ok(Decision {
+                events: vec![Event::CheckoutRunObserved { run: run.clone() }],
+                outcome: Outcome::CheckoutRunObserved { run },
+            })
+        }
+        Command::ObserveUncoordinated {
+            workspace_id,
+            files,
+            scanned_from_ms,
+        } => {
+            validate_known_workspace(state, workspace_id)?;
+            if files.is_empty() || files.len() > MAX_UNCOORDINATED_OBSERVED {
+                return Err(error(
+                    "invalid_path",
+                    &format!(
+                        "An uncoordinated change names 1 to {MAX_UNCOORDINATED_OBSERVED} changed files"
+                    ),
+                ));
+            }
+            let files = normalized_files(files)?;
+            // A file under an admitted edit is that edit's, whose report has
+            // not arrived yet; a version a session reported is explained; and
+            // a file a session reported after the scan began reading is newer
+            // than what the scan saw: the version before that session's edit.
+            let unexplained: Vec<ObservedFile> = files
+                .into_iter()
+                .filter(|file| {
+                    !leased(state, workspace_id, &file.path, now_ms)
+                        && !explained(state, workspace_id, file)
+                        && !scanned_from_ms.is_some_and(|from| {
+                            reported_since(state, workspace_id, &file.path, from)
+                        })
+                })
+                .take(MAX_UNCOORDINATED_FILES)
+                .collect();
+            // A Codex session already named in a notice still held is not
+            // named again: one notice per session until it ages out.
+            let named: BTreeSet<&str> = held_uncoordinated(state, workspace_id, now_ms)
+                .flat_map(|change| change.sessions.iter().map(String::as_str))
+                .collect();
+            let sessions = if unexplained.is_empty() {
+                Vec::new()
+            } else {
+                codex_sessions(state, workspace_id)
+                    .into_iter()
+                    .filter(|session| !named.contains(session.as_str()))
+                    .take(MAX_UNCOORDINATED_SESSIONS)
+                    .collect()
+            };
+            if sessions.is_empty() {
+                return Ok(Decision {
+                    events: Vec::new(),
+                    outcome: Outcome::UncoordinatedObserved {
+                        sessions: Vec::new(),
+                        paths: Vec::new(),
+                    },
+                });
+            }
+            let change = UncoordinatedChange {
+                change_id: request_id.into(),
+                workspace_id: workspace_id.clone(),
+                sessions: sessions.clone(),
+                files: unexplained,
+                at_ms: now_ms,
+                generation: state.generation,
+                delivered: Vec::new(),
+            };
+            validate_uncoordinated(state, &change)?;
+            Ok(Decision {
+                outcome: Outcome::UncoordinatedObserved {
+                    sessions,
+                    paths: change.files.iter().map(|file| file.path.clone()).collect(),
+                },
+                events: vec![Event::UncoordinatedChanged { change }],
+            })
+        }
+        // ---- end domain: observation ----
+        // ---- domain: notices ----
+        Command::AcknowledgeInterface {
+            session_id,
+            notice_ids,
+        } => {
+            current_session(state, session_id)?;
+            validate_alerted(notice_ids)?;
+            Ok(Decision {
+                events: vec![Event::InterfaceAlerted {
+                    session_id: session_id.clone(),
+                    notice_ids: notice_ids.clone(),
+                }],
+                outcome: Outcome::InterfaceAcknowledged {
+                    session_id: session_id.clone(),
+                    notice_ids: notice_ids.clone(),
+                },
+            })
+        }
+        Command::InterfaceShown {
+            session_id,
+            notice_ids,
+        } => {
+            current_session(state, session_id)?;
+            validate_told(notice_ids)?;
+            // A notice told before, either way, is not recorded twice.
+            let newly_told: Vec<String> = notice_ids
+                .iter()
+                .filter(|id| !told_notices(state, session_id).any(|told| told.notice_id == **id))
+                .cloned()
+                .collect();
+            let events = if newly_told.is_empty() {
+                Vec::new()
+            } else {
+                vec![Event::InterfaceNoticesTold {
+                    session_id: session_id.clone(),
+                    notice_ids: newly_told,
+                    via: NoticeVia::Briefing,
+                }]
+            };
+            Ok(Decision {
+                events,
+                outcome: Outcome::InterfaceAcknowledged {
+                    session_id: session_id.clone(),
+                    notice_ids: notice_ids.clone(),
+                },
+            })
+        }
+        // The daemon sends this only for a file it found large and indexed
+        // whole at `digest`; here the session's own record decides.
+        Command::OutlineRead {
+            session_id,
+            path,
+            digest,
+            ..
+        } => {
+            current_session(state, session_id)?;
+            validate_outlined(path, digest)?;
+            if was_outlined(state, session_id, path, digest) {
+                return Ok(Decision {
+                    events: Vec::new(),
+                    outcome: Outcome::ReadOutline {
+                        outline: None,
+                        definitions: 0,
+                        skipped: Some("shown".into()),
+                    },
+                });
+            }
+            Ok(Decision {
+                events: vec![Event::ReadOutlined {
+                    session_id: session_id.clone(),
+                    path: path.clone(),
+                    digest: digest.clone(),
+                }],
+                outcome: Outcome::ReadOutline {
+                    outline: Some(Vec::new()),
+                    definitions: 0,
+                    skipped: None,
+                },
+            })
+        }
+        Command::BetweenSteps {
+            session_id,
+            stops,
+            prompt_id,
+        } => {
+            let me = known_session(state, session_id)?;
+            if let Some(prompt_id) = prompt_id {
+                validate_request_id(prompt_id)?;
+            }
+            let activity = state
+                .activity
+                .get(session_id)
+                .filter(|activity| activity.generation == state.generation);
+            let now_stops = activity.map_or(0, |activity| activity.stops);
+            // The watcher's turn is over once its own prompt's reply
+            // finished, whenever its first answer came, or once any reply
+            // finished after its first ask; an ended or earlier-generation
+            // session has none.
+            let open = me.generation == state.generation
+                && !activity.is_some_and(|activity| activity.ended)
+                && !prompt_id.as_ref().is_some_and(|prompt| {
+                    activity.is_some_and(|activity| activity.stopped_prompts.contains(prompt))
+                })
+                && stops.is_none_or(|stops| stops == now_stops);
+            let (notice_ids, interface_changes): (Vec<String>, Vec<InterfaceImpact>) = if open {
+                let alerted = activity.map_or(&[][..], |activity| activity.alerted.as_slice());
+                let concerned = concerned_paths(state, session_id, now_ms);
+                interface_impacts(state, me, &concerned, now_ms)
+                    .filter(|(id, _)| {
+                        !alerted.contains(id)
+                            && !told_notices(state, session_id).any(|told| told.notice_id == *id)
+                    })
+                    .take(BRIEF_INTERFACE_NOTICES)
+                    .unzip()
+            } else {
+                (Vec::new(), Vec::new())
+            };
+            let events = if notice_ids.is_empty() {
+                Vec::new()
+            } else {
+                vec![Event::InterfaceNoticesTold {
+                    session_id: session_id.clone(),
+                    notice_ids,
+                    via: NoticeVia::BetweenSteps,
+                }]
+            };
+            Ok(Decision {
+                events,
+                outcome: Outcome::BetweenSteps {
+                    session_id: session_id.clone(),
+                    open,
+                    stops: now_stops,
+                    interface_changes,
+                },
+            })
+        }
+        Command::ObserveInterface {
+            workspace_id,
+            path,
+            changes,
+            dependents,
+        } => {
+            validate_known_workspace(state, workspace_id)?;
+            let notice = InterfaceNotice {
+                notice_id: request_id.into(),
+                workspace_id: workspace_id.clone(),
+                path: path.clone(),
+                changes: changes.clone(),
+                dependents: dependents.clone(),
+                elsewhere: Vec::new(),
+                by_session: last_peer_edit(state, "", workspace_id, path, 0)
+                    .map(|(session, _)| session.to_owned()),
+                at_ms: now_ms,
+                generation: state.generation,
+            };
+            validate_notice(&notice)?;
+            Ok(Decision {
+                events: vec![Event::InterfaceChanged {
+                    notice: notice.clone(),
+                }],
+                outcome: Outcome::InterfaceObserved { notice },
+            })
+        }
+        Command::ObserveInterfaceDependents {
+            notice_workspace_id,
+            notice_id,
+            workspace_id,
+            paths,
+        } => {
+            validate_known_workspace(state, notice_workspace_id)?;
+            validate_known_workspace(state, workspace_id)?;
+            if workspace_id == notice_workspace_id
+                || !related_workspace(state, notice_workspace_id, workspace_id)
+            {
+                return Err(error(
+                    "invalid_notice",
+                    "Dependents found elsewhere are files of another worktree of the notice's repository",
+                ));
+            }
+            if paths.len() > NOTICE_DEPENDENTS {
+                return Err(error(
+                    "invalid_notice",
+                    "At most 32 dependent files are reported at once",
+                ));
+            }
+            for path in paths {
+                validate_relative_path(path)?;
+            }
+            let notice = state
+                .interface_notices
+                .get(notice_workspace_id)
+                .and_then(|notices| notices.iter().find(|n| n.notice_id == *notice_id))
+                .ok_or_else(|| {
+                    error(
+                        "unknown_notice",
+                        "The interface notice is not held: a newer one for its file replaced it, or it was never recorded",
+                    )
+                })?;
+            let room = NOTICE_DEPENDENTS.saturating_sub(notice.elsewhere.len());
+            let files: Vec<WorktreeFile> = paths
+                .iter()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .map(|path| WorktreeFile {
+                    workspace_id: workspace_id.clone(),
+                    path: path.clone(),
+                })
+                .filter(|file| !notice.elsewhere.contains(file))
+                .take(room)
+                .collect();
+            Ok(Decision {
+                outcome: Outcome::InterfaceDependentsObserved {
+                    notice_id: notice_id.clone(),
+                    added: files.len() as u32,
+                },
+                events: if files.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![Event::InterfaceDependentsFound {
+                        notice_workspace_id: notice_workspace_id.clone(),
+                        notice_id: notice_id.clone(),
+                        files,
+                    }]
+                },
+            })
+        }
+        // ---- end domain: notices ----
+        // ---- domain: sessions ----
+        Command::WorkspaceRegister { workspace_id, root }
+        | Command::WorkspaceRegisterVerified {
+            workspace_id, root, ..
+        } => {
+            let verified_overlaps = if let Command::WorkspaceRegisterVerified {
+                verified_overlaps,
+                ..
+            } = command
+            {
+                let links = normalized_workspace_links(verified_overlaps)?;
+                validate_workspace_link_targets(state, workspace_id, root, &links)?;
+                links
+            } else {
+                Vec::new()
+            };
+            let workspace = Workspace {
+                workspace_id: workspace_id.clone(),
+                root: root.clone(),
+                verified_overlaps: state
+                    .workspaces
+                    .get(workspace_id)
+                    .map(|old| old.verified_overlaps.clone())
+                    .unwrap_or(verified_overlaps),
+            };
+            validate_workspace(state, &workspace)?;
+            let events = if state.workspaces.contains_key(workspace_id) {
+                Vec::new()
+            } else {
+                vec![Event::WorkspaceRegistered {
+                    workspace: workspace.clone(),
+                }]
+            };
+            Ok(Decision {
+                events,
+                outcome: Outcome::Workspace { workspace },
+            })
+        }
+        Command::WorkspaceList { after } => {
+            let (workspaces, next) = workspaces::list(state, after.as_deref())?;
+            Ok(Decision {
+                events: Vec::new(),
+                outcome: Outcome::Workspaces { workspaces, next },
+            })
+        }
+        Command::WorkspaceMove {
+            workspace_id, root, ..
+        } => workspaces::decide_move(state, workspace_id, root, &[], now_ms),
+        Command::WorkspaceMoveVerified {
+            workspace_id,
+            root,
+            verified_overlaps,
+        } => workspaces::decide_move(state, workspace_id, root, verified_overlaps, now_ms),
+        Command::WorkspaceRemove {
+            workspace_id,
+            apply,
+        } => workspaces::decide_remove(state, workspace_id, *apply, now_ms),
+        Command::SessionRegister {
+            session_id,
+            workspace_id,
+            parent,
+            headless,
+        } => {
+            let session = Session {
+                session_id: session_id.clone(),
+                workspace_id: workspace_id.clone(),
+                generation: state.generation,
+                parent: parent.clone(),
+                headless: *headless,
+            };
+            validate_session_registration(state, &session)?;
+            let events = if state.sessions.get(session_id) == Some(&session) {
+                Vec::new()
+            } else {
+                vec![Event::SessionRegistered {
+                    session: session.clone(),
+                }]
+            };
+            Ok(Decision {
+                events,
+                outcome: Outcome::Session { session },
+            })
+        }
+        Command::ObserveSessionLiveness {
+            session_id,
+            process,
+            status,
+        } => {
+            let liveness = SessionLiveness {
+                session_id: session_id.clone(),
+                process: process.clone(),
+                status: *status,
+                observed_at_ms: now_ms,
+                generation: state.generation,
+            };
+            validate_session_liveness(state, &liveness)?;
+            let events = if state.session_liveness.get(session_id) == Some(&liveness) {
+                Vec::new()
+            } else {
+                vec![Event::SessionLivenessObserved {
+                    liveness: liveness.clone(),
+                }]
+            };
+            Ok(Decision {
+                events,
+                outcome: Outcome::SessionLiveness { liveness },
+            })
+        }
+        Command::SessionSeen { session_id } => {
+            current_session(state, session_id)?;
+            let due = session_seen_due(state, session_id, now_ms);
+            let last = state
+                .activity
+                .get(session_id)
+                .filter(|activity| activity.generation == state.generation)
+                .map_or(0, |activity| activity.last_hook_ms);
+            let events = if due {
+                vec![Event::SessionSeen {
+                    session_id: session_id.clone(),
+                    at_ms: now_ms,
+                    generation: state.generation,
+                }]
+            } else {
+                Vec::new()
+            };
+            Ok(Decision {
+                events,
+                outcome: Outcome::SessionSeen {
+                    session_id: session_id.clone(),
+                    last_hook_ms: if due { now_ms } else { last },
+                },
+            })
+        }
+        Command::RecordContext {
+            session_id,
+            bytes,
+            turn,
+        } => {
+            current_session(state, session_id)?;
+            if *bytes > MAX_CONTEXT_RECORD_BYTES || (*bytes == 0 && !*turn) {
+                return Err(error(
+                    "invalid_request",
+                    "A context record names at most 1 MiB, and zero bytes only at a turn's start",
+                ));
+            }
+            let event = Event::ContextAdded {
+                session_id: session_id.clone(),
+                bytes: *bytes,
+                turn: *turn,
+                generation: state.generation,
+            };
+            let mut after = state
+                .activity
+                .get(session_id)
+                .filter(|activity| activity.generation == state.generation)
+                .map(|activity| activity.context)
+                .unwrap_or_default();
+            after.add(*bytes, *turn);
+            Ok(Decision {
+                events: vec![event],
+                outcome: Outcome::ContextRecorded {
+                    session_id: session_id.clone(),
+                    context: after,
+                },
+            })
+        }
+        Command::ForgetTold { session_id, keys } => {
+            current_session(state, session_id)?;
+            if keys.len() > MAX_TOLD {
+                return Err(error(
+                    "invalid_request",
+                    "Forget at most 256 briefing item keys at once",
+                ));
+            }
+            let named: BTreeSet<u64> = keys.iter().copied().collect();
+            let told: Vec<u64> = state
+                .activity
+                .get(session_id)
+                .filter(|activity| activity.generation == state.generation)
+                .map(|activity| {
+                    activity
+                        .told
+                        .iter()
+                        .copied()
+                        .filter(|key| named.contains(key))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let forgotten = u32::try_from(told.len()).unwrap_or(u32::MAX);
+            Ok(Decision {
+                // A retry, or keys never told, record nothing.
+                events: if told.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![Event::ToldForgotten {
+                        session_id: session_id.clone(),
+                        keys: told,
+                    }]
+                },
+                outcome: Outcome::ToldForgotten {
+                    session_id: session_id.clone(),
+                    forgotten,
+                },
+            })
+        }
+        Command::IntentSet {
+            session_id,
+            paths,
+            summary,
+        } => {
+            let session = current_session(state, session_id)?;
+            validate_summary(summary)?;
+            let intent = Intent {
+                session_id: session_id.clone(),
+                workspace_id: session.workspace_id.clone(),
+                paths: normalized_paths(paths)?,
+                summary: summary.clone(),
+                generation: state.generation,
+            };
+            let events = if state.intents.get(session_id) == Some(&intent) {
+                Vec::new()
+            } else {
+                vec![Event::IntentSet {
+                    intent: intent.clone(),
+                }]
+            };
+            Ok(Decision {
+                events,
+                outcome: Outcome::Intent { intent },
+            })
+        }
+        Command::IntentEnd { session_id } => {
+            current_session(state, session_id)?;
+            let events = if state.intents.contains_key(session_id) {
+                vec![Event::IntentEnded {
+                    session_id: session_id.clone(),
+                }]
+            } else {
+                Vec::new()
+            };
+            Ok(Decision {
+                events,
+                outcome: Outcome::IntentEnded {
+                    session_id: session_id.clone(),
+                },
+            })
+        }
+        // The summary is the adapter's one line; the digests let it learn,
+        // without any peer's words, whether a live peer's prompt began the
+        // same way, so that it can name this prompt by where it differs.
+        Command::SessionPrompt {
+            session_id,
+            summary,
+            line_digests,
+        } => {
+            current_session(state, session_id)?;
+            validate_prompt_summary(summary)?;
+            validate_line_digests(line_digests)?;
+            Ok(Decision {
+                events: vec![Event::SessionPrompted {
+                    session_id: session_id.clone(),
+                    summary: summary.clone(),
+                    line_digests: line_digests.clone(),
+                    at_ms: now_ms,
+                    generation: state.generation,
+                }],
+                outcome: Outcome::SessionPrompted {
+                    session_id: session_id.clone(),
+                    shared_lines: shared_prompt_lines(state, session_id, line_digests),
+                },
+            })
+        }
+        Command::SetPromptTargets { session_id, paths } => {
+            current_session(state, session_id)?;
+            let paths = prompt_target_paths(paths)?;
+            // Recorded again when unchanged: naming the same code again
+            // renews how recent the targets are.
+            Ok(Decision {
+                events: vec![Event::PromptTargetsSet {
+                    session_id: session_id.clone(),
+                    paths: paths.clone(),
+                    at_ms: now_ms,
+                    generation: state.generation,
+                }],
+                outcome: Outcome::PromptTargets {
+                    session_id: session_id.clone(),
+                    paths,
+                },
+            })
+        }
+        Command::ObservePresence {
+            session_id,
+            kind,
+            paths,
+        } => {
+            current_session(state, session_id)?;
+            let paths = presence_paths(*kind, paths)?;
+            if !presence_setting(state, session_id).shown {
+                return Err(error(
+                    "presence_off",
+                    "This session's presence is off; nothing it looks at is recorded",
+                ));
+            }
+            Ok(Decision {
+                events: vec![Event::PresenceObserved {
+                    session_id: session_id.clone(),
+                    kind: *kind,
+                    paths: paths.clone(),
+                    at_ms: now_ms,
+                    generation: state.generation,
+                }],
+                outcome: Outcome::PresenceObserved {
+                    session_id: session_id.clone(),
+                    paths: u32::try_from(paths.len()).unwrap_or(u32::MAX),
+                },
+            })
+        }
+        Command::SetPresence {
+            session_id,
+            shown,
+            window_ms,
+        } => {
+            known_session(state, session_id)?;
+            let setting = PresenceSetting {
+                shown: *shown,
+                window_ms: *window_ms,
+            };
+            validate_presence_setting(&setting)?;
+            let events = if presence_setting(state, session_id) == setting {
+                Vec::new()
+            } else {
+                vec![Event::PresenceSet {
+                    session_id: session_id.clone(),
+                    setting,
+                }]
+            };
+            Ok(Decision {
+                events,
+                outcome: Outcome::Presence {
+                    session_id: session_id.clone(),
+                    setting,
+                },
+            })
+        }
+        Command::SessionEnd { session_id, trail } => {
+            let session = known_session(state, session_id)?;
+            if let Some(facts) = trail {
+                trail::validate_facts(facts)?;
+            }
+            let ending = state
+                .activity
+                .get(session_id)
+                .is_none_or(|activity| !activity.ended);
+            let mut events = if ending || state.intents.contains_key(session_id) {
+                vec![Event::SessionEnded {
+                    session_id: session_id.clone(),
+                }]
+            } else {
+                Vec::new()
+            };
+            // A trail is built once per end, from the state before it.
+            if ending && let Some(trail) = trail::build(state, session, trail.as_ref(), now_ms) {
+                events.push(Event::TrailRecorded { trail });
+            }
+            Ok(Decision {
+                events,
+                outcome: Outcome::SessionEnded {
+                    session_id: session_id.clone(),
+                },
+            })
+        }
+        Command::SessionStop {
+            session_id,
+            failure,
+            prompt_id,
+        } => {
+            known_session(state, session_id)?;
+            if let Some(failure) = failure {
+                validate_failure(failure)?;
+            }
+            if let Some(prompt_id) = prompt_id {
+                validate_request_id(prompt_id)?;
+            }
+            // Only what the session's own tool calls hold, in this
+            // generation, and not already past its deadline (that is the
+            // expiry sweep's). An admission asked for by hand is not part of
+            // a reply and stays until it is completed or expires.
+            let released: Vec<String> = state
+                .leases
+                .values()
+                .filter(|lease| {
+                    lease.session_id == *session_id
+                        && lease.status == LeaseStatus::Active
+                        && lease.generation == state.generation
+                        && lease.operation.is_some()
+                        && lease.expires_at_ms > now_ms
+                })
+                .map(|lease| lease.lease_id.clone())
+                .collect();
+            let mut events: Vec<Event> = released
+                .iter()
+                .map(|lease_id| Event::LeaseCompleted {
+                    lease_id: lease_id.clone(),
+                })
+                .collect();
+            events.push(Event::SessionStopped {
+                session_id: session_id.clone(),
+                released: released.clone(),
+                failure: failure.clone(),
+                at_ms: now_ms,
+                generation: state.generation,
+                prompt_id: prompt_id.clone(),
+            });
+            Ok(Decision {
+                events,
+                outcome: Outcome::SessionStopped {
+                    session_id: session_id.clone(),
+                    released,
+                    wrote: wrote_since_boundary(state, session_id),
                 },
             })
         }
         Command::Adopt { session_id, from } => adopt(state, session_id, from, now_ms),
+        // ---- end domain: sessions ----
+        // ---- domain: admission ----
+        Command::Admit {
+            session_id,
+            paths,
+            ttl_ms,
+        }
+        | Command::AdmitTool {
+            session_id,
+            paths,
+            ttl_ms,
+            ..
+        } => {
+            let (operation, base, regions, overwrites) = if let Command::AdmitTool {
+                operation,
+                base,
+                regions,
+                overwrites,
+                ..
+            } = command
+            {
+                validate_tool_identity(operation)?;
+                (
+                    Some(operation.clone()),
+                    Some(normalized_files(base)?),
+                    regions.as_slice(),
+                    overwrites.as_slice(),
+                )
+            } else {
+                (None, None, &[][..], &[][..])
+            };
+            let session = current_session(state, session_id)?;
+            let paths = normalized_paths(paths)?;
+            lines::validate_overwrites(overwrites, &paths)?;
+            let regions = trusted_regions(regions, &paths, base.iter().flatten())?;
+            if !(1..=60_000).contains(ttl_ms) {
+                return Err(error(
+                    "invalid_ttl",
+                    "Lease TTL must be between 1 and 60000 milliseconds",
+                ));
+            }
+            let expires_at_ms = now_ms.checked_add(*ttl_ms).ok_or_else(|| {
+                error(
+                    "invalid_deadline",
+                    "Lease deadline overflows the supplied clock; use a valid monotonic timestamp",
+                )
+            })?;
+            if state.leases.contains_key(request_id) {
+                return Err(error(
+                    "lease_id_reused",
+                    "This lease ID already exists; replay the original request through storage or use a new request ID",
+                ));
+            }
+            // A host's tool call is never held back by an earlier tool call
+            // of the same session. That earlier call may still sit at a
+            // permission prompt the owner refused, which sends no post-tool
+            // event; denying the session its own file until the admission
+            // expires helps nobody. A manual admission stays exclusive, as
+            // ADR 0001 defines.
+            let tool_call = operation.is_some();
+            let holders = holders_of(
+                state,
+                session_id,
+                &session.workspace_id,
+                &paths,
+                &regions,
+                tool_call,
+                now_ms,
+            );
+            // Each refusal is one event, stored with the refusal's receipt:
+            // the same request again is answered from it and adds none.
+            let refused = |kind, peer: Option<&String>| Event::WriteRefused {
+                session_id: session_id.clone(),
+                workspace_id: session.workspace_id.clone(),
+                kind,
+                paths: paths.iter().take(REFUSAL_PATHS).cloned().collect(),
+                peer_session_id: peer.cloned(),
+                input_digest: operation
+                    .as_ref()
+                    .map(|operation| operation.input_digest.clone()),
+                at_ms: now_ms,
+                generation: state.generation,
+            };
+            if !holders.is_empty() {
+                // A hook's tool call; a manual `admit` refused is not a write.
+                // Where the workspace waits for a holder, the hook records
+                // the refusal when its wait ends without an admission.
+                let waits = policy::conflict_wait_ms(state, &session.workspace_id) > 0;
+                return Ok(Decision {
+                    events: (tool_call && !waits)
+                        .then(|| {
+                            refused(
+                                RefusalKind::Conflict,
+                                holders.first().map(|holder| &holder.session_id),
+                            )
+                        })
+                        .into_iter()
+                        .collect(),
+                    outcome: Outcome::Conflict { holders },
+                });
+            }
+            let mut base_unknown = Vec::new();
+            if let Some(base) = &base {
+                if let Some(extra) = base
+                    .iter()
+                    .find(|file| paths.binary_search(&file.path).is_err())
+                {
+                    return Err(error(
+                        "invalid_base",
+                        &format!(
+                            "Base version names {:?}, which this admission does not request",
+                            extra.path
+                        ),
+                    ));
+                }
+                let stale = stale_files(state, session, base);
+                if !stale.is_empty() {
+                    // One refusal per change. The session is told; what it was
+                    // told about becomes its known version, so a host with no
+                    // reported read, or a file that no longer exists to be
+                    // read, cannot be refused for the same change forever.
+                    return Ok(Decision {
+                        events: vec![
+                            Event::SourceObserved {
+                                session_id: session_id.clone(),
+                                files: stale
+                                    .iter()
+                                    .map(|file| ObservedFile {
+                                        path: file.path.clone(),
+                                        state: file.current.clone(),
+                                    })
+                                    .collect(),
+                                origin: SourceOrigin::Refused,
+                                at_ms: now_ms,
+                                generation: state.generation,
+                            },
+                            refused(
+                                RefusalKind::StaleBase,
+                                stale.iter().find_map(|file| file.changed_by.as_ref()),
+                            ),
+                        ],
+                        outcome: Outcome::StaleBase { stale },
+                    });
+                }
+                let unread = lines::unread_lines(state, session, base, overwrites);
+                if !unread.is_empty() {
+                    // Refused once, like a stale base: what the session was
+                    // told about becomes its known version, so the retry, or
+                    // any edit after it reads the file, is admitted.
+                    let told: Vec<ObservedFile> = base
+                        .iter()
+                        .filter(|file| unread.iter().any(|lines| lines.path == file.path))
+                        .cloned()
+                        .collect();
+                    return Ok(Decision {
+                        events: vec![
+                            Event::SourceObserved {
+                                session_id: session_id.clone(),
+                                files: told,
+                                origin: SourceOrigin::Refused,
+                                at_ms: now_ms,
+                                generation: state.generation,
+                            },
+                            refused(
+                                RefusalKind::UnreadLines,
+                                unread.first().map(|lines| &lines.session_id),
+                            ),
+                        ],
+                        outcome: Outcome::UnreadLines { lines: unread },
+                    });
+                }
+                let known = known_versions(state, session_id);
+                base_unknown = paths
+                    .iter()
+                    .filter(|path| {
+                        let supplied = base.iter().find(|file| &file.path == *path);
+                        // A file that does not exist yet has no earlier version to miss.
+                        !matches!(supplied.map(|file| &file.state), Some(FileState::Missing))
+                            && !(supplied.is_some()
+                                && known.iter().any(|version| &version.path == *path))
+                    })
+                    .cloned()
+                    .collect();
+            }
+            let lease = Lease {
+                lease_id: request_id.into(),
+                session_id: session_id.clone(),
+                workspace_id: session.workspace_id.clone(),
+                paths,
+                generation: state.generation,
+                expires_at_ms,
+                status: LeaseStatus::Active,
+                operation,
+                base_unknown,
+                regions,
+            };
+            Ok(Decision {
+                events: vec![Event::LeaseGranted {
+                    lease: lease.clone(),
+                }],
+                outcome: Outcome::Admitted { lease },
+            })
+        }
+        Command::Complete {
+            session_id,
+            lease_id,
+        } => {
+            current_session(state, session_id)?;
+            validate_id(lease_id, "lease ID")?;
+            let lease = state.leases.get(lease_id).ok_or_else(|| {
+                error(
+                    "lease_not_found",
+                    "Lease does not exist; inspect status for the active lease ID",
+                )
+            })?;
+            if lease.session_id != *session_id {
+                return Err(error(
+                    "not_holder",
+                    "Only the session holding this lease can complete it",
+                ));
+            }
+            if lease.generation != state.generation || lease.status == LeaseStatus::Invalidated {
+                return Err(error(
+                    "stale_lease",
+                    "The lease belongs to a previous daemon generation; request a new admission",
+                ));
+            }
+            if lease.status == LeaseStatus::Expired
+                || (lease.status == LeaseStatus::Active && lease.expires_at_ms <= now_ms)
+            {
+                return Err(error(
+                    "lease_expired",
+                    "The lease has expired; request a new admission before continuing work",
+                ));
+            }
+            if lease.status != LeaseStatus::Active {
+                return Err(error(
+                    "lease_not_active",
+                    "The lease is no longer active; replay completion through storage or request a new admission",
+                ));
+            }
+            Ok(Decision {
+                events: vec![Event::LeaseCompleted {
+                    lease_id: lease_id.clone(),
+                }],
+                outcome: Outcome::Completed {
+                    lease_id: lease_id.clone(),
+                },
+            })
+        }
+        Command::ObserveToolBatch {
+            session_id,
+            operation_ids,
+            calls,
+        } => {
+            current_session(state, session_id)?;
+            validate_batch(operation_ids, *calls)?;
+            Ok(Decision {
+                events: vec![Event::ToolBatchObserved {
+                    session_id: session_id.clone(),
+                    operation_ids: operation_ids.clone(),
+                    calls: *calls,
+                    at_ms: now_ms,
+                    generation: state.generation,
+                }],
+                outcome: Outcome::ToolBatchObserved {
+                    session_id: session_id.clone(),
+                    calls: *calls,
+                    wrote: wrote_since_boundary(state, session_id),
+                },
+            })
+        }
+        Command::ObserveSource {
+            session_id,
+            files,
+            origin,
+        } => {
+            current_session(state, session_id)?;
+            let files = normalized_files(files)?;
+            if files.is_empty() {
+                return Err(error(
+                    "invalid_path",
+                    "Name at least one observed file version",
+                ));
+            }
+            let count = u32::try_from(files.len()).unwrap_or(u32::MAX);
+            Ok(Decision {
+                events: vec![Event::SourceObserved {
+                    session_id: session_id.clone(),
+                    files,
+                    origin: *origin,
+                    at_ms: now_ms,
+                    generation: state.generation,
+                }],
+                outcome: Outcome::SourceObserved {
+                    session_id: session_id.clone(),
+                    files: count,
+                },
+            })
+        }
+        Command::Policy { workspace_id } => {
+            validate_known_workspace(state, workspace_id)?;
+            Ok(Decision {
+                events: Vec::new(),
+                outcome: Outcome::Policy {
+                    workspace_id: workspace_id.clone(),
+                    rows: policy::table(state, workspace_id),
+                },
+            })
+        }
+        Command::SetPolicy {
+            workspace_id,
+            case,
+            policy,
+            wait_ms,
+        } => policy::decide_set(state, workspace_id, *case, *policy, *wait_ms),
+        Command::Holders {
+            session_id,
+            paths,
+            base,
+            regions,
+        } => {
+            let session = current_session(state, session_id)?;
+            let paths = normalized_paths(paths)?;
+            let base = normalized_files(base)?;
+            let regions = trusted_regions(regions, &paths, base.iter())?;
+            Ok(Decision {
+                events: Vec::new(),
+                outcome: Outcome::Holders {
+                    holders: holders_of(
+                        state,
+                        session_id,
+                        &session.workspace_id,
+                        &paths,
+                        &regions,
+                        true,
+                        now_ms,
+                    ),
+                },
+            })
+        }
+        Command::RecordWait {
+            session_id,
+            paths,
+            holder_session_id,
+            waited_ms,
+            result,
+            changed,
+            input_digest,
+        } => policy::decide_wait(
+            state,
+            policy::WaitReport {
+                session_id,
+                paths,
+                holder_session_id: holder_session_id.as_ref(),
+                waited_ms: *waited_ms,
+                result: *result,
+                changed,
+                input_digest: input_digest.as_ref(),
+            },
+            now_ms,
+        ),
+        Command::RecordRefusal {
+            session_id,
+            kind,
+            paths,
+            peer_session_id,
+        } => {
+            if *kind != RefusalKind::CommitHeld {
+                return Err(error(
+                    "invalid_refusal",
+                    "Only a held commit is reported; the coordinator records the other refusals itself",
+                ));
+            }
+            let session = known_session(state, session_id)?;
+            let paths = normalized_paths(paths)?;
+            if let Some(peer) = peer_session_id {
+                known_session(state, peer)?;
+            }
+            Ok(Decision {
+                events: vec![Event::WriteRefused {
+                    session_id: session_id.clone(),
+                    workspace_id: session.workspace_id.clone(),
+                    kind: *kind,
+                    paths: paths.into_iter().take(REFUSAL_PATHS).collect(),
+                    peer_session_id: peer_session_id.clone(),
+                    input_digest: None,
+                    at_ms: now_ms,
+                    generation: state.generation,
+                }],
+                outcome: Outcome::RefusalRecorded {
+                    session_id: session_id.clone(),
+                },
+            })
+        }
+        // ---- end domain: admission ----
+        // ---- domain: briefing ----
         Command::Brief {
             session_id,
             max_peers,
@@ -9032,513 +9734,6 @@ fn decide_checked(
                 outcome: Outcome::Briefing { briefing },
             })
         }
-        Command::SendMessage {
-            workspace_id,
-            from,
-            to,
-            text,
-            paths,
-        } => {
-            validate_known_workspace(state, workspace_id)?;
-            if let Some(from) = from
-                && known_session(state, from)?.workspace_id != *workspace_id
-            {
-                return Err(error(
-                    "sender_not_in_workspace",
-                    "The sending session belongs to another workspace; send from a session of this one, or leave out the sender to send as the owner",
-                ));
-            }
-            let to = match to {
-                Some(to) => {
-                    validate_id(to, "session ID")?;
-                    if state
-                        .sessions
-                        .get(to)
-                        .is_none_or(|session| session.workspace_id != *workspace_id)
-                    {
-                        return Err(error(
-                            "recipient_not_found",
-                            "The recipient is not a session of this workspace; `langspan recap WORKSPACE` lists them",
-                        ));
-                    }
-                    if from.as_ref() == Some(to) {
-                        return Err(error(
-                            "invalid_message",
-                            "A session cannot send a message to itself; use `remember` for a note",
-                        ));
-                    }
-                    Recipient::Session {
-                        session_id: to.clone(),
-                    }
-                }
-                None => Recipient::Everyone {},
-            };
-            sent(
-                request_id,
-                now_ms,
-                state.generation,
-                workspace_id,
-                from.clone(),
-                to,
-                text,
-                paths,
-            )
-        }
-        Command::Handoff {
-            session_id,
-            text,
-            paths,
-        } => {
-            let session = known_session(state, session_id)?;
-            sent(
-                request_id,
-                now_ms,
-                state.generation,
-                &session.workspace_id,
-                Some(session_id.clone()),
-                Recipient::NextSession {},
-                text,
-                paths,
-            )
-        }
-        Command::AckMessage {
-            session_id,
-            message_id,
-        } => {
-            let session = known_session(state, session_id)?;
-            validate_request_id(message_id)?;
-            let owed = state
-                .messages
-                .get(&session.workspace_id)
-                .and_then(|messages| {
-                    messages
-                        .iter()
-                        .find(|message| &message.message_id == message_id)
-                })
-                .is_some_and(|message| owed_to(message, session_id, true));
-            Ok(Decision {
-                events: if owed {
-                    vec![Event::MessageAcknowledged {
-                        workspace_id: session.workspace_id.clone(),
-                        message_id: message_id.clone(),
-                        session_id: session_id.clone(),
-                        via: Some(Delivery::Ack),
-                        at_ms: Some(now_ms),
-                        generation: Some(state.generation),
-                    }]
-                } else {
-                    Vec::new()
-                },
-                outcome: Outcome::MessageAcknowledged {
-                    message_id: message_id.clone(),
-                    acknowledged: owed,
-                },
-            })
-        }
-        Command::RetractMessage {
-            workspace_id,
-            from,
-            message_id,
-        } => retract(state, workspace_id, from.as_deref(), message_id.as_deref()),
-        Command::Dashboard => Ok(Decision {
-            events: Vec::new(),
-            outcome: Outcome::Dashboard {
-                dashboard: dashboard::dashboard(state, now_ms),
-            },
-        }),
-        Command::Status => {
-            let (view, summary) = status_view(state, now_ms);
-            Ok(Decision {
-                events: Vec::new(),
-                outcome: Outcome::Status {
-                    state: view,
-                    summary: Some(summary),
-                },
-            })
-        }
-        Command::Remember {
-            workspace_id,
-            author,
-            text,
-            paths,
-            symbol,
-            tags,
-        } => decide_checked(
-            state,
-            &Command::RememberPrepared {
-                workspace_id: workspace_id.clone(),
-                author: author.clone(),
-                text: text.clone(),
-                paths: paths.clone(),
-                symbol: symbol.clone(),
-                tags: tags.clone(),
-                index: None,
-            },
-            request_id,
-            now_ms,
-        ),
-        Command::ObserveNoteAnchors { workspace_id } => {
-            validate_known_workspace(state, workspace_id)?;
-            Ok(Decision {
-                events: Vec::new(),
-                outcome: Outcome::NoteAnchorsObserved { changed: 0 },
-            })
-        }
-        Command::NoteAnchorsPrepared {
-            workspace_id,
-            index,
-        } => {
-            validate_known_workspace(state, workspace_id)?;
-            let events: Vec<Event> = state
-                .notes
-                .get(workspace_id)
-                .into_iter()
-                .flatten()
-                .filter_map(|note| {
-                    let (anchor, held) = note.anchor.as_ref().zip(note.anchor_state)?;
-                    let (anchor_now, state_now) = anchors::observe(anchor, &note.paths, index);
-                    (anchor_now != *anchor || state_now != held).then(|| Event::NoteAnchorChanged {
-                        workspace_id: workspace_id.clone(),
-                        note_id: note.note_id.clone(),
-                        anchor: anchor_now,
-                        state: state_now,
-                    })
-                })
-                .collect();
-            Ok(Decision {
-                outcome: Outcome::NoteAnchorsObserved {
-                    changed: u32::try_from(events.len()).unwrap_or(u32::MAX),
-                },
-                events,
-            })
-        }
-        Command::RememberPrepared {
-            workspace_id,
-            author,
-            text,
-            paths,
-            symbol,
-            tags,
-            index,
-        } => {
-            validate_known_workspace(state, workspace_id)?;
-            if let Some(author) = author {
-                known_session(state, author)?;
-            }
-            let paths = if paths.is_empty() {
-                Vec::new()
-            } else {
-                normalized_paths(paths)?
-            };
-            let tags = anchors::validate_tags(tags)?;
-            let (anchor, anchor_state) = match symbol {
-                Some(name) => {
-                    let (anchor, held) = anchors::resolve(name, &paths, index.as_ref())?;
-                    (Some(anchor), Some(held))
-                }
-                None => (None, None),
-            };
-            let note = Note {
-                note_id: request_id.into(),
-                workspace_id: workspace_id.clone(),
-                author: author.clone(),
-                text: text.clone(),
-                paths,
-                anchor,
-                anchor_state,
-                tags,
-            };
-            validate_note(&note)?;
-            Ok(Decision {
-                events: vec![Event::Remembered {
-                    note: note.clone(),
-                    at: Some(Stamp {
-                        at_ms: now_ms,
-                        generation: state.generation,
-                    }),
-                }],
-                outcome: Outcome::Remembered { note },
-            })
-        }
-        Command::Forget {
-            workspace_id,
-            note_id,
-        } => {
-            validate_known_workspace(state, workspace_id)?;
-            validate_request_id(note_id)?;
-            let removed = state
-                .notes
-                .get(workspace_id)
-                .is_some_and(|notes| notes.iter().any(|note| &note.note_id == note_id));
-            Ok(Decision {
-                events: if removed {
-                    vec![Event::Forgotten {
-                        workspace_id: workspace_id.clone(),
-                        note_id: note_id.clone(),
-                    }]
-                } else {
-                    Vec::new()
-                },
-                outcome: Outcome::Forgotten {
-                    note_id: note_id.clone(),
-                    removed,
-                },
-            })
-        }
-        Command::ObserveScan {
-            workspace_id,
-            failure,
-            coverage,
-        } => {
-            validate_known_workspace(state, workspace_id)?;
-            let held = state.scan_failures.get(workspace_id);
-            let mut events = match failure {
-                Some(detail) => {
-                    let detail: String = detail
-                        .chars()
-                        .map(|c| if c.is_control() { ' ' } else { c })
-                        .take(200)
-                        .collect();
-                    // The same failure repeated is one fact, not many.
-                    if held.is_some_and(|held| {
-                        held.detail == detail && held.generation == state.generation
-                    }) {
-                        Vec::new()
-                    } else {
-                        vec![Event::ScanFailed {
-                            failure: ScanFailure {
-                                workspace_id: workspace_id.clone(),
-                                detail,
-                                at_ms: now_ms,
-                                generation: state.generation,
-                            },
-                        }]
-                    }
-                }
-                None if held.is_some() => vec![Event::ScanRecovered {
-                    workspace_id: workspace_id.clone(),
-                }],
-                None => Vec::new(),
-            };
-            // Coverage is of the last completed scan: a failed attempt
-            // leaves it as it was, and an unchanged one is not a new fact.
-            if failure.is_none() {
-                let coverage = coverage
-                    .clone()
-                    .filter(|coverage| coverage != &ScanCoverage::default());
-                if let Some(coverage) = &coverage {
-                    validate_coverage(coverage)?;
-                }
-                if state.scan_coverage.get(workspace_id) != coverage.as_ref() {
-                    events.push(Event::ScanCoverageObserved {
-                        workspace_id: workspace_id.clone(),
-                        coverage,
-                    });
-                }
-            }
-            Ok(Decision {
-                events,
-                outcome: Outcome::ScanObserved {
-                    workspace_id: workspace_id.clone(),
-                    failed: failure.is_some(),
-                },
-            })
-        }
-        Command::ObserveHosts { not_installed } => {
-            if not_installed.len() > MAX_HOSTS {
-                return Err(error(
-                    "invalid_hosts",
-                    &format!("a host check names at most {MAX_HOSTS} hosts"),
-                ));
-            }
-            let now_missing: BTreeSet<&str> = not_installed.iter().map(String::as_str).collect();
-            if now_missing.len() != not_installed.len() {
-                return Err(error("invalid_hosts", "a host is named more than once"));
-            }
-            for host in &now_missing {
-                validate_host_name(host)?;
-            }
-            // Each change of a host's state is one fact; an unchanged
-            // host is not recorded again.
-            let mut events: Vec<Event> = state
-                .uninstalled_hosts
-                .keys()
-                .filter(|host| !now_missing.contains(host.as_str()))
-                .map(|host| Event::HostCleared { host: host.clone() })
-                .collect();
-            events.extend(
-                now_missing
-                    .iter()
-                    .filter(|host| !state.uninstalled_hosts.contains_key(**host))
-                    .map(|host| Event::HostNotInstalled {
-                        host: UninstalledHost {
-                            host: (*host).into(),
-                            at_ms: now_ms,
-                            generation: state.generation,
-                        },
-                    }),
-            );
-            Ok(Decision {
-                events,
-                outcome: Outcome::HostsObserved {
-                    not_installed: now_missing.iter().map(|host| (*host).into()).collect(),
-                },
-            })
-        }
-        Command::ObserveCheckout {
-            workspace_id,
-            from_branch,
-            to_branch,
-            from_head,
-            to_head,
-            files,
-        } => {
-            let change = CheckoutChange {
-                change_id: request_id.into(),
-                workspace_id: workspace_id.clone(),
-                from_branch: from_branch.clone(),
-                to_branch: to_branch.clone(),
-                from_head: from_head.clone(),
-                to_head: to_head.clone(),
-                files: *files,
-                at_ms: now_ms,
-                generation: state.generation,
-            };
-            validate_checkout(state, &change)?;
-            Ok(Decision {
-                events: vec![Event::CheckoutChanged {
-                    change: change.clone(),
-                }],
-                outcome: Outcome::CheckoutObserved { change },
-            })
-        }
-        Command::ObserveCheckoutRun {
-            session_id,
-            command,
-            to_branch,
-            to_head,
-            ran_ms,
-            finished_ago_ms,
-            files_unchanged,
-        } => {
-            let Some(session) = state.sessions.get(session_id) else {
-                return Err(error(
-                    "unknown_session",
-                    "A checkout run names a registered session; register it first",
-                ));
-            };
-            // When the command ran, not when its report arrived: a
-            // redelivered report credits no later change. Placed back from
-            // the daemon's own now by durations, so never after it; a run
-            // two hours at most, a shell call's lifetime.
-            let finished_ms = now_ms.saturating_sub(*finished_ago_ms);
-            let run = CheckoutRun {
-                run_id: request_id.into(),
-                workspace_id: session.workspace_id.clone(),
-                session_id: session_id.clone(),
-                command: command.clone(),
-                to_branch: to_branch.clone(),
-                to_head: to_head.clone(),
-                started_ms: finished_ms.saturating_sub((*ran_ms).min(MAX_CHECKOUT_RUN_MS)),
-                finished_ms,
-                generation: state.generation,
-                files_unchanged: *files_unchanged,
-            };
-            validate_checkout_run(state, &run)?;
-            Ok(Decision {
-                events: vec![Event::CheckoutRunObserved { run: run.clone() }],
-                outcome: Outcome::CheckoutRunObserved { run },
-            })
-        }
-        Command::ObserveUncoordinated {
-            workspace_id,
-            files,
-            scanned_from_ms,
-        } => {
-            validate_known_workspace(state, workspace_id)?;
-            if files.is_empty() || files.len() > MAX_UNCOORDINATED_OBSERVED {
-                return Err(error(
-                    "invalid_path",
-                    &format!(
-                        "An uncoordinated change names 1 to {MAX_UNCOORDINATED_OBSERVED} changed files"
-                    ),
-                ));
-            }
-            let files = normalized_files(files)?;
-            // A file under an admitted edit is that edit's, whose report has
-            // not arrived yet; a version a session reported is explained; and
-            // a file a session reported after the scan began reading is newer
-            // than what the scan saw: the version before that session's edit.
-            let unexplained: Vec<ObservedFile> = files
-                .into_iter()
-                .filter(|file| {
-                    !leased(state, workspace_id, &file.path, now_ms)
-                        && !explained(state, workspace_id, file)
-                        && !scanned_from_ms.is_some_and(|from| {
-                            reported_since(state, workspace_id, &file.path, from)
-                        })
-                })
-                .take(MAX_UNCOORDINATED_FILES)
-                .collect();
-            // A Codex session already named in a notice still held is not
-            // named again: one notice per session until it ages out.
-            let named: BTreeSet<&str> = held_uncoordinated(state, workspace_id, now_ms)
-                .flat_map(|change| change.sessions.iter().map(String::as_str))
-                .collect();
-            let sessions = if unexplained.is_empty() {
-                Vec::new()
-            } else {
-                codex_sessions(state, workspace_id)
-                    .into_iter()
-                    .filter(|session| !named.contains(session.as_str()))
-                    .take(MAX_UNCOORDINATED_SESSIONS)
-                    .collect()
-            };
-            if sessions.is_empty() {
-                return Ok(Decision {
-                    events: Vec::new(),
-                    outcome: Outcome::UncoordinatedObserved {
-                        sessions: Vec::new(),
-                        paths: Vec::new(),
-                    },
-                });
-            }
-            let change = UncoordinatedChange {
-                change_id: request_id.into(),
-                workspace_id: workspace_id.clone(),
-                sessions: sessions.clone(),
-                files: unexplained,
-                at_ms: now_ms,
-                generation: state.generation,
-                delivered: Vec::new(),
-            };
-            validate_uncoordinated(state, &change)?;
-            Ok(Decision {
-                outcome: Outcome::UncoordinatedObserved {
-                    sessions,
-                    paths: change.files.iter().map(|file| file.path.clone()).collect(),
-                },
-                events: vec![Event::UncoordinatedChanged { change }],
-            })
-        }
-        Command::Recap {
-            workspace_id,
-            tag,
-            since,
-        } => {
-            validate_known_workspace(state, workspace_id)?;
-            if let Some(tag) = tag {
-                anchors::validate_tag(tag)?;
-            }
-            // What happened since is read from the event log by the store.
-            since::validate(since.as_ref())?;
-            Ok(Decision {
-                events: Vec::new(),
-                outcome: Outcome::Recap {
-                    recap: recap(state, workspace_id, tag.as_deref(), now_ms),
-                },
-            })
-        }
         Command::Trails {
             workspace_id,
             limit,
@@ -9560,17 +9755,23 @@ fn decide_checked(
                 },
             })
         }
-        Command::Recall {
-            workspace_id,
-            query,
-            path,
-            limit,
-        } => Ok(Decision {
+        // ---- end domain: briefing ----
+        Command::Dashboard => Ok(Decision {
             events: Vec::new(),
-            outcome: Outcome::Recall {
-                recall: recall_notes(state, workspace_id, query, path.as_deref(), *limit)?,
+            outcome: Outcome::Dashboard {
+                dashboard: dashboard::dashboard(state, now_ms),
             },
         }),
+        Command::Status => {
+            let (view, summary) = status_view(state, now_ms);
+            Ok(Decision {
+                events: Vec::new(),
+                outcome: Outcome::Status {
+                    state: view,
+                    summary: Some(summary),
+                },
+            })
+        }
         Command::StatusLine { root, from_ms } => {
             if !root.starts_with('/') || root.len() > 4096 {
                 return Err(error(
@@ -9582,191 +9783,6 @@ fn decide_checked(
                 events: Vec::new(),
                 outcome: Outcome::StatusLine {
                     line: status_line(state, root, *from_ms, now_ms),
-                },
-            })
-        }
-        Command::Policy { workspace_id } => {
-            validate_known_workspace(state, workspace_id)?;
-            Ok(Decision {
-                events: Vec::new(),
-                outcome: Outcome::Policy {
-                    workspace_id: workspace_id.clone(),
-                    rows: policy::table(state, workspace_id),
-                },
-            })
-        }
-        Command::SetPolicy {
-            workspace_id,
-            case,
-            policy,
-            wait_ms,
-        } => policy::decide_set(state, workspace_id, *case, *policy, *wait_ms),
-        Command::Holders {
-            session_id,
-            paths,
-            base,
-            regions,
-        } => {
-            let session = current_session(state, session_id)?;
-            let paths = normalized_paths(paths)?;
-            let base = normalized_files(base)?;
-            let regions = trusted_regions(regions, &paths, base.iter())?;
-            Ok(Decision {
-                events: Vec::new(),
-                outcome: Outcome::Holders {
-                    holders: holders_of(
-                        state,
-                        session_id,
-                        &session.workspace_id,
-                        &paths,
-                        &regions,
-                        true,
-                        now_ms,
-                    ),
-                },
-            })
-        }
-        Command::RecordWait {
-            session_id,
-            paths,
-            holder_session_id,
-            waited_ms,
-            result,
-            changed,
-            input_digest,
-        } => policy::decide_wait(
-            state,
-            policy::WaitReport {
-                session_id,
-                paths,
-                holder_session_id: holder_session_id.as_ref(),
-                waited_ms: *waited_ms,
-                result: *result,
-                changed,
-                input_digest: input_digest.as_ref(),
-            },
-            now_ms,
-        ),
-        Command::RecordRefusal {
-            session_id,
-            kind,
-            paths,
-            peer_session_id,
-        } => {
-            if *kind != RefusalKind::CommitHeld {
-                return Err(error(
-                    "invalid_refusal",
-                    "Only a held commit is reported; the coordinator records the other refusals itself",
-                ));
-            }
-            let session = known_session(state, session_id)?;
-            let paths = normalized_paths(paths)?;
-            if let Some(peer) = peer_session_id {
-                known_session(state, peer)?;
-            }
-            Ok(Decision {
-                events: vec![Event::WriteRefused {
-                    session_id: session_id.clone(),
-                    workspace_id: session.workspace_id.clone(),
-                    kind: *kind,
-                    paths: paths.into_iter().take(REFUSAL_PATHS).collect(),
-                    peer_session_id: peer_session_id.clone(),
-                    input_digest: None,
-                    at_ms: now_ms,
-                    generation: state.generation,
-                }],
-                outcome: Outcome::RefusalRecorded {
-                    session_id: session_id.clone(),
-                },
-            })
-        }
-        Command::ObserveInterface {
-            workspace_id,
-            path,
-            changes,
-            dependents,
-        } => {
-            validate_known_workspace(state, workspace_id)?;
-            let notice = InterfaceNotice {
-                notice_id: request_id.into(),
-                workspace_id: workspace_id.clone(),
-                path: path.clone(),
-                changes: changes.clone(),
-                dependents: dependents.clone(),
-                elsewhere: Vec::new(),
-                by_session: last_peer_edit(state, "", workspace_id, path, 0)
-                    .map(|(session, _)| session.to_owned()),
-                at_ms: now_ms,
-                generation: state.generation,
-            };
-            validate_notice(&notice)?;
-            Ok(Decision {
-                events: vec![Event::InterfaceChanged {
-                    notice: notice.clone(),
-                }],
-                outcome: Outcome::InterfaceObserved { notice },
-            })
-        }
-        Command::ObserveInterfaceDependents {
-            notice_workspace_id,
-            notice_id,
-            workspace_id,
-            paths,
-        } => {
-            validate_known_workspace(state, notice_workspace_id)?;
-            validate_known_workspace(state, workspace_id)?;
-            if workspace_id == notice_workspace_id
-                || !related_workspace(state, notice_workspace_id, workspace_id)
-            {
-                return Err(error(
-                    "invalid_notice",
-                    "Dependents found elsewhere are files of another worktree of the notice's repository",
-                ));
-            }
-            if paths.len() > NOTICE_DEPENDENTS {
-                return Err(error(
-                    "invalid_notice",
-                    "At most 32 dependent files are reported at once",
-                ));
-            }
-            for path in paths {
-                validate_relative_path(path)?;
-            }
-            let notice = state
-                .interface_notices
-                .get(notice_workspace_id)
-                .and_then(|notices| notices.iter().find(|n| n.notice_id == *notice_id))
-                .ok_or_else(|| {
-                    error(
-                        "unknown_notice",
-                        "The interface notice is not held: a newer one for its file replaced it, or it was never recorded",
-                    )
-                })?;
-            let room = NOTICE_DEPENDENTS.saturating_sub(notice.elsewhere.len());
-            let files: Vec<WorktreeFile> = paths
-                .iter()
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .map(|path| WorktreeFile {
-                    workspace_id: workspace_id.clone(),
-                    path: path.clone(),
-                })
-                .filter(|file| !notice.elsewhere.contains(file))
-                .take(room)
-                .collect();
-            Ok(Decision {
-                outcome: Outcome::InterfaceDependentsObserved {
-                    notice_id: notice_id.clone(),
-                    added: files.len() as u32,
-                },
-                events: if files.is_empty() {
-                    Vec::new()
-                } else {
-                    vec![Event::InterfaceDependentsFound {
-                        notice_workspace_id: notice_workspace_id.clone(),
-                        notice_id: notice_id.clone(),
-                        files,
-                    }]
                 },
             })
         }
@@ -10172,577 +10188,7 @@ fn take_all<T: Default>(value: &mut T) -> T {
 /// the writer calling `expiry_events` before command admission and persistence.
 pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
     match event {
-        Event::Booted { generation } => {
-            if *generation <= state.generation {
-                return Err(error(
-                    "invalid_event",
-                    "A boot event must advance the daemon generation",
-                ));
-            }
-            state.generation = *generation;
-            // The new generation's anchor, if any, is the next event.
-            state.clock_anchor = None;
-            // A refusal is settled within the run it was given in.
-            state.unsettled.clear();
-            for lease in state.leases.values_mut() {
-                if lease.status == LeaseStatus::Active {
-                    lease.status = LeaseStatus::Invalidated;
-                }
-            }
-            for liveness in state.session_liveness.values_mut() {
-                liveness.status = LivenessStatus::Unknown;
-            }
-            // Times do not carry across generations: any edit a peer reports
-            // from now on is after every read made before the restart.
-            for activity in state.activity.values_mut() {
-                for version in &mut activity.known {
-                    version.at_ms = 0;
-                }
-            }
-            // What teammates published is current only once received again.
-            state.remote_peers.clear();
-            // A landing that was under way is no longer known to be alive,
-            // nor is one that was waiting.
-            state.turns.clear();
-            state.turn_queues.clear();
-        }
-        Event::ClockAnchored { anchor } => {
-            if anchor.generation != state.generation {
-                return Err(error(
-                    "invalid_event",
-                    "A clock anchor names the generation that is starting",
-                ));
-            }
-            state.clock_anchor = Some(*anchor);
-        }
-        Event::WriteRefused {
-            session_id,
-            workspace_id,
-            kind,
-            paths,
-            peer_session_id,
-            input_digest,
-            at_ms,
-            generation,
-        } => {
-            known_session(state, session_id)?;
-            validate_known_workspace(state, workspace_id)?;
-            normalized_paths(paths)?;
-            if paths.len() > REFUSAL_PATHS
-                || peer_session_id
-                    .as_ref()
-                    .is_some_and(|peer| peer.len() > 200)
-                || input_digest
-                    .as_ref()
-                    .is_some_and(|digest| !is_hex_digest(digest, 64))
-            {
-                return Err(error(
-                    "invalid_event",
-                    "A refusal keeps at most 8 paths, one peer session ID and a SHA-256 input digest",
-                ));
-            }
-            status_line::remember(state, workspace_id, *at_ms, *generation);
-            recent::remember_refusal(state, workspace_id, paths, *at_ms, *generation);
-            policy::remember_refusal(state, session_id, *kind, paths, *at_ms, *generation);
-        }
-        Event::WriteWaited {
-            session_id,
-            workspace_id,
-            paths,
-            holder_session_id,
-            waited_ms,
-            ..
-        } => policy::validate_waited(
-            state,
-            session_id,
-            workspace_id,
-            paths,
-            holder_session_id.as_ref(),
-            *waited_ms,
-        )?,
-        Event::RefusalSettled {
-            session_id,
-            kind,
-            paths,
-            refused_at_ms,
-            ..
-        } => policy::apply_settled(state, session_id, *kind, paths, *refused_at_ms)?,
-        Event::PolicySet {
-            workspace_id,
-            case,
-            policy,
-            wait_ms,
-        } => policy::apply_set(state, workspace_id, *case, *policy, *wait_ms)?,
-        Event::WorkspaceRegistered { workspace } => {
-            validate_workspace(state, workspace)?;
-            state
-                .workspaces
-                .insert(workspace.workspace_id.clone(), workspace.clone());
-        }
-        Event::WorkspaceMoved {
-            workspace,
-            from_root,
-        } => workspaces::apply_moved(state, workspace, from_root)?,
-        Event::WorkspaceRemoved { workspace_id } => {
-            workspaces::apply_removed(state, workspace_id)?;
-        }
-        Event::SessionRegistered { session } => {
-            validate_session_registration(state, session)?;
-            // A new registration, or one in another workspace, has written
-            // nothing yet; a daemon restart's registers again in place.
-            if state
-                .sessions
-                .get(&session.session_id)
-                .is_none_or(|old| old.workspace_id != session.workspace_id)
-            {
-                state.first_writes.remove(&session.session_id);
-            }
-            state
-                .sessions
-                .insert(session.session_id.clone(), session.clone());
-        }
-        Event::SessionLivenessObserved { liveness } => {
-            validate_session_liveness(state, liveness)?;
-            state
-                .session_liveness
-                .insert(liveness.session_id.clone(), liveness.clone());
-        }
-        Event::SessionSeen {
-            session_id,
-            at_ms,
-            generation,
-        } => {
-            current_session(state, session_id)?;
-            if *generation != state.generation {
-                return Err(error(
-                    "invalid_event",
-                    "A hook-run record must belong to the current daemon generation",
-                ));
-            }
-            let activity = activity_mut(state, session_id);
-            activity.last_hook_ms = activity.last_hook_ms.max(*at_ms);
-        }
-        Event::IntentSet { intent } => {
-            let session = current_session(state, &intent.session_id)?;
-            if intent.workspace_id != session.workspace_id || intent.generation != state.generation
-            {
-                return Err(error(
-                    "invalid_event",
-                    "Intent must match its session's workspace and current generation",
-                ));
-            }
-            validate_canonical_paths(&intent.paths)?;
-            validate_summary(&intent.summary)?;
-            state
-                .intents
-                .insert(intent.session_id.clone(), intent.clone());
-        }
-        Event::IntentEnded { session_id } => {
-            current_session(state, session_id)?;
-            if !state.intents.contains_key(session_id) {
-                return Err(error(
-                    "invalid_event",
-                    "Intent-ended event references no existing intent",
-                ));
-            }
-            state.intents.remove(session_id);
-        }
-        Event::LeaseGranted { lease } => {
-            validate_id(&lease.lease_id, "lease ID")?;
-            if let Some(operation) = &lease.operation {
-                validate_tool_identity(operation)?;
-            }
-            let session = current_session(state, &lease.session_id)?;
-            if lease.workspace_id != session.workspace_id
-                || lease.generation != state.generation
-                || lease.status != LeaseStatus::Active
-                || lease.expires_at_ms == 0
-            {
-                return Err(error(
-                    "invalid_event",
-                    "Granted lease must be active in its session's current workspace and generation with a positive deadline",
-                ));
-            }
-            validate_canonical_paths(&lease.paths)?;
-            if normalized_regions(&lease.regions, &lease.paths)? != lease.regions {
-                return Err(error(
-                    "invalid_event",
-                    "Granted lease regions must be in their normalized order",
-                ));
-            }
-            if state.leases.contains_key(&lease.lease_id) {
-                return Err(error(
-                    "invalid_event",
-                    "A lease-granted event cannot reuse an existing lease ID",
-                ));
-            }
-            state.leases.insert(lease.lease_id.clone(), lease.clone());
-        }
-        Event::OperationObserved { observation } => {
-            validate_request_id(&observation.observation_id)?;
-            let session = known_session(state, &observation.session_id)?;
-            for (id, label) in [
-                (&observation.operation_id, "operation ID"),
-                (&observation.source, "observation source"),
-                (&observation.tool, "tool name"),
-            ] {
-                validate_id(id, label)?;
-            }
-            validate_canonical_paths(&observation.paths)?;
-            if observation.workspace_id != session.workspace_id
-                || observation.generation != state.generation
-            {
-                return Err(error(
-                    "invalid_event",
-                    "Observation must match its session's workspace and the current generation",
-                ));
-            }
-            if let Some(lease) = observation
-                .lease_id
-                .as_ref()
-                .and_then(|id| state.leases.get(id))
-                && lease.session_id != observation.session_id
-            {
-                return Err(error(
-                    "invalid_event",
-                    "Observation names another session's admission",
-                ));
-            }
-            // Observations grant nothing. Older versions classified scope and
-            // same-session holders differently; preserve those historical
-            // decisions rather than rejecting an existing event log.
-            if observation.result == ToolResult::Succeeded {
-                if !observation.paths.is_empty() {
-                    wrote_in(
-                        state,
-                        &observation.workspace_id,
-                        Some(&observation.session_id),
-                    );
-                }
-                let activity = activity_mut(state, &observation.session_id);
-                activity.wrote_since_boundary |= !observation.paths.is_empty();
-                // The file is no longer the version the session knew. Until
-                // the adapter reports what it became, its base is unknown,
-                // never the old version.
-                activity
-                    .known
-                    .retain(|version| !observation.paths.contains(&version.path));
-                activity.last_ms = activity.last_ms.max(observation.observed_at_ms);
-                for path in &observation.paths {
-                    activity.touched.retain(|touch| &touch.path != path);
-                    activity.touched.insert(
-                        0,
-                        TouchedPath {
-                            path: path.clone(),
-                            at_ms: observation.observed_at_ms,
-                        },
-                    );
-                }
-                activity.touched.truncate(MAX_TOUCHED);
-            }
-        }
-        Event::WorkspaceGitObserved { git } => {
-            validate_workspace_git(state, git)?;
-            state
-                .workspace_git
-                .insert(git.workspace_id.clone(), git.clone());
-        }
-        Event::SessionPrompted {
-            session_id,
-            summary,
-            line_digests,
-            at_ms,
-            generation,
-        } => {
-            current_session(state, session_id)?;
-            validate_prompt_summary(summary)?;
-            validate_line_digests(line_digests)?;
-            if *generation != state.generation {
-                return Err(error(
-                    "invalid_event",
-                    "A prompt record must belong to the current daemon generation",
-                ));
-            }
-            let activity = activity_mut(state, session_id);
-            activity.summary = Some(summary.clone());
-            activity.line_digests = line_digests.clone();
-            activity.last_ms = activity.last_ms.max(*at_ms);
-        }
-        Event::PromptTargetsSet {
-            session_id,
-            paths,
-            at_ms,
-            generation,
-        } => {
-            current_session(state, session_id)?;
-            if prompt_target_paths(paths)? != *paths {
-                return Err(error(
-                    "invalid_event",
-                    "Prompt targets must be recorded sorted and without repeats",
-                ));
-            }
-            if *generation != state.generation {
-                return Err(error(
-                    "invalid_event",
-                    "A prompt targets record must belong to the current daemon generation",
-                ));
-            }
-            let activity = activity_mut(state, session_id);
-            activity.prompt_targets = Some(PromptTargets {
-                paths: paths.clone(),
-                at_ms: *at_ms,
-            });
-            activity.last_ms = activity.last_ms.max(*at_ms);
-        }
-        Event::PresenceObserved {
-            session_id,
-            kind,
-            paths,
-            at_ms,
-            generation,
-        } => {
-            current_session(state, session_id)?;
-            if presence_paths(*kind, paths)? != *paths || *generation != state.generation {
-                return Err(error(
-                    "invalid_event",
-                    "A presence record names sorted, unique paths in the current generation",
-                ));
-            }
-            // Recorded only while shown; a record kept from before the
-            // session turned presence off adds nothing.
-            if presence_setting(state, session_id).shown {
-                look(activity_mut(state, session_id), *kind, paths, *at_ms);
-            }
-        }
-        Event::PresenceSet {
-            session_id,
-            setting,
-        } => {
-            known_session(state, session_id)?;
-            validate_presence_setting(setting)?;
-            if !setting.shown {
-                // Off forgets what was recorded: turning it on again later
-                // never shows a path looked at while it was off or before.
-                if let Some(activity) = state.activity.get_mut(session_id) {
-                    activity.looking.clear();
-                }
-            }
-            if *setting == PresenceSetting::default() {
-                state.presence.remove(session_id);
-            } else {
-                state.presence.insert(session_id.clone(), *setting);
-            }
-        }
-        Event::SessionEnded { session_id } => {
-            known_session(state, session_id)?;
-            activity_mut(state, session_id).ended = true;
-            state.intents.remove(session_id);
-        }
-        Event::SessionAdopted { adoption } => {
-            let adopter = known_session(state, &adoption.session_id)?;
-            let ended = known_session(state, &adoption.from)?;
-            if adoption.from == adoption.session_id
-                || adopter.workspace_id != adoption.workspace_id
-                || ended.workspace_id != adoption.workspace_id
-            {
-                return Err(error(
-                    "invalid_event",
-                    "An adoption names two different sessions of its workspace",
-                ));
-            }
-            if let Some(AdoptReason::Handoff { message_id }) = &adoption.reason {
-                validate_request_id(message_id)?;
-            }
-            state
-                .adoptions
-                .insert(adoption.from.clone(), adoption.clone());
-        }
-        Event::TrailRecorded { trail } => {
-            trail::validate_trail(state, trail)?;
-            let trails = state.trails.entry(trail.workspace_id.clone()).or_default();
-            trails.retain(|kept| kept.session_id != trail.session_id);
-            trails.insert(0, trail.clone());
-            trails.truncate(MAX_TRAILS);
-        }
-        Event::TrailTaken {
-            workspace_id,
-            from,
-            session_id,
-        } => {
-            known_session(state, session_id)?;
-            // A trail the cap already dropped has nothing left to mark.
-            if let Some(trail) = state
-                .trails
-                .get_mut(workspace_id)
-                .and_then(|trails| trails.iter_mut().find(|trail| &trail.session_id == from))
-                && trail.taken_by.is_none()
-            {
-                trail.taken_by = Some(session_id.clone());
-            }
-        }
-        // Boundaries in the log. The admissions a stop released ended in
-        // their own `LeaseCompleted` events.
-        Event::SessionStopped {
-            session_id,
-            failure,
-            generation,
-            prompt_id,
-            ..
-        } => {
-            known_session(state, session_id)?;
-            if let Some(failure) = failure {
-                validate_failure(failure)?;
-            }
-            if let Some(prompt_id) = prompt_id {
-                validate_request_id(prompt_id)?;
-            }
-            if *generation != state.generation {
-                return Err(error(
-                    "invalid_event",
-                    "A stop record must belong to the current daemon generation",
-                ));
-            }
-            // Only the mark and the count: a boundary does not bring an
-            // ended session back or start an activity record.
-            if let Some(activity) = state.activity.get_mut(session_id) {
-                activity.wrote_since_boundary = false;
-                activity.stops = activity.stops.saturating_add(1);
-                if let Some(prompt_id) = prompt_id {
-                    let stopped = &mut activity.stopped_prompts;
-                    stopped.retain(|held| held != prompt_id);
-                    stopped.insert(0, prompt_id.clone());
-                    stopped.truncate(MAX_STOPPED_PROMPTS);
-                }
-            }
-        }
-        Event::ToolBatchObserved {
-            session_id,
-            operation_ids,
-            calls,
-            generation,
-            ..
-        } => {
-            current_session(state, session_id)?;
-            validate_batch(operation_ids, *calls)?;
-            if *generation != state.generation {
-                return Err(error(
-                    "invalid_event",
-                    "A tool batch record must belong to the current daemon generation",
-                ));
-            }
-            // Only the mark: a boundary does not bring an ended session back
-            // or start an activity record.
-            if let Some(activity) = state.activity.get_mut(session_id) {
-                activity.wrote_since_boundary = false;
-            }
-        }
-        Event::SourceObserved {
-            session_id,
-            files,
-            origin,
-            at_ms,
-            generation,
-        } => {
-            current_session(state, session_id)?;
-            if *generation != state.generation
-                || files.is_empty()
-                || normalized_files(files)? != *files
-            {
-                return Err(error(
-                    "invalid_event",
-                    "A source observation names sorted, unique files in the current generation",
-                ));
-            }
-            let activity = activity_mut(state, session_id);
-            for file in files.iter().rev() {
-                activity.known.retain(|version| version.path != file.path);
-                activity.known.insert(
-                    0,
-                    KnownVersion {
-                        path: file.path.clone(),
-                        state: file.state.clone(),
-                        at_ms: *at_ms,
-                    },
-                );
-            }
-            activity.known.truncate(MAX_KNOWN);
-            // A reported read is also where the session is looking
-            // (roadmap A13), unless its presence is off.
-            if *origin == SourceOrigin::Read && presence_setting(state, session_id).shown {
-                let paths: Vec<String> = files.iter().map(|file| file.path.clone()).collect();
-                look(
-                    activity_mut(state, session_id),
-                    PresenceKind::Read,
-                    &paths,
-                    *at_ms,
-                );
-            }
-        }
-        Event::RemoteEnabled { link } => {
-            validate_remote_link(state, link)?;
-            state
-                .remote_links
-                .insert(link.workspace_id.clone(), link.clone());
-        }
-        Event::RemoteDisabled { workspace_id } => {
-            let Some(link) = state.remote_links.get_mut(workspace_id) else {
-                return Err(error(
-                    "invalid_event",
-                    "Publication was not enabled for this workspace",
-                ));
-            };
-            link.enabled = false;
-            link.withdrawn = false;
-            // What teammates published stays theirs, but this workspace no
-            // longer takes part, so it stops showing it.
-            state
-                .remote_peers
-                .retain(|_, peer| &peer.workspace_id != workspace_id);
-        }
-        Event::RemotePublished {
-            workspace_id,
-            sequence,
-            signature,
-            ..
-        } => {
-            let link = state.remote_links.get_mut(workspace_id).ok_or_else(|| {
-                error(
-                    "invalid_event",
-                    "A publication record names a workspace that does not publish",
-                )
-            })?;
-            if *sequence != link.sequence + 1 || signature.len() > 64 {
-                return Err(error(
-                    "invalid_event",
-                    "A publication record must carry the next sequence",
-                ));
-            }
-            link.sequence = *sequence;
-            link.signature = signature.clone();
-        }
-        Event::RemoteObserved { peer } => {
-            validate_publication(&peer.publication)?;
-            if peer.generation != state.generation
-                || !state
-                    .remote_links
-                    .get(&peer.workspace_id)
-                    .is_some_and(|link| link.enabled)
-            {
-                return Err(error(
-                    "invalid_event",
-                    "A received publication belongs to a publishing workspace in the current generation",
-                ));
-            }
-            state.remote_peers.insert(
-                remote_key(&peer.workspace_id, &peer.publication.participant),
-                peer.clone(),
-            );
-        }
-        Event::RemoteWithdrawn { workspace_id } => {
-            if let Some(link) = state.remote_links.get_mut(workspace_id) {
-                link.withdrawn = true;
-            }
-        }
+        // ---- domain: messages ----
         Event::Remembered { note, .. } => {
             validate_note(note)?;
             validate_known_workspace(state, &note.workspace_id)?;
@@ -10946,171 +10392,83 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                 }
             }
         }
-        Event::ScanFailed { failure } => {
-            validate_known_workspace(state, &failure.workspace_id)?;
+        // ---- end domain: messages ----
+        // ---- domain: remote ----
+        Event::RemoteEnabled { link } => {
+            validate_remote_link(state, link)?;
             state
-                .scan_failures
-                .insert(failure.workspace_id.clone(), failure.clone());
+                .remote_links
+                .insert(link.workspace_id.clone(), link.clone());
         }
-        Event::ScanRecovered { workspace_id } => {
-            state.scan_failures.remove(workspace_id);
-        }
-        Event::ScanCoverageObserved {
-            workspace_id,
-            coverage,
-        } => {
-            validate_known_workspace(state, workspace_id)?;
-            match coverage {
-                Some(coverage) => {
-                    validate_coverage(coverage)?;
-                    state
-                        .scan_coverage
-                        .insert(workspace_id.clone(), coverage.clone());
-                }
-                None => {
-                    state.scan_coverage.remove(workspace_id);
-                }
-            }
-        }
-        Event::HostNotInstalled { host } => {
-            validate_host_name(&host.host)?;
-            if !state.uninstalled_hosts.contains_key(&host.host)
-                && state.uninstalled_hosts.len() >= MAX_HOSTS
-            {
+        Event::RemoteDisabled { workspace_id } => {
+            let Some(link) = state.remote_links.get_mut(workspace_id) else {
                 return Err(error(
-                    "invalid_hosts",
-                    &format!("at most {MAX_HOSTS} hosts are held as not installed"),
+                    "invalid_event",
+                    "Publication was not enabled for this workspace",
                 ));
-            }
+            };
+            link.enabled = false;
+            link.withdrawn = false;
+            // What teammates published stays theirs, but this workspace no
+            // longer takes part, so it stops showing it.
             state
-                .uninstalled_hosts
-                .insert(host.host.clone(), host.clone());
+                .remote_peers
+                .retain(|_, peer| &peer.workspace_id != workspace_id);
         }
-        Event::HostCleared { host } => {
-            state.uninstalled_hosts.remove(host);
-        }
-        Event::CheckoutChanged { change } => {
-            validate_checkout(state, change)?;
-            let changes = state
-                .checkouts
-                .entry(change.workspace_id.clone())
-                .or_default();
-            changes.insert(0, change.clone());
-            changes.truncate(MAX_CHECKOUTS);
-        }
-        Event::CheckoutRunObserved { run } => {
-            validate_checkout_run(state, run)?;
-            let runs = state
-                .checkout_runs
-                .entry(run.workspace_id.clone())
-                .or_default();
-            runs.insert(0, run.clone());
-            // Commits add runs and no change, so the two lists move apart.
-            // An older run stays while it explains a change still held, so
-            // that change keeps its attribution.
-            let changes = state
-                .checkouts
-                .get(&run.workspace_id)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
-            let explaining: BTreeSet<usize> = changes
-                .iter()
-                .filter_map(|change| runs.iter().position(|run| run.explains(change, changes)))
-                .collect();
-            let mut index = 0;
-            runs.retain(|_| {
-                index += 1;
-                index <= MAX_CHECKOUT_RUNS || explaining.contains(&(index - 1))
-            });
-        }
-        Event::UncoordinatedChanged { change } => {
-            validate_uncoordinated(state, change)?;
-            if !change.delivered.is_empty() {
-                return Err(error(
-                    "invalid_event",
-                    "A new uncoordinated change has not been delivered to any session",
-                ));
-            }
-            let changes = state
-                .uncoordinated
-                .entry(change.workspace_id.clone())
-                .or_default();
-            changes.insert(0, change.clone());
-            changes.truncate(MAX_UNCOORDINATED);
-        }
-        Event::UncoordinatedDelivered {
+        Event::RemotePublished {
             workspace_id,
-            change_id,
-            session_id,
+            sequence,
+            signature,
+            ..
         } => {
-            if known_session(state, session_id)?.workspace_id != *workspace_id {
+            let link = state.remote_links.get_mut(workspace_id).ok_or_else(|| {
+                error(
+                    "invalid_event",
+                    "A publication record names a workspace that does not publish",
+                )
+            })?;
+            if *sequence != link.sequence + 1 || signature.len() > 64 {
                 return Err(error(
                     "invalid_event",
-                    "An uncoordinated change is delivered to a session of its workspace",
+                    "A publication record must carry the next sequence",
                 ));
             }
-            // A change already truncated away has nothing left to mark.
-            if let Some(change) = state
-                .uncoordinated
-                .get_mut(workspace_id)
-                .and_then(|changes| changes.iter_mut().find(|c| c.change_id == *change_id))
-                && !change.delivered.contains(session_id)
+            link.sequence = *sequence;
+            link.signature = signature.clone();
+        }
+        Event::RemoteObserved { peer } => {
+            validate_publication(&peer.publication)?;
+            if peer.generation != state.generation
+                || !state
+                    .remote_links
+                    .get(&peer.workspace_id)
+                    .is_some_and(|link| link.enabled)
             {
-                change.delivered.push(session_id.clone());
-            }
-        }
-        Event::InterfaceChanged { notice } => {
-            validate_notice(notice)?;
-            validate_known_workspace(state, &notice.workspace_id)?;
-            // An added export is history only (roadmap D4): a new name is
-            // news to no dependent, so it is not held for briefings, recaps,
-            // break alerts or the dashboard, and an addition alone does not
-            // replace the file's held notice or open a workspace's entry.
-            // A private definition moved with its file is history only too.
-            follow_renames(state, notice);
-            let mut held = notice.clone();
-            held.changes
-                .retain(|change| change.change != "added" && !change.private);
-            if !held.changes.is_empty() {
-                let notices = state
-                    .interface_notices
-                    .entry(notice.workspace_id.clone())
-                    .or_default();
-                // A newer notice for the same file replaces the older one.
-                notices.retain(|older| older.path != held.path);
-                notices.insert(0, held);
-                notices.truncate(MAX_NOTICES);
-            }
-        }
-        Event::InterfaceDependentsFound {
-            notice_workspace_id,
-            notice_id,
-            files,
-        } => {
-            if files.len() > NOTICE_DEPENDENTS {
                 return Err(error(
                     "invalid_event",
-                    "At most 32 dependent files are found at once",
+                    "A received publication belongs to a publishing workspace in the current generation",
                 ));
             }
-            for file in files {
-                validate_relative_path(&file.path)?;
-            }
-            // A notice replaced or dropped since then has nothing to add to.
-            if let Some(notice) = state
-                .interface_notices
-                .get_mut(notice_workspace_id)
-                .and_then(|notices| notices.iter_mut().find(|n| n.notice_id == *notice_id))
-            {
-                for file in files {
-                    if notice.elsewhere.len() < NOTICE_DEPENDENTS
-                        && !notice.elsewhere.contains(file)
-                    {
-                        notice.elsewhere.push(file.clone());
-                    }
-                }
+            state.remote_peers.insert(
+                remote_key(&peer.workspace_id, &peer.publication.participant),
+                peer.clone(),
+            );
+        }
+        Event::RemoteWithdrawn { workspace_id } => {
+            if let Some(link) = state.remote_links.get_mut(workspace_id) {
+                link.withdrawn = true;
             }
         }
+        Event::RemoteForgotten {
+            workspace_id,
+            participant,
+        } => {
+            state
+                .remote_peers
+                .remove(&remote_key(workspace_id, participant));
+        }
+        // ---- end domain: remote ----
+        // ---- domain: checks ----
         Event::CheckRecorded { check, tests } => {
             validate_check(state, check)?;
             if let Some(kept) = tests {
@@ -11431,13 +10789,263 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             }
             state.turns.remove(&key);
         }
-        Event::RemoteForgotten {
-            workspace_id,
-            participant,
-        } => {
+        // ---- end domain: checks ----
+        // ---- domain: observation ----
+        Event::OperationObserved { observation } => {
+            validate_request_id(&observation.observation_id)?;
+            let session = known_session(state, &observation.session_id)?;
+            for (id, label) in [
+                (&observation.operation_id, "operation ID"),
+                (&observation.source, "observation source"),
+                (&observation.tool, "tool name"),
+            ] {
+                validate_id(id, label)?;
+            }
+            validate_canonical_paths(&observation.paths)?;
+            if observation.workspace_id != session.workspace_id
+                || observation.generation != state.generation
+            {
+                return Err(error(
+                    "invalid_event",
+                    "Observation must match its session's workspace and the current generation",
+                ));
+            }
+            if let Some(lease) = observation
+                .lease_id
+                .as_ref()
+                .and_then(|id| state.leases.get(id))
+                && lease.session_id != observation.session_id
+            {
+                return Err(error(
+                    "invalid_event",
+                    "Observation names another session's admission",
+                ));
+            }
+            // Observations grant nothing. Older versions classified scope and
+            // same-session holders differently; preserve those historical
+            // decisions rather than rejecting an existing event log.
+            if observation.result == ToolResult::Succeeded {
+                if !observation.paths.is_empty() {
+                    wrote_in(
+                        state,
+                        &observation.workspace_id,
+                        Some(&observation.session_id),
+                    );
+                }
+                let activity = activity_mut(state, &observation.session_id);
+                activity.wrote_since_boundary |= !observation.paths.is_empty();
+                // The file is no longer the version the session knew. Until
+                // the adapter reports what it became, its base is unknown,
+                // never the old version.
+                activity
+                    .known
+                    .retain(|version| !observation.paths.contains(&version.path));
+                activity.last_ms = activity.last_ms.max(observation.observed_at_ms);
+                for path in &observation.paths {
+                    activity.touched.retain(|touch| &touch.path != path);
+                    activity.touched.insert(
+                        0,
+                        TouchedPath {
+                            path: path.clone(),
+                            at_ms: observation.observed_at_ms,
+                        },
+                    );
+                }
+                activity.touched.truncate(MAX_TOUCHED);
+            }
+        }
+        Event::WorkspaceGitObserved { git } => {
+            validate_workspace_git(state, git)?;
             state
-                .remote_peers
-                .remove(&remote_key(workspace_id, participant));
+                .workspace_git
+                .insert(git.workspace_id.clone(), git.clone());
+        }
+        Event::ScanFailed { failure } => {
+            validate_known_workspace(state, &failure.workspace_id)?;
+            state
+                .scan_failures
+                .insert(failure.workspace_id.clone(), failure.clone());
+        }
+        Event::ScanRecovered { workspace_id } => {
+            state.scan_failures.remove(workspace_id);
+        }
+        Event::ScanCoverageObserved {
+            workspace_id,
+            coverage,
+        } => {
+            validate_known_workspace(state, workspace_id)?;
+            match coverage {
+                Some(coverage) => {
+                    validate_coverage(coverage)?;
+                    state
+                        .scan_coverage
+                        .insert(workspace_id.clone(), coverage.clone());
+                }
+                None => {
+                    state.scan_coverage.remove(workspace_id);
+                }
+            }
+        }
+        Event::HostNotInstalled { host } => {
+            validate_host_name(&host.host)?;
+            if !state.uninstalled_hosts.contains_key(&host.host)
+                && state.uninstalled_hosts.len() >= MAX_HOSTS
+            {
+                return Err(error(
+                    "invalid_hosts",
+                    &format!("at most {MAX_HOSTS} hosts are held as not installed"),
+                ));
+            }
+            state
+                .uninstalled_hosts
+                .insert(host.host.clone(), host.clone());
+        }
+        Event::HostCleared { host } => {
+            state.uninstalled_hosts.remove(host);
+        }
+        Event::CheckoutChanged { change } => {
+            validate_checkout(state, change)?;
+            let changes = state
+                .checkouts
+                .entry(change.workspace_id.clone())
+                .or_default();
+            changes.insert(0, change.clone());
+            changes.truncate(MAX_CHECKOUTS);
+        }
+        Event::CheckoutRunObserved { run } => {
+            validate_checkout_run(state, run)?;
+            let runs = state
+                .checkout_runs
+                .entry(run.workspace_id.clone())
+                .or_default();
+            runs.insert(0, run.clone());
+            // Commits add runs and no change, so the two lists move apart.
+            // An older run stays while it explains a change still held, so
+            // that change keeps its attribution.
+            let changes = state
+                .checkouts
+                .get(&run.workspace_id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let explaining: BTreeSet<usize> = changes
+                .iter()
+                .filter_map(|change| runs.iter().position(|run| run.explains(change, changes)))
+                .collect();
+            let mut index = 0;
+            runs.retain(|_| {
+                index += 1;
+                index <= MAX_CHECKOUT_RUNS || explaining.contains(&(index - 1))
+            });
+        }
+        Event::UncoordinatedChanged { change } => {
+            validate_uncoordinated(state, change)?;
+            if !change.delivered.is_empty() {
+                return Err(error(
+                    "invalid_event",
+                    "A new uncoordinated change has not been delivered to any session",
+                ));
+            }
+            let changes = state
+                .uncoordinated
+                .entry(change.workspace_id.clone())
+                .or_default();
+            changes.insert(0, change.clone());
+            changes.truncate(MAX_UNCOORDINATED);
+        }
+        Event::UncoordinatedDelivered {
+            workspace_id,
+            change_id,
+            session_id,
+        } => {
+            if known_session(state, session_id)?.workspace_id != *workspace_id {
+                return Err(error(
+                    "invalid_event",
+                    "An uncoordinated change is delivered to a session of its workspace",
+                ));
+            }
+            // A change already truncated away has nothing left to mark.
+            if let Some(change) = state
+                .uncoordinated
+                .get_mut(workspace_id)
+                .and_then(|changes| changes.iter_mut().find(|c| c.change_id == *change_id))
+                && !change.delivered.contains(session_id)
+            {
+                change.delivered.push(session_id.clone());
+            }
+        }
+        Event::DiskObserved { observation } => {
+            validate_disk_observation(state, observation)?;
+            // A first baseline is not a change. Anything else means the
+            // working tree a check ran on is no longer the working tree.
+            let changed = observation
+                .before
+                .as_ref()
+                .is_some_and(|before| before != &observation.after);
+            if changed {
+                wrote_in(state, &observation.workspace_id, None);
+            }
+            if changed && let Some(records) = state.checks.get_mut(&observation.workspace_id) {
+                for record in records.iter_mut().filter(|record| record.inputs.is_empty()) {
+                    record.changed_since = true;
+                }
+            }
+        }
+        Event::BranchObserved { observation } => {
+            validate_branch_observation(state, observation)?;
+        }
+        // ---- end domain: observation ----
+        // ---- domain: notices ----
+        Event::InterfaceChanged { notice } => {
+            validate_notice(notice)?;
+            validate_known_workspace(state, &notice.workspace_id)?;
+            // An added export is history only (roadmap D4): a new name is
+            // news to no dependent, so it is not held for briefings, recaps,
+            // break alerts or the dashboard, and an addition alone does not
+            // replace the file's held notice or open a workspace's entry.
+            // A private definition moved with its file is history only too.
+            follow_renames(state, notice);
+            let mut held = notice.clone();
+            held.changes
+                .retain(|change| change.change != "added" && !change.private);
+            if !held.changes.is_empty() {
+                let notices = state
+                    .interface_notices
+                    .entry(notice.workspace_id.clone())
+                    .or_default();
+                // A newer notice for the same file replaces the older one.
+                notices.retain(|older| older.path != held.path);
+                notices.insert(0, held);
+                notices.truncate(MAX_NOTICES);
+            }
+        }
+        Event::InterfaceDependentsFound {
+            notice_workspace_id,
+            notice_id,
+            files,
+        } => {
+            if files.len() > NOTICE_DEPENDENTS {
+                return Err(error(
+                    "invalid_event",
+                    "At most 32 dependent files are found at once",
+                ));
+            }
+            for file in files {
+                validate_relative_path(&file.path)?;
+            }
+            // A notice replaced or dropped since then has nothing to add to.
+            if let Some(notice) = state
+                .interface_notices
+                .get_mut(notice_workspace_id)
+                .and_then(|notices| notices.iter_mut().find(|n| n.notice_id == *notice_id))
+            {
+                for file in files {
+                    if notice.elsewhere.len() < NOTICE_DEPENDENTS
+                        && !notice.elsewhere.contains(file)
+                    {
+                        notice.elsewhere.push(file.clone());
+                    }
+                }
+            }
         }
         Event::InterfaceAlerted {
             session_id,
@@ -11492,24 +11100,245 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             );
             outlined.truncate(MAX_OUTLINED);
         }
-        Event::BriefingDelivered {
-            session_id,
-            signature,
-            told,
-            told_at_ms,
-        } => {
+        Event::InflightDelivered { session_id, keys } => {
             current_session(state, session_id)?;
-            if signature.len() > 64 || told.len() > MAX_TOLD {
+            if keys.is_empty()
+                || keys.len() > INFLIGHT_LINES
+                || keys
+                    .iter()
+                    .any(|key| key.is_empty() || key.len() > 64 || !key.is_ascii())
+            {
                 return Err(error(
                     "invalid_event",
-                    "A briefing signature is at most 64 bytes, and a delivery names at most 256 item keys",
+                    "A delivery names 1 to 3 in-flight keys of at most 64 ASCII bytes",
+                ));
+            }
+            let told = &mut activity_mut(state, session_id).inflight_told;
+            told.retain(|held| !keys.contains(held));
+            for key in keys.iter().rev() {
+                told.insert(0, key.clone());
+            }
+            told.truncate(MAX_INFLIGHT_TOLD);
+        }
+        // ---- end domain: notices ----
+        // ---- domain: sessions ----
+        Event::WorkspaceRegistered { workspace } => {
+            validate_workspace(state, workspace)?;
+            state
+                .workspaces
+                .insert(workspace.workspace_id.clone(), workspace.clone());
+        }
+        Event::WorkspaceMoved {
+            workspace,
+            from_root,
+        } => workspaces::apply_moved(state, workspace, from_root)?,
+        Event::WorkspaceRemoved { workspace_id } => {
+            workspaces::apply_removed(state, workspace_id)?;
+        }
+        Event::SessionRegistered { session } => {
+            validate_session_registration(state, session)?;
+            // A new registration, or one in another workspace, has written
+            // nothing yet; a daemon restart's registers again in place.
+            if state
+                .sessions
+                .get(&session.session_id)
+                .is_none_or(|old| old.workspace_id != session.workspace_id)
+            {
+                state.first_writes.remove(&session.session_id);
+            }
+            state
+                .sessions
+                .insert(session.session_id.clone(), session.clone());
+        }
+        Event::SessionLivenessObserved { liveness } => {
+            validate_session_liveness(state, liveness)?;
+            state
+                .session_liveness
+                .insert(liveness.session_id.clone(), liveness.clone());
+        }
+        Event::SessionSeen {
+            session_id,
+            at_ms,
+            generation,
+        } => {
+            current_session(state, session_id)?;
+            if *generation != state.generation {
+                return Err(error(
+                    "invalid_event",
+                    "A hook-run record must belong to the current daemon generation",
                 ));
             }
             let activity = activity_mut(state, session_id);
-            activity.briefed = Some(signature.clone());
-            activity.told = told.clone();
-            if let Some(at_ms) = told_at_ms {
-                activity.told_at_ms = *at_ms;
+            activity.last_hook_ms = activity.last_hook_ms.max(*at_ms);
+        }
+        Event::IntentSet { intent } => {
+            let session = current_session(state, &intent.session_id)?;
+            if intent.workspace_id != session.workspace_id || intent.generation != state.generation
+            {
+                return Err(error(
+                    "invalid_event",
+                    "Intent must match its session's workspace and current generation",
+                ));
+            }
+            validate_canonical_paths(&intent.paths)?;
+            validate_summary(&intent.summary)?;
+            state
+                .intents
+                .insert(intent.session_id.clone(), intent.clone());
+        }
+        Event::IntentEnded { session_id } => {
+            current_session(state, session_id)?;
+            if !state.intents.contains_key(session_id) {
+                return Err(error(
+                    "invalid_event",
+                    "Intent-ended event references no existing intent",
+                ));
+            }
+            state.intents.remove(session_id);
+        }
+        Event::SessionPrompted {
+            session_id,
+            summary,
+            line_digests,
+            at_ms,
+            generation,
+        } => {
+            current_session(state, session_id)?;
+            validate_prompt_summary(summary)?;
+            validate_line_digests(line_digests)?;
+            if *generation != state.generation {
+                return Err(error(
+                    "invalid_event",
+                    "A prompt record must belong to the current daemon generation",
+                ));
+            }
+            let activity = activity_mut(state, session_id);
+            activity.summary = Some(summary.clone());
+            activity.line_digests = line_digests.clone();
+            activity.last_ms = activity.last_ms.max(*at_ms);
+        }
+        Event::PromptTargetsSet {
+            session_id,
+            paths,
+            at_ms,
+            generation,
+        } => {
+            current_session(state, session_id)?;
+            if prompt_target_paths(paths)? != *paths {
+                return Err(error(
+                    "invalid_event",
+                    "Prompt targets must be recorded sorted and without repeats",
+                ));
+            }
+            if *generation != state.generation {
+                return Err(error(
+                    "invalid_event",
+                    "A prompt targets record must belong to the current daemon generation",
+                ));
+            }
+            let activity = activity_mut(state, session_id);
+            activity.prompt_targets = Some(PromptTargets {
+                paths: paths.clone(),
+                at_ms: *at_ms,
+            });
+            activity.last_ms = activity.last_ms.max(*at_ms);
+        }
+        Event::PresenceObserved {
+            session_id,
+            kind,
+            paths,
+            at_ms,
+            generation,
+        } => {
+            current_session(state, session_id)?;
+            if presence_paths(*kind, paths)? != *paths || *generation != state.generation {
+                return Err(error(
+                    "invalid_event",
+                    "A presence record names sorted, unique paths in the current generation",
+                ));
+            }
+            // Recorded only while shown; a record kept from before the
+            // session turned presence off adds nothing.
+            if presence_setting(state, session_id).shown {
+                look(activity_mut(state, session_id), *kind, paths, *at_ms);
+            }
+        }
+        Event::PresenceSet {
+            session_id,
+            setting,
+        } => {
+            known_session(state, session_id)?;
+            validate_presence_setting(setting)?;
+            if !setting.shown {
+                // Off forgets what was recorded: turning it on again later
+                // never shows a path looked at while it was off or before.
+                if let Some(activity) = state.activity.get_mut(session_id) {
+                    activity.looking.clear();
+                }
+            }
+            if *setting == PresenceSetting::default() {
+                state.presence.remove(session_id);
+            } else {
+                state.presence.insert(session_id.clone(), *setting);
+            }
+        }
+        Event::SessionEnded { session_id } => {
+            known_session(state, session_id)?;
+            activity_mut(state, session_id).ended = true;
+            state.intents.remove(session_id);
+        }
+        Event::SessionAdopted { adoption } => {
+            let adopter = known_session(state, &adoption.session_id)?;
+            let ended = known_session(state, &adoption.from)?;
+            if adoption.from == adoption.session_id
+                || adopter.workspace_id != adoption.workspace_id
+                || ended.workspace_id != adoption.workspace_id
+            {
+                return Err(error(
+                    "invalid_event",
+                    "An adoption names two different sessions of its workspace",
+                ));
+            }
+            if let Some(AdoptReason::Handoff { message_id }) = &adoption.reason {
+                validate_request_id(message_id)?;
+            }
+            state
+                .adoptions
+                .insert(adoption.from.clone(), adoption.clone());
+        }
+        // Boundaries in the log. The admissions a stop released ended in
+        // their own `LeaseCompleted` events.
+        Event::SessionStopped {
+            session_id,
+            failure,
+            generation,
+            prompt_id,
+            ..
+        } => {
+            known_session(state, session_id)?;
+            if let Some(failure) = failure {
+                validate_failure(failure)?;
+            }
+            if let Some(prompt_id) = prompt_id {
+                validate_request_id(prompt_id)?;
+            }
+            if *generation != state.generation {
+                return Err(error(
+                    "invalid_event",
+                    "A stop record must belong to the current daemon generation",
+                ));
+            }
+            // Only the mark and the count: a boundary does not bring an
+            // ended session back or start an activity record.
+            if let Some(activity) = state.activity.get_mut(session_id) {
+                activity.wrote_since_boundary = false;
+                activity.stops = activity.stops.saturating_add(1);
+                if let Some(prompt_id) = prompt_id {
+                    let stopped = &mut activity.stopped_prompts;
+                    stopped.retain(|held| held != prompt_id);
+                    stopped.insert(0, prompt_id.clone());
+                    stopped.truncate(MAX_STOPPED_PROMPTS);
+                }
             }
         }
         Event::ContextAdded {
@@ -11539,45 +11368,159 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
                 .told
                 .retain(|key| !keys.contains(key));
         }
-        Event::InflightDelivered { session_id, keys } => {
-            current_session(state, session_id)?;
-            if keys.is_empty()
-                || keys.len() > INFLIGHT_LINES
-                || keys
-                    .iter()
-                    .any(|key| key.is_empty() || key.len() > 64 || !key.is_ascii())
+        // ---- end domain: sessions ----
+        // ---- domain: admission ----
+        Event::WriteRefused {
+            session_id,
+            workspace_id,
+            kind,
+            paths,
+            peer_session_id,
+            input_digest,
+            at_ms,
+            generation,
+        } => {
+            known_session(state, session_id)?;
+            validate_known_workspace(state, workspace_id)?;
+            normalized_paths(paths)?;
+            if paths.len() > REFUSAL_PATHS
+                || peer_session_id
+                    .as_ref()
+                    .is_some_and(|peer| peer.len() > 200)
+                || input_digest
+                    .as_ref()
+                    .is_some_and(|digest| !is_hex_digest(digest, 64))
             {
                 return Err(error(
                     "invalid_event",
-                    "A delivery names 1 to 3 in-flight keys of at most 64 ASCII bytes",
+                    "A refusal keeps at most 8 paths, one peer session ID and a SHA-256 input digest",
                 ));
             }
-            let told = &mut activity_mut(state, session_id).inflight_told;
-            told.retain(|held| !keys.contains(held));
-            for key in keys.iter().rev() {
-                told.insert(0, key.clone());
-            }
-            told.truncate(MAX_INFLIGHT_TOLD);
+            status_line::remember(state, workspace_id, *at_ms, *generation);
+            recent::remember_refusal(state, workspace_id, paths, *at_ms, *generation);
+            policy::remember_refusal(state, session_id, *kind, paths, *at_ms, *generation);
         }
-        Event::DiskObserved { observation } => {
-            validate_disk_observation(state, observation)?;
-            // A first baseline is not a change. Anything else means the
-            // working tree a check ran on is no longer the working tree.
-            let changed = observation
-                .before
-                .as_ref()
-                .is_some_and(|before| before != &observation.after);
-            if changed {
-                wrote_in(state, &observation.workspace_id, None);
+        Event::WriteWaited {
+            session_id,
+            workspace_id,
+            paths,
+            holder_session_id,
+            waited_ms,
+            ..
+        } => policy::validate_waited(
+            state,
+            session_id,
+            workspace_id,
+            paths,
+            holder_session_id.as_ref(),
+            *waited_ms,
+        )?,
+        Event::RefusalSettled {
+            session_id,
+            kind,
+            paths,
+            refused_at_ms,
+            ..
+        } => policy::apply_settled(state, session_id, *kind, paths, *refused_at_ms)?,
+        Event::PolicySet {
+            workspace_id,
+            case,
+            policy,
+            wait_ms,
+        } => policy::apply_set(state, workspace_id, *case, *policy, *wait_ms)?,
+        Event::LeaseGranted { lease } => {
+            validate_id(&lease.lease_id, "lease ID")?;
+            if let Some(operation) = &lease.operation {
+                validate_tool_identity(operation)?;
             }
-            if changed && let Some(records) = state.checks.get_mut(&observation.workspace_id) {
-                for record in records.iter_mut().filter(|record| record.inputs.is_empty()) {
-                    record.changed_since = true;
-                }
+            let session = current_session(state, &lease.session_id)?;
+            if lease.workspace_id != session.workspace_id
+                || lease.generation != state.generation
+                || lease.status != LeaseStatus::Active
+                || lease.expires_at_ms == 0
+            {
+                return Err(error(
+                    "invalid_event",
+                    "Granted lease must be active in its session's current workspace and generation with a positive deadline",
+                ));
+            }
+            validate_canonical_paths(&lease.paths)?;
+            if normalized_regions(&lease.regions, &lease.paths)? != lease.regions {
+                return Err(error(
+                    "invalid_event",
+                    "Granted lease regions must be in their normalized order",
+                ));
+            }
+            if state.leases.contains_key(&lease.lease_id) {
+                return Err(error(
+                    "invalid_event",
+                    "A lease-granted event cannot reuse an existing lease ID",
+                ));
+            }
+            state.leases.insert(lease.lease_id.clone(), lease.clone());
+        }
+        Event::ToolBatchObserved {
+            session_id,
+            operation_ids,
+            calls,
+            generation,
+            ..
+        } => {
+            current_session(state, session_id)?;
+            validate_batch(operation_ids, *calls)?;
+            if *generation != state.generation {
+                return Err(error(
+                    "invalid_event",
+                    "A tool batch record must belong to the current daemon generation",
+                ));
+            }
+            // Only the mark: a boundary does not bring an ended session back
+            // or start an activity record.
+            if let Some(activity) = state.activity.get_mut(session_id) {
+                activity.wrote_since_boundary = false;
             }
         }
-        Event::BranchObserved { observation } => {
-            validate_branch_observation(state, observation)?;
+        Event::SourceObserved {
+            session_id,
+            files,
+            origin,
+            at_ms,
+            generation,
+        } => {
+            current_session(state, session_id)?;
+            if *generation != state.generation
+                || files.is_empty()
+                || normalized_files(files)? != *files
+            {
+                return Err(error(
+                    "invalid_event",
+                    "A source observation names sorted, unique files in the current generation",
+                ));
+            }
+            let activity = activity_mut(state, session_id);
+            for file in files.iter().rev() {
+                activity.known.retain(|version| version.path != file.path);
+                activity.known.insert(
+                    0,
+                    KnownVersion {
+                        path: file.path.clone(),
+                        state: file.state.clone(),
+                        at_ms: *at_ms,
+                    },
+                );
+            }
+            activity.known.truncate(MAX_KNOWN);
+            // A reported read is also where the session is looking
+            // (roadmap A13), unless its presence is off.
+            if *origin == SourceOrigin::Read && presence_setting(state, session_id).shown {
+                let paths: Vec<String> = files.iter().map(|file| file.path.clone()).collect();
+                look(
+                    activity_mut(state, session_id),
+                    PresenceKind::Read,
+                    &paths,
+                    *at_ms,
+                );
+            }
         }
         Event::LeaseCompleted { lease_id } | Event::LeaseExpired { lease_id } => {
             validate_id(lease_id, "lease ID")?;
@@ -11596,6 +11539,95 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             } else {
                 LeaseStatus::Expired
             };
+        }
+        // ---- end domain: admission ----
+        // ---- domain: briefing ----
+        Event::TrailRecorded { trail } => {
+            trail::validate_trail(state, trail)?;
+            let trails = state.trails.entry(trail.workspace_id.clone()).or_default();
+            trails.retain(|kept| kept.session_id != trail.session_id);
+            trails.insert(0, trail.clone());
+            trails.truncate(MAX_TRAILS);
+        }
+        Event::TrailTaken {
+            workspace_id,
+            from,
+            session_id,
+        } => {
+            known_session(state, session_id)?;
+            // A trail the cap already dropped has nothing left to mark.
+            if let Some(trail) = state
+                .trails
+                .get_mut(workspace_id)
+                .and_then(|trails| trails.iter_mut().find(|trail| &trail.session_id == from))
+                && trail.taken_by.is_none()
+            {
+                trail.taken_by = Some(session_id.clone());
+            }
+        }
+        Event::BriefingDelivered {
+            session_id,
+            signature,
+            told,
+            told_at_ms,
+        } => {
+            current_session(state, session_id)?;
+            if signature.len() > 64 || told.len() > MAX_TOLD {
+                return Err(error(
+                    "invalid_event",
+                    "A briefing signature is at most 64 bytes, and a delivery names at most 256 item keys",
+                ));
+            }
+            let activity = activity_mut(state, session_id);
+            activity.briefed = Some(signature.clone());
+            activity.told = told.clone();
+            if let Some(at_ms) = told_at_ms {
+                activity.told_at_ms = *at_ms;
+            }
+        }
+        // ---- end domain: briefing ----
+        Event::Booted { generation } => {
+            if *generation <= state.generation {
+                return Err(error(
+                    "invalid_event",
+                    "A boot event must advance the daemon generation",
+                ));
+            }
+            state.generation = *generation;
+            // The new generation's anchor, if any, is the next event.
+            state.clock_anchor = None;
+            // A refusal is settled within the run it was given in.
+            state.unsettled.clear();
+            for lease in state.leases.values_mut() {
+                if lease.status == LeaseStatus::Active {
+                    lease.status = LeaseStatus::Invalidated;
+                }
+            }
+            for liveness in state.session_liveness.values_mut() {
+                liveness.status = LivenessStatus::Unknown;
+            }
+            // Times do not carry across generations: any edit a peer reports
+            // from now on is after every read made before the restart.
+            for activity in state.activity.values_mut() {
+                for version in &mut activity.known {
+                    version.at_ms = 0;
+                }
+            }
+            // What teammates published is current only once received again.
+            state.remote_peers.clear();
+            // A landing that was under way is no longer known to be alive,
+            // nor is one that was waiting.
+            state.turns.clear();
+            state.turn_queues.clear();
+        }
+        Event::ClockAnchored { anchor } => {
+            if anchor.generation != state.generation {
+                return Err(error(
+                    "invalid_event",
+                    "A clock anchor names the generation that is starting",
+                ));
+            }
+            state.clock_anchor = Some(*anchor);
         }
     }
     Ok(())
