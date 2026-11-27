@@ -245,6 +245,7 @@ pub(super) fn index_worker(
     sender: mpsc::SyncSender<Job>,
     path: PathBuf,
 ) {
+    super::remote_worker::panic_in_thread_for_test();
     let mut index = match crate::graph::Index::open(&path) {
         Ok(index) => index,
         Err(error) => {
