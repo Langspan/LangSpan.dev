@@ -346,8 +346,9 @@ has reached still take longer (issue #311).
 ### Coverage
 
 The `Coverage` workflow ([`coverage.yml`](../.github/workflows/coverage.yml))
-runs `bash scripts/coverage.sh` every night on `main` (04:41 UTC), and on a
-pull request that changes the measurement. It isn't a required check. The
+runs `bash scripts/coverage.sh` on every push to `main`, every night on
+`main` (04:41 UTC), and on a pull request that changes the measurement. It
+isn't a required check. The
 script runs the suite once under cargo-llvm-cov and cargo-nextest, with the
 profile written continuously, so coordinators that tests stop with SIGKILL
 still count. It counts production lines only (`src/` and `crates/*/src/`,
@@ -356,20 +357,26 @@ source with `#[path]`); in-file unit tests still cover them. The exports
 name sources relative to the checkout, so a downloaded artifact reads the
 same in yours. The run summary has the per-file table.
 
-The floor: production lines 90% covered or more, and none of the ten files
-with the most production lines more than 2 points under its row in
+The floor: production lines 90% covered or more, and no file more than 2
+points under its row in
 [`scripts/coverage-baseline.tsv`](../scripts/coverage-baseline.tsv), one
-row per file. A file among those ten without a row is named in the summary.
+row per file. Every row is checked. The run also fails for a row whose file
+no longer exists, a row whose file measures no production lines, and a file
+of 100 production lines or more without a row. Under 100 lines one line is
+more than a point, so the 2-point margin would be a line or two of noise.
 A nightly run under the floor, or with a failing test, opens or comments on
 the issue "Nightly Rust checks on main failed".
 
 To raise the baseline, run `bash scripts/coverage.sh` (or download the
-`coverage` artifact of a nightly run into `target/coverage`), then
+`coverage` artifact of a run on `main` into `target/coverage`), then
 `python3 -I -B scripts/coverage-report.py --write-baseline . target/coverage`,
-which rewrites one row per measured file. Commit only the rows of files your
-change raised or added. A pull request that splits or moves a file replaces
-its rows with the new files' rows. Lowering a row needs the reason in the
-pull request.
+which rewrites one row per measured file of 100 production lines or more.
+Commit only the rows of files your change raised or added. A pull request
+that splits or moves a file moves its rows with it: the old row goes, and
+each new file of 100 lines or more gets a row. Lowering a row needs the
+reason in the pull request.
+A refactor that moves or renames files moves their rows in the same pull
+request; `tests/coverage_report.rs` fails on a row whose file is gone.
 
 ### Ratchets
 
