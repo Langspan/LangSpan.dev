@@ -417,6 +417,7 @@ version = "0.4.0"
 dependencies = [
  "langspan-core",
  "langspan-graph",
+ "proptest",
  "rmcp",
  "rusqlite",
  "rustix",
