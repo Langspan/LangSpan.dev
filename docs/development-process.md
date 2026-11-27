@@ -441,12 +441,17 @@ made. `every_release_has_a_golden_store_directory` fails for a changelog
 version with no `tests/fixtures/store-VERSION/`, whether or not the release
 changed the event set or the schema.
 
-Add its frozen event-type list in the same pull request: copy the sorted
-`type` of each `fixtures/*-event-v10.json` at the new tag into
+Add its frozen event-type list in the first pull request after the tag,
+since the release pull request can't hold it: copy the sorted `type` of each
+`fixtures/*-event-v10.json` at the new tag into
 `fixtures/event-types/VERSION.txt`, add its row to `RELEASES` in
 `tests/protocol.rs` with the capabilities its requests name, and run
 `python3 scripts/gen-docs.py`. `every_published_release_has_a_frozen_list`
-fails for a changelog version without one.
+fails for a changelog version without one. The version being released counts
+only once its `v` tag exists, so the release pull request passes; from the
+tag on, the test fails locally and in the merge queue, which fetch the tags,
+until the list lands. A pull request run has no tags, and checks that version
+from the next release on.
 
 Before 1.0, a breaking change (`feat!:`) raises the minor version.
 [CONTRIBUTING.md](../CONTRIBUTING.md) lists how each title type affects the

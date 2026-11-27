@@ -2764,19 +2764,79 @@ fn release_grant(version: u16, named: Option<&[&str]>) -> (Capabilities, Option<
     (Capabilities::negotiate(version, named.as_deref()), named)
 }
 
-/// Issue #331: every release `CHANGELOG.md` names has a frozen list in
-/// `fixtures/event-types/` and a row in `RELEASES`, and every list has a
-/// row, so a release cannot ship without the test of its pages.
+/// The releases `changelog` names that are published. A release PR adds the
+/// heading of the version it creates and bumps `current` to it, so that
+/// heading is published only once `tagged` finds its tag; every other
+/// heading is a release that has been tagged (issue #518).
+fn published_releases<'a>(
+    changelog: &'a str,
+    current: &str,
+    tagged: impl Fn(&str) -> bool,
+) -> Vec<&'a str> {
+    changelog
+        .lines()
+        .filter_map(|line| line.strip_prefix("## ["))
+        .filter_map(|line| line.split(']').next())
+        .filter(|release| *release != current || tagged(release))
+        .collect()
+}
+
+/// Whether the repository has the tag `v<release>`. A failing `git` fails
+/// the test: it never counts as untagged.
+fn has_release_tag(root: &std::path::Path, release: &str) -> bool {
+    let output = std::process::Command::new("git")
+        .args([
+            "--no-optional-locks",
+            "tag",
+            "--list",
+            &format!("v{release}"),
+        ])
+        .current_dir(root)
+        .output()
+        .unwrap_or_else(|error| panic!("cannot run git to list the tags: {error}; install git"));
+    assert!(
+        output.status.success(),
+        "git tag --list v{release} failed in {}: {}; run the test in a Git checkout",
+        root.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    !output.stdout.trim_ascii().is_empty()
+}
+
+const RELEASE_PR_CHANGELOG: &str = "# Changelog\n\n## [0.9.0](link) (2026-11-27)\n\n### Features\n\n## [0.8.0](link) (2026-11-01)\n";
+
+/// Issue #518: on a release PR the version is bumped and the changelog
+/// names it, but there is no tag yet, so it is not published; older
+/// headings are published without looking for their tags.
+#[test]
+fn a_release_pr_version_without_its_tag_is_not_published() {
+    let published = published_releases(RELEASE_PR_CHANGELOG, "0.9.0", |_| false);
+    assert_eq!(published, ["0.8.0"]);
+}
+
+/// Issue #518: once the version being released is tagged it is published,
+/// so a tagged release without a frozen list still fails.
+#[test]
+fn a_tagged_release_is_published() {
+    let published = published_releases(RELEASE_PR_CHANGELOG, "0.9.0", |release| release == "0.9.0");
+    assert_eq!(published, ["0.9.0", "0.8.0"]);
+}
+
+/// Issue #331: every published release `CHANGELOG.md` names has a frozen
+/// list in `fixtures/event-types/` and a row in `RELEASES`, and every list
+/// has a row, so a release cannot ship without the test of its pages. The
+/// version this build carries counts once its `v` tag exists (issue #518):
+/// locally and in the merge queue, which fetches the tags; a pull request
+/// run has no tags and checks it from the next release on. This test runs
+/// `git` because what it checks is the repository's tags.
 #[test]
 fn every_published_release_has_a_frozen_list() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let rows: std::collections::BTreeSet<&str> = RELEASES.iter().map(|row| row.0).collect();
     let changelog = std::fs::read_to_string(root.join("CHANGELOG.md")).unwrap();
-    let published: Vec<&str> = changelog
-        .lines()
-        .filter_map(|line| line.strip_prefix("## ["))
-        .filter_map(|line| line.split(']').next())
-        .collect();
+    let published = published_releases(&changelog, env!("CARGO_PKG_VERSION"), |release| {
+        has_release_tag(root, release)
+    });
     assert!(published.len() >= 8, "{published:?}");
     for release in published {
         assert!(
