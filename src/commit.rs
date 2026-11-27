@@ -3464,6 +3464,7 @@ mod tests {
             code_briefing: false,
             presence: false,
             presence_window_ms: langspan_core::PRESENCE_WINDOW_MS,
+            outline_reads: false,
             vendor: crate::install::Vendor::ClaudeCode,
             user_level: false,
         };

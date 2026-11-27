@@ -1,0 +1,1 @@
+{"version":10,"request_id":"outline-1","command":{"op":"outline_read","session_id":"claude-code.alice","path":"src/big.rs","digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","lines":2400,"bytes":96000}}

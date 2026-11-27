@@ -2,9 +2,7 @@
 
 #[cfg(unix)]
 mod unix {
-    use crate::protocol::{
-        OLDEST_PROTOCOL_VERSION, PROTOCOL_VERSION, Request, Response, encode, read_frame,
-    };
+    use crate::protocol::{PROTOCOL_VERSION, Request, Response, encode, read_frame};
     use langspan_core::Outcome;
     use rustix::{
         event::{PollFd, PollFlags, Timespec, poll},
@@ -36,15 +34,16 @@ mod unix {
         crate::hook::redact_command(&mut request.command);
         let mut response = exchange(state_dir, &request, deadline)?;
         // A daemon of an earlier build refuses this version before it reads
-        // the command, and answers in its own (version 7, 6, 5, 4 or 3), so the
-        // same request in the version it names cannot take effect twice.
-        // Requests are the same in every version it answers, except the one
-        // version 6 changed (`protocol::fits`), which is not sent at all to
-        // a daemon of version 5 or earlier, and a briefing of changes only,
-        // asked of a daemon before version 7 as the full view
+        // the command, and answers in its own (version 9, 8, 7, 6, 5, 4 or
+        // 3), so the same request in the version it names cannot take effect
+        // twice. Requests are the same in every version it answers, except
+        // those versions 6 and 9 changed (`protocol::fits`), which are not
+        // sent at all to a daemon that cannot read them, and a briefing of
+        // changes only, asked of a daemon before version 7 as the full view
         // (`protocol::for_version`).
         if request.version == PROTOCOL_VERSION
-            && (OLDEST_PROTOCOL_VERSION..PROTOCOL_VERSION).contains(&response.version)
+            && response.version < PROTOCOL_VERSION
+            && crate::protocol::answers(response.version)
             && matches!(&response.outcome, Outcome::Error { code, .. } if code == "unsupported_version")
         {
             if !crate::protocol::fits(response.version, &request.command) {
@@ -311,12 +310,12 @@ mod unix {
 
         /// Roadmap D7 (review comment 4707749784), H9 (review comment
         /// 4711096877) and issue #222 (review comments 4711375982 and
-        /// 4712860167): a daemon of an earlier build answers only protocol
-        /// version 3, or only up to 4, 5, 6 (roadmap F5's build), 7
-        /// (issue #222's) or 8 (issue #262's). It
-        /// refuses this build's version in its own, as that build does, and
-        /// the client asks again once in that version, with the same
-        /// request, and reads that answer.
+        /// 4712860167), roadmap A11 (review comment 4714078108): a daemon
+        /// of an earlier build answers only protocol version 3, or only up
+        /// to 4, 5, 6 (roadmap F5's build), 7 (issue #222's), 8 (issue
+        /// #262's) or 9 (roadmap E1's). It refuses this build's version in
+        /// its own, as that build does, and the client asks again once in
+        /// that version, with the same request, and reads that answer.
         #[test]
         fn a_daemon_of_an_earlier_build_is_asked_again_in_its_version() {
             for version in [
@@ -326,19 +325,22 @@ mod unix {
                 crate::protocol::PROTOCOL_VERSION_6,
                 crate::protocol::PROTOCOL_VERSION_7,
                 crate::protocol::PROTOCOL_VERSION_8,
+                crate::protocol::PROTOCOL_VERSION_9,
             ] {
                 ask_an_earlier_daemon(version);
             }
         }
 
-        /// A daemon of this build's version 9 (roadmap E1) answers a
+        /// A daemon of this build's version (roadmap A11's 10) answers a
         /// briefing of changes only as it is asked, once, with
-        /// `changes_only` kept.
+        /// `changes_only` kept. A daemon of version 9 is asked again in its
+        /// version, still for changes only
+        /// (`a_daemon_of_an_earlier_build_is_asked_again_in_its_version`).
         #[test]
-        fn a_daemon_of_version_9_is_asked_once_for_changes_only() {
+        fn a_daemon_of_this_version_is_asked_once_for_changes_only() {
             use std::io::{BufRead, BufReader};
             use std::os::unix::fs::PermissionsExt;
-            let version = crate::protocol::PROTOCOL_VERSION_9;
+            let version = crate::protocol::PROTOCOL_VERSION;
             let dir = std::env::temp_dir().join(format!("ls-current-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir(&dir).unwrap();
@@ -381,7 +383,7 @@ mod unix {
             let response = call(&dir, &request).unwrap();
             let (asked, asked_again) = peer.join().unwrap();
             std::fs::remove_dir_all(&dir).unwrap();
-            assert!(!asked_again, "asked again of a daemon of version 9");
+            assert!(!asked_again, "asked again of a daemon of this version");
             assert_eq!(asked["version"], version);
             assert_eq!(asked["command"]["changes_only"], true);
             assert_eq!(response.version, version);
@@ -514,7 +516,7 @@ mod unix {
             // The same request, except that a briefing of changes only,
             // which a daemon before version 7 cannot read, is asked of it
             // as the full view (review follow-up #259). A daemon of version
-            // 7 or 8, which gives changes only, is asked for them still.
+            // 7 or later, which gives changes only, is asked for them still.
             assert_eq!(asked[0]["command"]["changes_only"], true);
             if version >= crate::protocol::PROTOCOL_VERSION_7 {
                 assert_eq!(asked[0]["command"], asked[1]["command"]);

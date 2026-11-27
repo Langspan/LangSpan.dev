@@ -1,0 +1,1 @@
+{"version":9,"request_id":"events-1","replayed":false,"generation":4,"lease_valid":null,"outcome":{"type":"events","events":[{"seq":8,"event":{"type":"told_forgotten","session_id":"claude-code.alice","keys":[9]}}]}}

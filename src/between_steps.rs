@@ -258,6 +258,7 @@ mod tests {
             code_briefing: false,
             presence: false,
             presence_window_ms: 0,
+            outline_reads: false,
             vendor: crate::install::Vendor::ClaudeCode,
             user_level: false,
         };

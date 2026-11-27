@@ -31,11 +31,53 @@ about graph depth waits.
 | D9 | Symbol-level merge simulation | `integrate check --symbols` and `symbols` on `langspan_integrate_check`: before the command runs, each branch's changed files in indexed languages are indexed in memory from Git's objects, and the record keeps at most 32 `symbol_findings` (`both_changed`, `changed_and_called` by ADR 0029's arity rule, `removed_and_used`), skipped with a note past 10 seconds | Built 26 November 2026 ([issue #58](https://github.com/Langspan/LangSpan.dev/issues/58)), ahead of the condition below; see [usage](../usage.md). Advisory: a finding never changes the check's result or what `land` requires, and Git's combination stays the tree that is checked and landed; no symbol-level merge is written. Name matches only. Not yet called on a host |
 | C2 | Prompt briefing ranked with dependents | Definitions ranked by fixed rules (the session's own files, a live peer's, exported, named in the prompt, path order), each with up to 5 ranked dependents | Built 26 November 2026 at the owner's request ([issue #41](https://github.com/Langspan/LangSpan.dev/issues/41)), ahead of the condition below; see [ADR 0008](0008-derived-source-index.md). Not yet run on a host |
 | C7 | In-flight unpushed signatures told to dependents | Exported names another worktree of the repository added or changed and not committed, told by name to sessions whose files mention them; `graph inflight` | Built 25 November 2026 at the owner's request ([issue #44](https://github.com/Langspan/LangSpan.dev/issues/44)), ahead of the condition below; see [ADR 0008](0008-derived-source-index.md). Linked worktrees on one machine only. Not yet run on a host |
-| A11 | Declining a whole-file read once and returning an outline | None | Not now. It changes what the host's read returns |
+| A11 | Declining a whole-file read once and returning an outline | `--outline-reads on` (off by default): a session's first whole read of a large file the index holds whole at its disk content is refused once with the file's outline; see [usage](../usage.md#outline-first-for-whole-reads-of-large-files) | Built 26 November 2026 ([issue #16](https://github.com/Langspan/LangSpan.dev/issues/16)), ahead of the condition below, opt-in because it changes what the host's read returns. Tested with Claude Code-shaped and constructed Cursor events through a real daemon and index; not yet run on a host. Decisions the issue left open are below |
 | A12 | The index's answer attached to a grep result | None | Not now |
 
 Revisit after the launch, ordered by what the benchmark re-run and the
 real-host demonstration show agents missing.
+
+### A11: choices the issue left open
+
+Each is the smallest that meets the issue's criteria.
+
+- The option is `--outline-reads on|off` on `hooks install`, `install` and
+  `hook`, written into the installed command only when on. On, it also adds
+  the read tool to the pre-tool matcher of Claude Code (`PreToolUse`) and
+  Cursor (`preToolUse`), so with it off no
+  read starts a hook process before it runs. Codex and Antigravity commands
+  carry the option and ignore it.
+- The thresholds are `outline_min_lines` (1,500) and `outline_min_bytes`
+  (65,536) in `config.json`, read by the coordinator at start; either one
+  reached is enough. A file over the index's 1 MiB bound is never outlined.
+- A read names part of the file when its input has a non-null `offset`,
+  `limit` or `pages`.
+- The hook reads the file, measures it and sends its SHA-256 with one new
+  command, `outline_read`. The coordinator answers with an outline only
+  when the index row for the path has that digest and no partial parse, the
+  scan is complete, the file has at least one definition, and the session's
+  record (`read_outlined`, at most 64 versions per session, one per path)
+  does not hold that version. Only then is `read_outlined` appended. An
+  older coordinator answers the unknown command with an error, which is no
+  decision.
+- Wire protocol version 10 (review comment 4714078108; version 8 is issue
+  #262's and version 9 roadmap E1's). A client of an earlier build reads
+  session activity and events with `deny_unknown_fields`, so a session
+  activity's `outlined` and the `read_outlined` event would break its
+  status and event queries. To a version 9 or earlier client, the
+  coordinator answers without them, including in state records given in
+  parts.
+- Each outline line is `KIND NAME lines A-B`, with ` (exported)` for an
+  exported definition. `KIND` is the index's own name (`function`,
+  `method`, `type`, `interface`, `constant`, `module`), not the language's
+  keyword. Signatures are left out, so the outline holds names alone.
+- The coordinator sends at most 200 definitions, the largest by lines
+  spanned when a file has more (the index ranks them before it limits
+  them, review comment 4713905468), with how many the index holds. The hook
+  lists them in line order when all fit in 2,400 bytes; otherwise largest
+  first. Either way, a last line counts the definitions not listed.
+- Session identity is the host's, so a subagent with its own identity gets
+  its own outline.
 
 ## Consequences
 

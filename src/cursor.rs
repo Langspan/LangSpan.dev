@@ -233,6 +233,26 @@ fn dispatch(event: HostEvent, config: &Config, deadline: Instant) -> Reply {
     }
     let phase = match (tool, phase) {
         (READ_TOOL, Phase::Post(ToolResult::Succeeded)) => Phase::Read,
+        // With `--outline-reads on`, a whole read of a large indexed file
+        // is refused once with its outline (roadmap A11).
+        (READ_TOOL, Phase::Pre) if config.outline_reads => {
+            let Some(file_path) = input.get("file_path").and_then(Value::as_str) else {
+                return Reply::none("unsupported", "Cursor tool input names no file");
+            };
+            return match hook::file_key(&config.root, event.directory(), file_path) {
+                Ok(key) => hook::outline_read(
+                    SOURCE,
+                    &host_session,
+                    parent.as_deref(),
+                    &tool_use_id,
+                    &key,
+                    input,
+                    &config,
+                    deadline,
+                ),
+                Err(error) => Reply::none("unsupported", error),
+            };
+        }
         (READ_TOOL, _) => {
             return Reply::none("unsupported", "only a completed Read is recorded");
         }
