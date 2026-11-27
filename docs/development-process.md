@@ -209,7 +209,10 @@ fails when a file holds more fixed sleeps of 200 ms or more than
 fewer, so the counts only go down.
 
 Where a product delay is the subject, a test shortens it with the
-`LANGSPAN_TEST_*_MS` setting the code already reads. A test that must still
+`LANGSPAN_TEST_*_MS` setting the code already reads. A coordinator started
+with `LANGSPAN_TEST_SCAN_EVERY_MS` (50 to 2000 ms) scans Git at that interval
+instead of every 2 s, and lets a hook's urgent rescan through after 5/2 of
+it instead of 5 s. A test that must still
 take long is named `slow_…`, with a comment saying why. The fast lane leaves
 it out (a filter in `.config/nextest.toml`); the full lane runs it. In the
 full lane on Linux, `scripts/slow-tests.py` names every test not so named

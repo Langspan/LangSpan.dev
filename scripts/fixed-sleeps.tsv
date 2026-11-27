@@ -17,4 +17,3 @@ tests/repository_shapes.rs	1
 tests/retention.rs	1
 tests/status_line.rs	1
 tests/user_install.rs	4
-tests/wider_checks.rs	2

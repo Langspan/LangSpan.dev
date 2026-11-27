@@ -5,6 +5,8 @@
 //! processes. The checks are shell commands that log how they were run, so
 //! that the order of runs and their arguments can be read back.
 
+mod support;
+
 use langspan::{client, protocol::Request};
 use langspan_core::{CheckRecord, CheckResult, Command, Outcome, State};
 use serde_json::{Value, json};
@@ -22,6 +24,9 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 const ALICE: &str = "00000000-0000-4000-8000-0000000000a1";
 const BOB: &str = "00000000-0000-4000-8000-0000000000b2";
 const WAIT: Duration = Duration::from_secs(40);
+/// Ten scans at the daemon's `LANGSPAN_TEST_SCAN_EVERY_MS` of 200 ms, and
+/// four urgent rescans: what a check that should not start is watched for.
+const SCAN_ROUNDS: Duration = Duration::from_secs(2);
 
 const LIB: &str = "core/src/lib.rs";
 const MAIN: &str = "cli/src/main.rs";
@@ -126,6 +131,7 @@ impl Fixture {
         fs::write(&config, json!({"auto_check_debounce_ms": 100}).to_string()).unwrap();
         fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
         let daemon = Process::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_TEST_SCAN_EVERY_MS", "200")
             .args(["daemon", "--state-dir"])
             .arg(&state)
             .stdout(Stdio::null())
@@ -383,11 +389,13 @@ fn a_body_only_change_runs_only_the_regular_check() {
     );
     let checks = f.wait_for_checks(1);
     assert_eq!(checks[0].name, "fast");
-    // The index has read the new content, and two scan rounds have passed:
-    // a notice, had there been one, would have started the wider check.
+    // The index has read the new content, and several scan rounds at the
+    // test's 200 ms tick pass: a notice, had there been one, would have
+    // started the wider check.
     f.wait_for_index();
-    std::thread::sleep(Duration::from_secs(5));
-    assert_eq!(f.log_lines(), ["fast 0"]);
+    support::holds_for("only the regular check ran", SCAN_ROUNDS, || {
+        f.log_lines() == ["fast 0"]
+    });
     assert_eq!(f.checks().len(), 1);
     let context = f.briefings(ALICE);
     assert!(context.contains("fast passed"), "{context}");
@@ -444,8 +452,9 @@ fn a_signature_change_runs_the_whole_wider_command_after_the_regular_one_and_gra
     );
     assert!(bob.contains(MAIN), "{bob}");
     // Nothing more runs.
-    std::thread::sleep(Duration::from_secs(3));
-    assert_eq!(f.log_lines(), ["fast 0", "all 0"]);
+    support::holds_for("nothing more ran", SCAN_ROUNDS, || {
+        f.log_lines() == ["fast 0", "all 0"]
+    });
 }
 
 #[test]
