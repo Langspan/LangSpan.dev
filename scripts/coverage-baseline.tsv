@@ -2,3 +2,13 @@
 # job (scripts/coverage-report.py) holds the ten largest files to, within 2
 # points. One row per file: path, a tab, the percentage. To raise it, see
 # docs/development-process.md#coverage.
+crates/langspan-core/src/lib.rs	95.0
+src/commit.rs	91.4
+src/daemon.rs	89.1
+src/graph.rs	94.2
+src/hook.rs	93.3
+src/integrate.rs	91.9
+src/main.rs	84.8
+src/mcp.rs	88.1
+src/shell.rs	94.0
+src/store.rs	94.2
