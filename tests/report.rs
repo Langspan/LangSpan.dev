@@ -22,6 +22,8 @@ use rmcp::model::CallToolRequestParams;
 use rmcp::transport::TokioChildProcess;
 use rmcp::{ServiceExt, model::ContentBlock};
 
+mod support;
+
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 fn recorded(text: &str) -> Value {
@@ -283,9 +285,9 @@ fn claude_code_and_codex_sessions_are_counted_per_session_and_per_host() {
         "codex",
         codex_patch("PostToolUse", "p1", "src/api.rs", "old", "new"),
     );
-    std::thread::sleep(Duration::from_millis(1100));
+    support::next_wall_second();
     let middle = now_rfc3339();
-    std::thread::sleep(Duration::from_millis(1100));
+    support::next_wall_second();
     w.hook("codex", codex_lifecycle("UserPromptSubmit"));
     let (reply, _) = w.hook(
         "codex",

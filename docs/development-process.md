@@ -257,7 +257,7 @@ happens within a stated time, `holds_for` checks it throughout that time.
 `python3 -I -B scripts/fixed-sleeps.py tests`, run on Linux in every lane,
 fails when a file holds more fixed sleeps of 200 ms or more than
 [`scripts/fixed-sleeps.tsv`](../scripts/fixed-sleeps.tsv) allows it, or
-fewer, so the counts only go down.
+fewer. That list is empty, so no test may hold one.
 
 Where a product delay is the subject, a test shortens it with the
 `LANGSPAN_TEST_*_MS` setting the code already reads. A coordinator started

@@ -18,6 +18,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod support;
+
 static NEXT: AtomicU64 = AtomicU64::new(0);
 const ALICE: &str = "00000000-0000-4000-8000-00000000000a";
 const BOB: &str = "00000000-0000-4000-8000-00000000000b";
@@ -358,6 +360,8 @@ fn a_session_starting_after_the_workspace_was_away_is_told_what_happened_since()
     f.prompt("claude-code", ALICE, "Rework the upload client", &[]);
     f.prompt("codex", BOB, "Add retry", &[]);
     let busy = f.lifecycle("claude-code", "SessionStart", CAROL, &f.root());
+    // No later than the coordinator recorded the last work.
+    let last_work = Instant::now();
     assert!(
         !busy.context.as_deref().unwrap_or("").contains(HEADER),
         "{:?}",
@@ -365,7 +369,9 @@ fn a_session_starting_after_the_workspace_was_away_is_told_what_happened_since()
     );
 
     f.away_after_ms = "300";
-    std::thread::sleep(Duration::from_millis(400));
+    support::wait_until("the 300 ms gap to pass", Duration::from_secs(5), || {
+        last_work.elapsed() >= Duration::from_millis(300)
+    });
     // Ending a session is not work: the gap goes on.
     f.lifecycle("codex", "SessionEnd", BOB, &f.root());
     let start = f.lifecycle("claude-code", "SessionStart", CAROL, &f.root());
@@ -1200,17 +1206,11 @@ fn a_codex_session_is_told_a_signature_claude_code_has_in_flight_in_a_linked_wor
                 .map(str::to_owned)
         })
     };
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let told = loop {
-        if let Some(told) = line(&f.prompt("codex", BOB, "continue", &[])) {
-            break told;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the Codex session was never told"
-        );
-        std::thread::sleep(Duration::from_millis(200));
-    };
+    let told = support::wait_for(
+        "the Codex session to be told",
+        Duration::from_secs(60),
+        || line(&f.prompt("codex", BOB, "continue", &[])).ok_or_else(|| "not yet".into()),
+    );
     assert_eq!(
         told,
         format!(
@@ -1951,18 +1951,12 @@ fn a_codex_session_is_told_both_names_of_a_rename_a_claude_session_made() {
     );
     let expected =
         r#"function "fetch_user" was renamed to "load_user" (same body): "def load_user(id)""#;
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let context = loop {
-        if let Some(context) = f
-            .prompt("codex", BOB, "carry on", &[])
+    let context = support::wait_for("bob to be told", Duration::from_secs(60), || {
+        f.prompt("codex", BOB, "carry on", &[])
             .context
             .filter(|context| context.contains("Interface change"))
-        {
-            break context;
-        }
-        assert!(Instant::now() < deadline, "bob was never told");
-        std::thread::sleep(Duration::from_millis(200));
-    };
+            .ok_or_else(|| "not yet".into())
+    });
     assert!(context.contains(expected), "{context}");
     assert!(context.contains(r#""src/users.py""#), "{context}");
     assert!(context.contains(r#""src/api.py""#), "{context}");
