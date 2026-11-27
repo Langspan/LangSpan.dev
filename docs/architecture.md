@@ -69,7 +69,7 @@ its old path as a re-export in the compatibility block at the end of
 | | `store` | the SQLite event store |
 | | `graph` | the source index: `graph`, `index_file` |
 | | `shell` | shell command parsing and snapshots |
-| | `install` | `install`, install detection (today's `hosts`), `user_install`, `guidance`, `service`, `binary_version` |
+| | `install` | `install`, install detection (`install::detect`), `user_install`, `guidance`, `service`, `binary_version` |
 | application | `ownership` | `journal`, `lines`, `reformat`, `formatter`, `adopt`, `commit` |
 | | `checks` | `integrate`, `landing`, `rewrite`, `auto_check`, `test_output`, `definitions` |
 | | `briefing` | the briefing and its render: `since`, `recent`, `trail` |

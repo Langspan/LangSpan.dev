@@ -5,6 +5,8 @@
 //! an executable named `langspan`; other unmarked commands remain user-owned.
 //! Settings-file symlinks are refused rather than silently replaced.
 
+pub mod detect;
+
 use serde_json::{Map, Value, json};
 use std::{
     fs,

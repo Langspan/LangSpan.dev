@@ -60,7 +60,6 @@ pub mod shell;
 // install
 pub mod binary_version;
 pub mod guidance;
-pub mod hosts;
 pub mod install;
 pub mod service;
 pub mod user_install;

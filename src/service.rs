@@ -7,7 +7,7 @@
 //! in that state directory. LangSpan recognizes its own file by the marker
 //! line it writes and leaves any other file at the same path alone.
 
-use crate::hosts::UserHome;
+use crate::install::detect::UserHome;
 use std::{
     io::Read,
     path::{Path, PathBuf},
