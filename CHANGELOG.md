@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.0](https://github.com/Langspan/LangSpan.dev/compare/v0.3.0...v0.4.0) (2026-11-27)
+
+
+### Features
+
+* anchor notes to a definition, with staleness and tags (E1) ([#273](https://github.com/Langspan/LangSpan.dev/issues/273)) ([f8ad02e](https://github.com/Langspan/LangSpan.dev/commit/f8ad02e6726cd62022bc3492e5535d8a0cb5fa1b))
+
+
+### Bug fixes
+
+* review follow-ups from ten pull requests ([#279](https://github.com/Langspan/LangSpan.dev/issues/279)) ([1c21437](https://github.com/Langspan/LangSpan.dev/commit/1c21437042e488ddd4106c6ee267584526f01b23))
+
 ## [0.3.0](https://github.com/Langspan/LangSpan.dev/compare/v0.2.0...v0.3.0) (2026-11-26)
 
 
