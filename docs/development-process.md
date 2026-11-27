@@ -34,14 +34,16 @@ Limit open work so that each pull request merges quickly:
 - Keep at most 5 pull requests open at once. Release pull requests don't
   count.
 - Keep at most one open pull request per hot component. The hot components
-  are the following:
-  - the wire protocol: `src/protocol.rs` and its clients;
-  - briefings;
-  - installation: `src/install.rs`, `src/user_install.rs` and
-    `src/hosts.rs`;
-  - the CLI argument list in `src/main.rs` and its flags table in
-    `src/cli/flags.rs`;
-  - the source graph.
+  are the following namespaces of the
+  [module map](architecture.md#module-map), with the files that hold them
+  today:
+  - `protocol`, the wire protocol: `src/protocol.rs` and its clients;
+  - `briefing`: `src/hook/render.rs`, `src/since.rs`, `src/recent.rs` and
+    `src/trail.rs`;
+  - `install`: `src/install.rs`, `src/user_install.rs` and `src/hosts.rs`;
+  - `cli`, its argument list and flags table: `src/main.rs` and `src/cli/`;
+  - `graph`, the source graph: `src/graph.rs`, `src/graph/`,
+    `src/index_file.rs` and `crates/langspan-graph`.
 - Give at least one of the 5 slots to bugs, review follow-ups or flaky
   tests. This slot is the debt slot.
 - Aim to merge each pull request within an hour of opening it. If a pull
@@ -326,10 +328,14 @@ numbers, each against `scripts/ratchets/baseline/<source path>.tsv`:
   enough to turn it on.
 - **Module dependencies** in the `langspan` crate. An edge from one
   top-level module to another may not join a cycle, or point outward,
-  unless the module's root file lists it as an `edge` row. A module states
-  its layer with a `// layer: utility|infrastructure|application|interface`
-  comment in that file; edges between modules without one are checked for
-  cycles only.
+  unless the module's root file lists it as an `edge` row. Each module's
+  layer, and the edges allowed within a layer, are rows of
+  `scripts/ratchets/namespaces.tsv` (the
+  [module map](architecture.md#module-map)). A module whose row says `-`
+  can state its layer with a
+  `// layer: utility|infrastructure|application|interface` comment in its
+  root file; edges between modules without a layer are checked for cycles
+  only.
 
 A failure says what grew, by how much, and what to do: split the code, or
 justify the growth in the pull request and run
