@@ -8,12 +8,20 @@ use langspan_core::{Command, Conflict, Outcome, ToolResult};
 use serde_json::{Value, json};
 use std::{
     fs, io,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 mod redact;
+pub use crate::file_state::{MAX_VERSION_BYTES, file_state};
+pub use crate::ids::{file_key, valid_host_id, wire_id, workspace_request_id};
+pub use crate::input::{MAX_EVENT_BYTES, read_stdin_until};
+pub use crate::text::age;
+pub(crate) use crate::text::{SUMMARY_LIMIT, clean, quoted, truncate};
+use crate::{
+    file_state::{file_content, version_of},
+    text::kept_bytes,
+};
 pub use redact::{contains_secret, redact, redact_check, redact_command, refuse_secret};
-pub const MAX_EVENT_BYTES: u64 = 8 * 1024 * 1024;
 pub(crate) const REASON_LIMIT: usize = 600;
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -105,22 +113,6 @@ pub struct Identities {
     pub complete: String,
 }
 
-/// Versioned, length-prefixed digest: `lsh1-<kind>-<first 128 bits, hex>`.
-pub fn wire_id(kind: &str, fields: &[&str]) -> String {
-    let mut message = Vec::new();
-    for field in [&"langspan-hook-id", &"v1", &kind]
-        .into_iter()
-        .chain(fields)
-    {
-        message.extend_from_slice(&(field.len() as u64).to_be_bytes());
-        message.extend_from_slice(field.as_bytes());
-    }
-    format!(
-        "lsh1-{kind}-{}",
-        &sha256::hex(&sha256::digest(&message))[..32]
-    )
-}
-
 pub fn identities_for(source: &str, host_session: &str, tool_use_id: &str) -> Identities {
     let fields = [source, host_session, tool_use_id];
     Identities {
@@ -130,18 +122,6 @@ pub fn identities_for(source: &str, host_session: &str, tool_use_id: &str) -> Id
         admit: wire_id("admit", &fields),
         complete: wire_id("complete", &fields),
     }
-}
-
-pub fn workspace_request_id(workspace_id: &str, root: &str) -> String {
-    wire_id("workspace", &[workspace_id, root])
-}
-
-pub fn valid_host_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= 100
-        && id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
 }
 
 /// A host's prompt or turn ID that LangSpan uses: a valid host ID of at
@@ -667,7 +647,6 @@ pub const BRIEFING_LIMIT: usize = 2400;
 /// over its turns (issue #222): about 64 tokens. `langspan status` reports
 /// what a session actually received; a test holds a typical session to it.
 pub const CONTEXT_BUDGET_BYTES_PER_TURN: u64 = 256;
-pub(crate) const SUMMARY_LIMIT: usize = 200;
 const BRIEF_PEERS: u32 = 6;
 
 #[derive(serde::Deserialize)]
@@ -1209,18 +1188,6 @@ pub fn prompt_qualifiers(prompt: &str) -> Vec<String> {
     found
 }
 
-/// Characters that can forge a line break or reorder what a reader sees.
-fn deceptive(c: char) -> bool {
-    c.is_control()
-        || matches!(c, '\u{2028}' | '\u{2029}' | '\u{feff}')
-        || ('\u{200b}'..='\u{200f}').contains(&c)
-        || ('\u{202a}'..='\u{202e}').contains(&c)
-        || ('\u{2066}'..='\u{2069}').contains(&c)
-}
-
-/// Text from another session or the repository, made safe to place on one
-/// line: deceptive characters become spaces and the result is at most
-/// `limit` bytes including its ellipsis.
 /// What a note is about, as a briefing line and the recap show it: its
 /// files, or its definition and whether that is still the code the note
 /// was written about (roadmap E1), then its tags. An anchored note never
@@ -1282,22 +1249,6 @@ pub fn about_note(
     } else {
         format!("{about} [{}]", tags.join(", "))
     }
-}
-
-pub(crate) fn clean(text: &str, limit: usize) -> String {
-    let text: String = text
-        .chars()
-        .map(|c| if deceptive(c) { ' ' } else { c })
-        .collect();
-    let text = text.trim();
-    if text.len() <= limit {
-        return text.into();
-    }
-    let mut end = limit.saturating_sub('…'.len_utf8());
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}…", &text[..end])
 }
 
 fn lifecycle(
@@ -1980,14 +1931,6 @@ pub fn uncoordinated_text(change: &langspan_core::UncoordinatedNotice) -> String
     )
 }
 
-/// An age for a person: seconds up to 89, then minutes.
-pub fn age(ms: u64) -> String {
-    match ms / 1000 {
-        seconds @ 0..=89 => format!("{seconds}s ago"),
-        seconds => format!("{}m ago", seconds / 60),
-    }
-}
-
 pub(crate) const PEER_LINE_LIMIT: usize = 700;
 
 /// Peer text is data from other sessions. Every value taken from a peer or
@@ -2461,10 +2404,6 @@ fn report_shown(
             failure_reply(failure).detail
         ),
     }
-}
-
-pub(crate) fn quoted(text: &str) -> String {
-    format!("{:?}", clean(text, SUMMARY_LIMIT))
 }
 
 /// A change in how many definitions share a name and kind, said as an
@@ -3832,51 +3771,6 @@ fn covered(vendor: crate::install::Vendor, path: PathBuf) -> Result<Option<PathB
             .is_empty()
         })
         .map(|_| path))
-}
-/// Bound the actual CLI's stdin pipe by the same absolute deadline as IPC.
-#[cfg(unix)]
-pub fn read_stdin_until(deadline: Instant) -> io::Result<Vec<u8>> {
-    use rustix::event::{PollFd, PollFlags, Timespec, poll};
-    use rustix::io::Errno;
-    let input = io::stdin();
-    let mut bytes = Vec::new();
-    let mut buffer = [0_u8; 8192];
-    loop {
-        let remaining = deadline
-            .checked_duration_since(Instant::now())
-            .filter(|d| !d.is_zero())
-            .ok_or_else(|| {
-                io::Error::new(io::ErrorKind::TimedOut, "hook stdin deadline elapsed")
-            })?;
-        let wait = Timespec::try_from(remaining).map_err(io::Error::other)?;
-        let mut fds = [PollFd::new(&input, PollFlags::IN)];
-        match poll(&mut fds, Some(&wait)) {
-            Ok(0) | Err(Errno::INTR) => continue,
-            Err(e) => return Err(e.into()),
-            Ok(_) => {}
-        }
-        match rustix::io::read(&input, &mut buffer) {
-            Ok(0) => return Ok(bytes),
-            Ok(n) => {
-                if bytes.len() + n > MAX_EVENT_BYTES as usize {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "host event exceeds 8 MiB",
-                    ));
-                }
-                bytes.extend_from_slice(&buffer[..n]);
-            }
-            Err(Errno::INTR | Errno::AGAIN) => continue,
-            Err(e) => return Err(e.into()),
-        }
-    }
-}
-#[cfg(not(unix))]
-pub fn read_stdin_until(_: Instant) -> io::Result<Vec<u8>> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "native hooks require Unix transport",
-    ))
 }
 struct Session<'a> {
     config: &'a Config,
@@ -5861,7 +5755,6 @@ impl Session<'_> {
     }
 }
 
-pub const MAX_VERSION_BYTES: u64 = 4 * 1024 * 1024;
 /// Files of one write checked for call breaks, at most.
 const BREAK_FILES: usize = 8;
 const BREAK_LATE: &str = "break check skipped: too little of the hook budget left";
@@ -5893,48 +5786,6 @@ fn add_alert(reply: &mut Reply, event: &str, (context, note): (Option<String>, S
         }
     })
     .to_string();
-}
-
-/// The version of one workspace file as it is on disk now: its SHA-256, or
-/// missing. `None` when it cannot be established within bounds (a symlink, a
-/// special file, more than 4 MiB, unreadable); such a file's base is unknown.
-pub fn file_state(root: &Path, key: &str) -> Option<langspan_core::FileState> {
-    file_content(root, key).map(|content| version_of(content.as_deref()))
-}
-
-/// A workspace file's bytes, `Some(None)` when it does not exist, or `None`
-/// when it cannot be read within the version bounds.
-fn file_content(root: &Path, key: &str) -> Option<Option<Vec<u8>>> {
-    use std::io::Read;
-    let path = root.join(key);
-    let metadata = match fs::symlink_metadata(&path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Some(None),
-        Err(_) => return None,
-    };
-    if !metadata.is_file() || metadata.len() > MAX_VERSION_BYTES {
-        return None;
-    }
-    let mut bytes = Vec::new();
-    fs::File::open(&path)
-        .ok()?
-        .take(MAX_VERSION_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .ok()?;
-    if bytes.len() as u64 > MAX_VERSION_BYTES {
-        return None;
-    }
-    Some(Some(bytes))
-}
-
-fn version_of(bytes: Option<&[u8]>) -> langspan_core::FileState {
-    match bytes {
-        None => langspan_core::FileState::Missing,
-        Some(bytes) => langspan_core::FileState::Present {
-            digest: sha256::hex(&sha256::digest(bytes)),
-            kind: langspan_core::FileKind::Regular,
-        },
-    }
 }
 
 fn observed_files(root: &Path, keys: &[String]) -> Vec<langspan_core::ObservedFile> {
@@ -6276,81 +6127,6 @@ fn overlap(
         );
     }
     text
-}
-
-/// `text` in at most `limit` bytes, the ellipsis that marks a cut included.
-pub(crate) fn truncate(text: &str, limit: usize) -> String {
-    let end = kept_bytes(text, limit);
-    if end == text.len() {
-        return text.into();
-    }
-    format!("{}…", &text[..end])
-}
-
-/// How many leading bytes of `text` `truncate` keeps within `limit`.
-fn kept_bytes(text: &str, limit: usize) -> usize {
-    if text.len() <= limit {
-        return text.len();
-    }
-    let mut end = limit.saturating_sub('…'.len_utf8());
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    end
-}
-
-/// Map a host path to a workspace-relative key. The daemon repeats the
-/// canonical checks; this only decides whether the path is inside the root.
-pub fn file_key(root: &Path, cwd: Option<&str>, file_path: &str) -> Result<String, String> {
-    if file_path.is_empty() || file_path.len() > 4096 || file_path.contains('\0') {
-        return Err("file_path is empty, too long or contains NUL".into());
-    }
-    let path = Path::new(file_path);
-    let path = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        Path::new(cwd.ok_or("relative file_path without cwd")?).join(path)
-    };
-    if path
-        .components()
-        .any(|part| matches!(part, Component::ParentDir | Component::CurDir))
-    {
-        return Err("file_path has dot components".into());
-    }
-    let mut existing = path.clone();
-    let mut suffix = Vec::new();
-    let resolved = loop {
-        match fs::canonicalize(&existing) {
-            Ok(resolved) => break resolved,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                suffix.push(existing.file_name().ok_or("unresolvable path")?.to_owned());
-                if !existing.pop() {
-                    return Err("unresolvable path".into());
-                }
-            }
-            Err(error) => return Err(format!("cannot resolve file_path: {error}")),
-        }
-    };
-    let mut resolved = resolved;
-    for part in suffix.iter().rev() {
-        resolved.push(part);
-    }
-    if resolved.parent().is_some_and(|parent| {
-        parent
-            .ancestors()
-            .take_while(|ancestor| *ancestor != root)
-            .any(|ancestor| ancestor.join(".git").try_exists().unwrap_or(true))
-    }) {
-        return Err("file_path crosses a nested Git workspace boundary".into());
-    }
-    let relative = resolved
-        .strip_prefix(root)
-        .map_err(|_| "file_path is outside the registered workspace root".to_string())?;
-    relative
-        .to_str()
-        .filter(|key| !key.is_empty())
-        .map(str::to_owned)
-        .ok_or_else(|| "file_path is not a UTF-8 file inside the root".into())
 }
 
 #[cfg(test)]
