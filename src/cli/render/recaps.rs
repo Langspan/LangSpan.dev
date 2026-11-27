@@ -145,7 +145,7 @@ pub(super) fn print_recap(recap: &Recap) -> Result<(), crate::Error> {
         // An anchored or tagged note says what it is about as a
         // briefing does, with the state of its definition.
         let about = if note.anchor.is_some() || !note.tags.is_empty() {
-            crate::hook::note_about(note)
+            crate::briefing::render::note_about(note)
         } else if note.paths.is_empty() {
             String::new()
         } else {
@@ -183,7 +183,7 @@ pub(super) fn print_recall(recall: &Recall) -> Result<(), crate::Error> {
                 .unwrap_or_default(),
             serde_json::to_string(&note.text)?,
             if note.anchor.is_some() || !note.tags.is_empty() {
-                crate::hook::about_note(
+                crate::briefing::render::about_note(
                     &note.paths,
                     note.anchor.as_ref(),
                     note.anchor_state,

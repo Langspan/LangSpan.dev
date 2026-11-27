@@ -620,7 +620,7 @@ fn an_owed_trail_of_escaped_paths_beside_full_peers_still_fits_one_frame() {
     let mut state = ready();
     full_of_peers(&mut state);
     erin_leaves_the_largest_trail(&mut state);
-    let stored = &state.trails["main"][0];
+    let stored = &state.trails()["main"][0];
     assert!(
         encoded_len(stored) <= langspan_core::TRAIL_JSON_BYTES,
         "the stored trail is bounded: {} bytes",
@@ -662,7 +662,7 @@ fn an_owed_trail_of_escaped_paths_beside_full_peers_still_fits_one_frame() {
     // no larger than one without a trail.
     let shared = encoded_len(&briefing.peers) + encoded_len(view);
     assert!(shared <= 40 * 1024, "{shared}");
-    assert_eq!(state.trails["main"][0].taken_by.as_deref(), Some("alice"));
+    assert_eq!(state.trails()["main"][0].taken_by.as_deref(), Some("alice"));
 }
 
 /// A trail recorded before the bound, as an older daemon of this branch

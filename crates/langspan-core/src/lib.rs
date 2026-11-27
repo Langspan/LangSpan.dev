@@ -35,6 +35,7 @@ mod route;
 mod sessions;
 mod shared;
 mod since;
+mod state;
 mod status;
 mod status_line;
 mod today;
@@ -111,6 +112,7 @@ pub use since::{
     AWAY_AFTER_MS, MAX_AWAY_AFTER_MS, SINCE_EVENTS, SINCE_ITEMS, Since, SinceChecks, SinceFailure,
     SinceFrom, SinceInterface, SinceLanding, SinceMessage, SinceQuery, since,
 };
+pub use state::{SnapshotRecord, State};
 pub use status::{
     STATUS_RECENT_MS, StatusPosition, StatusRecord, StatusResume, StatusSummary, restore_status,
     shrink_status, status_records, status_view,
@@ -147,168 +149,6 @@ pub use write_check::{
     WriteCheckPath, WriteCheckRequest, WriteCheckSymbol, write_check, write_check_noticed,
     write_check_request,
 };
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct State {
-    pub generation: u64,
-    pub workspaces: BTreeMap<String, Workspace>,
-    pub sessions: BTreeMap<String, Session>,
-    pub intents: BTreeMap<String, Intent>,
-    pub leases: BTreeMap<String, Lease>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub session_liveness: BTreeMap<String, SessionLiveness>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub workspace_git: BTreeMap<String, WorkspaceGit>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub activity: BTreeMap<String, SessionActivity>,
-    /// Workspaces the owner chose to publish, by workspace ID.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub remote_links: BTreeMap<String, RemoteLink>,
-    /// Latest publication per teammate, keyed `workspace:participant`.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub remote_peers: BTreeMap<String, RemotePeer>,
-    /// Check records per workspace, newest first, at most `MAX_CHECKS`.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub checks: BTreeMap<String, Vec<CheckRecord>>,
-    /// Landings per workspace, newest first, at most `MAX_LANDINGS`.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub landings: BTreeMap<String, Vec<Landing>>,
-    /// Push turns held now, keyed `workspace:onto`.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub turns: BTreeMap<String, Turn>,
-    /// Landings waiting for each push turn, keyed `workspace:onto`, first in
-    /// line first, at most `MAX_TURN_QUEUE` each.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub turn_queues: BTreeMap<String, Vec<TurnWaiter>>,
-    /// Interface changes per workspace, newest first, at most `MAX_NOTICES`.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub interface_notices: BTreeMap<String, Vec<InterfaceNotice>>,
-    /// Remembered notes per workspace, newest first, at most `MAX_NOTES`.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub notes: BTreeMap<String, Vec<Note>>,
-    /// Unacknowledged messages per workspace, newest first, at most
-    /// `MAX_MESSAGES`.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub messages: BTreeMap<String, Vec<Message>>,
-    /// The latest messages sent per workspace, newest first, at most
-    /// `MAX_MESSAGES`, with every session that received each one and
-    /// whether it was withdrawn: what a withdrawal and the recap read.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub message_history: BTreeMap<String, Vec<Message>>,
-    /// IDs of the messages per workspace that newer ones pushed out of
-    /// `messages` unread, newest first, at most `MAX_MESSAGES`: what a
-    /// status query reads to tell a drop from a completion.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub dropped_messages: BTreeMap<String, Vec<String>>,
-    /// Withdrawn messages each session received and has not yet been told
-    /// to disregard, per session, newest first, at most `MAX_MESSAGES`.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub retracted_notices: BTreeMap<String, Vec<RetractedMessage>>,
-    /// Workspaces whose last scan attempt failed.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub scan_failures: BTreeMap<String, ScanFailure>,
-    /// Workspaces whose last completed scan left something unversioned.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub scan_coverage: BTreeMap<String, ScanCoverage>,
-    /// Checkout changes per workspace, newest first, at most `MAX_CHECKOUTS`.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub checkouts: BTreeMap<String, Vec<CheckoutChange>>,
-    /// Sessions' shell runs that moved the checkout, per workspace, newest
-    /// first: the newest `MAX_CHECKOUT_RUNS`, and any older run that
-    /// explains a held checkout change (at most `MAX_CHECKOUTS` more).
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub checkout_runs: BTreeMap<String, Vec<CheckoutRun>>,
-    /// Uncoordinated changes per workspace, newest first, at most
-    /// `MAX_UNCOORDINATED`.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub uncoordinated: BTreeMap<String, Vec<UncoordinatedChange>>,
-    /// The automatic check per workspace, for the workspaces where the owner
-    /// turned one on.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub auto_checks: BTreeMap<String, AutoCheck>,
-    /// Automatic check results not yet delivered, per session, newest first.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub check_notices: BTreeMap<String, Vec<CheckNotice>>,
-    /// Tests that flip on unchanged code, learned per workspace.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub test_learning: BTreeMap<String, TestLearning>,
-    /// Agent hosts present on this machine with no LangSpan install that
-    /// covers them, by host name (roadmap A7). For the owner; agents are
-    /// not told.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub uninstalled_hosts: BTreeMap<String, UninstalledHost>,
-    /// Sessions whose presence setting is not the default, by session ID.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub presence: BTreeMap<String, PresenceSetting>,
-    /// Ended sessions whose uncommitted work another session took over, by
-    /// the ended session's ID (issue #161). One adoption per ended session.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub adoptions: BTreeMap<String, Adoption>,
-    /// Recorded renames per workspace, newest first, at most `MAX_RENAMES`
-    /// (roadmap D7): what `graph symbol --renamed` follows. A name defined
-    /// again is dropped. Derived on replay; not part of the status reply.
-    #[serde(skip)]
-    pub renames: BTreeMap<String, Vec<Rename>>,
-    /// Trails of ended sessions per workspace, newest first, at most
-    /// `MAX_TRAILS` (roadmap C9). Derived on replay; not part of the status
-    /// reply.
-    #[serde(skip)]
-    pub trails: BTreeMap<String, Vec<Trail>>,
-    /// The current generation's clock anchor, once recorded. Derived from
-    /// the events on replay; not part of the status reply.
-    #[serde(skip)]
-    pub clock_anchor: Option<ClockAnchor>,
-    /// Recent refusals placed in wall time, newest first, for the status
-    /// line (roadmap H2). Derived on replay; not part of the status reply.
-    #[serde(skip)]
-    pub refusals: Vec<RecentRefusal>,
-    /// Refusals of the current run with their paths, newest first, at most
-    /// `MAX_PATH_REFUSALS`, for a starting session's recent section
-    /// (roadmap C3). Derived on replay; not part of the status reply.
-    #[serde(skip)]
-    pub path_refusals: Vec<PathRefusal>,
-    /// How many times each workspace ID has been moved or removed: its
-    /// registration revision. With the root it names one registration, so
-    /// what was derived outside the log during an earlier one (the source
-    /// index, a worker's report) is started again or refused, even after a
-    /// switch back to an earlier root. Derived on replay; not part of the
-    /// status reply.
-    #[serde(skip)]
-    pub workspace_revisions: BTreeMap<String, u32>,
-    /// Writes recorded per workspace since the event log was replayed: the
-    /// write generation a check run takes before its tree and carries with
-    /// its test results (`record_check.writes_before`). Derived on replay;
-    /// in the status reply, one count per workspace, so that `check run`
-    /// can read it.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub writes: BTreeMap<String, u64>,
-    /// Per workspace, then check ID: the per-test results of the records it
-    /// holds, for comparing a later run with them (issue #69). Derived on
-    /// replay; not part of the status reply.
-    #[serde(skip)]
-    pub kept_tests: BTreeMap<String, BTreeMap<String, KeptTests>>,
-    /// Per session, the workspace's write count just before the session's
-    /// first write since it registered. Derived on replay; not part of the
-    /// status reply.
-    #[serde(skip)]
-    pub first_writes: BTreeMap<String, u64>,
-    /// Per workspace, its sessions' runs of consecutive writes, oldest
-    /// first, at most `MAX_WRITE_RUNS`. Derived on replay; not part of the
-    /// status reply.
-    #[serde(skip)]
-    pub write_runs: BTreeMap<String, Vec<WriteRun>>,
-    /// The wait for a current holder per workspace, for the workspaces
-    /// whose conflict policy is `wait` (roadmap B28). Derived on replay;
-    /// not part of the status reply.
-    #[serde(skip)]
-    pub conflict_waits: BTreeMap<String, u32>,
-    /// Each session's write refusals not yet settled by an admitted write or
-    /// a stop, oldest first, at most `MAX_UNSETTLED`, of the current
-    /// generation only. Derived on replay; not part of the status reply.
-    #[serde(skip)]
-    pub unsettled: BTreeMap<String, Vec<UnsettledRefusal>>,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]

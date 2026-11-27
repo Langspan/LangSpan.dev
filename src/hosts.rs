@@ -1,6 +1,7 @@
 //! The host catalog: the hosts LangSpan supports, their session namespaces,
 //! the tools each can stand in for, and the host settings shared by install
 //! and the hook adapters.
+pub(crate) mod port;
 pub(crate) mod tool_names;
 pub(crate) mod vendor;
 

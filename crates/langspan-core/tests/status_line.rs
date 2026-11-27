@@ -153,7 +153,7 @@ fn tool(operation_id: impl Into<String>) -> ToolIdentity {
 }
 
 fn refusals(state: &State) -> usize {
-    state.refusals.len()
+    state.refusals().len()
 }
 
 #[test]

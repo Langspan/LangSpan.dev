@@ -402,7 +402,7 @@ fn reshape(
     events: fn(&mut Vec<RecordedEvent>),
 ) {
     match outcome {
-        Outcome::Status { state, .. } => state.activity.values_mut().for_each(activity),
+        Outcome::Status { state, .. } => state.activities_mut().for_each(activity),
         Outcome::StatusRecords { records, .. } => {
             for record in records {
                 if let StatusRecord::Activity { activity: a, .. } = record {

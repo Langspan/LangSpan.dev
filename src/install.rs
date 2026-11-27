@@ -14,6 +14,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub use crate::hosts::port::{PRESENCE_MINUTES, Presence};
 pub use crate::vendor::{Vendor, quote};
 
 pub const EVENTS: [&str; 3] = ["PreToolUse", "PostToolUse", "PostToolUseFailure"];
@@ -313,44 +314,7 @@ pub struct Registration {
     pub outline_reads: bool,
 }
 
-/// The presence options of an installed hook command (roadmap A13).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Presence {
-    /// False: the session's reads, searches and shell paths are never shown.
-    pub shown: bool,
-    /// How old a peer's presence the session is shown; `None` is the
-    /// default, `PRESENCE_MINUTES`.
-    pub minutes: Option<u64>,
-}
-
-/// The presence window, in minutes, when none is given.
-pub const PRESENCE_MINUTES: u64 = langspan_core::PRESENCE_WINDOW_MS / 60_000;
-
-impl Default for Presence {
-    fn default() -> Self {
-        Self {
-            shown: true,
-            minutes: None,
-        }
-    }
-}
-
 impl Presence {
-    /// How old a peer's presence the session is shown, in milliseconds.
-    pub fn window_ms(self) -> u64 {
-        self.minutes.unwrap_or(PRESENCE_MINUTES) * 60_000
-    }
-
-    /// `--presence-minutes`: 1 to 30, the briefing horizon. The default
-    /// is written as no option at all.
-    pub fn minutes(value: &str) -> Result<Option<u64>, String> {
-        match value.parse::<u64>() {
-            Ok(PRESENCE_MINUTES) => Ok(None),
-            Ok(minutes @ 1..=30) => Ok(Some(minutes)),
-            _ => Err("--presence-minutes must be a whole number of minutes from 1 to 30".into()),
-        }
-    }
-
     fn words(self) -> Vec<String> {
         let mut words = Vec::new();
         if !self.shown {
