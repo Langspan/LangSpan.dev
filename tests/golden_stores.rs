@@ -100,7 +100,12 @@ fn missing_stores<'a>(
 /// the test: it never counts as untagged.
 fn has_release_tag(release: &str) -> bool {
     let output = std::process::Command::new("git")
-        .args(["--no-optional-locks", "tag", "--list", &format!("v{release}")])
+        .args([
+            "--no-optional-locks",
+            "tag",
+            "--list",
+            &format!("v{release}"),
+        ])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .unwrap_or_else(|e| panic!("cannot run git to list the tags: {e}; install git"));
