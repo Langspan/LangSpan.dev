@@ -26,7 +26,9 @@ records the local foundation. The derived source index lives in
 
 Wire protocol is version 10 (version 9, 8, 7, 6, 5, 4 and 3 clients are still
 answered, in their shapes; ADR 0004, ADR 0007, ADR 0008, ADR 0019, ADR 0020,
-ADR 0023) and the SQLite schema marker version 4 (retention, J7 in
+ADR 0023; each version maps to a set of named capabilities, and a new wire
+field adds a capability, not a version, ADR 0037) and the SQLite schema
+marker version 4 (retention, J7 in
 [ADR 0025](adr/0025-distribution-lifecycle-and-store-beyond-the-first-release.md));
 older persisted records remain readable.
 

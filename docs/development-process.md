@@ -22,6 +22,11 @@ priority and size:
 If a decision is costly to reverse, record it in an ADR in
 [`docs/adr/`](adr/0001-local-coordination.md) before or with the change.
 
+A new wire field adds a named capability, one line in `CAPABILITIES` in
+`src/protocol.rs` with vectors in `fixtures/capabilities/<name>/`, never a
+protocol version. The version changes only for a breaking change
+([ADR 0037](adr/0037-protocol-capabilities.md)).
+
 ## Work in progress
 
 Limit open work so that each pull request merges quickly:
