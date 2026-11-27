@@ -58,19 +58,29 @@ const TAIL_LINES: usize = 20;
 /// only if the state owner's count is still that when the record arrives.
 pub type WriteCounts = Arc<Mutex<BTreeMap<String, u64>>>;
 
-/// The automatic checks running now, each by run with its cancel flag. The
-/// daemon reads it so that it neither stops for idleness while a check runs
-/// nor exits leaving a check's command behind (issue #239).
+/// The process group of the command a run has going now, if any.
+type Group = Arc<Mutex<Option<rustix::process::Pid>>>;
+
+/// The automatic checks running now, each by run with its cancel flag and
+/// its command's process group. The daemon reads it so that it neither
+/// stops for idleness while a check runs nor exits leaving a check's
+/// command behind (issues #239 and #257).
 #[derive(Clone, Default)]
-pub struct Runs(Arc<Mutex<BTreeMap<u64, Arc<AtomicBool>>>>);
+pub struct Runs(Arc<Mutex<Entries>>);
+
+/// Each running check's cancel flag and process group slot, by run.
+type Entries = BTreeMap<u64, (Arc<AtomicBool>, Group)>;
 
 impl Runs {
     /// Counts `run` as running until the returned guard is dropped.
     fn enter(&self, run: u64, cancel: Arc<AtomicBool>) -> Entered {
-        self.lock().insert(run, cancel);
+        let group = Group::default();
+        self.lock().insert(run, (cancel.clone(), group.clone()));
         Entered {
             runs: self.clone(),
             run,
+            cancel,
+            group,
         }
     }
     /// Whether any automatic check is running.
@@ -79,21 +89,31 @@ impl Runs {
     }
     /// Cancels every running check and waits up to `limit` for them to
     /// end. A cancelled command's process group is killed within about a
-    /// tenth of a second. Returns whether they all ended in time.
+    /// tenth of a second. Returns whether they all ended in time; a run
+    /// that did not, such as one held in a working-tree snapshot, has the
+    /// process group of the command it has going killed here.
     pub fn cancel_all(&self, limit: Duration) -> bool {
-        for cancel in self.lock().values() {
+        for (cancel, _) in self.lock().values() {
             cancel.store(true, Ordering::SeqCst);
         }
         let deadline = Instant::now() + limit;
         while self.any() {
             if Instant::now() >= deadline {
+                for (_, group) in self.lock().values() {
+                    if let Some(group) = *group.lock().unwrap_or_else(|e| e.into_inner()) {
+                        let _ = rustix::process::kill_process_group(
+                            group,
+                            rustix::process::Signal::KILL,
+                        );
+                    }
+                }
                 return false;
             }
             std::thread::sleep(Duration::from_millis(20));
         }
         true
     }
-    fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<u64, Arc<AtomicBool>>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Entries> {
         self.0.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
@@ -102,6 +122,9 @@ impl Runs {
 struct Entered {
     runs: Runs,
     run: u64,
+    cancel: Arc<AtomicBool>,
+    /// The slot the run's commands hold their process group in.
+    group: Group,
 }
 
 impl Drop for Entered {
@@ -597,16 +620,16 @@ pub fn worker(
                 let (workspace_id, run) = (workspace_id.clone(), next_run);
                 // Counted before the thread starts, so the daemon never sees
                 // a moment with the run going and uncounted.
-                let entered = runs.enter(run, cancel.clone());
+                let entered = runs.enter(run, cancel);
                 let started = std::thread::Builder::new()
                     .name("langspan-auto-check".into())
                     .spawn(move || {
-                        let _entered = entered;
+                        let entered = entered;
                         let ended = run_once(
                             &of.root,
                             &command,
                             expect.as_deref(),
-                            &cancel,
+                            &entered,
                             &recheck,
                             rerun_max,
                             &writes,
@@ -831,11 +854,12 @@ fn run_once(
     root: &Path,
     check: &AutoCheck,
     expect: Option<&str>,
-    cancel: &AtomicBool,
+    entered: &Entered,
     recheck: &Recheck,
     rerun_max: Duration,
     writes: &WriteCounts,
 ) -> Ended {
+    let (cancel, group) = (&*entered.cancel, &entered.group);
     // Taken before the tree: a write recorded after this, even one the tree
     // no longer shows when the rerun ends, keeps the two runs uncompared.
     let writes_before = writes
@@ -872,7 +896,7 @@ fn run_once(
         changed
     };
     let stop = |deadline| cancel.load(Ordering::SeqCst) || tree_changed(deadline);
-    let (ran, duration_ms, output) = match run_command(root, &check.argv, limit, stop) {
+    let (ran, duration_ms, output) = match run_command(root, &check.argv, limit, group, stop) {
         Ok(ran) => ran,
         Err(error) => return Ended::Failed(error),
     };
@@ -923,7 +947,7 @@ fn run_once(
         && !rerun_max.is_zero()
         && u128::from(duration_ms) <= rerun_max.as_millis()
     {
-        match run_command(root, &check.argv, limit.min(rerun_max), stop) {
+        match run_command(root, &check.argv, limit.min(rerun_max), group, stop) {
             Ok((Some(Exit::Code(code)), _, again)) => match held_still() {
                 Ok(true) => rerun = again.tests(code == 0, &first.failed),
                 // Changed while it ran again: the first result stands, and
@@ -1010,6 +1034,7 @@ fn run_command(
     dir: &Path,
     argv: &[String],
     limit: Duration,
+    slot: &Group,
     mut stop: impl FnMut(Instant) -> bool,
 ) -> Result<(Option<Exit>, u64, Output), String> {
     use std::os::unix::process::CommandExt;
@@ -1031,12 +1056,17 @@ fn run_command(
         .spawn()
         .map_err(|e| format!("cannot start {program:?}: {e}"))?;
     let group = rustix::process::Pid::from_child(&child);
+    let set_slot = |held| *slot.lock().unwrap_or_else(|e| e.into_inner()) = held;
+    // Held until the group's last kill, so `Runs::cancel_all` can kill it
+    // while this thread is held elsewhere.
+    set_slot(Some(group));
     // The pipe's writing ends now belong to the command alone, so the
     // reader sees its end when the command's process group is gone.
     let stop_all = |child: &mut std::process::Child| {
         let _ = child.kill();
         let _ = child.wait();
         let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+        set_slot(None);
     };
     let kept = Arc::new(Mutex::new(Output::default()));
     let (finished_reading, read_done) = mpsc::channel::<()>();
@@ -1093,6 +1123,7 @@ fn run_command(
         }
     };
     let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+    set_slot(None);
     // A process that left the group can hold the pipe open: its output is
     // not waited for beyond a second.
     let _ = read_done.recv_timeout(Duration::from_secs(1));
@@ -1170,6 +1201,57 @@ mod tests {
         assert!(runs.cancel_all(Duration::from_secs(10)));
         assert!(!runs.any());
         ender.join().unwrap();
+    }
+
+    /// A process test: killing a real process group is the behavior.
+    #[test]
+    fn cancel_all_kills_the_group_of_a_run_that_does_not_end_in_time() {
+        use std::os::unix::process::{CommandExt, ExitStatusExt};
+        let mut sleeper = Process::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let runs = Runs::default();
+        // A cancel flag nobody reads, as when the worker is held in a snapshot.
+        let entered = runs.enter(1, Arc::default());
+        *entered.group.lock().unwrap() = Some(rustix::process::Pid::from_child(&sleeper));
+        assert!(!runs.cancel_all(Duration::from_millis(50)));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = sleeper.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let _ = sleeper.kill();
+                let _ = sleeper.wait();
+                panic!("the check's group outlived cancel_all");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(status.signal(), Some(9), "{status:?}");
+    }
+
+    /// A process test: the slot holds a real child's process group.
+    #[test]
+    fn run_command_holds_its_group_in_the_slot_only_while_it_runs() {
+        let group = Group::default();
+        let mut seen = None;
+        let argv = ["sleep".to_owned(), "30".to_owned()];
+        let (exit, _, _) = run_command(
+            Path::new("."),
+            &argv,
+            Duration::from_secs(20),
+            &group,
+            |_| {
+                seen = *group.lock().unwrap();
+                true
+            },
+        )
+        .unwrap();
+        assert!(exit.is_none(), "stopped");
+        assert!(seen.is_some(), "the group was in the slot while it ran");
+        assert!(group.lock().unwrap().is_none(), "emptied once it ended");
     }
 
     fn registration() -> Registration {

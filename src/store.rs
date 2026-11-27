@@ -37,6 +37,10 @@ pub const PAGE_BUDGET_BYTES: usize = 48 * 1024;
 /// moves the cursor on.
 pub const MIN_PAGE_BYTES: usize = 1024;
 
+/// The events a page scans beyond its limit for a client that cannot read
+/// some of them: bounds the rows read and held per page (`event_page`).
+const MAX_UNREAD_PER_PAGE: i64 = 10_000;
+
 /// A generation marker: a `booted` or `clock_anchored` event. One owner for
 /// the index over them and the lookup that must match it to use it.
 macro_rules! generation_marker {
@@ -1426,6 +1430,23 @@ impl Store {
     }
 
     fn events(&self, after: u64, limit: u32) -> StoreResult<Outcome> {
+        self.event_page(after, limit, |_| true)
+    }
+
+    /// A page of events after `after` for a client that reads the events
+    /// `reads` accepts (`protocol::reads_event`). An event it does not read
+    /// stays in the page, so the reply can say how many it left out, but
+    /// counts against neither `limit` nor the page's bytes: the client
+    /// pages past it (issue #259). A page scans at most `limit` plus
+    /// `MAX_UNREAD_PER_PAGE` rows, so a longer run of unread events ends
+    /// it there, and a client that cannot say `withheld_events` sees an
+    /// empty page.
+    pub(crate) fn event_page(
+        &self,
+        after: u64,
+        limit: u32,
+        reads: impl Fn(&Event) -> bool,
+    ) -> StoreResult<Outcome> {
         if !(1..=1000).contains(&limit) {
             return Ok(Outcome::Error {
                 code: "invalid_limit".into(),
@@ -1436,15 +1457,25 @@ impl Store {
         let mut statement = self
             .connection
             .prepare("SELECT seq, event_json FROM events WHERE seq > ?1 ORDER BY seq LIMIT ?2")?;
-        let mut rows = statement.query(params![after, i64::from(limit)])?;
+        let scan = i64::from(limit) + MAX_UNREAD_PER_PAGE;
+        let mut rows = statement.query(params![after, scan])?;
         let mut events = Vec::new();
-        let mut page_bytes = 0;
-        while let Some(row) = rows.next()? {
+        let (mut page_bytes, mut read, mut ends) = (0, 0, 0);
+        while read < limit
+            && let Some(row) = rows.next()?
+        {
             let sequence: i64 = row.get(0)?;
             let stored: String = row.get(1)?;
             let (event, json) = shown_event(serde_json::from_str(&stored)?, stored)?;
+            if !reads(&event) {
+                events.push(RecordedEvent {
+                    seq: u64::try_from(sequence)?,
+                    event,
+                });
+                continue;
+            }
             if page_bytes + json.len() + 64 > 48 * 1024 {
-                if events.is_empty() {
+                if read == 0 {
                     return Err("one event exceeds the transport page budget".into());
                 }
                 break;
@@ -1454,6 +1485,13 @@ impl Store {
                 seq: u64::try_from(sequence)?,
                 event,
             });
+            read += 1;
+            ends = events.len();
+        }
+        // The client asks next from the last event it read, so unread events
+        // after it are left to that page, which tells of them once.
+        if read > 0 {
+            events.truncate(ends);
         }
         Ok(Outcome::Events { events })
     }
@@ -2207,6 +2245,8 @@ impl Store {
         let scan = summary
             .map(|json| serde_json::from_str(&json))
             .transpose()?;
+        // Every client reads both types, so the page needs no client's
+        // filter before its limit, as `event_page` has (tests/protocol.rs).
         let mut statement = self.connection.prepare(
             "SELECT seq,event_json FROM events
              WHERE json_extract(event_json,'$.type') IN ('disk_observed','branch_observed')
@@ -2438,6 +2478,65 @@ fn observed_branches(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #259, at the store: events the client does not read count
+    /// against neither the page's bytes nor its limit, and those after the
+    /// last event it reads are left to the next page.
+    #[test]
+    fn an_event_page_does_not_spend_its_budget_on_unread_events() {
+        let directory = std::env::temp_dir().join(format!(
+            "langspan-event-page-{}-{}",
+            std::process::id(),
+            wall_now_ms()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let mut store = Store::open(&directory.join("state.sqlite")).unwrap();
+        // Thirty workspaces with 2 KB roots: 60 KB, past one page's bytes.
+        let mut commands: Vec<Command> = (0..30)
+            .map(|n| Command::WorkspaceRegister {
+                workspace_id: format!("w{n}"),
+                root: format!("/{n}{}", "a".repeat(2000)),
+            })
+            .collect();
+        let register = |session: &str| Command::SessionRegister {
+            session_id: session.into(),
+            workspace_id: "w0".into(),
+            parent: None,
+            headless: false,
+        };
+        commands.extend([register("one"), register("two")]);
+        commands.push(Command::WorkspaceRegister {
+            workspace_id: "late".into(),
+            root: "/late".into(),
+        });
+        for (index, command) in commands.iter().enumerate() {
+            let execution = store
+                .execute(&format!("fixture-{index}"), command, command, 1)
+                .unwrap();
+            assert!(!matches!(execution.outcome, Outcome::Error { .. }));
+        }
+        let sessions = |event: &Event| matches!(event, Event::SessionRegistered { .. });
+        let page = |after, limit| match store.event_page(after, limit, sessions).unwrap() {
+            Outcome::Events { events } => events,
+            other => panic!("{other:?}"),
+        };
+        let first = page(0, 1);
+        let last = first.last().unwrap();
+        assert!(
+            sessions(&last.event),
+            "the page reached a session: {first:?}"
+        );
+        assert!(first.len() > 30, "the workspaces were held for the reply");
+        // The second session ends the page: the workspace after it is the
+        // next page's, with nothing the client reads.
+        let second = page(last.seq, 1);
+        assert!(sessions(&second.last().unwrap().event));
+        let rest = page(second.last().unwrap().seq, 1);
+        assert_eq!(rest.len(), 1, "{rest:?}");
+        assert!(!sessions(&rest[0].event));
+        drop(store);
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
 
     /// `count` runs in the daemon's request handler too: reading refusals
     /// and a session's later admissions must use their partial indexes, not
