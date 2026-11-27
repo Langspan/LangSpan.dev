@@ -639,7 +639,7 @@ mod unix {
                         .transpose()?;
                     Ok((symbols, references, levels))
                 }
-                _ => unreachable!("matched above"),
+                _ => Err("not a source index query".into()),
             })
             .map_err(failed)?;
         let mut truncated = symbols.len() > limit as usize
@@ -2099,7 +2099,7 @@ mod unix {
             bytes,
         } = &command
         else {
-            unreachable!("matched by the caller");
+            return error(request_id, generation, "internal", "not an outline read");
         };
         let answer =
             |outline: Option<(u32, Vec<langspan_core::OutlineEntry>)>, skipped: &str| Response {
@@ -2460,6 +2460,11 @@ mod unix {
             "{}",
             serde_json::json!({"level":level,"event":"daemon_stopping","reason":reason,"detail":detail})
         );
+        end(checks, code)
+    }
+
+    /// Stops any automatic check still running, then ends the process.
+    fn end(checks: &auto_check::Runs, code: i32) -> ! {
         if !checks.cancel_all(CHECKS_STOP_WITHIN) {
             eprintln!(
                 "{}",
@@ -2467,6 +2472,31 @@ mod unix {
             );
         }
         std::process::exit(code)
+    }
+
+    /// Makes a panic on any of the coordinator's threads end the process
+    /// with status 1 (issue #329). Unwinding would end only that thread and
+    /// leave the socket accepting requests nobody answers; a failed exit
+    /// lets a login service start the coordinator again, and a removed
+    /// socket lets a hook start one. Writes one structured line in place of
+    /// the default message. Only `langspan daemon` installs it: the hooks
+    /// keep their own panic fallback (`main.rs`).
+    fn stop_on_panic(socket: PathBuf, checks: auto_check::Runs) {
+        std::panic::set_hook(Box::new(move |info| {
+            let _ = remove_own_socket(&socket);
+            let thread = std::thread::current();
+            let detail = format!(
+                "{} at {}",
+                info.payload_as_str().unwrap_or("a panic with no message"),
+                info.location()
+                    .map_or_else(|| "an unknown location".to_owned(), ToString::to_string)
+            );
+            eprintln!(
+                "{}",
+                serde_json::json!({"level":"error","event":"daemon_stopping","reason":"panic","thread":thread.name().unwrap_or("unnamed"),"detail":detail})
+            );
+            end(&checks, 1)
+        }));
     }
 
     /// `LANGSPAN_TEST_COMPACT_PAUSE_MS`, at most 10 s: how long a compaction
@@ -2479,6 +2509,20 @@ mod unix {
             .ok()
             .map(|ms| Duration::from_millis(ms.min(10_000)))
     }
+
+    /// For tests only, in a debug build: the state owner panics on the
+    /// request whose ID `LANGSPAN_TEST_PANIC_ON_REQUEST` names, so a test can
+    /// see what a panic in a coordinator thread does (issue #329). A release
+    /// build never reads the variable.
+    #[cfg(debug_assertions)]
+    #[allow(clippy::panic, reason = "the test-only switch exists to panic")]
+    fn panic_for_test(request_id: &str) {
+        if std::env::var("LANGSPAN_TEST_PANIC_ON_REQUEST").as_deref() == Ok(request_id) {
+            panic!("LANGSPAN_TEST_PANIC_ON_REQUEST named request {request_id}");
+        }
+    }
+    #[cfg(not(debug_assertions))]
+    fn panic_for_test(_: &str) {}
 
     /// The daily compaction. Its outcome is a log line; a failure leaves the
     /// log as it was and is tried again the next day.
@@ -2567,6 +2611,8 @@ mod unix {
         fs::set_permissions(&binding, fs::Permissions::from_mode(0o600))?;
         fs::rename(&binding, &socket)
             .map_err(|e| format!("move the local Unix socket into place: {e}"))?;
+        let check_runs = auto_check::Runs::default();
+        stop_on_panic(socket.clone(), check_runs.clone());
         let (sender, receiver) = mpsc::sync_channel::<Job>(config.max_clients);
         let (scan_sender, scan_receiver) = mpsc::sync_channel::<Registration>(1);
         let (scan_result_sender, scan_results) = mpsc::sync_channel::<ScanResult>(1);
@@ -2606,7 +2652,6 @@ mod unix {
         }
         let (check_sender, check_receiver) = mpsc::sync_channel::<auto_check::Message>(256);
         let write_counts = auto_check::WriteCounts::default();
-        let check_runs = auto_check::Runs::default();
         {
             let sender = sender.clone();
             let check_sender = check_sender.clone();
@@ -2684,6 +2729,7 @@ mod unix {
                 loop {
                     match receiver.recv_timeout(Duration::from_millis(100)) {
                         Ok(job) => {
+                            panic_for_test(&job.request.request_id);
                             if graph_reader.is_none() {
                                 graph_reader = crate::graph::Index::open_reader(&graph_path).ok();
                             }

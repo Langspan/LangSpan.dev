@@ -50,6 +50,11 @@ fn answers(state_dir: &Path) -> bool {
 /// Starts a coordinator for `root/state`, logging to `root/daemon.log`, and
 /// waits until it answers.
 fn start(root: &Path, idle_ms: Option<u64>) -> Owned {
+    start_with(root, idle_ms, &[])
+}
+
+/// `start`, with `env` set for the coordinator.
+fn start_with(root: &Path, idle_ms: Option<u64>, env: &[(&str, &str)]) -> Owned {
     let state_dir = root.join("state");
     let log = fs::File::create(root.join("daemon.log")).unwrap();
     let mut command = Process::new(env!("CARGO_BIN_EXE_langspan"));
@@ -60,7 +65,8 @@ fn start(root: &Path, idle_ms: Option<u64>) -> Owned {
         .arg(&state_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(log);
+        .stderr(log)
+        .envs(env.iter().copied());
     if let Some(ms) = idle_ms {
         command.env(IDLE, ms.to_string());
     }
@@ -316,4 +322,128 @@ fn a_coordinator_with_the_idle_exit_turned_off_keeps_running() {
     std::thread::sleep(Duration::from_secs(2));
     assert!(daemon.child().try_wait().unwrap().is_none());
     assert!(answers(&root.0.join("state")));
+}
+
+/// A panic in a coordinator thread stops the process with a failure status
+/// and one structured line, and removes its socket, so a login service
+/// starts it again instead of leaving it listening without answers (issue
+/// #329). Debug builds only: a release build has no switch that panics.
+#[cfg(debug_assertions)]
+#[test]
+fn a_coordinator_thread_that_panics_stops_the_coordinator() {
+    let root = Root::new();
+    let state_dir = root.0.join("state");
+    let mut daemon = start_with(
+        &root.0,
+        None,
+        &[("LANGSPAN_TEST_PANIC_ON_REQUEST", "panic-now")],
+    );
+    let _ = client::call(&state_dir, &Request::new("panic-now", Command::Status));
+    let log = exits_within(&mut daemon, &root.0, Duration::from_secs(1));
+    let status = daemon.child().wait().unwrap();
+    assert!(!status.success(), "{status}: {log}");
+    assert!(!state_dir.join("daemon.sock").exists(), "{log}");
+    let line = stopping_line(&log);
+    assert_eq!(line["level"], "error", "{log}");
+    assert_eq!(line["reason"], "panic", "{log}");
+    assert_eq!(line["thread"], "langspan-owner", "{log}");
+    let detail = line["detail"].as_str().unwrap_or_default();
+    assert!(detail.contains("LANGSPAN_TEST_PANIC_ON_REQUEST"), "{log}");
+    // One line: the default hook's unstructured message is not written too.
+    assert!(!log.contains("panicked at"), "{log}");
+}
+
+/// A state directory whose socket listens but never answers, and an empty
+/// home: what `doctor` sees of a stuck coordinator.
+fn stuck_socket(root: &Root) -> (PathBuf, PathBuf, std::os::unix::net::UnixListener) {
+    let state_dir = root.0.join("state");
+    fs::create_dir(&state_dir).unwrap();
+    fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    let home = root.0.join("home");
+    fs::create_dir(&home).unwrap();
+    let socket = state_dir.join("daemon.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+    (state_dir, home, listener)
+}
+
+/// Runs `doctor` for `state_dir` and returns its stdout, failing the test
+/// if it runs past `limit`.
+fn doctor_within(state_dir: &Path, home: &Path, limit: Duration) -> String {
+    let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
+        .arg("--state-dir")
+        .arg(state_dir)
+        .args(["doctor", "--home"])
+        .arg(home)
+        .env("LANGSPAN_AUTOSTART", "off")
+        .env_remove("GEMINI_CLI_HOME")
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("CODEX_HOME")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let started = Instant::now();
+    while child.try_wait().unwrap().is_none() {
+        if started.elapsed() > limit {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("doctor ran past {limit:?}");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let output = child.wait_with_output().unwrap();
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// `doctor` reports a coordinator that no longer accepts and whose listen
+/// backlog is full, instead of waiting on its socket: a blocking connect
+/// there does not return on Linux.
+#[test]
+fn doctor_reports_a_coordinator_whose_listen_backlog_is_full() {
+    let root = Root::new();
+    let (state_dir, home, _listener) = stuck_socket(&root);
+    // Queues connections until the backlog is full. On Linux the last
+    // connect blocks; on macOS it is refused, and the thread keeps the
+    // queued ones open.
+    let socket = state_dir.join("daemon.sock");
+    let queued = std::sync::Arc::new(AtomicU64::new(0));
+    let counter = queued.clone();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        while let Ok(stream) = std::os::unix::net::UnixStream::connect(&socket) {
+            held.push(stream);
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
+        std::thread::park();
+    });
+    let mut last = u64::MAX;
+    while queued.load(Ordering::Relaxed) != last {
+        last = queued.load(Ordering::Relaxed);
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let stdout = doctor_within(&state_dir, &home, Duration::from_secs(60));
+    assert!(stdout.contains("Coordinator"), "{stdout}");
+}
+
+/// `doctor` names a coordinator that accepts connections but does not
+/// answer, and says how to restart it (issue #329).
+#[test]
+fn doctor_names_a_coordinator_that_accepts_but_does_not_answer() {
+    let root = Root::new();
+    let (state_dir, home, listener) = stuck_socket(&root);
+    // Accepts every connection and holds it open without a reply.
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for stream in listener.incoming() {
+            held.push(stream);
+        }
+    });
+    let stdout = doctor_within(&state_dir, &home, Duration::from_secs(60));
+    assert!(
+        stdout.contains("accepts connections but does not answer"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("langspan daemon --state-dir"), "{stdout}");
 }

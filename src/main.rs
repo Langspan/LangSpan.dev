@@ -3463,6 +3463,16 @@ fn doctor(
     // What doctor judges a workspace by must be complete, even when the
     // bounded view leaves it out to fit a frame.
     match langspan::client::status_from(state_dir, &["workspace_git", "remote_peers"]) {
+        // A socket that accepts is a coordinator that runs but is stuck
+        // (issue #329): starting another would find it holding the lock.
+        Err(error) if accepts_connections(state_dir) => note(
+            false,
+            format!(
+                "Coordinator at {} accepts connections but does not answer: {error}. It is running but stuck; restart it: {}.",
+                state_dir.display(),
+                restart_hint(home, state_dir, None)
+            ),
+        ),
         Err(error) => note(
             false,
             format!(
@@ -4007,6 +4017,17 @@ fn main_install_problem(
 /// What `doctor` says of the tool events whose installed matcher is not the
 /// one this version writes (`install::stale_matchers`).
 const STALE_MATCHER: &str = "the matcher does not name the tools this version handles";
+
+/// Whether `state_dir`'s socket accepts a connection within a second.
+#[cfg(unix)]
+fn accepts_connections(state_dir: &std::path::Path) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    client::accepts(state_dir, deadline)
+}
+#[cfg(not(unix))]
+fn accepts_connections(_: &std::path::Path) -> bool {
+    false
+}
 
 /// How to restart the coordinator for `state_dir`: through the login
 /// service when `setup` installed one, otherwise by stopping process `pid`
