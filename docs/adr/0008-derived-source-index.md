@@ -782,7 +782,11 @@ current: 3,850 loaded, and 200 kept that the first pass had already parsed.
 - **Dependencies.** Tree-sitter and four grammars are compiled C, linked into
   the binary. Rows are in [the dependency notes](../dependencies.md).
 - The index lags the working tree by one scan plus one indexing pass. With N
-  workspaces a scan comes round about every N × 2 s.
+  workspaces a scan comes round about every N × 2 s. A workspace where a
+  session acts (a registration, a prompt, a tool call) is scanned ahead of
+  that order: at once, or 5 s after its last scan if that was sooner, so a
+  busy workspace does not take every scan. That bound does not grow with N
+  (issue #146).
 - The scan versions at most 4,096 files per workspace. A larger repository is
   scanned partially (ADR 0003): changed files first, then clean ones in path
   order. The index holds the files the scan versioned; a file a partial scan
