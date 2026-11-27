@@ -1068,6 +1068,9 @@ class DriverUnitTests(Temporary):
         entry = json.loads((self.root / "hooks.jsonl").read_text())
         self.assertEqual((entry["event"], entry["tool_use_id"], entry["exit_code"]), ("PreToolUse", "call-1", 2))
         self.assertEqual(entry["stdout"], '{"decision":"deny"}')
+        # Issue #262: the hook's own log line (LangSpan's coverage and detail)
+        # is kept, so a session told nothing shows why.
+        self.assertEqual(entry["stderr"], "why\n")
         self.assertEqual(os.stat(self.root / "hooks.jsonl").st_mode & 0o777, 0o600)
 
     def hook_log(self, log, command, *options, payload="{}"):
@@ -1991,7 +1994,8 @@ class DryRun(Temporary):
             # Issue #222: the context LangSpan's hooks added, from the coordinator, per task and in all.
             added = [t["context_added"] for t in record["tasks"]]
             self.assertTrue(all(a is not None and a["turns"] >= 1 for a in added), added)
-            self.assertTrue(any(a["bytes"] > 0 for a in added), added)
+            self.assertTrue(any(a["bytes"] > 0 for a in added),
+                            "%s\n%s" % (added, self.silence_report(output, record)))
             trial = record["context_added"]
             self.assertEqual((trial["status"], trial["turns"], trial["bytes"]),
                              ("reported", sum(a["turns"] for a in added), sum(a["bytes"] for a in added)))
@@ -2062,6 +2066,29 @@ class DryRun(Temporary):
                 elif entry.get("elapsed_ms", 0) > 5000:
                     lines.append("  %s %s at %s took %s ms" % (entry.get("event"), entry.get("tool"),
                                                               entry.get("at"), entry["elapsed_ms"]))
+        return "\n".join(lines)
+
+    def silence_report(self, output, record):
+        """Issue #262, what a session told nothing saw: per session its hook
+        calls, the slowest, those the wrapper ended, and the coverage
+        LangSpan's hook logged for each event; and the coordinator's scans."""
+        lines = ["coordinator scans: %s" % json.dumps(record["coordinator_scans"])]
+        for index, task in enumerate(record["tasks"], 1):
+            log = output / task["hook_log"] if task["hook_log"] else None
+            entries = [json.loads(line) for line in log.read_text().splitlines()] if log and log.is_file() else []
+            coverage = {}
+            for entry in entries:
+                for line in entry.get("stderr", "").splitlines():
+                    try:
+                        said = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(said, dict) and said.get("event") == "langspan_hook":
+                        key = "%s %s" % (entry.get("event"), said.get("coverage"))
+                        coverage[key] = coverage.get(key, 0) + 1
+            lines.append("session %d (%s): %d hook calls, slowest %s ms, %d ended by the wrapper, coverage %s" % (
+                index, task["role"], len(entries), max((e.get("elapsed_ms", 0) for e in entries), default=None),
+                sum(bool(e.get("timed_out")) for e in entries), json.dumps(coverage, sort_keys=True)))
         return "\n".join(lines)
 
     def informed(self, output_record):
@@ -2185,9 +2212,10 @@ class DryRun(Temporary):
                         if arm == "langspan" and mode == "follow" and family == "rename_vs_new_caller":
                             # LangSpan's interface notice of the rename reached every
                             # new caller's session, in the coordinator's own log.
-                            notices = [t["interface_notices"] for t in record["tasks"] if t["role"] == "new_caller"]
-                            self.assertTrue(all(count >= 1 for count in notices), notices)
                             output = self.root / ("%s-%s-%d-%s" % (arm, family, n, mode))
+                            notices = [t["interface_notices"] for t in record["tasks"] if t["role"] == "new_caller"]
+                            self.assertTrue(all(count >= 1 for count in notices),
+                                            "%s\n%s" % (notices, self.silence_report(output, record)))
                             told = [(output / t["hook_log"]).read_text() for t in record["tasks"]
                                     if t["role"] == "new_caller"]
                             self.assertTrue(all("load_config" in log and "In flight" in log for log in told))
