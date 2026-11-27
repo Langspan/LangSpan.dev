@@ -1575,7 +1575,7 @@ pub fn guard_hook(config: &Config, me: &str, call: &ShellCall, deadline: Instant
             file,
             &claims,
             &entries,
-            &crate::hook::file_state,
+            &crate::file_state::file_state,
             Reading {
                 deadline: until,
                 made: None,
@@ -1605,7 +1605,7 @@ pub fn guard_hook(config: &Config, me: &str, call: &ShellCall, deadline: Instant
     }
     let mut fields = vec![me, call.command.as_str()];
     fields.extend(evidence.iter().map(String::as_str));
-    let fingerprint = crate::hook::wire_id("commit-held", &fields);
+    let fingerprint = crate::ids::wire_id("commit-held", &fields);
     if journal::told(&config.state_dir, me, &fingerprint) {
         return passed(
             "it takes another live session's lines, and this session was told so once; not held again".into(),
@@ -1633,7 +1633,7 @@ fn record_held(
         .flat_map(|paths| paths.keys().cloned())
         .collect();
     let request = crate::protocol::Request::new(
-        crate::hook::wire_id("refusal", &[me, fingerprint]),
+        crate::ids::wire_id("refusal", &[me, fingerprint]),
         Command::RecordRefusal {
             session_id: me.into(),
             kind: langspan_core::RefusalKind::CommitHeld,
@@ -1882,7 +1882,7 @@ fn plan(
             &mut file,
             &claims,
             entries,
-            &crate::hook::file_state,
+            &crate::file_state::file_state,
             reading,
         );
         let owners = attributed.owners;
@@ -2827,7 +2827,7 @@ pub fn status_mine(
             file,
             &claims,
             &entries,
-            &crate::hook::file_state,
+            &crate::file_state::file_state,
             reading,
         );
         let (listed, theirs) = mine_file(file, &owners, staged.contains(&file.path));

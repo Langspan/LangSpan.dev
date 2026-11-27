@@ -773,7 +773,7 @@ pub fn snapshot(root: &Path, deadline: Instant) -> Result<Snapshot, String> {
         if bytes > MAX_SNAPSHOT_BYTES {
             return Err("the changed files are larger than the snapshot bound".into());
         }
-        let state = crate::hook::file_state(root, path).ok_or_else(unversioned)?;
+        let state = crate::file_state::file_state(root, path).ok_or_else(unversioned)?;
         snapshot.files.insert(
             path.to_owned(),
             Entry {
@@ -1310,19 +1310,19 @@ pub struct ChangeNote {
 /// secrets redacted, deceptive characters replaced, at most
 /// `NOTE_COMMAND_BYTES` bytes.
 pub fn kept_command(command: &str) -> String {
-    crate::hook::clean(&crate::hook::redact(command), NOTE_COMMAND_BYTES)
+    crate::text::clean(&crate::hook::redact(command), NOTE_COMMAND_BYTES)
 }
 
 fn notes_dir(state_dir: &Path, root: &Path) -> PathBuf {
     let workspace = workspace_identity(root);
-    state_dir.join("shell-changes").join(crate::hook::wire_id(
+    state_dir.join("shell-changes").join(crate::ids::wire_id(
         "shell-changes",
         &[&workspace.to_string_lossy()],
     ))
 }
 
 fn note_path(directory: &Path, path: &str) -> PathBuf {
-    directory.join(crate::hook::wire_id("shell-change", &[path]))
+    directory.join(crate::ids::wire_id("shell-change", &[path]))
 }
 
 /// Note that `session_id`'s command changed each of `files` to the version
