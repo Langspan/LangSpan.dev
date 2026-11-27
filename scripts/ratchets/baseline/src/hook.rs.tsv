@@ -1,4 +1,4 @@
-lines	3360
+lines	3361
 pub	45
 index	7
 slice	2
@@ -7,18 +7,13 @@ fn	lifecycle	290
 fn	pre	174
 edge	adopt
 edge	antigravity
-edge	breaks
 edge	claude_code
-edge	client
 edge	codex
 edge	commit
 edge	formatter
-edge	git
 edge	install
 edge	journal
 edge	lines
 edge	recent
-edge	shell
 edge	since
 edge	trail
-edge	wait
