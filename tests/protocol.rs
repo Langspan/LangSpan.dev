@@ -2761,6 +2761,34 @@ fn each_release_is_sent_only_the_event_types_it_reads() {
     }
 }
 
+/// Issue #259: a `changes` page holds only `disk_observed` and
+/// `branch_observed`, so it pages by its limit for every client: a client
+/// granted nothing reads both. A type the store's `changes` returns that
+/// some client cannot read needs the store to page by the client's reads,
+/// as `events` does.
+#[test]
+fn every_client_reads_the_event_types_of_a_changes_page() {
+    let events: Vec<_> = every_event_type()
+        .into_iter()
+        .filter(|recorded| {
+            matches!(
+                recorded.event,
+                langspan_core::Event::DiskObserved { .. }
+                    | langspan_core::Event::BranchObserved { .. }
+            )
+        })
+        .collect();
+    assert_eq!(events.len(), 2);
+    let response = answer(langspan_core::Outcome::Changes {
+        events: events.clone(),
+        scan: None,
+    });
+    let nothing = Capabilities::negotiate(OLDEST_PROTOCOL_VERSION, Some(&[]));
+    let page: serde_json::Value =
+        serde_json::from_slice(&encode_with(nothing, Some(&[]), &response).unwrap()).unwrap();
+    assert_eq!(event_types(&page).len(), 2, "{page}");
+}
+
 /// Issue #331: the reply says how many events it left out, to a client
 /// that reads that count (`withheld_events`). A frozen version cannot read
 /// it and is not told.
