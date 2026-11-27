@@ -149,6 +149,15 @@ builds nothing in either lane.
   Rust checks on main failed", or comments on that issue while it is open.
   Treat that issue like a failing check on `main`.
 
+The two times are targets the lanes should meet, not gates: a run over
+them still passes. `bash scripts/measure-ci.sh` reports them from GitHub's
+run data (the median and 90th percentile from push to result per event, the
+Linux and macOS job times by cache state, and how many dependency crates
+each job compiled); `--since` and `--until` bound the runs, and `--rows DIR`
+keeps one row per run and per job. The latest figures, the gap to each
+target and what would close it are in
+[docs/evidence/ci](evidence/ci/README.md).
+
 Locally, `sh scripts/check.sh` runs the full lane, and
 `LANGSPAN_CHECK_LANE=fast sh scripts/check.sh` the fast one. The runners
 come from the repository variables `LINUX_RUNNER` and `MACOS_RUNNER`;
