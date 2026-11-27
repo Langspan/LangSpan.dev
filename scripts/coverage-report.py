@@ -232,6 +232,8 @@ def main(argv):
     every, _ = lines(os.path.join(out, "all.lcov"))
     measured = {}
     for file, counts in production.items():
+        if not counts:
+            continue  # Every line test-only: measures no production lines.
         unit = every.get(file, {})
         covered = sum(1 for n, c in counts.items() if c > 0 or unit.get(n, 0) > 0)
         measured[file] = (len(counts), covered)

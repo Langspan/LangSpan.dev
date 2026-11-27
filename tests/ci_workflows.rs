@@ -2460,6 +2460,50 @@ fn coverage_fails_for_a_row_without_its_file_or_a_large_file_without_a_row() {
 }
 
 #[test]
+fn coverage_fails_for_a_row_whose_record_keeps_no_production_lines() {
+    // The export has a record for src/tests_only.rs, but --prepare drops
+    // every line of it as test-only: the row fails as if the record were
+    // absent, and the file isn't counted as 100% covered.
+    let dir = temp_dir("coverage-emptied");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("src/tests_only.rs"), "#[cfg(test)]\nmod t {}\n").unwrap();
+    let mut files = eleven(
+        Measured("src/f00.rs", 400, 380, 0),
+        Measured("src/f10.rs", 100, 95, 0),
+    );
+    files.push(Measured("src/tests_only.rs", 2, 2, 0));
+    let baseline = rows("95.0") + "src/tests_only.rs\t90.0\n";
+    let out = coverage_fixture(&dir, &files, &baseline);
+    let prepared = fs::read_to_string(out.join("production.lcov")).unwrap();
+    assert!(
+        kept_lines(&prepared, "src/tests_only.rs").is_empty(),
+        "{prepared}"
+    );
+    let (ok, stdout, stderr) = coverage_report(&dir, &out, &[]);
+    assert!(!ok, "{stdout}");
+    let message =
+        "`src/tests_only.rs` has a baseline row but no production lines measured; remove the row";
+    assert!(stdout.contains(message), "{stdout}");
+    assert!(stderr.contains(message), "{stderr}");
+    assert!(!stdout.contains("| `src/tests_only.rs` |"), "{stdout}");
+    let _ = fs::remove_dir_all(&dir);
+
+    // Every record emptied: no production lines at all, which fails like an
+    // export with no records instead of passing at 100%.
+    let dir = temp_dir("coverage-all-emptied");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("src/tests_only.rs"), "#[cfg(test)]\nmod t {}\n").unwrap();
+    let files = [Measured("src/tests_only.rs", 2, 2, 0)];
+    let out = coverage_fixture(&dir, &files, "");
+    for args in [&[][..], &["--write-baseline"]] {
+        let (ok, stdout, stderr) = coverage_report(&dir, &out, args);
+        assert!(!ok, "{args:?}: {stdout}");
+        assert!(stderr.contains("no production lines"), "{args:?}: {stderr}");
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn writing_the_coverage_baseline_records_one_row_per_file() {
     let dir = temp_dir("coverage-write");
     let mut files = eleven(
