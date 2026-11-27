@@ -371,6 +371,26 @@ fn a_wait_admits_the_edit_once_the_holder_ends_its_admission_with_the_file_uncha
     assert_eq!(f.dashboard_conflicts(), 0);
 }
 
+/// Review follow-up #244: the host delivers Bob's pre-tool event again
+/// after his wait admitted it, and gets the same admission, not a
+/// historical conflict.
+#[test]
+fn a_pre_tool_event_delivered_again_after_a_wait_keeps_its_admission() {
+    let f = Fixture::new();
+    f.wait_policy(&["--wait-ms", "2000"]);
+    f.alice_holds("alice-1");
+    let bob = std::thread::scope(|scope| {
+        let bob = scope.spawn(|| f.codex(BOB, "bob-1", "PreToolUse", Some(4000)));
+        std::thread::sleep(Duration::from_millis(400));
+        f.alice_ends("alice-1", false);
+        bob.join().unwrap()
+    });
+    assert_eq!(bob.coverage, "admitted", "{bob:?}");
+    let again = f.codex(BOB, "bob-1", "PreToolUse", None);
+    assert_eq!(again.coverage, "admitted", "{again:?}");
+    assert_eq!(f.events(&["write_waited"]).len(), 1);
+}
+
 /// A holder that never lets go: the wait ends with today's conflict
 /// refusal, saying how long it waited, before the hook's deadline.
 #[test]
@@ -448,6 +468,9 @@ fn a_wait_whose_holder_writes_the_file_ends_in_a_stale_refusal_naming_it() {
     let refused = f.events(&["write_refused"]);
     assert_eq!(refused.len(), 1, "{refused:?}");
     assert_eq!(refused[0]["kind"], "stale_base");
+    // One refusal, the stale one: the conflict that started the wait is
+    // not listed as another (review follow-up #244).
+    assert_eq!(f.dashboard_conflicts(), 0);
     assert_eq!(
         refused[0]["peer_session_id"],
         format!("claude-code.{ALICE}")

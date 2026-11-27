@@ -40,7 +40,9 @@ mod unix {
         // same request in the version it names cannot take effect twice.
         // Requests are the same in every version it answers, except the one
         // version 6 changed (`protocol::fits`), which is not sent at all to
-        // a daemon of version 5 or earlier.
+        // a daemon of version 5 or earlier, and a briefing of changes only,
+        // asked of a daemon before version 7 as the full view
+        // (`protocol::for_version`).
         if request.version == PROTOCOL_VERSION
             && (OLDEST_PROTOCOL_VERSION..PROTOCOL_VERSION).contains(&response.version)
             && matches!(&response.outcome, Outcome::Error { code, .. } if code == "unsupported_version")
@@ -49,6 +51,7 @@ mod unix {
                 return Err(crate::protocol::older_daemon(response.version).into());
             }
             request.version = response.version;
+            crate::protocol::for_version(response.version, &mut request.command);
             response = exchange(state_dir, &request, deadline)?;
         }
         if response.version != request.version {
@@ -309,8 +312,8 @@ mod unix {
         /// Roadmap D7 (review comment 4707749784), H9 (review comment
         /// 4711096877) and issue #222 (review comments 4711375982 and
         /// 4712860167): a daemon of an earlier build answers only protocol
-        /// version 3, or only up to 4, 5, 6 (roadmap F5's build) or 7
-        /// (issue #222's). It
+        /// version 3, or only up to 4, 5, 6 (roadmap F5's build), 7
+        /// (issue #222's) or 8 (issue #262's). It
         /// refuses this build's version in its own, as that build does, and
         /// the client asks again once in that version, with the same
         /// request, and reads that answer.
@@ -322,9 +325,70 @@ mod unix {
                 crate::protocol::PROTOCOL_VERSION_5,
                 crate::protocol::PROTOCOL_VERSION_6,
                 crate::protocol::PROTOCOL_VERSION_7,
+                crate::protocol::PROTOCOL_VERSION_8,
             ] {
                 ask_an_earlier_daemon(version);
             }
+        }
+
+        /// A daemon of this build's version 9 (roadmap E1) answers a
+        /// briefing of changes only as it is asked, once, with
+        /// `changes_only` kept.
+        #[test]
+        fn a_daemon_of_version_9_is_asked_once_for_changes_only() {
+            use std::io::{BufRead, BufReader};
+            use std::os::unix::fs::PermissionsExt;
+            let version = crate::protocol::PROTOCOL_VERSION_9;
+            let dir = std::env::temp_dir().join(format!("ls-current-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let listener = std::os::unix::net::UnixListener::bind(dir.join("daemon.sock")).unwrap();
+            std::fs::set_permissions(
+                dir.join("daemon.sock"),
+                std::fs::Permissions::from_mode(0o600),
+            )
+            .unwrap();
+            let peer = std::thread::spawn(move || {
+                let (stream, _) = listener.accept().unwrap();
+                let mut line = String::new();
+                BufReader::new(&stream).read_line(&mut line).unwrap();
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                let reply = serde_json::json!({"version": version, "request_id": request["request_id"],
+                    "replayed": false, "generation": 1, "lease_valid": null,
+                    "outcome": {"type": "error", "code": "answered", "message": "in its version"}});
+                writeln!(&stream, "{reply}").unwrap();
+                // A second request would be accepted here; none may come.
+                listener.set_nonblocking(true).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                (request, listener.accept().is_ok())
+            });
+            let request = crate::protocol::Request {
+                version,
+                request_id: "read".into(),
+                command: langspan_core::Command::Brief {
+                    session_id: "s".into(),
+                    max_peers: 8,
+                    deliver: true,
+                    mid_turn: false,
+                    left: Vec::new(),
+                    recent: false,
+                    recent_window_ms: None,
+                    mcp: false,
+                    changes_only: true,
+                },
+            };
+            let response = call(&dir, &request).unwrap();
+            let (asked, asked_again) = peer.join().unwrap();
+            std::fs::remove_dir_all(&dir).unwrap();
+            assert!(!asked_again, "asked again of a daemon of version 9");
+            assert_eq!(asked["version"], version);
+            assert_eq!(asked["command"]["changes_only"], true);
+            assert_eq!(response.version, version);
+            assert!(
+                matches!(&response.outcome, Outcome::Error { code, .. } if code == "answered"),
+                "{response:?}"
+            );
         }
 
         /// Review comment 4712442596: a request to record a rebased landing
@@ -422,7 +486,17 @@ mod unix {
             let request = crate::protocol::Request {
                 version: crate::protocol::PROTOCOL_VERSION,
                 request_id: "read".into(),
-                command: langspan_core::Command::Dashboard,
+                command: langspan_core::Command::Brief {
+                    session_id: "s".into(),
+                    max_peers: 8,
+                    deliver: true,
+                    mid_turn: false,
+                    left: Vec::new(),
+                    recent: false,
+                    recent_window_ms: None,
+                    mcp: false,
+                    changes_only: true,
+                },
             };
             let response = call(&dir, &request).unwrap();
             let asked = peer.join().unwrap();
@@ -437,7 +511,18 @@ mod unix {
                     serde_json::json!(version)
                 ]
             );
-            assert_eq!(asked[0]["command"], asked[1]["command"]);
+            // The same request, except that a briefing of changes only,
+            // which a daemon before version 7 cannot read, is asked of it
+            // as the full view (review follow-up #259). A daemon of version
+            // 7 or 8, which gives changes only, is asked for them still.
+            assert_eq!(asked[0]["command"]["changes_only"], true);
+            if version >= crate::protocol::PROTOCOL_VERSION_7 {
+                assert_eq!(asked[0]["command"], asked[1]["command"]);
+            } else {
+                let mut full = asked[0]["command"].clone();
+                full.as_object_mut().unwrap().shift_remove("changes_only");
+                assert_eq!(full, asked[1]["command"]);
+            }
             assert_eq!(asked[1]["request_id"], "read");
             assert_eq!(response.version, version);
             assert!(

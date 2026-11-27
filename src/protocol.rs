@@ -21,9 +21,12 @@ use std::io::{self, BufRead, BufReader, Read};
 /// `interface_notice_ids` in a briefing. Version 4 is version 3 with
 /// roadmap D7's rename fields in interface changes, history entries and
 /// in-flight symbols. Apart from recording a rebased or adapted landing and
-/// a note's symbol and tags, requests of an earlier version are requests of
-/// this one.
-pub const PROTOCOL_VERSION: u16 = 9;
+/// a note's symbol and tags (`fits`), and a briefing of changes only
+/// (`for_version`), requests of an earlier version are requests of this
+/// one.
+pub const PROTOCOL_VERSION: u16 = PROTOCOL_VERSION_9;
+/// Roadmap E1's version.
+pub const PROTOCOL_VERSION_9: u16 = 9;
 /// Issue #262's version, answered in its own shape.
 pub const PROTOCOL_VERSION_8: u16 = 8;
 /// Issue #222's version, answered in its own shape.
@@ -90,7 +93,7 @@ pub fn encode_record_for(version: u16, record: &StatusRecord) -> Result<String, 
 /// `value` without the fields versions after `version` added to it, apart
 /// from issue #222's (`protocol_6_outcome`, `protocol_6_activity`).
 fn earlier_shape(version: u16, value: &mut serde_json::Value) {
-    if version < PROTOCOL_VERSION {
+    if version < PROTOCOL_VERSION_9 {
         protocol_8_shape(value);
     }
     if version < PROTOCOL_VERSION_6 {
@@ -161,7 +164,7 @@ fn protocol_6_outcome(outcome: &mut Outcome) {
 /// The first version that can record a rebased or adapted landing.
 const REWRITES_SINCE: u16 = PROTOCOL_VERSION_6;
 /// The first version that reads a note's symbol and tags (roadmap E1).
-const ANCHORS_SINCE: u16 = PROTOCOL_VERSION;
+const ANCHORS_SINCE: u16 = PROTOCOL_VERSION_9;
 
 /// Whether a daemon answering `version` reads `command` as it is. An
 /// earlier daemon refuses a request to record a landing with `rebased` or
@@ -179,6 +182,22 @@ pub fn fits(version: u16, command: &Command) -> bool {
         }
         Command::Recap { tag, .. } => version >= ANCHORS_SINCE || tag.is_none(),
         _ => true,
+    }
+}
+
+/// The first version that can give a briefing of changes only.
+const CHANGES_ONLY_SINCE: u16 = PROTOCOL_VERSION_7;
+
+/// `command` as a daemon answering `version` reads it. A briefing of
+/// changes only (issue #222) is new in version 7, and an earlier daemon
+/// refuses the field as unknown: it is asked for the full view instead,
+/// which is all that daemon gives. A daemon of version 7 or later is
+/// asked for changes only, as the caller asked.
+pub fn for_version(version: u16, command: &mut Command) {
+    if version < CHANGES_ONLY_SINCE
+        && let Command::Brief { changes_only, .. } = command
+    {
+        *changes_only = false;
     }
 }
 

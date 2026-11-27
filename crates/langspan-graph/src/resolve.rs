@@ -21,7 +21,8 @@ const SCRIPT: [&str; 8] = ["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"]
 /// - TypeScript and JavaScript: a specifier starting `./` or `../`, joined to
 ///   the importer's directory; as written, then (for `.js`, `.jsx`, `.mjs`
 ///   and `.cjs`) with the TypeScript extension it is emitted from, then with
-///   each extension in `SCRIPT`, then as a directory's `index` file.
+///   each extension in `SCRIPT`, then as a directory's `index` file (the
+///   workspace root's, for `..` from `src/a.ts`).
 /// - Python: a relative module (`.store`, `..core`) from the importer's
 ///   package; an absolute one (`app.models`) under each directory above the
 ///   importer, nearest first. A module is `NAME.py`, `NAME.pyi` or
@@ -30,7 +31,9 @@ const SCRIPT: [&str; 8] = ["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"]
 ///   the importer that holds `lib.rs` or `main.rs`), `super::` or `self::`,
 ///   or a bare path, which is taken as relative to the importer's module.
 ///   The longest prefix of the path that names a module file (`NAME.rs` or
-///   `NAME/mod.rs`) wins, so `crate::store::save` is `src/store.rs`.
+///   `NAME/mod.rs`) wins, so `crate::store::save` is `src/store.rs`. A
+///   `crate::` path that names no module file (`crate::Language`) is the
+///   crate root's file. A glob (`crate::store::*`) is its module's path.
 pub fn resolve_import(
     importer: &str,
     target: &str,
@@ -72,11 +75,16 @@ fn joined<'a>(mut parts: Vec<&'a str>, relative: &'a str) -> Option<String> {
 fn script(importer: &str, target: &str) -> Vec<String> {
     let relative =
         target == "." || target == ".." || target.starts_with("./") || target.starts_with("../");
-    let Some(base) = relative
-        .then(|| joined(directory(importer), target))
-        .flatten()
-    else {
+    if !relative {
         return Vec::new();
+    }
+    let Some(base) = joined(directory(importer), target) else {
+        // `..` from `src/a.ts` names the workspace root: only its `index`.
+        let root = joined(directory(importer), &format!("{target}/index"));
+        return match root.as_deref() {
+            Some("index") => SCRIPT.iter().map(|ext| format!("index.{ext}")).collect(),
+            _ => Vec::new(),
+        };
     };
     let mut candidates = Vec::new();
     let file = base.rsplit('/').next().unwrap_or(&base);
@@ -160,13 +168,15 @@ fn rust_module_directory(importer: &str) -> Vec<&str> {
 }
 
 fn rust(importer: &str, target: &str, exists: &mut impl FnMut(&str) -> bool) -> Option<String> {
-    // `a::{b, c}` and `a::b as c`: the path before the group or the alias.
+    // `a::{b, c}`, `a::*` and `a::b as c`: the path before the group, the
+    // glob or the alias.
     let path = target.split('{').next().unwrap_or(target);
     let path = path
         .split(" as ")
         .next()
         .unwrap_or(path)
         .trim()
+        .trim_end_matches('*')
         .trim_end_matches(':');
     let mut segments: Vec<&str> = path.split("::").map(str::trim).collect();
     if segments.iter().any(|segment| {
@@ -174,17 +184,21 @@ fn rust(importer: &str, target: &str, exists: &mut impl FnMut(&str) -> bool) -> 
     }) {
         return None;
     }
+    // An item of the crate root itself (`crate::Language`) is in its file.
+    let mut crate_root = None;
     let base = match segments.first().copied() {
         Some("crate") => {
             segments.remove(0);
             let mut parts = directory(importer);
             loop {
-                let mut root = |name: &str| {
+                let root = ["lib.rs", "main.rs"].into_iter().find_map(|name| {
                     let mut path = parts.clone();
                     path.push(name);
-                    exists(&path.join("/"))
-                };
-                if root("lib.rs") || root("main.rs") {
+                    let path = path.join("/");
+                    exists(&path).then_some(path)
+                });
+                if root.is_some() {
+                    crate_root = root;
                     break parts;
                 }
                 parts.pop()?;
@@ -204,10 +218,13 @@ fn rust(importer: &str, target: &str, exists: &mut impl FnMut(&str) -> bool) -> 
         }
         _ => rust_module_directory(importer),
     };
-    (1..=segments.len()).rev().find_map(|length| {
-        let stem = joined(base.clone(), &segments[..length].join("/"))?;
-        [format!("{stem}.rs"), format!("{stem}/mod.rs")]
-            .into_iter()
-            .find(|candidate| exists(candidate))
-    })
+    (1..=segments.len())
+        .rev()
+        .find_map(|length| {
+            let stem = joined(base.clone(), &segments[..length].join("/"))?;
+            [format!("{stem}.rs"), format!("{stem}/mod.rs")]
+                .into_iter()
+                .find(|candidate| exists(candidate))
+        })
+        .or(crate_root)
 }

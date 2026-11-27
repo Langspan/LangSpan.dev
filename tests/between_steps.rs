@@ -331,6 +331,15 @@ fn a_notice_reaches_a_session_that_makes_no_hook_call_for_30_seconds() {
     assert_eq!(told.len(), 1, "{told:#?}");
     assert_eq!(told[0]["session_id"], "claude-code.alice");
     assert_eq!(told[0]["via"], "between_steps");
+    // What the wake placed in alice's context is counted (review follow-up
+    // #269).
+    let added: Vec<Value> = w
+        .events()
+        .into_iter()
+        .filter(|event| event["type"] == "context_added" && event["bytes"] == stderr.len())
+        .collect();
+    assert_eq!(added.len(), 1, "{added:#?}");
+    assert_eq!(added[0]["turn"], false);
 
     // Alice's next prompt is not told it again, and neither is a second
     // watcher.

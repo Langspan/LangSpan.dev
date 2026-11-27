@@ -1,7 +1,7 @@
 use langspan::protocol::{
     OLDEST_PROTOCOL_VERSION, PROTOCOL_VERSION, PROTOCOL_VERSION_4, PROTOCOL_VERSION_5,
-    PROTOCOL_VERSION_6, PROTOCOL_VERSION_7, PROTOCOL_VERSION_8, Request, Response, encode,
-    encode_for, encode_record_for, read_frame,
+    PROTOCOL_VERSION_6, PROTOCOL_VERSION_7, PROTOCOL_VERSION_8, PROTOCOL_VERSION_9, Request,
+    Response, encode, encode_for, encode_record_for, read_frame,
 };
 use langspan_core::Command;
 
@@ -1874,6 +1874,46 @@ fn recording_a_rebased_or_adapted_landing_fits_only_version_6_and_later() {
     }
     for version in std::iter::once(PROTOCOL_VERSION).chain(EARLIER_VERSIONS) {
         assert!(fits(version, &with(false, false)), "version {version}");
+    }
+}
+
+/// Review follow-up #259: a briefing of changes only (issue #222) is new
+/// in version 7. A request to a daemon of version 7, 8 or 9 keeps asking for
+/// changes only; one to a daemon of version 6 or earlier, which refuses
+/// the field, asks for the full view and is otherwise the same. Other
+/// requests are left as they are.
+#[test]
+fn a_briefing_of_changes_only_is_asked_of_version_7_and_later() {
+    use langspan::protocol::for_version;
+    let wire = include_bytes!("../fixtures/brief-changes-only-request-v7.json");
+    let request: Request = serde_json::from_slice(wire).unwrap();
+    assert_eq!(request.version, PROTOCOL_VERSION_7);
+    assert_eq!(encode(&request).unwrap(), wire);
+    let with_changes_only = |value: bool| {
+        let mut command = request.command.clone();
+        let Command::Brief { changes_only, .. } = &mut command else {
+            panic!("{request:?}");
+        };
+        assert!(*changes_only);
+        *changes_only = value;
+        command
+    };
+    let changes_only_versions = [PROTOCOL_VERSION_9, PROTOCOL_VERSION_8, PROTOCOL_VERSION_7];
+    assert_eq!(PROTOCOL_VERSION, PROTOCOL_VERSION_9, "add the new version");
+    for version in changes_only_versions {
+        let mut command = request.command.clone();
+        for_version(version, &mut command);
+        assert_eq!(command, with_changes_only(true), "version {version}");
+    }
+    for version in EARLIER_VERSIONS {
+        let mut command = request.command.clone();
+        for_version(version, &mut command);
+        assert_eq!(command, with_changes_only(false), "version {version}");
+    }
+    for version in changes_only_versions.into_iter().chain(EARLIER_VERSIONS) {
+        let mut command = Command::Dashboard;
+        for_version(version, &mut command);
+        assert_eq!(command, Command::Dashboard, "version {version}");
     }
 }
 
