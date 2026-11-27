@@ -29,21 +29,21 @@ Close Claude Code. In an empty folder, set your target on the first line and pas
 ```sh
 target=aarch64-apple-darwin
 url=https://github.com/Langspan/LangSpan.dev/releases/latest/download
-curl -fsSLO "$url/SHA256SUMS"
-archive=$(awk -v t="-$target.tar.gz" 'index($2, t) { print $2 }' SHA256SUMS)
-curl -fsSLO "$url/$archive"
-awk -v a="$archive" '$2 == a' SHA256SUMS | shasum -a 256 -c
-tar -xzf "$archive"
-cd "${archive%.tar.gz}"
-mkdir -p "$HOME/.local/bin"
-install -m 0755 langspan "$HOME/.local/bin/langspan"
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.$(basename "$SHELL")rc"
-export PATH="$HOME/.local/bin:$PATH"
-langspan setup
+curl -fsSLO "$url/SHA256SUMS" &&
+archive=$(awk -v t="-$target.tar.gz" 'index($2, t) { print $2 }' SHA256SUMS) &&
+curl -fsSLO "$url/$archive" &&
+awk -v a="$archive" '$2 == a' SHA256SUMS | shasum -a 256 -c &&
+tar -xzf "$archive" &&
+cd "${archive%.tar.gz}" &&
+mkdir -p "$HOME/.local/bin" &&
+install -m 0755 langspan "$HOME/.local/bin/langspan" &&
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.$(basename "$SHELL")rc" &&
+export PATH="$HOME/.local/bin:$PATH" &&
+langspan setup &&
 langspan doctor
 ```
 
-The checksum line prints `OK`. On Linux without `shasum`, use `sha256sum -c` instead. The `echo` line keeps `langspan` on your `PATH` in new shells. An older bash, such as macOS's `/bin/bash`, runs pasted lines one at a time, so setup would read the `langspan doctor` line as its answer; use zsh there.
+The checksum line prints `OK`. Each `&&` runs the next step only if the one before succeeds, so a failed download or checksum installs nothing. On Linux without `shasum`, use `sha256sum -c` instead. The `echo` line keeps `langspan` on your `PATH` in new shells. An older bash, such as macOS's `/bin/bash`, runs pasted lines one at a time, and this block isn't tested there; use zsh.
 
 Setup shows one plan and asks once. It connects the agent hosts it finds, starts the coordinator as a login service, and runs `langspan doctor`. On a new install, `doctor` reports that no workspace is registered yet; your first agent session registers one. In Codex, review and trust the hooks with `/hooks`.
 

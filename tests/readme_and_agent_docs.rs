@@ -5,7 +5,9 @@
 //! context on every agent turn.
 
 use std::fs;
-use std::path::Path;
+use std::os::unix::fs::{PermissionsExt, symlink};
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// The README's upper bound in words of rendered text.
 const README_MAX_WORDS: usize = 1_500;
@@ -232,4 +234,285 @@ fn the_agent_file_stays_within_its_word_budget() {
          (docs/writing-style.md, \"Docs for agents\").",
         words.len()
     );
+}
+
+/// The folder and archive stem of the stand-in release.
+const RELEASE: &str = "langspan-v9.9.9-aarch64-apple-darwin";
+/// The file in the home that the `langspan` stand-ins append their arguments to.
+const RAN: &str = "ran";
+
+fn on_path(name: &str) -> Option<PathBuf> {
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
+/// A `langspan` stand-in that records `label` and its arguments.
+fn write_stand_in(path: &Path, label: &str) {
+    let script = format!("#!/bin/sh\necho \"{label} $*\" >> \"$HOME/{RAN}\"\n");
+    fs::write(path, script).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// A release served from a local folder, an empty folder to paste the
+/// quickstart in, a home with an earlier install, and a `PATH` holding only
+/// the tools the block names. Real `curl`, `awk`, `tar` and checksum tool.
+struct Quickstart {
+    base: PathBuf,
+    /// The checksum command the block runs: its own, or the Linux variant.
+    checker: &'static str,
+}
+
+impl Quickstart {
+    fn new(name: &str, checker: &'static str) -> Self {
+        let program = checker.split(' ').next().unwrap();
+        let base = fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!(
+                "langspan-quickstart-{name}-{program}-{}",
+                std::process::id()
+            ));
+        let _ = fs::remove_dir_all(&base);
+        let quickstart = Self { base, checker };
+        let stage = quickstart.base.join("stage").join(RELEASE);
+        let earlier = quickstart.base.join("home/.local/bin");
+        for dir in [
+            &stage,
+            &earlier,
+            &quickstart.base.join("release"),
+            &quickstart.base.join("work"),
+            &quickstart.base.join("bin"),
+        ] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        for tool in [
+            "curl", "awk", "tar", "gzip", "mkdir", "install", "basename", program,
+        ] {
+            match on_path(tool) {
+                Some(found) => symlink(found, quickstart.base.join("bin").join(tool)).unwrap(),
+                // GNU tar runs gzip; a tar with gzip built in needs none.
+                None if tool == "gzip" => {}
+                None => panic!("the quickstart test needs {tool} on PATH"),
+            }
+        }
+        write_stand_in(&stage.join("langspan"), "new");
+        write_stand_in(&earlier.join("langspan"), "earlier");
+        let packed = Command::new("tar")
+            .arg("-czf")
+            .arg(quickstart.archive())
+            .arg("-C")
+            .arg(quickstart.base.join("stage"))
+            .arg(RELEASE)
+            .status()
+            .unwrap();
+        assert!(packed.success());
+        quickstart.list(&quickstart.digest());
+        quickstart
+    }
+
+    fn archive(&self) -> PathBuf {
+        self.base.join("release").join(format!("{RELEASE}.tar.gz"))
+    }
+
+    fn program(&self) -> &'static str {
+        self.checker.split(' ').next().unwrap()
+    }
+
+    /// The archive's SHA-256, from the same tool the block checks it with.
+    fn digest(&self) -> String {
+        let mut words = self.checker.split(' ').filter(|word| *word != "-c");
+        let output = Command::new(words.next().unwrap())
+            .args(words)
+            .arg(self.archive())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let line = String::from_utf8(output.stdout).unwrap();
+        line.split_whitespace().next().unwrap().to_owned()
+    }
+
+    /// Publishes `SHA256SUMS` as the release workflow lays it out: the
+    /// archive under `digest`, and the target's SBOM.
+    fn list(&self, digest: &str) {
+        let sbom = "1".repeat(64);
+        fs::write(
+            self.base.join("release/SHA256SUMS"),
+            format!("{digest}  {RELEASE}.tar.gz\n{sbom}  {RELEASE}.cdx.json\n"),
+        )
+        .unwrap();
+    }
+
+    /// The README's block, pointed at the local release.
+    fn block(&self) -> String {
+        let block = sh_block_after(&read("README.md"), "## Quickstart");
+        assert!(block.contains("shasum -a 256 -c"));
+        let release = format!("url=file://{}", self.base.join("release").display());
+        block
+            .replace("shasum -a 256 -c", self.checker)
+            .lines()
+            .map(|line| {
+                if line.starts_with("url=") {
+                    release.as_str()
+                } else {
+                    line
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Runs `block` as a shell runs a pasted block: a failed line does not
+    /// end the shell. Returns the block's standard error if it failed.
+    fn paste(&self, block: &str) -> Result<(), String> {
+        let home = self.base.join("home");
+        let path = std::env::join_paths([home.join(".local/bin"), self.base.join("bin")]).unwrap();
+        let output = Command::new("/bin/sh")
+            .args(["-c", block])
+            .current_dir(self.base.join("work"))
+            .env_clear()
+            .env("HOME", &home)
+            .env("SHELL", "/bin/zsh")
+            .env("PATH", path)
+            .output()
+            .unwrap();
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(String::from_utf8_lossy(&output.stderr).into_owned())
+        }
+    }
+
+    fn home_file(&self, relative: &str) -> Option<String> {
+        fs::read_to_string(self.base.join("home").join(relative)).ok()
+    }
+}
+
+impl Drop for Quickstart {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.base);
+    }
+}
+
+/// The checksum commands the docs name that this machine has. The docs give
+/// `sha256sum -c` for Linux only: macOS's `sha256sum -c` takes no list on
+/// standard input.
+fn checkers() -> Vec<&'static str> {
+    let found: Vec<_> = ["shasum -a 256 -c", "sha256sum -c"]
+        .into_iter()
+        .filter(|checker| cfg!(target_os = "linux") || checker.starts_with("shasum"))
+        .filter(|checker| on_path(checker.split(' ').next().unwrap()).is_some())
+        .collect();
+    assert!(!found.is_empty(), "no SHA-256 tool on PATH");
+    found
+}
+
+#[test]
+fn the_quickstart_installs_and_sets_up_an_intact_download() {
+    for checker in checkers() {
+        let quickstart = Quickstart::new("intact", checker);
+        assert_eq!(quickstart.paste(&quickstart.block()), Ok(()), "{checker}");
+        assert_eq!(
+            quickstart.home_file(RAN).as_deref(),
+            Some("new setup\nnew doctor\n"),
+            "{checker}: the downloaded binary runs setup, then doctor"
+        );
+        assert!(
+            quickstart
+                .home_file(".zshrc")
+                .is_some_and(|profile| profile.contains(".local/bin")),
+            "{checker}: PATH is kept for later shells"
+        );
+    }
+}
+
+#[test]
+fn the_quickstart_stops_at_the_first_failed_step() {
+    type Break = fn(&Quickstart) -> String;
+    let cases: [(&str, Break); 6] = [
+        ("checksum-mismatch", |quickstart| {
+            quickstart.list(&"0".repeat(64));
+            quickstart.block()
+        }),
+        ("no-checksum-tool", |quickstart| {
+            fs::remove_file(quickstart.base.join("bin").join(quickstart.program())).unwrap();
+            quickstart.block()
+        }),
+        ("unknown-target", |quickstart| {
+            let block = quickstart.block();
+            assert!(block.contains("target=aarch64-apple-darwin\n"));
+            block.replace("target=aarch64-apple-darwin\n", "target=riscv64-none\n")
+        }),
+        ("no-checksum-file", |quickstart| {
+            fs::remove_file(quickstart.base.join("release/SHA256SUMS")).unwrap();
+            quickstart.block()
+        }),
+        ("no-archive", |quickstart| {
+            fs::remove_file(quickstart.archive()).unwrap();
+            quickstart.block()
+        }),
+        // The checksum matches, but the archive doesn't extract, and the
+        // folder already holds a file named `langspan`.
+        ("not-an-archive", |quickstart| {
+            fs::write(quickstart.archive(), "not a tarball").unwrap();
+            quickstart.list(&quickstart.digest());
+            write_stand_in(&quickstart.base.join("work/langspan"), "stray");
+            quickstart.block()
+        }),
+    ];
+    for checker in checkers() {
+        for (name, break_it) in cases {
+            let quickstart = Quickstart::new(name, checker);
+            let earlier = quickstart.home_file(".local/bin/langspan");
+            let block = break_it(&quickstart);
+            assert!(
+                quickstart.paste(&block).is_err(),
+                "{name}, {checker}: the block must report the failure"
+            );
+            assert_eq!(
+                quickstart.home_file(RAN),
+                None,
+                "{name}, {checker}: no langspan may run after a failed step"
+            );
+            assert_eq!(
+                quickstart.home_file(".local/bin/langspan"),
+                earlier,
+                "{name}, {checker}: nothing may be installed after a failed step"
+            );
+            assert_eq!(
+                quickstart.home_file(".zshrc"),
+                None,
+                "{name}, {checker}: the shell startup file must stay untouched"
+            );
+            assert!(
+                !quickstart.base.join("work").join(RELEASE).exists(),
+                "{name}, {checker}: nothing may be extracted after a failed step"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_quickstart_gates_every_step_on_the_one_before() {
+    // A line added without `&&` would run after a failed check.
+    let block = sh_block_after(&read("README.md"), "## Quickstart");
+    let lines: Vec<&str> = block.lines().collect();
+    let first_step = lines
+        .iter()
+        .position(|line| line.starts_with("curl "))
+        .expect("the quickstart downloads with curl");
+    for line in &lines[..first_step] {
+        assert!(
+            line.starts_with("target=") || line.starts_with("url="),
+            "only the two settings may precede the first download: {line:?}"
+        );
+    }
+    let (last, gated) = lines[first_step..].split_last().unwrap();
+    for line in gated {
+        assert!(
+            line.ends_with(" &&"),
+            "{line:?} must end with `&&` so the next step needs it to succeed"
+        );
+    }
+    assert_eq!(*last, "langspan doctor");
+    assert!(!block.contains("||"), "no step may excuse a failure");
 }

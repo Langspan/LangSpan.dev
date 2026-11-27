@@ -20,19 +20,21 @@ Close Claude Code. In an empty folder, set your target on the first line and pas
 ```sh
 target=aarch64-apple-darwin
 url=https://github.com/Langspan/LangSpan.dev/releases/latest/download
-curl -fsSLO "$url/SHA256SUMS"
-archive=$(awk -v t="-$target.tar.gz" 'index($2, t) { print $2 }' SHA256SUMS)
-curl -fsSLO "$url/$archive"
-awk -v a="$archive" '$2 == a' SHA256SUMS | shasum -a 256 -c
-tar -xzf "$archive"
-cd "${archive%.tar.gz}"
-mkdir -p "$HOME/.local/bin"
-install -m 0755 langspan "$HOME/.local/bin/langspan"
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.$(basename "$SHELL")rc"
-export PATH="$HOME/.local/bin:$PATH"
-langspan setup
+curl -fsSLO "$url/SHA256SUMS" &&
+archive=$(awk -v t="-$target.tar.gz" 'index($2, t) { print $2 }' SHA256SUMS) &&
+curl -fsSLO "$url/$archive" &&
+awk -v a="$archive" '$2 == a' SHA256SUMS | shasum -a 256 -c &&
+tar -xzf "$archive" &&
+cd "${archive%.tar.gz}" &&
+mkdir -p "$HOME/.local/bin" &&
+install -m 0755 langspan "$HOME/.local/bin/langspan" &&
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.$(basename "$SHELL")rc" &&
+export PATH="$HOME/.local/bin:$PATH" &&
+langspan setup &&
 langspan doctor
 ```
+
+Each `&&` runs the next step only if the one before succeeds. A failed download, a checksum that doesn't match, or a missing checksum tool stops the block there: nothing is extracted, installed or run. Fix the reported error and paste the block again.
 
 The block does the following:
 
@@ -42,7 +44,7 @@ The block does the following:
 4. Installs `langspan` in `~/.local/bin`, and adds that folder to `PATH` in your shell's startup file (`~/.zshrc` or `~/.bashrc`) for new shells.
 5. Runs `langspan setup`, which shows one plan, asks once, connects the agent hosts it finds, starts the coordinator and runs `langspan doctor`.
 
-zsh and bash 5.1 or later take a pasted block as a whole, so setup's question waits for you. An older bash, such as macOS's `/bin/bash` 3.2, runs pasted lines one at a time, and setup would read the next pasted line as its answer and change nothing; use zsh there, or run the last two lines one at a time.
+zsh and bash 5.1 or later take a pasted block as a whole, so setup's question waits for you. An older bash, such as macOS's `/bin/bash` 3.2, runs pasted lines one at a time, and this block isn't tested there; use zsh.
 
 On a new install, `doctor` reports that no workspace is registered yet; your first agent session registers one. In Codex, use `/hooks` to review and trust the hooks. Open your agents in a Git repository, and run `langspan dashboard --open` to watch their activity. The [usage guide](usage.md#set-up-in-one-command) covers setup in detail.
 
