@@ -12,6 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 mod prompt;
+mod rename_hold;
 mod render;
 mod shell_hooks;
 pub use crate::file_state::{MAX_VERSION_BYTES, file_state};
@@ -202,8 +203,9 @@ pub struct Operation {
     pub snapshot_unknown: bool,
     /// For a shell call, the command and the directory it runs in.
     pub shell: Option<ShellCall>,
-    /// The whole new content of a file the call creates outside `edits` (a
-    /// Codex `Add File`), for the break check before the write
+    /// The whole new content of a file the call creates or deletes outside
+    /// `edits` (a Codex `Add File`, or empty for a `Delete File`), for the
+    /// break check and the rename hold before the write
     /// ([ADR 0029](../docs/adr/0029-break-alerts-at-write-time.md)).
     pub contents: Vec<(String, String)>,
     /// The host gives the model `additionalContext` from a pre-tool reply
@@ -1840,9 +1842,14 @@ enum WaitEnd {
 
 impl Session<'_> {
     fn call(&self, request_id: String, command: Command) -> Result<Response, Failure> {
-        let request = Request::new(request_id, command);
-        let response = client::call_until(&self.config.state_dir, &request, self.deadline)
-            .map_err(|error| {
+        self.call_by(request_id, command, self.deadline)
+    }
+
+    /// `call`, answered `by` then: a step before the admission leaves it time.
+    fn call_by(&self, id: String, command: Command, by: Instant) -> Result<Response, Failure> {
+        let request = Request::new(id, command);
+        let response =
+            client::call_until(&self.config.state_dir, &request, by).map_err(|error| {
                 let text = error.to_string();
                 let coverage = if text.contains("deadline") || text.contains("timed out") {
                     "timeout"
@@ -2013,7 +2020,17 @@ impl Session<'_> {
                 },
             )
         };
-        let mut admitted = self.attach(ids).and_then(|()| admit(ids.admit.clone()));
+        let attached = self.attach(ids);
+        // A write that renames a name other worktrees' uncommitted files
+        // use is held once, before it takes an admission (issue #213).
+        let rename_note = match (&attached, break_check) {
+            (Ok(()), BreakCheck::Now) => self.rename_hold(ids, &keys, edits, contents),
+            _ => None,
+        };
+        if let Some(Ok(held)) = rename_note {
+            return held;
+        }
+        let mut admitted = attached.and_then(|()| admit(ids.admit.clone()));
         // The same call delivered again after a wait that admitted it: its
         // first request replays the conflict that started the wait, so ask
         // again under the request the wait ended with (issue #244).
@@ -2048,7 +2065,7 @@ impl Session<'_> {
                 }
             }
         }
-        let reply = match admitted {
+        let mut reply = match admitted {
             Err(failure) => failure_reply(failure),
             Ok(response) => match response.outcome {
                 Outcome::Admitted { lease } if response.lease_valid == Some(true) => {
@@ -2150,6 +2167,9 @@ impl Session<'_> {
             if let Some(result) = result {
                 self.record_wait(ids, operation, &keys, &wait, result, Vec::new());
             }
+        }
+        if let Some(Err(note)) = rename_note {
+            reply.detail.push_str(&format!("; {note}"));
         }
         reply
     }
@@ -2571,30 +2591,7 @@ impl Session<'_> {
             if langspan_graph::Language::for_path(key).is_none() {
                 continue;
             }
-            let written = match contents.iter().find(|(path, _)| path == key) {
-                Some((_, content)) => Some((content.clone(), None)),
-                None => edits
-                    .iter()
-                    .find(|(path, _)| path == key)
-                    .and_then(|(_, edit)| {
-                        if let crate::regions::Edit::Write(content) = edit {
-                            return Some((content.clone(), None));
-                        }
-                        let bytes = file_content(self.root, key)??;
-                        let text = std::str::from_utf8(&bytes).ok()?;
-                        let (content, lines) = match edit {
-                            crate::regions::Edit::Replace(list) => {
-                                crate::breaks::replaced(text, list)?
-                            }
-                            crate::regions::Edit::Hunks(hunks) => {
-                                crate::breaks::patched(text, hunks)?
-                            }
-                            crate::regions::Edit::Write(_) => return None,
-                        };
-                        Some((content, Some(lines)))
-                    }),
-            };
-            let Some((content, lines)) = written else {
+            let Some((content, lines)) = self.written_text(key, edits, contents) else {
                 continue;
             };
             if Instant::now() >= start_by {
@@ -2612,6 +2609,35 @@ impl Session<'_> {
             }
         }
         Ok(calls)
+    }
+
+    /// The whole text a write leaves in `key`, and for an edit of an
+    /// existing file the lines it writes. `None` when it cannot be built.
+    fn written_text(
+        &self,
+        key: &str,
+        edits: &[(String, crate::regions::Edit)],
+        contents: &[(String, String)],
+    ) -> Option<(String, Option<std::collections::BTreeSet<u32>>)> {
+        match contents.iter().find(|(path, _)| path == key) {
+            Some((_, content)) => Some((content.clone(), None)),
+            None => edits
+                .iter()
+                .find(|(path, _)| path == key)
+                .and_then(|(_, edit)| {
+                    if let crate::regions::Edit::Write(content) = edit {
+                        return Some((content.clone(), None));
+                    }
+                    let bytes = file_content(self.root, key)??;
+                    let text = std::str::from_utf8(&bytes).ok()?;
+                    let (content, lines) = match edit {
+                        crate::regions::Edit::Replace(list) => crate::breaks::replaced(text, list)?,
+                        crate::regions::Edit::Hunks(hunks) => crate::breaks::patched(text, hunks)?,
+                        crate::regions::Edit::Write(_) => return None,
+                    };
+                    Some((content, Some(lines)))
+                }),
+        }
     }
 
     /// The break check starts only while a quarter of the budget remains.

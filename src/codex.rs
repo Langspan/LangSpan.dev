@@ -150,7 +150,7 @@ fn parse_event(
             // Codex reads through shell commands, which no hook reports.
             snapshot_unknown: true,
             shell: None,
-            contents: added_files(command)
+            contents: whole_files(command)
                 .into_iter()
                 .filter_map(|(path, content)| {
                     Some((
@@ -467,20 +467,21 @@ pub fn patch_edits(patch: &str) -> Vec<(String, crate::regions::Edit)> {
         .collect()
 }
 
-/// The content of each `Add File` section of a patch that `patch_paths`
-/// accepted: its `+` lines. A path named in more than one section has none.
-fn added_files(patch: &str) -> Vec<(String, String)> {
+/// The whole content a patch that `patch_paths` accepted leaves in a file:
+/// an `Add File` section's `+` lines, and nothing for a `Delete File`. A
+/// path named in more than one section has none.
+fn whole_files(patch: &str) -> Vec<(String, String)> {
     let mut sections: Vec<(String, Option<String>)> = Vec::new();
     for line in patch.trim().lines() {
         let line = line.strip_suffix('\r').unwrap_or(line);
-        if let Some(path) = line.strip_prefix("*** Add File: ") {
-            sections.push((path.to_owned(), Some(String::new())));
-            continue;
-        }
-        if let Some(path) = ["*** Update File: ", "*** Delete File: "]
+        if let Some(path) = ["*** Add File: ", "*** Delete File: "]
             .iter()
             .find_map(|prefix| line.strip_prefix(prefix))
         {
+            sections.push((path.to_owned(), Some(String::new())));
+            continue;
+        }
+        if let Some(path) = line.strip_prefix("*** Update File: ") {
             sections.push((path.to_owned(), None));
             continue;
         }
@@ -789,6 +790,23 @@ mod tests {
             patch_paths(patch).unwrap(),
             ["after.rs", "before.rs", "new file.txt", "old.txt"]
         );
+    }
+
+    /// Review comment 4722261554: a deleted file leaves nothing, so the
+    /// rename hold sees every name it defined removed.
+    #[test]
+    fn whole_files_are_added_lines_or_empty_for_a_deletion_and_others_have_none() {
+        let patch = "*** Begin Patch\n*** Add File: new.rs\n+pub fn n() {}\n+\n*** Delete File: gone.rs\n*** Update File: a.rs\n@@\n-x\n+y\n*** Update File: m.rs\n*** Move to: n.rs\n@@\n-o\n+p\n*** Delete File: twice.rs\n*** Add File: twice.rs\n+t\n*** End Patch";
+        assert!(patch_paths(patch).is_ok());
+        assert_eq!(
+            whole_files(patch),
+            [
+                ("new.rs".to_owned(), "pub fn n() {}\n\n".to_owned()),
+                ("gone.rs".to_owned(), String::new()),
+            ]
+        );
+        let crlf = "*** Begin Patch\r\n*** Delete File: gone.rs\r\n*** End Patch\r\n";
+        assert_eq!(whole_files(crlf), [("gone.rs".to_owned(), String::new())]);
     }
 
     #[test]

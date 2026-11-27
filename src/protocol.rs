@@ -188,8 +188,14 @@ fn without_unread_events(granted: Capabilities, outcome: &mut Outcome) -> usize 
         return 0;
     };
     let before = events.len();
-    events.retain(|recorded| granted.reads(event_needs(&recorded.event)));
+    events.retain(|recorded| reads_event(granted, &recorded.event));
     before - events.len()
+}
+
+/// Whether a client granted `granted` reads `event`'s type: the store pages
+/// by it, so that events left out of a reply do not fill the page.
+pub(crate) fn reads_event(granted: Capabilities, event: &Event) -> bool {
+    granted.reads(event_needs(event))
 }
 
 /// `record`'s JSON as a client of `version` that names no capabilities
