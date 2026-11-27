@@ -212,7 +212,8 @@ built ([issue #94](https://github.com/Langspan/LangSpan.dev/issues/94)):
 
 A store holding `session_seen` is read by this build and later ones only: an
 older build stops at the first, as for any event kind it does not know
-([ADR 0015](0015-version-tolerance.md)). Activity recorded before
+([ADR 0015](0015-version-tolerance.md); what it reports is in
+[ADR 0038](0038-store-rollback.md)). Activity recorded before
 `last_hook_ms` existed reads as zero. Tests:
 `crates/langspan-core/tests/hook_liveness.rs` (injected clocks: 40 minutes of
 reads, 31 quiet minutes, a burst, a lease, a restart) and
@@ -237,7 +238,11 @@ Built 26 November 2026
 downloads, replaces or rolls back the binary; the owner upgrades through
 Homebrew (`brew upgrade langspan`, once the tap is published) or a release archive checked with
 `gh attestation verify` ([ADR 0031](0031-releases.md)), and rolls back the
-same way or by keeping the previous archive.
+same way or by keeping the previous archive. The earlier build reads the
+store only until the later one records an event kind or field it doesn't
+know; then it refuses with one line naming the build to start, or the owner
+moves the state directory aside ([ADR 0038](0038-store-rollback.md), which
+holds the compatibility policy).
 
 - **The coordinator says its version.** A new read-only request, `version`,
   answers with the version the running daemon was built as and its process

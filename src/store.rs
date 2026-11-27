@@ -357,6 +357,27 @@ mod retention;
 /// The SQLite schema marker this build writes.
 const SCHEMA_VERSION: i64 = 4;
 
+/// The newest build that has opened the store (ADR 0038): one row, raised by
+/// a later build and never lowered, so that an earlier build that cannot read
+/// the store names the build that can. A table, not a schema change: builds
+/// without it ignore it.
+const NEWEST_WRITER: &str = "CREATE TABLE IF NOT EXISTS newest_writer (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    version TEXT NOT NULL
+)";
+
+/// A release version's three numbers; `None` for anything else. A
+/// pre-release or build suffix is ignored.
+fn release(version: &str) -> Option<[u64; 3]> {
+    if version.len() > 32 {
+        return None;
+    }
+    let core = version.split(['-', '+']).next()?;
+    let mut parts = core.split('.').map(|part| part.parse::<u64>().ok());
+    let numbers = [parts.next()??, parts.next()??, parts.next()??];
+    parts.next().is_none().then_some(numbers)
+}
+
 pub type StoreResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 #[derive(Debug, Clone)]
@@ -530,7 +551,7 @@ impl Store {
             transaction.commit()?;
         }
 
-        let (state, snapshot_seq) = Self::recover(&connection)?;
+        let (state, snapshot_seq) = Self::recover_as_newest_writer(&connection)?;
         let generation = state
             .generation
             .checked_add(1)
@@ -2284,6 +2305,41 @@ impl Store {
             );
         }
         Ok(())
+    }
+
+    /// `recover`, then record this build as the newest writer if it is. When
+    /// a newer build wrote the store and this one cannot read it, the error
+    /// is one line naming that build (ADR 0038).
+    fn recover_as_newest_writer(connection: &Connection) -> StoreResult<(State, u64)> {
+        connection.execute_batch(NEWEST_WRITER)?;
+        let newest = connection
+            .query_row("SELECT version FROM newest_writer", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .optional()?
+            .and_then(|version| release(&version));
+        let this = release(env!("CARGO_PKG_VERSION"));
+        let recovered = Self::recover(connection).map_err(|error| match (newest, this) {
+            (Some(newer), Some(this)) if newer > this => {
+                let [major, minor, patch] = newer;
+                let newer = format!("{major}.{minor}.{patch}");
+                format!(
+                    "this store was last written by LangSpan {newer} and holds records this build ({}) cannot read; start LangSpan {newer} or later on this state directory, or move the state directory aside to start with an empty store",
+                    env!("CARGO_PKG_VERSION")
+                )
+                .into()
+            }
+            _ => error,
+        })?;
+        // `None` orders first: a build of no release version never records.
+        if this > newest {
+            connection.execute(
+                "INSERT INTO newest_writer (id, version) VALUES (1, ?1)
+                 ON CONFLICT (id) DO UPDATE SET version = excluded.version",
+                [env!("CARGO_PKG_VERSION")],
+            )?;
+        }
+        Ok(recovered)
     }
 
     /// The state the newest snapshot and the events after it give, and the

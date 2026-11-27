@@ -30,7 +30,11 @@ ADR 0023; each version maps to a set of named capabilities, and a new wire
 field adds a capability, not a version, ADR 0037) and the SQLite schema
 marker version 4 (retention, J7 in
 [ADR 0025](adr/0025-distribution-lifecycle-and-store-beyond-the-first-release.md));
-older persisted records remain readable.
+older persisted records remain readable. An earlier build reads a later
+build's store until it meets a record it doesn't know, then refuses with one
+line naming the build needed; the
+[compatibility policy](adr/0038-store-rollback.md#compatibility-policy) says
+what each interface promises across builds.
 
 ## Decisions by milestone
 
