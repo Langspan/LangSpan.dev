@@ -82,7 +82,7 @@ pub(super) fn print_status(
         "{active} active admission(s). Session registration is not a process-liveness signal."
     );
     for host in state.uninstalled_hosts.keys() {
-        println!("{}", crate::hosts::status_line(host, state_dir));
+        println!("{}", crate::install::detect::status_line(host, state_dir));
     }
     if let Some(summary) = summary {
         let closed = summary.closed_admissions.values().sum::<u64>() + summary.other_closed;

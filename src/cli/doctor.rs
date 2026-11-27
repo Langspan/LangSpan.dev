@@ -3,7 +3,7 @@
 use super::{ask, render::coverage_text};
 #[cfg(unix)]
 use crate::client;
-use crate::{hosts::UserHome, protocol::PROTOCOL_VERSION};
+use crate::{install::detect::UserHome, protocol::PROTOCOL_VERSION};
 use langspan_core::{Command, Outcome};
 use std::path::PathBuf;
 
@@ -881,8 +881,8 @@ fn user_level_findings(
             // host's sessions and nothing covers this one (roadmap A7).
             let uncovered = in_use.filter(|in_use| {
                 in_use.hosts.iter().any(|host| host != name)
-                    && !crate::hosts::not_installed(
-                        &[crate::hosts::inspect(vendor, home, state_dir)],
+                    && !crate::install::detect::not_installed(
+                        &[crate::install::detect::inspect(vendor, home, state_dir)],
                         &in_use.roots,
                         state_dir,
                     )
@@ -893,7 +893,7 @@ fn user_level_findings(
                 format!(
                     "{name}: no user-level install under {}; repositories need a project install, or run `{}`.{}",
                     home.home.display(),
-                    crate::hosts::install_command(vendor, home, state_dir),
+                    crate::install::detect::install_command(vendor, home, state_dir),
                     if uncovered.is_some() {
                         " Sessions of another host use this coordinator and no registered workspace has a project install for this one, so its edits are not coordinated."
                     } else {

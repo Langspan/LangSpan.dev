@@ -20,7 +20,7 @@ const REMOTE_HEARTBEAT: Duration = Duration::from_secs(120);
 /// own entries in host files, never writes them; what it finds reaches
 /// the state owner as one request naming the uncovered hosts.
 pub(super) fn host_worker(sender: mpsc::SyncSender<Job>, directory: PathBuf, every: Duration) {
-    let home = match crate::hosts::UserHome::new(None) {
+    let home = match crate::install::detect::UserHome::new(None) {
         Ok(home) => home,
         Err(error) => {
             eprintln!(
@@ -48,10 +48,11 @@ pub(super) fn host_worker(sender: mpsc::SyncSender<Job>, directory: PathBuf, eve
             // The owner is busy or stopping: the next check counts.
             None => Some("the state owner did not answer".to_owned()),
             Some((roots, held)) => {
-                let reports = crate::hosts::report(&home, &directory);
+                let reports = crate::install::detect::report(&home, &directory);
                 // A host that could not be inspected keeps the notice
                 // it has, and the reason is logged.
-                let observation = crate::hosts::observe(&reports, &roots, &directory, &held);
+                let observation =
+                    crate::install::detect::observe(&reports, &roots, &directory, &held);
                 checks += 1;
                 let answer = match ask(
                     &sender,
