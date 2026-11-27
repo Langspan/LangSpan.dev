@@ -1,0 +1,1 @@
+{"version":10,"request_id":"remote-enable-1","command":{"op":"remote_enable","workspace_id":"app","remote":"example","participant":"codex.bob","name":"parse","share_task":true}}

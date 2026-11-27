@@ -1,0 +1,1 @@
+{"version":10,"request_id":"remember-1","command":{"op":"remember","workspace_id":"app","author":"codex.bob","text":"Rework the session handler","paths":["src/api.rs"]}}

@@ -1,0 +1,1 @@
+{"version":10,"request_id":"session-liveness-1","replayed":false,"generation":4,"lease_valid":null,"outcome":{"type":"session_liveness","liveness":{"session_id":"claude-code.alice","process":{"pid":1,"start_token":"example"},"status":"alive","observed_at_ms":5000,"generation":2}}}

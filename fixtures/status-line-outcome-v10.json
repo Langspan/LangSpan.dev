@@ -1,0 +1,1 @@
+{"version":10,"request_id":"status-line-1","replayed":false,"generation":4,"lease_valid":null,"outcome":{"type":"status_line","line":{"workspace_id":"app","sessions_here":1,"refusals_today":1}}}

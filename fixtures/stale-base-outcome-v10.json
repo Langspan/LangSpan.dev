@@ -1,0 +1,1 @@
+{"version":10,"request_id":"stale-base-1","replayed":false,"generation":4,"lease_valid":null,"outcome":{"type":"stale_base","stale":[{"path":"src/api.rs","read":{"type":"missing"},"current":{"type":"missing"},"changed_by":"example"}]}}

@@ -1,0 +1,1 @@
+{"version":10,"request_id":"auto-check-1","replayed":false,"generation":4,"lease_valid":null,"outcome":{"type":"auto_check","check":{"workspace_id":"app","name":"parse","argv":["example"],"timeout_s":1}}}

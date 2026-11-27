@@ -1,0 +1,1 @@
+{"type":"interface_changed","notice":{"notice_id":"notice-1","workspace_id":"app","path":"src/api.rs","changes":[{"name":"parse","kind":"example","change":"example","before":"example","after":"example"}],"dependents":["example"],"by_session":"claude-code.alice","at_ms":5000,"generation":2}}

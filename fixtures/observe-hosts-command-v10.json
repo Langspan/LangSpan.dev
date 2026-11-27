@@ -1,0 +1,1 @@
+{"version":10,"request_id":"observe-hosts-1","command":{"op":"observe_hosts","not_installed":["example"]}}

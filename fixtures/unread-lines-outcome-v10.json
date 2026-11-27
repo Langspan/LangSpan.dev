@@ -1,0 +1,1 @@
+{"version":10,"request_id":"unread-lines-1","replayed":false,"generation":4,"lease_valid":null,"outcome":{"type":"unread_lines","lines":[{"path":"src/api.rs","session_id":"claude-code.alice","lines":[{"start_line":1,"end_line":1}],"age_ms":5000}]}}

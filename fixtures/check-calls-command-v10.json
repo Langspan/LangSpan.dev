@@ -1,0 +1,1 @@
+{"version":10,"request_id":"check-calls-1","command":{"op":"check_calls","session_id":"claude-code.alice","calls":[{"path":"src/api.rs","line":1,"name":"parse","args":1,"member":true}]}}

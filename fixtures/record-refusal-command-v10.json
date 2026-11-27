@@ -1,0 +1,1 @@
+{"version":10,"request_id":"record-refusal-1","command":{"op":"record_refusal","session_id":"claude-code.alice","kind":"conflict","paths":["src/api.rs"]}}

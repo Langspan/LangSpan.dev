@@ -487,6 +487,110 @@ fn a_watcher_whose_prompt_already_finished_ends_and_never_wakes_the_session() {
     assert_eq!(stopped[0]["prompt_id"], "prompt-1");
 }
 
+/// Issue #288: the watcher exits 2 only to tell a notice. Every way it can
+/// fail (options it cannot use, an event it cannot read, input that never
+/// ends) exits 0, so a background hook never fails a prompt, with a log
+/// line that says what went wrong.
+#[test]
+fn a_watcher_that_cannot_run_exits_0_and_says_why() {
+    let w = World::new();
+    for (options, why) in [
+        (&["--ttl-ms", "0"][..], "hook limits"),
+        (&["--budget-ms", "x"][..], "--budget-ms"),
+        (&["--unknown", "1"][..], "--unknown"),
+        (&["--event", "Stop"][..], "--event"),
+    ] {
+        let mut args = vec!["--mode", "between-steps"];
+        args.extend_from_slice(options);
+        let mut child = w.hook_process(&args);
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(prompt_event(&w.work(), "alice").to_string().as_bytes())
+            .unwrap();
+        let (code, stderr) = finished(child, Duration::from_secs(10));
+        assert_eq!(code, 0, "{options:?}: {stderr}");
+        assert!(stderr.contains("langspan_between_steps"), "{stderr}");
+        assert!(stderr.contains(why), "{options:?}: {stderr}");
+    }
+    // The ordinary hook keeps exit 1 for the same mistake: a non-blocking
+    // error that its host shows.
+    let mut child = w.hook_process(&["--ttl-ms", "0"]);
+    drop(child.stdin.take());
+    assert_eq!(finished(child, Duration::from_secs(10)).0, 1);
+
+    for input in [&b"not json"[..], b"[]", b"{\"hook_event_name\": 3}"] {
+        let mut child = w.hook_process(&["--mode", "between-steps"]);
+        child.stdin.take().unwrap().write_all(input).unwrap();
+        let (code, stderr) = finished(child, Duration::from_secs(10));
+        assert_eq!(code, 0, "{stderr}");
+        assert!(stderr.contains("malformed host event"), "{stderr}");
+    }
+
+    // Input that never ends: the read is bounded by the hook's budget.
+    let started = Instant::now();
+    let mut child = w.hook_process(&["--mode", "between-steps", "--budget-ms", "500"]);
+    let stdin = child.stdin.take().unwrap();
+    let (code, stderr) = finished(child, Duration::from_secs(10));
+    drop(stdin);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("langspan_between_steps"), "{stderr}");
+    assert!(started.elapsed() < Duration::from_secs(10));
+}
+
+/// A coordinator that answers but does not know the session (the prompt
+/// hook never registered it) ends the watcher with exit 0 once the startup
+/// grace has passed, with the coordinator's error in the log line.
+#[test]
+fn a_watcher_for_a_session_the_coordinator_never_learns_ends_quietly() {
+    let w = World::new();
+    let started = Instant::now();
+    let watcher = w.watcher(prompt_event_for(&w.work(), "nobody", "prompt-1"));
+    let (code, stderr) = finished(watcher, WAIT);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("langspan_between_steps"), "{stderr}");
+    assert!(!stderr.contains("Interface change"), "{stderr}");
+    assert!(
+        started.elapsed() >= Duration::from_secs(10),
+        "after the grace"
+    );
+}
+
+/// The watcher's own bound: with a turn that stays open and nothing to
+/// tell, it ends with exit 0 at its limit, and soon after it, well before
+/// the entry's host timeout.
+#[test]
+fn a_watcher_ends_quietly_at_its_bound() {
+    let w = World::new();
+    assert!(
+        w.prompt("alice")
+            .is_none_or(|text| !text.contains("Interface change"))
+    );
+    let config = langspan::claude_code::Config {
+        share_prompt: false,
+        code_briefing: false,
+        presence_window_ms: 600_000,
+        ..langspan::claude_code::Config::new(
+            w.base.join("state"),
+            "app",
+            w.work(),
+            langspan::install::Vendor::ClaudeCode,
+        )
+    };
+    let limit = Duration::from_secs(3);
+    let event = prompt_event(&w.work(), "alice").to_string();
+    let started = Instant::now();
+    let watched = langspan::between_steps::watch_within(event.as_bytes(), &config, limit);
+    let elapsed = started.elapsed();
+    assert_eq!(watched.exit, 0, "{watched:?}");
+    assert_eq!(watched.detail, "watch limit reached");
+    assert!(watched.stderr.is_empty(), "{watched:?}");
+    assert!(elapsed >= limit, "{elapsed:?}");
+    // One ask (1.5 s) and one poll (1 s) at most past the limit.
+    assert!(elapsed < limit + Duration::from_secs(5), "{elapsed:?}");
+}
+
 /// Review comment 4712432083, end to end: a notice the prompt hook's
 /// briefing showed is recorded as told in a briefing, so no watcher tells
 /// it again.

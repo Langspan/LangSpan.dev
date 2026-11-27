@@ -1,0 +1,1 @@
+{"type":"source_observed","session_id":"claude-code.alice","files":[{"path":"src/api.rs","state":{"type":"missing"}}],"origin":"read","at_ms":5000,"generation":2}
