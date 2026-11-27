@@ -39,7 +39,8 @@ Limit open work so that each pull request merges quickly:
   - briefings;
   - installation: `src/install.rs`, `src/user_install.rs` and
     `src/hosts.rs`;
-  - the CLI argument list in `src/main.rs`;
+  - the CLI argument list in `src/main.rs` and its flags table in
+    `src/cli/flags.rs`;
   - the source graph.
 - Give at least one of the 5 slots to bugs, review follow-ups or flaky
   tests. This slot is the debt slot.
