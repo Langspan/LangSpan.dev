@@ -1146,6 +1146,26 @@ mod unix {
         }
         response(id, execution)
     }
+    /// An event page read again for a client that cannot read every event
+    /// type: the reply leaves those out, so they must not fill the page
+    /// (issue #259).
+    fn events_for_client(
+        store: &Store,
+        granted: protocol::Capabilities,
+        command: &Command,
+        outcome: &mut Outcome,
+    ) {
+        if granted == protocol::Capabilities::ALL || !matches!(outcome, Outcome::Events { .. }) {
+            return;
+        }
+        if let Command::Events { after, limit } = command {
+            let page = store.event_page(*after, *limit, |e| protocol::reads_event(granted, e));
+            *outcome = page.unwrap_or_else(|e| Outcome::Error {
+                code: "storage_error".into(),
+                message: e.to_string(),
+            });
+        }
+    }
     fn handle(
         store: &mut Store,
         graph: Option<&crate::graph::Index>,
@@ -1450,6 +1470,7 @@ mod unix {
                                 .map_err(|error| error.to_string())
                         });
                 }
+                events_for_client(store, granted, &command, &mut execution.outcome);
                 if let Outcome::Dashboard { dashboard } = &mut execution.outcome {
                     complete_dashboard(dashboard, store.state(), graph);
                 }
@@ -1872,6 +1893,88 @@ mod unix {
             assert_ne!(again, moved);
             assert!(refused(&store, &moved).is_some());
             assert!(refused(&store, &again).is_none());
+            drop(store);
+            fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    #[cfg(test)]
+    mod event_paging_tests {
+        use super::*;
+
+        /// Issue #259: a client that cannot read some event types pages
+        /// past them. Events A, two `context_added`, B; a version 6 client
+        /// asking two at a time reaches B instead of stopping at a page the
+        /// reply emptied.
+        #[test]
+        fn a_client_pages_past_events_it_cannot_read() {
+            let directory =
+                std::env::temp_dir().join(format!("langspan-event-paging-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&directory);
+            fs::create_dir(&directory).unwrap();
+            let mut store = Store::open(&directory.join("store.sqlite")).unwrap();
+            let register = |session: &str| Command::SessionRegister {
+                session_id: session.into(),
+                workspace_id: "work".into(),
+                parent: None,
+                headless: false,
+            };
+            let context = Command::RecordContext {
+                session_id: "one".into(),
+                bytes: 10,
+                turn: false,
+            };
+            let commands = [
+                Command::WorkspaceRegister {
+                    workspace_id: "work".into(),
+                    root: "/work".into(),
+                },
+                register("one"),
+                context.clone(),
+                context,
+                register("two"),
+            ];
+            for (index, command) in commands.iter().enumerate() {
+                let execution = store
+                    .execute(&format!("fixture-{index}"), command, command, 1)
+                    .unwrap();
+                assert!(!matches!(execution.outcome, Outcome::Error { .. }));
+            }
+            // A frozen version 6 client, and a current one without
+            // `briefing_memory` that is told how many were left out.
+            let named: Vec<String> = protocol::Capabilities::ALL
+                .names()
+                .into_iter()
+                .filter(|name| name != "briefing_memory")
+                .collect();
+            for (version, named) in [
+                (protocol::PROTOCOL_VERSION_6, None),
+                (protocol::PROTOCOL_VERSION, Some(named)),
+            ] {
+                let granted = protocol::Capabilities::negotiate(version, named.as_deref());
+                let (mut after, mut read, mut withheld, mut pages) = (0, Vec::new(), 0, 0);
+                loop {
+                    let mut request =
+                        Request::new(format!("page-{pages}"), Command::Events { after, limit: 2 })
+                            .with_version(version);
+                    request.capabilities = named.clone();
+                    let response = answer(&mut store, None, &directory, request);
+                    let wire = protocol::encode_with(granted, named.as_deref(), &response).unwrap();
+                    let page: serde_json::Value = serde_json::from_slice(&wire).unwrap();
+                    withheld += page["withheld"].as_u64().unwrap_or(0);
+                    let events = page["outcome"]["events"].as_array().unwrap().clone();
+                    pages += 1;
+                    let Some(last) = events.last() else { break };
+                    after = last["seq"].as_u64().unwrap();
+                    read.extend(events.iter().map(|event| event["event"]["type"].clone()));
+                    assert!(pages < 10, "{read:?}");
+                }
+                let registered = read.iter().filter(|t| *t == "session_registered").count();
+                assert_eq!(registered, 2, "version {version} reached B: {read:?}");
+                assert!(!read.iter().any(|t| t == "context_added"), "{read:?}");
+                let told = if granted.has("withheld_events") { 2 } else { 0 };
+                assert_eq!(withheld, told, "version {version} told of each once");
+            }
             drop(store);
             fs::remove_dir_all(directory).unwrap();
         }
