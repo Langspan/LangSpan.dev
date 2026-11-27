@@ -84,8 +84,32 @@ after this merges.
 
 ### Cold
 
-Run 46035934855, with `cold` set, was still running when this was
-written; its rows are added when it ends.
+### Cold: run 46035934855 at `07b956a2`, 2026-11-27 16:43 UTC
+
+The same commit as the warm run, with `cold` set: both jobs skipped the
+cache restore (0 s) and compiled every dependency (`libc`, `tokio` and the
+rest), and cargo-nextest from source (2 min 42 s on Linux, 5 min 32 s on
+macOS); Linux also compiled cargo-audit (2 min 15 s). The test build took
+1 min 47 s on Linux and 3 min 54 s on macOS. Each figure is read from the
+job log.
+
+| Job | Wait | Job | Cache | Tools | Check | Tests (nextest summary) | After, warm job / tools / check |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Linux | 758 | 783 | 0 | 300 | 457 | 274 s, 2,109 passed, 7 skipped | 505 / 1 / 472 |
+| macOS | 760 | 1,394 | 0 | 334 | 1,016 | 673 s, 2,106 passed, 6 skipped | 755 / 0 / 714 |
+
+- **The wait** is not a cold cost. Both manual runs were started at
+  16:43 on the same commit and shared a concurrency group, so this run's
+  jobs started at 16:55:38, the second the warm run's macOS job ended.
+- **Linux** took 278 s more than warm: 299 s more in the tools step
+  (cargo-audit and cargo-nextest compiled). Its check step was 15 s
+  shorter despite compiling every dependency, because its tests took 274 s
+  against 305 s warm.
+- **macOS** took 639 s more than warm: 334 s in the tools step and 302 s
+  in the check step, of which 132 s is the slower tests (673 s against
+  541 s) and the rest the dependency and test builds. At 1,394 s the job
+  is within the 30 min limit that the four macOS pushes to `main` whose
+  tool caches missed hit before.
 
 ## What the targets need beyond this
 
