@@ -5,6 +5,7 @@
 import contextlib
 import io
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -438,6 +439,134 @@ class ModuleDependencies(unittest.TestCase):
         self.ws.write("src/a.rs", "// layer: domain\n")
         with self.assertRaisesRegex(ratchets.RatchetError, "src/a.rs: unknown layer 'domain'"):
             self.ws.check()
+
+
+class Namespaces(unittest.TestCase):
+    """namespaces.tsv, nested paths, lib.rs aliases and role files."""
+
+    def setUp(self):
+        self.ws = Workspace(self)
+        self.ws.write("src/a.rs", "")
+        self.ws.write("src/b.rs", "struct Thing;\n")
+
+    def namespaces(self, *rows):
+        self.ws.write("scripts/ratchets/namespaces.tsv", "# a comment\n" + "".join(r + "\n" for r in rows))
+
+    def failures(self):
+        failures, _ = self.ws.check()
+        return failures
+
+    def test_paths_resolve_nested_super_self_and_child_modules(self):
+        with open(os.path.join(HERE, "fixtures", "paths.rs"), encoding="utf-8") as f:
+            text = ratchets.Source(f.read()).text
+        self.assertEqual(
+            set(ratchets.named_paths(text, ["hook", "x"], {"k"})),
+            {("a", "b"), ("c", "d"), ("e",), ("hook", "f"), ("g", "h"), ("hook", "x"),
+             ("m", "n"), ("o",), ("o", "p")},
+        )
+
+    def test_a_layer_comes_from_namespaces_and_an_outward_edge_fails(self):
+        self.namespaces("namespace\ta\tutility", "namespace\tb\tinterface")
+        self.ws.write("src/a.rs", "use crate::b::Thing;\n")
+        failures = self.failures()
+        self.assertEqual(len(failures), 1)
+        self.assertIn("module a now depends on b, a new outward (utility -> interface) edge", failures[0])
+
+    def test_a_same_layer_edge_needs_an_allow_row(self):
+        self.namespaces("namespace\ta\tutility", "namespace\tb\tutility")
+        self.ws.write("src/a.rs", "use crate::b::Thing;\n")
+        self.assertIn("a new same-layer (utility, no `allow a b` row) edge", self.failures()[0])
+        self.namespaces("namespace\ta\tutility", "namespace\tb\tutility", "allow\ta\tb")
+        self.assertEqual(self.ws.check(), ([], []))
+
+    def test_an_import_outside_an_only_list_fails(self):
+        self.namespaces("namespace\ta\t-", "namespace\tb\t-", "namespace\tc\t-", "only\tb\tc")
+        self.ws.write("src/lib.rs", "mod a;\nmod b;\nmod c;\n")
+        self.ws.write("src/c.rs", "use crate::b::Thing;\n")
+        self.assertEqual(self.ws.check(), ([], []))
+        self.ws.write("src/a.rs", "use crate::b::Thing;\n")
+        failures = self.failures()
+        self.assertEqual(len(failures), 1)
+        self.assertIn("module a now depends on b, a new only-list (b is imported only from c) edge", failures[0])
+
+    def test_a_new_top_level_file_must_be_a_namespace(self):
+        self.namespaces("namespace\ta\t-", "namespace\tb\t-", "namespace\tgone\t-", "role\ta::x\tfeature")
+        self.ws.write("src/c.rs", "")
+        self.ws.write("src/d/mod.rs", "")
+        self.assertEqual(self.failures(), [
+            "src/c.rs: c is not a namespace in scripts/ratchets/namespaces.tsv; move it into "
+            "a namespace (git mv, with a re-export in lib.rs's compatibility block) or add a "
+            "`namespace c LAYER` row",
+            "src/d/mod.rs: d is not a namespace in scripts/ratchets/namespaces.tsv; move it into "
+            "a namespace (git mv, with a re-export in lib.rs's compatibility block) or add a "
+            "`namespace d LAYER` row",
+            "scripts/ratchets/namespaces.tsv: namespace gone has no src/gone.rs or "
+            "src/gone/mod.rs; delete its rows",
+            "scripts/ratchets/namespaces.tsv: role a::x has no src/a/x.rs; delete its row",
+        ])
+
+    def test_a_file_deeper_than_namespace_sub_file_fails(self):
+        self.ws.write("src/b/one/two.rs", "")
+        self.assertEqual(self.ws.check(), ([], []))
+        self.ws.write("src/b/one/two/three.rs", "")
+        self.assertEqual(self.failures(), [
+            "src/b/one/two/three.rs: deeper than src/<namespace>/<sub>/<file>.rs; "
+            "move it up into src/b/one/"
+        ])
+
+    def test_an_alias_resolves_to_its_namespace_and_carries_edge_rows(self):
+        self.ws.write("src/lib.rs", "mod a;\nmod b;\n// Compatibility aliases\nuse b::c;\n")
+        self.ws.write("src/b.rs", "mod c;\n")
+        self.ws.write("src/a.rs", "fn g() {}\nuse crate::c::Thing;\n")
+        self.ws.write("src/b/c.rs", "struct Thing;\nfn f() { super::super::a::g() }\n")
+        failures = self.failures()
+        self.assertIn("module a now depends on b, a new cycle edge", failures[0])
+        self.assertIn("src/b.rs: module b now depends on a", failures[1])
+        # Rows recorded before the move name the old module, c.
+        self.ws.write("scripts/ratchets/baseline/src/a.rs.tsv", "edge\tc\n")
+        self.ws.write("scripts/ratchets/baseline/src/b/c.rs.tsv", "edge\ta\n")
+        self.assertEqual(self.ws.check(), ([], []))
+
+    def test_an_alias_with_no_users_fails_and_a_test_is_a_user(self):
+        self.ws.write("src/lib.rs", "mod a;\nmod b;\npub use b::inner as old;\n")
+        self.ws.write("src/b/inner.rs", "")
+        self.assertEqual(self.failures(), [
+            "src/lib.rs: compatibility alias old (b::inner) has no users; delete it"
+        ])
+        self.ws.write("tests/uses.rs", "use langspan::old::Thing;\n")
+        self.assertEqual(self.ws.check(), ([], []))
+
+    def test_a_pipeline_naming_an_adapter_fails(self):
+        self.namespaces("namespace\ta\t-", "namespace\tb\t-", "role\tb::x\tadapter")
+        self.ws.write("src/b.rs", "mod x;\nmod y;\nfn run() { x::parse() }\n")
+        self.ws.write("src/b/x.rs", "fn parse() {}\n")
+        self.ws.write("src/b/y.rs", "")
+        self.assertEqual(len(self.failures()), 1)
+        self.assertIn("src/b.rs: module b now depends on b::x, a new adapter (a pipeline may not name b::x) edge",
+                      self.failures()[0])
+        # The adapter may use its namespace's root, and another namespace may name it.
+        self.ws.write("src/b.rs", "mod x;\nmod y;\n")
+        self.ws.write("src/b/x.rs", "fn parse() { super::Thing; }\n")
+        self.ws.write("src/a.rs", "use crate::b::x::parse;\n")
+        self.assertEqual(self.ws.check(), ([], []))
+
+    def test_role_files_are_nodes_and_a_cycle_between_them_fails(self):
+        self.ws.write("src/b.rs", "mod x;\nmod y;\n")
+        self.ws.write("src/b/x.rs", "// role: feature\nuse super::y::Y;\n")
+        self.ws.write("src/b/y/mod.rs", "// role: feature\nuse crate::b::x::X;\n")
+        failures = self.failures()
+        self.assertIn("src/b/x.rs: module b::x now depends on b::y, a new cycle edge", failures[0])
+        self.ws.record("src/b/x.rs")
+        self.assertEqual(self.ws.baseline("src/b/x.rs"), "edge\tb::y\n")
+
+    def test_a_malformed_namespaces_row_names_the_line(self):
+        for row, what in [("namespace\ta\tdomain", "unknown layer 'domain'"),
+                          ("role\tb::x\tport", "unknown role 'port'"),
+                          ("allow\tb\tnope", "nope is not a namespace"),
+                          ("namespace\ta", "expected `namespace NAME LAYER`")]:
+            self.namespaces("namespace\tb\t-", row)
+            with self.assertRaisesRegex(ratchets.RatchetError, "namespaces.tsv:3: .*" + re.escape(what)):
+                self.ws.check()
 
 
 class Interface(unittest.TestCase):

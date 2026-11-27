@@ -3,6 +3,9 @@
 //! grow past `scripts/ratchets/baseline/`. Needs `python3` 3.9 or later on
 //! `PATH`, like the benchmark harness tests.
 
+use std::collections::BTreeSet;
+use std::fs;
+use std::path::Path;
 use std::process::Command;
 
 fn python(args: &[&str]) -> (bool, String) {
@@ -28,6 +31,48 @@ fn no_ratchet_grows_past_its_baseline() {
     // The report names what can be tightened even when the check passes.
     eprintln!("{report}");
     assert!(passed, "{report}");
+}
+
+/// A second reading of the namespaces, independent of the Python lexer: the
+/// files and directories of src/ and the `mod` lines of lib.rs are exactly the
+/// `namespace` rows of scripts/ratchets/namespaces.tsv.
+#[test]
+fn the_top_level_modules_are_the_listed_namespaces() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let rows = fs::read_to_string(root.join("scripts/ratchets/namespaces.tsv"))
+        .expect("read scripts/ratchets/namespaces.tsv");
+    let listed: BTreeSet<String> = rows
+        .lines()
+        .filter_map(|line| {
+            let mut words = line.split_whitespace();
+            (words.next() == Some("namespace")).then(|| words.next())?
+        })
+        .map(str::to_owned)
+        .collect();
+    let entries: BTreeSet<String> = fs::read_dir(root.join("src"))
+        .expect("read src/")
+        .map(|entry| entry.expect("read an entry of src/").path())
+        .filter(|path| path.is_dir() || path.extension().is_some_and(|ext| ext == "rs"))
+        .filter_map(|path| Some(path.file_stem()?.to_str()?.to_owned()))
+        .filter(|name| name != "lib" && name != "main")
+        .collect();
+    let lib = fs::read_to_string(root.join("src/lib.rs")).expect("read src/lib.rs");
+    let declared: BTreeSet<String> = lib
+        .lines()
+        .filter_map(|line| {
+            let line = line.strip_prefix("pub ").unwrap_or(line);
+            line.strip_prefix("mod ")?.strip_suffix(';')
+        })
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        entries, listed,
+        "files and directories of src/ against namespaces.tsv"
+    );
+    assert_eq!(
+        declared, listed,
+        "mod lines of src/lib.rs against namespaces.tsv"
+    );
 }
 
 #[test]

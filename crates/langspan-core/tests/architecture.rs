@@ -111,6 +111,99 @@ fn pure_core_dependencies_point_inward_and_import_no_effect_adapters() {
     }
 }
 
+/// The names at the crate root are its public interface: `pub` items of lib.rs
+/// and what its `pub use` lines re-export, through `*` from a module's own
+/// top-level `pub` items. A change shows as a diff of the golden list, which
+/// `LANGSPAN_UPDATE_GOLDEN=1` rewrites.
+#[test]
+fn the_root_names_of_the_core_match_their_golden_list() {
+    let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let golden = crate_dir.join("../../scripts/ratchets/baseline/crates/langspan-core/api.txt");
+    let lib = fs::read_to_string(crate_dir.join("src/lib.rs")).expect("read the core lib.rs");
+    let mut names = BTreeSet::new();
+    for item in root_items(&lib) {
+        let Some(used) = item.strip_prefix("pub use ") else {
+            names.insert(item_name(&item).expect("a named pub item").to_owned());
+            continue;
+        };
+        if let Some(module) = used.strip_suffix("::*;") {
+            let path = crate_dir.join("src").join(format!("{module}.rs"));
+            let text = fs::read_to_string(&path).expect("read a re-exported core module");
+            names.extend(
+                root_items(&text)
+                    .iter()
+                    .filter_map(|item| item_name(item))
+                    .map(str::to_owned),
+            );
+            continue;
+        }
+        let list = used.split_once('{').map_or(used, |(_, list)| list);
+        for part in list.trim_end_matches([';', '}']).split(',') {
+            let part = part.trim();
+            let name = part.rsplit(" as ").next().expect("a re-export");
+            let name = name.rsplit("::").next().expect("a re-export");
+            if !name.is_empty() {
+                names.insert(name.to_owned());
+            }
+        }
+    }
+    let actual: String = names.iter().map(|name| format!("{name}\n")).collect();
+    if std::env::var_os("LANGSPAN_UPDATE_GOLDEN").is_some() {
+        fs::write(&golden, &actual).expect("write the core API golden");
+    }
+    let expected = fs::read_to_string(&golden).unwrap_or_default();
+    assert!(
+        expected == actual,
+        "the core's root names changed; review the change to its public interface, then \
+         rerun with LANGSPAN_UPDATE_GOLDEN=1 to rewrite {}.\nadded: {:?}\nremoved: {:?}",
+        golden.display(),
+        names
+            .iter()
+            .filter(|name| !expected.lines().any(|line| line == name.as_str()))
+            .collect::<Vec<_>>(),
+        expected
+            .lines()
+            .filter(|line| !names.contains(*line))
+            .collect::<Vec<_>>(),
+    );
+}
+
+/// The top-level `pub` items of a rustfmt-formatted file, each joined onto one
+/// line: they start in the first column, and a `pub use` ends at its `;`.
+fn root_items(text: &str) -> Vec<String> {
+    let mut items: Vec<String> = Vec::new();
+    let mut open = false;
+    for line in text.lines() {
+        if open {
+            let last = items.last_mut().expect("an open pub use");
+            last.push_str(line.trim());
+            open = !line.ends_with(';');
+        } else if line.starts_with("pub ") {
+            items.push(line.to_owned());
+            open = line.starts_with("pub use ") && !line.ends_with(';');
+        }
+    }
+    items
+}
+
+/// The name a `pub` item declares, such as `State` in `pub struct State {`.
+fn item_name(item: &str) -> Option<&str> {
+    let mut words = item.split_whitespace().skip(1);
+    words.find(|word| {
+        matches!(
+            *word,
+            "fn" | "struct" | "enum" | "trait" | "type" | "const" | "static" | "mod" | "union"
+        )
+    })?;
+    let mut name = words.next()?;
+    // `pub const fn name` names the function, not a constant called `fn`.
+    if name == "fn" {
+        name = words.next()?;
+    }
+    name.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .next()
+}
+
 /// Every `.rs` file under `dir`, sorted.
 fn rust_files(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
