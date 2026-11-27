@@ -42,3 +42,13 @@ Every capability still to build is a GitHub issue labeled `roadmap` ([the list](
 - [docs/security/threat-model.md](docs/security/threat-model.md): trust boundaries and threats.
 - [benchmarks/coordination/README.md](benchmarks/coordination/README.md): the coordination benchmark harness.
 - [README.md](README.md): the product overview for people deciding whether to try it.
+
+## How to work
+
+**Think before coding.** State your assumptions. If you're uncertain, ask. If a request has more than one reading, say which ones and don't pick silently. If a simpler approach exists, say so, and push back when it's warranted.
+
+**Simplicity first.** Write the least code that solves the problem, with nothing speculative: no abstraction for single-use code and no configurability nobody asked for. If 200 lines could be 50, rewrite it.
+
+**Surgical changes.** Don't improve adjacent code or formatting, and don't refactor what isn't broken. Every changed line traces to the task. (A task that is itself a refactor, such as an extraction in the engineering remediation, is the change; keep it to moves.)
+
+**Goal-driven execution.** Define what success looks like and loop until it's verified. For a multi-step task, state a short plan with a check for each step.
