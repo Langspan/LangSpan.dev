@@ -1,0 +1,24 @@
+=== targets: printf x > notes.txt; printf y > main.py; printf z >> notes.txt
+exit: Some(0)
+--- stdout
+
+--- stderr
+{"level":"info","event":"langspan_hook","coverage":"admitted","detail":"admission lsh1-admit-148740a5945edf72dd7076bf4ef05742; source version not compared for 2 file(s) (N ms)"}
+=== outside: printf x > /tmp/langspan-outside.txt
+exit: Some(0)
+--- stdout
+
+--- stderr
+{"level":"info","event":"langspan_hook","coverage":"shell_observing","detail":"no decision: write set unknown (a write target outside this workspace or not resolvable); changes compared after (N ms)"}
+=== directory: printf x > src
+exit: Some(0)
+--- stdout
+
+--- stderr
+{"level":"info","event":"langspan_hook","coverage":"shell_observing","detail":"no decision: write set unknown (a write target that is a directory); changes compared after (N ms)"}
+=== unsupported: git status
+exit: Some(0)
+--- stdout
+
+--- stderr
+{"level":"info","event":"langspan_hook","coverage":"shell_observing","detail":"no decision: write set unknown (a command outside the supported set); changes compared after (N ms)"}
