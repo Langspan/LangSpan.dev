@@ -39,7 +39,7 @@ and never touch the same source line:
   `gh issue list --label roadmap --state open --limit 500 --json number,title,body,labels,url`.
   Sections come from the `area: X Name` labels, items sorted by their ID
   (`B10` after `B9`), items without an ID after them by number. Each line is
-  `- [title](url): summary`, the summary being the issue's `**Index.**`
+  a bullet linking the title to the issue URL, then `: summary`, the summary being the issue's `**Index.**`
   paragraph, else the first sentence of its `**Problem.**` (and a warning
   naming the issue). On demand only: CI never needs the network.
 
