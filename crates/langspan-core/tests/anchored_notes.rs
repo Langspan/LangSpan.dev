@@ -735,6 +735,58 @@ fn anchored_lists_each_notes_own_files_and_a_workspace_lookup_only_without_them(
     assert!(lookup["parse_upload"].workspace);
 }
 
+/// Review follow-up #281: the cap on looked-up paths is per note, so notes
+/// on one name that together name more than 65 files each keep theirs.
+#[test]
+fn anchored_keeps_every_notes_paths_when_notes_share_a_name() {
+    let mut state = ready();
+    let mut all = std::collections::BTreeSet::new();
+    for note in 0..9 {
+        let paths: Vec<String> = (0..8).map(|n| format!("n{note}/{n}.py")).collect();
+        let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+        let (outcome, _) = remember(
+            &mut state,
+            &format!("n{note}"),
+            &refs,
+            "check_size",
+            &[],
+            None,
+        );
+        assert!(!matches!(outcome, Outcome::Error { .. }), "{outcome:?}");
+        all.extend(paths);
+    }
+    assert_eq!(all.len(), 72);
+    let lookups = langspan_core::anchored(&state, "demo");
+    assert_eq!(lookups["check_size"].paths, all);
+    assert!(!lookups["check_size"].workspace);
+}
+
+/// Review follow-up on #405: the per-call cap counts distinct paths, so a
+/// repeated path does not push a later one out of the lookup.
+#[test]
+fn remember_lookups_caps_distinct_paths_not_repeated_entries() {
+    let mut named = vec!["a.rs"; 65];
+    named.push("z.rs");
+    let lookup = langspan_core::remember_lookups("parse_upload", &named);
+    let paths: Vec<&str> = lookup["parse_upload"]
+        .paths
+        .iter()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(paths, ["a.rs", "z.rs"]);
+    // Repeats spread through more than 65 distinct paths still stop at
+    // 65 distinct ones, enough for the command to be refused.
+    let many: Vec<String> = (0..100).map(|n| format!("f/{n:03}.rs")).collect();
+    let repeated: Vec<&str> = many
+        .iter()
+        .flat_map(|path| [path.as_str(), path.as_str()])
+        .collect();
+    let lookup = langspan_core::remember_lookups("parse_upload", &repeated);
+    assert_eq!(lookup["parse_upload"].paths.len(), 65);
+    assert!(lookup["parse_upload"].paths.contains("f/064.rs"));
+    assert!(!lookup["parse_upload"].paths.contains("f/065.rs"));
+}
+
 /// A workspace-wide lookup that reached its cap counts what it found as a
 /// lower bound.
 #[test]
