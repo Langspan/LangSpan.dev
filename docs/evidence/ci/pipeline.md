@@ -54,16 +54,47 @@ the build cache (`cold` unset) and one without (`cold` set). A manual run
 takes the full lane on both platforms with the merge queue's settings and,
 since this change, no release build.
 
-Not measured yet: the runs start after this branch is pushed, and their
-rows are added to this pull request when they end.
+### Warm: run 46035930668 at `07b956a2`, 2026-11-27 16:43 UTC
+
+Both jobs restored an entry under their exact key, and compiled only the
+workspace's three crates (`langspan`, `langspan-core`, `langspan-graph`),
+no dependency crate.
+
+| Job | Wait | Job | Cache | Tools | Check | Tests (nextest summary) | Before, queue median job / check | Before, main median job / check |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Linux | 3 | 505 | 2 | 1 | 472 | 305 s, 2,109 passed, 7 skipped | 501 / 463 | 795 / 756 |
+| macOS | 3 | 755 | 6 | 0 | 714 | 541 s, 2,106 passed, 6 skipped | 1,026 / 952 | 1,660 / 1,264 |
+
+- **Linux** is unchanged against the queue, as expected: the queue already
+  skipped the release build, and Linux keeps every check. Against a push
+  to `main`, the run no longer waits behind the queue run (430 s median
+  before) or builds the release binary (about 3 min 51 s with its
+  demonstration).
+- **macOS** took 271 s less than the queue median. About 27 s of that is
+  the portable checks left to Linux. The rest is the exact cache hit (the
+  queue runs before compiled 9 dependency crates from a fallback entry)
+  and test time, which varies from run to run: 541 s here against 701 s
+  in run 46031003210. One run can't separate the two. Against a push to
+  `main`, it also drops the 430 s wait and the release build (about
+  4 min 46 s).
+
+A manual run has the settings of a push to `main` except that it saves no
+cache, so these stand for `main` too. The figures from `main` itself come
+after this merges.
+
+### Cold
+
+Run 46035934855, with `cold` set, was still running when this was
+written; its rows are added when it ends.
 
 ## What the targets need beyond this
 
 The targets are PR feedback within 90 s, the full merge-queue verification
 within 5 min on Linux and macOS, full Linux under 3 min warm and full
 macOS under 5 min warm. After this change the warm full lane is still
-mostly test time: 459 to 468 s for the Linux check step and 797 to 1,025 s
-for macOS in the queue runs above, against 300 s. Closing that needs the
+mostly test time: a 472 s Linux check step (305 s of tests) and a 714 s
+macOS check step (541 s of tests) in the warm run above, against 180 s
+and 300 s for the whole job. Closing that needs the
 slow tests shortened or sharded, or larger runners, which other tasks of
 epic #304 work on. The cargo-nextest and cargo-audit builds remain until
 both install as prebuilt binaries with pinned digests; this change didn't
