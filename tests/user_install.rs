@@ -833,21 +833,28 @@ fn the_skill_is_written_only_when_asked_reported_by_doctor_and_removed_exactly()
     }
     let before = home.skill_files();
 
-    // A dry run shows each host's form and its size, and writes nothing.
+    // A dry run shows the skill's text and size once, names the other
+    // host's copy, and writes nothing (issue #291).
+    let skill_path = |vendor, dir| skill::path(vendor, &home.home().join(dir));
+    let claude = skill_path(Vendor::ClaudeCode, ".claude");
+    let codex = skill_path(Vendor::Codex, ".codex");
     let dry = home.ok(&["install", "--skill", "--hosts", SKILL_HOSTS]);
-    for vendor in [Vendor::ClaudeCode, Vendor::Codex] {
-        let path = skill::path(
-            vendor,
-            &home.home().join(match vendor {
-                Vendor::ClaudeCode => ".claude",
-                _ => ".codex",
-            }),
-        );
-        assert!(
-            dry.contains(&format!("{} would become (", path.display())),
-            "{dry}"
-        );
-    }
+    assert!(
+        dry.contains(&format!("{} would become (", claude.display())),
+        "{dry}"
+    );
+    assert!(
+        dry.contains(&format!(
+            "{} would get the same skill text as {}.",
+            codex.display(),
+            claude.display()
+        )),
+        "{dry}"
+    );
+    assert_eq!(
+        dry.matches(skill::SOURCE.lines().next().unwrap()).count(),
+        1
+    );
     assert!(dry.contains(skill::SOURCE.lines().next().unwrap()), "{dry}");
     assert!(dry.contains("Dry run; nothing was written"), "{dry}");
     assert_eq!(home.skill_files(), before);

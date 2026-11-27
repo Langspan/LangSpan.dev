@@ -17,16 +17,23 @@ build](#build-from-source)), run:
 langspan setup
 ```
 
-Setup prints one plan and asks once, `Set this up? [Y/n]`:
+Setup prints one plan, about a screen long, and asks once,
+`Set this up? [Y/n]`:
 
 - the state directory;
 - the files `langspan install --skill` changes for each host whose
-  configuration directory exists: user-level hooks, the MCP entry and the
-  [LangSpan skill](#the-langspan-skill);
-- the coordinator's login service, shown in full: on macOS a LaunchAgent,
+  configuration directory exists, one line each: user-level hooks, the MCP
+  entry and the [LangSpan skill](#the-langspan-skill);
+- the coordinator's login service: on macOS a LaunchAgent,
   `~/Library/LaunchAgents/dev.langspan.coordinator.plist`; on Linux a
   `systemd --user` unit, `~/.config/systemd/user/langspan.service` (under
   `XDG_CONFIG_HOME` when set).
+
+`--verbose` shows each file's full text as well; the skill's text is shown
+once, however many hosts get a copy. If none of Claude Code, Codex or Cursor
+has a configuration directory, setup says so in one sentence and changes
+nothing: start one of them once and run setup again, or name a host with
+`--hosts`.
 
 It then applies the install, starts the service so the coordinator runs at
 every login and restarts after a failure, and runs `langspan doctor`. The
@@ -41,8 +48,14 @@ changes nothing and prints `Already set up; nothing to change.` Close Claude
 Code first, as for [`install --apply`](#all-repositories-for-this-user).
 `--hosts`, `--home` and `--state-dir` work as they do for `install`; with
 `--home`, setup installs no login service. `langspan uninstall --apply` stops
-and removes the service with everything else. Setup's last line is the next
-step: `Try it: langspan demo`.
+and removes the service with everything else. Right after setup no workspace
+is registered yet; that is normal, and `doctor` reports it as `ok`. The first
+hook of an agent session in a Git repository registers one. Setup's last line
+is the next step: `Try it: langspan demo`.
+
+On a terminal, a command that fails prints `langspan: ` and what failed and
+what to do. Otherwise, and with `--json`, the error is one JSON line on
+stderr, `{"level":"error","message":...}`.
 
 ### See a refusal without an agent
 

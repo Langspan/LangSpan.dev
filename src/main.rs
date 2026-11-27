@@ -11,14 +11,15 @@ const HELP: &str = r#"LangSpan — local cooperative coordination for AI coding 
 
 Usage: langspan [--state-dir DIR] COMMAND [--json]
 
-  setup [--home DIR] [--hosts ...] [--yes]
+  setup [--home DIR] [--hosts ...] [--yes] [--verbose]
                                  From nothing to coordinated sessions: shows one plan
                                  (the hosts found, the files `install --skill` changes,
                                  the coordinator's login service and the state
                                  directory), asks once, applies it, starts the
                                  coordinator and runs `doctor`. --yes applies without
                                  asking; without a terminal and without --yes it only
-                                 prints the plan. A second run changes nothing
+                                 prints the plan. The plan lists each file; --verbose
+                                 shows each file's full text. A second run changes nothing
   demo                           Show a real refusal with no agent: two example
                                  sessions edit one file in a temporary workspace,
                                  with a coordinator of the demo's own. Removes
@@ -434,22 +435,33 @@ fn main() -> ExitCode {
     {
         Ok(runtime) => runtime,
         Err(error) => {
-            eprintln!(
-                "{}",
-                serde_json::json!({"level":"error","message":error.to_string()})
-            );
+            eprintln!("{}", error_line(&error.to_string(), &input));
             return ExitCode::FAILURE;
         }
     };
-    match runtime.block_on(run(input)) {
-        Ok(code) => ExitCode::from(code),
-        Err(error) => {
-            eprintln!(
-                "{}",
-                serde_json::json!({"level":"error","message":error.to_string()})
-            );
-            ExitCode::FAILURE
-        }
+    let error = match runtime.block_on(run(input.clone())) {
+        Ok(code) => return ExitCode::from(code),
+        Err(error) => error.to_string(),
+    };
+    eprintln!("{}", error_line(&error, &input));
+    ExitCode::FAILURE
+}
+
+/// A command's error for stderr: plain text for a person at a terminal,
+/// one JSON line for a program or with --json (issue #291).
+fn error_line(message: &str, input: &[String]) -> String {
+    use std::io::IsTerminal;
+    error_text(
+        message,
+        std::io::stderr().is_terminal() && !input.iter().any(|word| word == "--json"),
+    )
+}
+
+fn error_text(message: &str, plain: bool) -> String {
+    if plain {
+        format!("langspan: {message}")
+    } else {
+        serde_json::json!({"level":"error","message":message}).to_string()
     }
 }
 
@@ -1049,9 +1061,40 @@ fn guidance(
 enum Mode {
     /// Show the plan and how to apply it.
     DryRun,
-    /// Show the plan only: `setup` says how to apply it.
+    /// Show the plan only: `setup --verbose` says how to apply it.
     Plan,
+    /// One line per file, no file's text: `setup` says how to apply it.
+    Brief,
     Apply,
+}
+
+/// The hosts `install` and `setup` choose without --hosts: those whose
+/// configuration directory exists. Antigravity is chosen only by name:
+/// `~/.gemini` is also made by other tools, Gemini CLI among them.
+fn found_hosts(home: &UserHome) -> Vec<langspan::install::Vendor> {
+    use langspan::install::Vendor;
+    [Vendor::ClaudeCode, Vendor::Codex, Vendor::Cursor]
+        .into_iter()
+        .filter(|vendor| home.files(*vendor).config_dir.is_dir())
+        .collect()
+}
+
+fn no_host(home: &UserHome) -> langspan::Error {
+    format!(
+        "No Claude Code, Codex or Cursor found in {}. Start one of them once, then run this again, or name a host with --hosts claude-code,codex,cursor,antigravity.",
+        home.home.display()
+    )
+    .into()
+}
+
+/// A brief plan's line for one file.
+fn would_be(path: &std::path::Path, exists: bool, removed: bool) -> String {
+    let what = match (removed, exists) {
+        (true, _) => "removed",
+        (false, true) => "changed",
+        (false, false) => "created",
+    };
+    format!("{} would be {what}.", path.display())
 }
 
 /// `install` / `uninstall`: LangSpan's user-level hooks and MCP server entry
@@ -1110,21 +1153,14 @@ fn user_install(
             .collect::<Result<_, _>>()?,
         // Antigravity is chosen only by name: `~/.gemini` is also made by
         // other tools, Gemini CLI among them.
-        None => [Vendor::ClaudeCode, Vendor::Codex, Vendor::Cursor]
-            .into_iter()
-            .filter(|vendor| home.files(*vendor).config_dir.is_dir())
-            .collect(),
+        None => found_hosts(&home),
     };
     // Gemini CLI is named only to remove an earlier install.
     if install && vendors.iter().any(|vendor| vendor.removed()) {
         return Err(langspan::install::GEMINI_REMOVED.into());
     }
     if vendors.is_empty() && install {
-        return Err(format!(
-            "no host configuration found under {} (.claude, .codex or .cursor); choose --hosts claude-code,codex,cursor,antigravity",
-            home.home.display()
-        )
-        .into());
+        return Err(no_host(&home));
     }
     if vendors.is_empty() {
         println!(
@@ -1466,13 +1502,15 @@ fn user_install(
                     println!("{} already matches; nothing to change.", path.display())
                 }
             }
-        } else if removed {
-            println!("{} would be removed.", path.display());
+        } else if removed || mode == Mode::Brief {
+            println!("{}", would_be(path, original.is_some(), removed));
         } else {
             println!("{} would become:", path.display());
             println!("{text}");
         }
     }
+    // Each skill's text is shown once, however many hosts get a copy.
+    let mut shown: Option<&std::path::Path> = None;
     for plan in &skills {
         if plan.unchanged() {
             // Uninstall says nothing about a skill that is not there.
@@ -1485,8 +1523,25 @@ fn user_install(
             continue;
         }
         changed += 1;
-        if !apply {
-            println!("{}", plan.shown());
+        if mode == Mode::Brief {
+            println!(
+                "{}",
+                would_be(&plan.path, plan.original.is_some(), plan.planned.is_none())
+            );
+        } else if !apply {
+            match shown {
+                Some(first) if plan.planned.is_some() => println!(
+                    "{} would get the same skill text as {}.",
+                    plan.path.display(),
+                    first.display()
+                ),
+                _ => {
+                    println!("{}", plan.shown());
+                    if plan.planned.is_some() {
+                        shown = Some(&plan.path);
+                    }
+                }
+            }
         } else if plan.apply()? {
             match plan.planned {
                 Some(_) => println!("Wrote {}.", plan.path.display()),
@@ -1617,11 +1672,16 @@ fn setup(options: &mut BTreeMap<String, String>, json: bool) -> Result<u8, langs
         );
     }
     let yes = options.remove("--yes").is_some();
+    let verbose = options.remove("--verbose").is_some();
     if options.contains_key("--skill") {
         return Err("`setup` always installs the skill; leave out --skill".into());
     }
     options.insert("--skill".into(), String::new());
     let home = UserHome::new(options.get("--home").map(PathBuf::from))?;
+    // Said before any plan is printed (issue #291).
+    if !options.contains_key("--hosts") && found_hosts(&home).is_empty() {
+        return Err(no_host(&home));
+    }
     let state_dir = std::path::absolute(home.state_dir(options.get("--state-dir").cloned()))?;
     langspan::autostart::check_state_dir(&state_dir)?;
     let executable = langspan::install::installed_executable(&std::env::current_exe()?)?;
@@ -1629,7 +1689,8 @@ fn setup(options: &mut BTreeMap<String, String>, json: bool) -> Result<u8, langs
     println!("State directory: {}", state_dir.display());
     println!("Hook and MCP files:");
     let mut plan_options = options.clone();
-    let files = user_install(true, &mut plan_options, Mode::Plan)?;
+    let mode = if verbose { Mode::Plan } else { Mode::Brief };
+    let files = user_install(true, &mut plan_options, mode)?;
     let service = plan_service(&home, &executable, &state_dir)?;
     println!("Coordinator:");
     match &service {
@@ -1655,16 +1716,19 @@ fn setup(options: &mut BTreeMap<String, String>, json: bool) -> Result<u8, langs
                 );
             } else {
                 println!(
-                    "  {} {} and start it, so the coordinator runs at every login:",
+                    "  {} {} and start it, so the coordinator runs at every login{}",
                     if existing.is_some() {
                         "Replace"
                     } else {
                         "Write"
                     },
-                    path.display()
+                    path.display(),
+                    if verbose { ":" } else { "." }
                 );
-                for line in text.lines() {
-                    println!("    {line}");
+                if verbose {
+                    for line in text.lines() {
+                        println!("    {line}");
+                    }
                 }
             }
         }
@@ -1678,6 +1742,9 @@ fn setup(options: &mut BTreeMap<String, String>, json: bool) -> Result<u8, langs
         println!("Already set up; nothing to change.");
         println!("{TRY_IT}");
         return Ok(0);
+    }
+    if !verbose {
+        println!("Run `langspan setup --verbose` to see each file's full text first.");
     }
     if !yes {
         if !std::io::stdin().is_terminal() {
@@ -3458,10 +3525,11 @@ fn doctor(
                     state.sessions.len() - stale
                 ),
             );
+            // The normal state of a fresh install, not a fault (issue #291).
             if state.workspaces.is_empty() {
                 note(
-                    false,
-                    "No workspace is registered. A hook registers one on first use; none has run."
+                    true,
+                    "No workspace yet. Start an agent session in a Git repository; its first hook registers one."
                         .into(),
                 );
             }
@@ -5202,7 +5270,7 @@ const COMMANDS: &[Flags] = &[
     },
     Flags {
         form: |words, _| words == ["setup"],
-        switches: &["--yes", "--skill"],
+        switches: &["--yes", "--skill", "--verbose"],
         values: INSTALL_VALUES,
         ..Flags::NONE
     },
@@ -7287,6 +7355,18 @@ mod time_tests {
         assert_eq!(super::sized(1023), "1023 bytes");
         assert_eq!(super::sized(2048), "2 KiB");
         assert_eq!(super::sized(410 * 1_048_576 + 5), "410 MiB");
+    }
+
+    #[test]
+    fn an_error_is_plain_text_for_a_person_and_json_for_a_program() {
+        assert_eq!(
+            super::error_text("no \"x\" here; do y", true),
+            "langspan: no \"x\" here; do y"
+        );
+        assert_eq!(
+            super::error_text("no \"x\" here; do y", false),
+            r#"{"level":"error","message":"no \"x\" here; do y"}"#
+        );
     }
 }
 
