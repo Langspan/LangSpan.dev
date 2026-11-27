@@ -1,6 +1,7 @@
 //! The `langspan` command's drivers and what it prints, in the library so
-//! a test can call them as functions (issue #300). `main.rs` keeps the
-//! argument dispatch and help text.
+//! a test can call them as functions (issue #300). The binary's own
+//! modules in this directory (`run.rs`, `help.rs` and each command's
+//! driver) keep the argument dispatch and help text.
 
 pub mod doctor;
 pub mod options;
