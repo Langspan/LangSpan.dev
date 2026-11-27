@@ -25,8 +25,13 @@ fn dry_runs_skipped(value: Option<&OsStr>) -> bool {
     value == Some(OsStr::new("skip"))
 }
 
-/// One dry-run part of the Python suite, unless CI said to skip it.
+/// One dry-run part of the driver's Python suite, unless CI said to skip it.
 fn dry_run(filter: &str) {
+    dry_run_suite("test_driver.py", filter);
+}
+
+/// One dry-run part of the Python suite PATTERN, unless CI said to skip it.
+fn dry_run_suite(pattern: &str, filter: &str) {
     if dry_runs_skipped(std::env::var_os(DRY_RUNS).as_deref()) {
         // Written to stderr directly: the test harness keeps `eprintln!`
         // output of a passing test, and this line has to reach the CI log.
@@ -36,7 +41,7 @@ fn dry_run(filter: &str) {
         );
         return;
     }
-    python_suite("test_driver.py", Some(filter));
+    python_suite(pattern, Some(filter));
 }
 
 fn python_suite(pattern: &str, filter: Option<&str>) {
@@ -194,6 +199,21 @@ fn dry_run_with_the_watcher_installed_a_session_takes_its_turn() {
 #[test]
 fn dry_run_records_an_ignored_option() {
     dry_run("a_dry_run_records_an_option_its_arm_ignores");
+}
+
+#[test]
+fn matrix_plan_report_and_kept_refusals() {
+    python_suite("test_matrix.py", Some("MatrixTests"));
+}
+
+#[test]
+fn matrix_stops_a_trial_and_its_session_groups() {
+    python_suite("test_matrix.py", Some("StopTests"));
+}
+
+#[test]
+fn dry_run_matrix_keeps_every_trial_and_resumes() {
+    dry_run_suite("test_matrix.py", "MatrixDryRun");
 }
 
 #[test]
