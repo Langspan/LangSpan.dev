@@ -43,6 +43,8 @@ pub const HOST_TIMEOUT_SECONDS: u64 = WATCH_LIMIT.as_secs() + 60;
 /// that does not know the session yet: the prompt hook that starts the
 /// coordinator and registers the session runs at the same time.
 const START_GRACE: Duration = Duration::from_secs(10);
+/// The shortest start grace a test may set.
+const GRACE_FLOOR: Duration = Duration::from_millis(500);
 /// One ask's bound.
 const CALL_BUDGET: Duration = Duration::from_millis(1500);
 /// The exit code that wakes Claude Code with the hook's stderr.
@@ -81,6 +83,25 @@ struct HostEvent {
     cursor_version: Option<serde_json::Value>,
 }
 
+/// The start grace: `START_GRACE`, or for tests only
+/// `LANGSPAN_TEST_WATCH_GRACE_MS`, between `GRACE_FLOOR` and `START_GRACE`,
+/// so a test of the grace need not wait 10 s. Not a setting: it is
+/// undocumented for users and can only shorten the grace.
+fn start_grace() -> Duration {
+    grace_of(
+        std::env::var("LANGSPAN_TEST_WATCH_GRACE_MS")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn grace_of(text: Option<&str>) -> Duration {
+    text.and_then(|text| text.parse::<u64>().ok())
+        .map_or(START_GRACE, |ms| {
+            Duration::from_millis(ms).clamp(GRACE_FLOOR, START_GRACE)
+        })
+}
+
 /// Watch for one prompt's turn, with the production bounds.
 pub fn watch(bytes: &[u8], config: &Config) -> Watched {
     watch_within(bytes, config, WATCH_LIMIT)
@@ -89,6 +110,7 @@ pub fn watch(bytes: &[u8], config: &Config) -> Watched {
 /// Watch for at most `limit`.
 pub fn watch_within(bytes: &[u8], config: &Config, limit: Duration) -> Watched {
     let started = Instant::now();
+    let grace = start_grace();
     let event: HostEvent = match serde_json::from_slice(bytes) {
         Ok(event) => event,
         Err(_) => return Watched::quiet("malformed host event"),
@@ -122,7 +144,7 @@ pub fn watch_within(bytes: &[u8], config: &Config, limit: Duration) -> Watched {
     );
     let mut stops = None;
     let mut ask = 0_u64;
-    // Since when the coordinator has not answered: within `START_GRACE`, the
+    // Since when the coordinator has not answered: within the grace, the
     // same ask is asked again.
     let mut failing_since: Option<Instant> = None;
     loop {
@@ -174,7 +196,7 @@ pub fn watch_within(bytes: &[u8], config: &Config, limit: Duration) -> Watched {
             // The prompt hook that runs beside this watcher may not have
             // started the coordinator or registered the session yet.
             Ok(Outcome::Error { code, message }) => {
-                if started.elapsed() >= START_GRACE {
+                if started.elapsed() >= grace {
                     return Watched::quiet(format!("{code}: {message}"));
                 }
             }
@@ -182,7 +204,7 @@ pub fn watch_within(bytes: &[u8], config: &Config, limit: Duration) -> Watched {
             // The coordinator may have recorded what this ask told before
             // its answer was lost: the same request ID gets its receipt.
             Err(error) => {
-                if failing_since.get_or_insert_with(Instant::now).elapsed() >= START_GRACE {
+                if failing_since.get_or_insert_with(Instant::now).elapsed() >= grace {
                     return Watched::quiet(format!("coordinator unavailable: {error}"));
                 }
                 std::thread::sleep(POLL);
@@ -224,6 +246,25 @@ mod tests {
         let overrun = Duration::from_secs(4) + CALL_BUDGET * 2 + POLL;
         assert!(WATCH_LIMIT + overrun < Duration::from_secs(HOST_TIMEOUT_SECONDS));
         assert!(START_GRACE < WATCH_LIMIT);
+    }
+
+    /// Issue #456: the test setting can only shorten the start grace, and
+    /// anything it cannot use leaves the production grace.
+    #[test]
+    fn the_test_grace_only_shortens_the_start_grace() {
+        for (text, grace) in [
+            (None, START_GRACE),
+            (Some(""), START_GRACE),
+            (Some("soon"), START_GRACE),
+            (Some("-5"), START_GRACE),
+            (Some("0"), GRACE_FLOOR),
+            (Some("100"), GRACE_FLOOR),
+            (Some("1500"), Duration::from_millis(1500)),
+            (Some("60000"), START_GRACE),
+            (Some("99999999999999999999"), START_GRACE),
+        ] {
+            assert_eq!(grace_of(text), grace, "{text:?}");
+        }
     }
 
     /// An owner-only directory of its own for one test, and a hook

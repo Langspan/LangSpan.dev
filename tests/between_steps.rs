@@ -18,6 +18,9 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 const WAIT: Duration = Duration::from_secs(60);
 /// How long the receiving session makes no hook call (issue #214).
 const QUIET: Duration = Duration::from_secs(30);
+/// The watcher's start grace in these tests (`LANGSPAN_TEST_WATCH_GRACE_MS`,
+/// issue #456), in place of the 10 s a session gets.
+const GRACE: Duration = Duration::from_secs(1);
 
 const UPLOAD: &str = "pub fn upload(path: &str) -> bool {\n    !path.is_empty()\n}\n";
 const MAIN: &str = "mod upload;\nfn main() {\n    upload::upload(\"a.txt\");\n}\n";
@@ -122,7 +125,11 @@ impl World {
         )
     }
     fn hook_process(&self, options: &[&str]) -> Child {
-        Process::new(env!("CARGO_BIN_EXE_langspan"))
+        self.hook_command(options).spawn().unwrap()
+    }
+    fn hook_command(&self, options: &[&str]) -> Process {
+        let mut command = Process::new(env!("CARGO_BIN_EXE_langspan"));
+        command
             .env("LANGSPAN_AUTOSTART", "off")
             .args(["hook", "claude-code", "--state-dir"])
             .arg(self.base.join("state"))
@@ -131,9 +138,8 @@ impl World {
             .args(options)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap()
+            .stderr(Stdio::piped());
+        command
     }
     /// The hook's coverage and additional context.
     fn hook(&self, event: Value) -> (String, Option<String>) {
@@ -158,9 +164,17 @@ impl World {
         )
     }
     /// The watcher Claude Code starts in the background at a prompt, as the
-    /// install registers it.
+    /// install registers it, with the tests' start grace.
     fn watcher(&self, event: Value) -> Child {
-        let mut child = self.hook_process(&["--mode", "between-steps"]);
+        self.watcher_with_grace(event, GRACE)
+    }
+    fn watcher_with_grace(&self, event: Value, grace: Duration) -> Child {
+        let mut command = self.hook_command(&["--mode", "between-steps"]);
+        command.env(
+            "LANGSPAN_TEST_WATCH_GRACE_MS",
+            grace.as_millis().to_string(),
+        );
+        let mut child = command.spawn().unwrap();
         child
             .stdin
             .take()
@@ -287,8 +301,12 @@ fn alice_starts_a_turn(w: &World) -> Child {
     w.watcher(prompt_event(&w.work(), "alice"))
 }
 
+/// The 30 s quiet period is the scenario of issue #214 and spans one
+/// `SESSION_SEEN_INTERVAL_MS` (30 s), so it proves the real timing rather
+/// than a shortened one. The full lane runs it; the fast lane skips `slow_`
+/// tests.
 #[test]
-fn a_notice_reaches_a_session_that_makes_no_hook_call_for_30_seconds() {
+fn slow_a_notice_reaches_a_session_that_makes_no_hook_call_for_30_seconds() {
     let w = World::new();
     let mut watcher = alice_starts_a_turn(&w);
     // Alice is waiting on a long command: no hook call of hers from here.
@@ -406,13 +424,16 @@ fn a_cursor_event_or_another_event_ends_the_watcher_at_once() {
 
 /// Review comment 4712432075: the watcher can ask before the prompt hook
 /// beside it has started the coordinator. It keeps asking within its
-/// startup grace, and tells the notice once the coordinator is up.
+/// startup grace, and tells the notice once the coordinator is up. Its
+/// grace leaves room, on a loaded runner, for the daemon to start and for
+/// alice's edit to register the session.
 #[test]
 fn a_watcher_started_before_the_coordinator_waits_for_it_and_still_tells() {
     let mut w = World::new();
     w.stop_daemon();
-    let mut watcher = w.watcher(prompt_event_for(&w.work(), "alice", "prompt-1"));
-    std::thread::sleep(Duration::from_secs(3));
+    let event = prompt_event_for(&w.work(), "alice", "prompt-1");
+    let mut watcher = w.watcher_with_grace(event, Duration::from_secs(5));
+    std::thread::sleep(Duration::from_secs(1));
     assert!(
         watcher.try_wait().unwrap().is_none(),
         "an unreachable coordinator is retried within the startup grace"
@@ -440,15 +461,14 @@ fn a_watcher_ends_quietly_when_the_coordinator_never_comes() {
     w.stop_daemon();
     let started = Instant::now();
     let mut watcher = w.watcher(prompt_event_for(&w.work(), "alice", "prompt-1"));
-    std::thread::sleep(Duration::from_secs(3));
+    std::thread::sleep(Duration::from_millis(500));
     assert!(watcher.try_wait().unwrap().is_none());
     let (code, stderr) = finished(watcher, WAIT);
     assert_eq!(code, 0, "{stderr}");
     assert!(stderr.contains("coordinator unavailable"), "{stderr}");
-    assert!(
-        started.elapsed() >= Duration::from_secs(10),
-        "after the grace"
-    );
+    assert!(started.elapsed() >= GRACE, "after the grace");
+    // The test grace took the place of the 10 s a session gets.
+    assert!(started.elapsed() < Duration::from_secs(10), "within it");
 }
 
 /// Review comment 4712602568: the reply to the watcher's prompt finished
@@ -551,10 +571,7 @@ fn a_watcher_for_a_session_the_coordinator_never_learns_ends_quietly() {
     assert_eq!(code, 0, "{stderr}");
     assert!(stderr.contains("langspan_between_steps"), "{stderr}");
     assert!(!stderr.contains("Interface change"), "{stderr}");
-    assert!(
-        started.elapsed() >= Duration::from_secs(10),
-        "after the grace"
-    );
+    assert!(started.elapsed() >= GRACE, "after the grace");
 }
 
 /// The watcher's own bound: with a turn that stays open and nothing to

@@ -108,6 +108,7 @@ impl Fixture {
         daemon
             .env("LANGSPAN_AUTOSTART", "off")
             .env_remove("LANGSPAN_TEST_IDLE_EXIT_MS")
+            .env("LANGSPAN_TEST_SCAN_EVERY_MS", "200")
             .args(["daemon", "--state-dir"])
             .arg(&state)
             .stdout(Stdio::null())
@@ -1012,7 +1013,11 @@ fn ready_to_land(f: &Fixture, tree: &str) -> bool {
 
 #[test]
 fn a_failure_that_passes_on_a_rerun_of_the_identical_tree_records_one_flip() {
-    let f = Fixture::with_config(json!({"auto_check_debounce_ms": 100, "flaky_rerun_max_s": 30}));
+    // A scan that sees the hook's write on disk counts it once more, and a
+    // count during the run keeps it from being learned from. The 1 s
+    // debounce lets five scans at the fixture's 200 ms tick see the write
+    // before the run starts, so both runs are of unchanged code.
+    let f = Fixture::with_config(json!({"auto_check_debounce_ms": 1000, "flaky_rerun_max_s": 30}));
     f.enable(60, &scheduled(&[0], &[]));
     f.write_batch("call-1", "one\n");
     let checks = f.wait_for_checks(1);
@@ -1687,10 +1692,11 @@ fn two_hundred_failing_tests_keep_the_check_section_within_its_bound() {
 }
 
 /// `go test -v` lines for calc.go as committed (TestNet and TestReady fail)
-/// or as broken (TestAdd and TestNet fail), after 3 s: longer than the Git
-/// observer's 2 s scan, as a cold `go test` build is on CI.
+/// or as broken (TestAdd and TestNet fail), after 1 s: longer than five of
+/// the Git observer's scans at the fixture's 200 ms tick, as a cold
+/// `go test` build is longer than a scan on CI.
 const SLOW_GO_TEST: &str = concat!(
-    "sleep 3; ",
+    "sleep 1; ",
     "if grep -q 'a - b' calc.go; then add=FAIL ready=PASS; else add=PASS ready=FAIL; fi; ",
     r"printf '=== RUN   TestAdd\n--- %s: TestAdd (0.00s)\n=== RUN   TestNet\n    calc_test.go:11: timed out\n--- FAIL: TestNet (0.00s)\n=== RUN   TestReady\n--- %s: TestReady (0.00s)\nFAIL\nFAIL\texample.com/calc\t0.001s\nFAIL\n' ",
     r#""$add" "$ready"; exit 1"#,
