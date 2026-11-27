@@ -9,11 +9,24 @@
 # tests and the demonstration to the merge queue.
 #
 # LANGSPAN_CHECK_RELEASE=false skips the release build and the demonstration
-# on it. CI sets that on pull requests and merge-queue commits, so every
-# push to main still builds and exercises the release binary. Unset, both
-# run in the full lane.
+# on it. CI sets that except on the nightly run; nothing else reads the
+# release binary, and the release workflow builds its own.
+# Unset, both run in the full lane.
+#
+# LANGSPAN_CHECK_PORTABLE=false skips the checks whose result doesn't depend
+# on the platform: format, dependency policy, advisories, unused
+# dependencies and the docs. CI's macOS job sets it, since Linux runs them
+# on the same commit; lint, the build and the tests still run.
 set -eu
 lane=${LANGSPAN_CHECK_LANE:-full}
+portable=${LANGSPAN_CHECK_PORTABLE:-true}
+case $portable in
+  true | false) ;;
+  *)
+    echo "check.sh: LANGSPAN_CHECK_PORTABLE is '$portable'; set it to true or false" >&2
+    exit 2
+    ;;
+esac
 case $lane in
   full) ;;
   fast)
@@ -54,15 +67,17 @@ leftovers() {
   done
 }
 
-cargo fmt --all -- --check
-cargo deny --locked check
-# cargo-audit reads the RustSec database too, with the ignores deny.toml
-# lists (the script checks each has a reason and a review date still ahead).
-# Its warnings (unmaintained, unsound, yanked) fail, as cargo-deny's do.
-audit_flags=$(python3 -I -B scripts/advisory-ignores.py --audit-flags)
-# shellcheck disable=SC2086 # each flag and id is one word
-cargo audit --deny warnings $audit_flags
-cargo machete
+if [ "$portable" = true ]; then
+  cargo fmt --all -- --check
+  cargo deny --locked check
+  # cargo-audit reads the RustSec database too, with the ignores deny.toml
+  # lists (the script checks each has a reason and a review date still ahead).
+  # Its warnings (unmaintained, unsound, yanked) fail, as cargo-deny's do.
+  audit_flags=$(python3 -I -B scripts/advisory-ignores.py --audit-flags)
+  # shellcheck disable=SC2086 # each flag and id is one word
+  cargo audit --deny warnings $audit_flags
+  cargo machete
+fi
 cargo clippy --workspace --all-targets --locked -- -D warnings
 # Code outside tests returns an error instead of panicking (issue #330);
 # tests may still unwrap, so this pass leaves them out.
@@ -70,7 +85,9 @@ cargo clippy --workspace --lib --bins --locked -- -D warnings \
   -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic \
   -D clippy::unreachable -D clippy::unimplemented
 # A broken intra-doc link or any other rustdoc warning fails.
-RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --locked
+if [ "$portable" = true ]; then
+  RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --locked
+fi
 # The suite under cargo-nextest, with HOME at a read-only home holding a
 # foreign LangSpan install, so no test can depend on the machine's own
 # (issue #108).

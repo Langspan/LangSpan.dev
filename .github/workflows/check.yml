@@ -8,7 +8,14 @@ on:
     branches: [main]
   # The release workflow starts this on release-please's branch: a pull
   # request opened with GITHUB_TOKEN starts no pull_request run of its own.
+  # `cold` restores no cache, to measure a build from nothing
+  # (docs/evidence/ci); off main, a manual run saves nothing.
   workflow_dispatch:
+    inputs:
+      cold:
+        description: Restore no build cache
+        type: boolean
+        default: false
   # Every night on main (schedules run on the default branch), with the
   # benchmark harness's dry runs whatever changed. A failure opens or
   # updates one issue (job nightly-report).
@@ -27,11 +34,13 @@ env:
   # the build cache doesn't keep it. The cache action used before set this
   # itself.
   CARGO_INCREMENTAL: 0
-  # scripts/check.sh: a merge-queue commit runs the demonstration on the
-  # debug binary only (a pull request's fast lane leaves it to the queue);
-  # main, nightly and manual runs also build the release binary and run it
-  # again on that.
-  LANGSPAN_CHECK_RELEASE: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
+  # scripts/check.sh: the merge queue, a push to main and a manual run (as
+  # the release workflow starts on its branch) run the demonstration on the
+  # debug binary the tests built; a pull request's fast lane leaves it to
+  # the queue. Nothing reads a release binary there, and the release
+  # workflow builds its own, so only the nightly run also builds the release
+  # binary and runs the demonstration on it, once a day.
+  LANGSPAN_CHECK_RELEASE: ${{ github.event_name == 'schedule' }}
   # The lanes (docs/development-process.md#which-tests-run-when). A pull
   # request runs the fast lane on Linux: format, dependency policy, lint
   # and the tests nextest's `ci-fast` profile selects; the macOS check
@@ -69,11 +78,12 @@ env:
     target
     ~/.cache/langspan-ci-tools/cargo-nextest
   CACHE_LIMIT_MB: 2048
-# A newer push to a pull request cancels its older run. Runs on main are
-# never cancelled, so every commit on main keeps its own result; the nightly
-# run has a group of its own, so it never replaces a push's pending run.
+# One group per event and commit (per pull request for a pull request), so
+# the push to main never waits for, or replaces, the merge-queue run of the
+# same commit, nor the nightly run a push's. Only a newer push to a pull
+# request cancels its older run; every commit on main keeps its own result.
 concurrency:
-  group: check-${{ github.event.pull_request.number || github.sha }}${{ github.event_name == 'schedule' && '-nightly' || '' }}
+  group: check-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 # Job names are the check names a ruleset requires: keep them stable.
 #
@@ -81,8 +91,10 @@ concurrency:
 # so the owner can move a job to a larger (billed) runner without a code
 # change; unset, each job takes GitHub's standard runner.
 #
-# Time limits by lane: the full lane in the merge queue gets 15 minutes;
-# main and the nightly run also build the release binary, so 30. The fast
+# Time limits by lane: the full lane gets 35 minutes in the merge queue and
+# 30 on main and nightly (the nightly run also builds the release binary).
+# The targets are far lower (docs/development-process.md); these limits
+# only stop a hung run. The fast
 # lane gets 10, not the 6 its 3-minute target suggests, because building
 # cargo-nextest or cargo-audit when its cache misses takes minutes on a
 # standard runner (scripts/install-ci-tools.sh).
@@ -123,31 +135,33 @@ jobs:
           rustup --version
           rustup toolchain install
           rustc --version
-      # Main restores only an entry under its exact key and otherwise
-      # builds from nothing, so what it saves holds no stale dependency. A
-      # pull request or merge-queue commit falls back to main's latest
-      # entry for the same toolchain, so a lockfile change rebuilds only
-      # the crates it changed. Neither ever saves.
+      # Every run falls back to main's latest entry for the same toolchain
+      # when none is under its exact key, so a lockfile change rebuilds only
+      # the crates it changed; main too, which then saves the result under
+      # the new key. Every entry is main's own (only main saves), so a
+      # fallback brings in nothing else (docs/security/threat-model.md#ci-build-cache).
+      # A cold manual run restores nothing.
       - name: Restore the build cache
         id: cache
-        if: steps.changes.outputs.code == 'true'
+        if: steps.changes.outputs.code == 'true' && !inputs.cold
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ env.CACHE_PATHS }}
           key: rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock', 'scripts/install-ci-tools.sh') }}
-          restore-keys: ${{ github.ref != 'refs/heads/main' && format('rust-v1-{0}-{1}-{2}-{3}-', runner.os, runner.arch, github.job, hashFiles('rust-toolchain.toml')) || '' }}
+          restore-keys: rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('rust-toolchain.toml') }}-
       # cargo-audit is built, not downloaded, so it is cached too, in an
       # entry of its own that leaves CACHE_PATHS alone. The same rules: only
-      # main saves, and main restores only its exact key.
+      # main saves, and every run falls back to main's latest entry.
       - name: Restore cargo-audit
         id: audit-cache
-        if: steps.changes.outputs.code == 'true'
+        if: steps.changes.outputs.code == 'true' && !inputs.cold
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ~/.cache/langspan-ci-tools/cargo-audit
           key: cargo-audit-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('scripts/install-ci-tools.sh') }}
-          restore-keys: ${{ github.ref != 'refs/heads/main' && format('cargo-audit-v1-{0}-{1}-{2}-', runner.os, runner.arch, github.job) || '' }}
+          restore-keys: cargo-audit-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
       - name: Install the dependency policy, advisory and unused-dependency checkers and the test runner
+        id: tools
         if: steps.changes.outputs.code == 'true'
         run: |
           bash scripts/install-ci-tools.sh "$HOME/.cache/langspan-ci-tools"
@@ -203,25 +217,26 @@ jobs:
           path: target/nextest/${{ env.NEXTEST_PROFILE }}/junit.xml
           if-no-files-found: warn
           retention-days: 14
-      # After a passing run on main that found no entry under its key: drop
-      # what the next run rebuilds anyway (the workspace's own crates, the
-      # release build, test reports), then save if within the limit.
+      # After a run on main that found no entry under its key, whether its
+      # checks passed or failed: drop what the next run rebuilds anyway
+      # (the workspace's own crates, the release build, test reports), then
+      # save if within the limit. A failed test leaves main's own build
+      # output, which is what the entry holds. Not after a cancelled or
+      # timed-out run, or one whose checks never built the tests: its
+      # target directory may be partial, and an entry is never replaced.
       - name: Prune the build cache and check its size
         id: size
-        if: github.ref == 'refs/heads/main' && steps.changes.outputs.code == 'true' && steps.cache.outputs.cache-hit != 'true'
+        if: ${{ !cancelled() && github.ref == 'refs/heads/main' && steps.changes.outputs.code == 'true' && steps.cache.outputs.cache-hit != 'true' }}
         env:
           LIMIT_MB: ${{ env.CACHE_LIMIT_MB }}
-        run: |
-          cargo clean --locked -p langspan -p langspan-core -p langspan-graph
-          rm -rf target/release target/nextest
-          bash scripts/ci-cache-size.sh
-      - if: steps.size.outputs.save == 'true'
+        run: bash scripts/ci-cache-prune.sh
+      - if: ${{ !cancelled() && steps.size.outputs.save == 'true' }}
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ env.CACHE_PATHS }}
           key: ${{ steps.cache.outputs.cache-primary-key }}
       - name: Save cargo-audit
-        if: github.ref == 'refs/heads/main' && steps.changes.outputs.code == 'true' && steps.audit-cache.outputs.cache-hit != 'true'
+        if: ${{ !cancelled() && github.ref == 'refs/heads/main' && steps.tools.outcome == 'success' && steps.audit-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ~/.cache/langspan-ci-tools/cargo-audit
@@ -245,6 +260,7 @@ jobs:
       contents: read
     outputs:
       flaky: ${{ steps.flaky.outputs.flaky }}
+      failed: ${{ steps.failed.outputs.failed }}
     steps:
       - name: Pass a pull request at once
         if: github.event_name == 'pull_request'
@@ -273,30 +289,23 @@ jobs:
           rustup toolchain install
           rustc --version
       # The build cache as on Linux: macOS keeps entries of its own (the key
-      # names the job and platform), and only main saves them.
+      # names the job and platform), every run falls back to main's latest,
+      # and only main saves them.
       - name: Restore the build cache
         id: cache
-        if: steps.changes.outputs.code == 'true'
+        if: steps.changes.outputs.code == 'true' && !inputs.cold
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ env.CACHE_PATHS }}
           key: rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock', 'scripts/install-ci-tools.sh') }}
-          restore-keys: ${{ github.ref != 'refs/heads/main' && format('rust-v1-{0}-{1}-{2}-{3}-', runner.os, runner.arch, github.job, hashFiles('rust-toolchain.toml')) || '' }}
-      # cargo-audit is built, not downloaded, so it is cached too, in an
-      # entry of its own that leaves CACHE_PATHS alone. The same rules: only
-      # main saves, and main restores only its exact key.
-      - name: Restore cargo-audit
-        id: audit-cache
-        if: steps.changes.outputs.code == 'true'
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: ~/.cache/langspan-ci-tools/cargo-audit
-          key: cargo-audit-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('scripts/install-ci-tools.sh') }}
-          restore-keys: ${{ github.ref != 'refs/heads/main' && format('cargo-audit-v1-{0}-{1}-{2}-', runner.os, runner.arch, github.job) || '' }}
-      - name: Install the dependency policy, advisory and unused-dependency checkers and the test runner
+          restore-keys: rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('rust-toolchain.toml') }}-
+      # Only the test runner: format, dependency policy, advisories, unused
+      # dependencies and the docs don't depend on the platform, so only
+      # Linux runs them (LANGSPAN_CHECK_PORTABLE below).
+      - name: Install the test runner
         if: steps.changes.outputs.code == 'true'
         run: |
-          bash scripts/install-ci-tools.sh "$HOME/.cache/langspan-ci-tools"
+          bash scripts/install-ci-tools.sh "$HOME/.cache/langspan-ci-tools" cargo-nextest
           echo "$HOME/.cache/langspan-ci-tools" >> "$GITHUB_PATH"
       # Go and pytest for the tests in tests/auto_checks.rs that run a real
       # `go test` and pytest; LANGSPAN_REQUIRE_TOOLS fails them without
@@ -316,15 +325,23 @@ jobs:
           echo "$RUNNER_TEMP/pytest/bin" >> "$GITHUB_PATH"
           "$RUNNER_TEMP/pytest/bin/python3" -m pytest --version
           go version
+      # Without the portable checks, which Linux runs; the name stays as on
+      # Linux, which scripts/measure-ci.sh finds the step by.
       - name: Check formatting, dependencies, lint, real integration tests and the demonstration
         if: steps.changes.outputs.code == 'true'
         env:
           LANGSPAN_BENCH_DRY_RUNS: ${{ steps.changes.outputs.dry_runs }}
+          LANGSPAN_CHECK_PORTABLE: "false"
         run: sh scripts/check.sh
       - name: Name the tests that passed only on retry
         id: flaky
         if: always() && steps.changes.outputs.code == 'true'
         run: python3 -I -B scripts/flaky-tests.py "target/nextest/$NEXTEST_PROFILE/junit.xml"
+      # For the issue macos-report opens when this job fails on main.
+      - name: Name the tests that failed
+        id: failed
+        if: always() && steps.changes.outputs.code == 'true'
+        run: bash scripts/ci-failed-tests.sh "target/nextest/$NEXTEST_PROFILE/junit.xml"
       - name: Keep the JUnit report
         if: always() && steps.changes.outputs.code == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -333,26 +350,19 @@ jobs:
           path: target/nextest/${{ env.NEXTEST_PROFILE }}/junit.xml
           if-no-files-found: warn
           retention-days: 14
+      # As on Linux: after a run on main that passed or failed, not one
+      # cancelled or timed out.
       - name: Prune the build cache and check its size
         id: size
-        if: github.ref == 'refs/heads/main' && steps.changes.outputs.code == 'true' && steps.cache.outputs.cache-hit != 'true'
+        if: ${{ !cancelled() && github.ref == 'refs/heads/main' && steps.changes.outputs.code == 'true' && steps.cache.outputs.cache-hit != 'true' }}
         env:
           LIMIT_MB: ${{ env.CACHE_LIMIT_MB }}
-        run: |
-          cargo clean --locked -p langspan -p langspan-core -p langspan-graph
-          rm -rf target/release target/nextest
-          bash scripts/ci-cache-size.sh
-      - if: steps.size.outputs.save == 'true'
+        run: bash scripts/ci-cache-prune.sh
+      - if: ${{ !cancelled() && steps.size.outputs.save == 'true' }}
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ env.CACHE_PATHS }}
           key: ${{ steps.cache.outputs.cache-primary-key }}
-      - name: Save cargo-audit
-        if: github.ref == 'refs/heads/main' && steps.changes.outputs.code == 'true' && steps.audit-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: ~/.cache/langspan-ci-tools/cargo-audit
-          key: ${{ steps.audit-cache.outputs.cache-primary-key }}
   # A test that passed only on retry on main opens one issue, or comments
   # on it while it is open, naming the tests. Only this job can write, and
   # only issues; it checks out nothing and runs no repository code. The
@@ -420,6 +430,46 @@ jobs:
           else
             # No label: a missing label would fail the create and lose
             # the report.
+            gh issue create --title "$TITLE" --body "$body"
+          fi
+  # macOS isn't a required check, so a macOS failure can reach main without
+  # stopping the queue. When the macOS job fails or times out on a push to
+  # main, this opens one issue, or comments on it while it is open, naming
+  # the commit and the tests that failed. As in nightly-report: only this
+  # job can write, and only issues; it checks out nothing and runs no
+  # repository code, and the names reach it through the environment.
+  macos-report:
+    name: macOS failure report
+    needs: [macos]
+    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && (needs.macos.result == 'failure' || needs.macos.result == 'cancelled')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update the macOS failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TITLE: macOS Rust checks on main failed
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.sha }}
+          RESULT: ${{ needs.macos.result }}
+          FAILED: ${{ needs.macos.outputs.failed }}
+        run: |
+          tests=$(printf '%s\n' "$FAILED" | while IFS= read -r name; do
+            if [ -n "$name" ]; then printf -- '- `%s`\n' "$name"; fi
+          done)
+          if [ -z "$tests" ]; then
+            tests="No failed test was recorded: the job failed outside the tests, or stopped before their report. The run's log says where."
+          fi
+          body=$(printf 'The macOS job of the Rust checks ended with %s on main at %s.\n\nFailed tests:\n\n%s\n\nRun: %s\n\nmacOS is not a required check, so the merge queue did not stop on this. Fix it the same day (docs/development-process.md).' \
+            "$RESULT" "$SHA" "$tests" "$RUN_URL")
+          number=$(gh issue list --state open --search "\"$TITLE\" in:title" --json number,title \
+            --jq 'map(select(.title == env.TITLE)) | .[0].number // empty')
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body "$body"
+          else
             gh issue create --title "$TITLE" --body "$body"
           fi
   # zizmor audits the workflows and dependabot.yml: injection, over-broad

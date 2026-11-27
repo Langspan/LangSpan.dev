@@ -5,6 +5,10 @@ take now that they run in two lanes with a build cache, how far that is from
 the targets, and a dry run showing that a broken release binary stops the
 release before `publish`.
 
+The per-step times before and after the change to concurrency, the build
+cache, the release build and the macOS checks are in
+[pipeline.md](pipeline.md).
+
 ## Workflow completion, the merge-queue gate and job times
 
 Measured on 2026-11-27 at 14:36 UTC with

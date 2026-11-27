@@ -341,24 +341,32 @@ fn pull_requests_read_the_build_cache_and_only_main_writes_it() {
             .nth(1)
             .unwrap_or_else(|| panic!("{id} restores no build cache"));
         // Keyed on the platform, the job, the toolchain and the lockfile.
+        // Every run, main's included, falls back to main's latest entry for
+        // the toolchain, so main isn't left to build from nothing.
         for part in [
             "key: rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock', 'scripts/install-ci-tools.sh') }}",
+            "restore-keys: rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('rust-toolchain.toml') }}-\n",
             "path: ${{ env.CACHE_PATHS }}",
         ] {
             assert!(restore.contains(part), "{id}'s restore lacks {part}");
         }
-        // Only main prunes, checks the size and saves, and only when it
-        // found nothing under the key.
+        assert!(
+            job.contains("if: steps.changes.outputs.code == 'true' && !inputs.cold\n        uses: actions/cache/restore@"),
+            "{id} restores the build cache on a cold run"
+        );
+        // Only main prunes, checks the size and saves, only when it found
+        // nothing under the key, and whether the checks passed or failed,
+        // but not after a cancelled or timed-out run.
         assert!(job.contains(
-            "if: github.ref == 'refs/heads/main' && steps.changes.outputs.code == 'true' && steps.cache.outputs.cache-hit != 'true'"
-        ), "{id} could save a cache off main");
+            "if: ${{ !cancelled() && github.ref == 'refs/heads/main' && steps.changes.outputs.code == 'true' && steps.cache.outputs.cache-hit != 'true' }}\n        env:\n          LIMIT_MB: ${{ env.CACHE_LIMIT_MB }}\n        run: bash scripts/ci-cache-prune.sh\n"
+        ), "{id} could save a cache off main, or not after a failed test");
         let save = job
             .split("uses: actions/cache/save@")
             .nth(1)
             .unwrap_or_else(|| panic!("{id} saves no build cache"));
         assert!(
             job.contains(
-                "if: steps.size.outputs.save == 'true'\n        uses: actions/cache/save@"
+                "if: ${{ !cancelled() && steps.size.outputs.save == 'true' }}\n        uses: actions/cache/save@"
             ),
             "{id} saves without the size check"
         );
@@ -383,35 +391,136 @@ fn cargo_audit_has_its_own_cache_and_the_build_cache_paths_stay_put() {
         ),
         "CACHE_PATHS changed; change it in a pull request of its own"
     );
-    for id in ["linux", "macos"] {
-        let job = job(&text, id);
-        let restore = job
-            .split("- name: Restore cargo-audit\n")
-            .nth(1)
-            .unwrap_or_else(|| panic!("{id} doesn't restore cargo-audit"));
-        for part in [
-            "path: ~/.cache/langspan-ci-tools/cargo-audit\n",
-            "key: cargo-audit-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('scripts/install-ci-tools.sh') }}",
-            "restore-keys: ${{ github.ref != 'refs/heads/main' && ",
-        ] {
-            assert!(
-                restore.contains(part),
-                "{id}'s cargo-audit restore lacks {part}"
-            );
-        }
+    // Only Linux runs cargo-audit (the portable checks), so only Linux
+    // builds and caches it.
+    let job = job(&text, "linux");
+    let restore = job
+        .split("- name: Restore cargo-audit\n")
+        .nth(1)
+        .expect("linux doesn't restore cargo-audit");
+    for part in [
+        "path: ~/.cache/langspan-ci-tools/cargo-audit\n",
+        "key: cargo-audit-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('scripts/install-ci-tools.sh') }}",
+        "restore-keys: cargo-audit-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-\n",
+    ] {
         assert!(
-            restore.contains("- name: Install the dependency policy"),
-            "{id} restores cargo-audit after installing it"
+            restore.contains(part),
+            "the cargo-audit restore lacks {part}"
         );
-        let save = job
-            .split("- name: Save cargo-audit\n")
-            .nth(1)
-            .unwrap_or_else(|| panic!("{id} doesn't save cargo-audit"));
-        assert!(save.starts_with(
-            "        if: github.ref == 'refs/heads/main' && steps.changes.outputs.code == 'true' && steps.audit-cache.outputs.cache-hit != 'true'\n"
-        ), "{id} could save cargo-audit off main");
-        assert!(save.contains("key: ${{ steps.audit-cache.outputs.cache-primary-key }}"));
     }
+    assert!(
+        restore.contains("- name: Install the dependency policy"),
+        "linux restores cargo-audit after installing it"
+    );
+    let save = job
+        .split("- name: Save cargo-audit\n")
+        .nth(1)
+        .expect("linux doesn't save cargo-audit");
+    // After the install, whether the checks passed or failed.
+    assert!(save.starts_with(
+        "        if: ${{ !cancelled() && github.ref == 'refs/heads/main' && steps.tools.outcome == 'success' && steps.audit-cache.outputs.cache-hit != 'true' }}\n"
+    ), "cargo-audit could be saved off main, or not after a failed test");
+    assert!(save.contains("key: ${{ steps.audit-cache.outputs.cache-primary-key }}"));
+}
+
+#[test]
+fn macos_runs_lint_build_and_tests_and_leaves_the_portable_checks_to_linux() {
+    let text = workflow("check.yml");
+    let macos = job(&text, "macos");
+    assert!(
+        macos.contains(
+            "bash scripts/install-ci-tools.sh \"$HOME/.cache/langspan-ci-tools\" cargo-nextest\n"
+        ),
+        "macOS installs more than the test runner"
+    );
+    assert!(!macos.contains("cargo-audit"), "{macos}");
+    assert!(macos.contains(
+        "\n          LANGSPAN_CHECK_PORTABLE: \"false\"\n        run: sh scripts/check.sh\n"
+    ));
+    assert!(!job(&text, "linux").contains("LANGSPAN_CHECK_PORTABLE"));
+    // check.sh skips exactly the platform-independent checks: format,
+    // dependency policy, advisories, unused dependencies and the docs.
+    let check = read("scripts/check.sh");
+    let portable: Vec<&str> = check
+        .split("if [ \"$portable\" = true ]; then\n")
+        .skip(1)
+        .map(|block| &block[..block.find("\nfi\n").expect("the block ends")])
+        .collect();
+    let skipped = portable.join("\n");
+    for command in [
+        "cargo fmt --all -- --check",
+        "cargo deny --locked check",
+        "cargo audit --deny warnings",
+        "cargo machete",
+        "cargo doc --workspace",
+    ] {
+        assert!(skipped.contains(command), "macOS still runs {command}");
+    }
+    for command in [
+        "cargo clippy",
+        "test-foreign-home.sh",
+        "demo-two-developers.sh",
+    ] {
+        assert!(!skipped.contains(command), "macOS skips {command}");
+    }
+}
+
+#[test]
+fn check_sh_refuses_an_unknown_portable_setting_before_it_runs_anything() {
+    let dir = temp_dir("check-portable");
+    let out = Command::new("sh")
+        .arg(root().join("scripts/check.sh"))
+        .current_dir(&dir)
+        .env("LANGSPAN_CHECK_PORTABLE", "no")
+        .output()
+        .unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("LANGSPAN_CHECK_PORTABLE is 'no'; set it to true or false"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn runs_are_grouped_by_event_and_only_the_nightly_run_builds_the_release() {
+    let text = workflow("check.yml");
+    // A push to main and the merge-queue run of the same commit are in
+    // different groups, so neither waits for or cancels the other.
+    assert!(text.contains(
+        "\nconcurrency:\n  group: check-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}\n  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n"
+    ));
+    assert!(text.contains("\n  LANGSPAN_CHECK_RELEASE: ${{ github.event_name == 'schedule' }}\n"));
+    // The release workflow builds its own binary, with no cache.
+    assert!(workflow("release.yml").contains("cargo build"));
+}
+
+/// Runs scripts/ci-cache-prune.sh in `dir`; returns (GITHUB_OUTPUT, stdout).
+fn cache_prune(dir: &Path) -> (String, String) {
+    let output = dir.join("output");
+    let out = Command::new("bash")
+        .arg(root().join("scripts/ci-cache-prune.sh"))
+        .current_dir(dir)
+        .env_remove("CARGO_TARGET_DIR")
+        .env("GITHUB_OUTPUT", &output)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "ci-cache-prune.sh failed: {out:?}");
+    let written = fs::read_to_string(&output).unwrap_or_default();
+    (written, String::from_utf8(out.stdout).unwrap())
+}
+
+#[test]
+fn main_saves_no_build_cache_from_a_run_that_built_no_tests() {
+    // A run whose format check or advisory check failed before the test
+    // build: a restored or empty target directory and no langspan binary.
+    let dir = temp_dir("cache-prune");
+    fs::create_dir_all(dir.join("target/debug/deps")).unwrap();
+    let (output, stdout) = cache_prune(&dir);
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(output, "save=false\n", "{stdout}");
+    assert!(stdout.contains("this run built no tests"), "{stdout}");
 }
 
 /// Runs scripts/ci-cache-size.sh over `paths` with `limit_mb`, and returns
@@ -553,6 +662,81 @@ fn the_flaky_report_says_so_when_no_test_or_no_report_is_there() {
     let _ = fs::remove_dir_all(&dir);
     assert_eq!(stdout, "");
     assert!(summary.contains("No JUnit report"), "{summary}");
+}
+
+/// Runs scripts/ci-failed-tests.sh on `junit`; returns (stdout, GITHUB_OUTPUT).
+fn failed_tests(junit: &Path) -> (String, String) {
+    let dir = temp_dir("failed-tests");
+    let output = dir.join("output");
+    let out = Command::new("bash")
+        .arg(root().join("scripts/ci-failed-tests.sh"))
+        .arg(junit)
+        .env("GITHUB_OUTPUT", &output)
+        .output()
+        .unwrap();
+    let written = fs::read_to_string(&output).unwrap_or_default();
+    let _ = fs::remove_dir_all(&dir);
+    assert!(out.status.success(), "ci-failed-tests.sh failed: {out:?}");
+    (String::from_utf8(out.stdout).unwrap(), written)
+}
+
+#[test]
+fn the_macos_failure_report_names_the_tests_that_failed_every_try_and_no_other() {
+    let (stdout, output) = failed_tests(&root().join("tests/fixtures/nextest/junit-retries.xml"));
+    assert_eq!(stdout, "flaky_sample fails_every_try\n");
+    let mut lines = output.lines();
+    let delimiter = lines
+        .next()
+        .and_then(|l| l.strip_prefix("failed<<"))
+        .unwrap_or_else(|| panic!("no failed output in {output:?}"));
+    assert_eq!(lines.next(), Some("flaky_sample fails_every_try"));
+    assert_eq!(lines.next(), Some(delimiter));
+
+    // No report, as when the job stopped before the tests ended: no name.
+    let (stdout, output) = failed_tests(Path::new("/nonexistent/junit.xml"));
+    assert_eq!(stdout, "");
+    assert_eq!(output.lines().count(), 2, "{output}");
+
+    // Beyond 50 failures the rest are counted, not listed.
+    let dir = temp_dir("failed-many");
+    let cases: String = (0..53)
+        .map(|i| format!(r#"<testcase name="t{i}" classname="b"><failure/></testcase>"#))
+        .collect();
+    let junit = dir.join("junit.xml");
+    fs::write(
+        &junit,
+        format!("<testsuites><testsuite name=\"b\">{cases}</testsuite></testsuites>"),
+    )
+    .unwrap();
+    let (stdout, _) = failed_tests(&junit);
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(stdout.lines().count(), 51, "{stdout}");
+    assert!(stdout.ends_with("and 3 more; the run's JUnit report lists them all\n"));
+}
+
+#[test]
+fn a_macos_failure_on_main_opens_or_updates_one_issue() {
+    let text = workflow("check.yml");
+    assert!(job(&text, "macos").contains("\n      failed: ${{ steps.failed.outputs.failed }}\n"));
+    assert!(job(&text, "macos").contains(
+        "if: always() && steps.changes.outputs.code == 'true'\n        run: bash scripts/ci-failed-tests.sh \"target/nextest/$NEXTEST_PROFILE/junit.xml\"\n"
+    ));
+    let report = job(&text, "macos-report");
+    for line in [
+        "\n    needs: [macos]\n",
+        "\n    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && (needs.macos.result == 'failure' || needs.macos.result == 'cancelled')\n",
+        "\n      issues: write\n",
+        "TITLE: macOS Rust checks on main failed",
+        "SHA: ${{ github.sha }}",
+        "FAILED: ${{ needs.macos.outputs.failed }}",
+        "gh issue comment \"$number\"",
+        "gh issue create --title \"$TITLE\"",
+    ] {
+        assert!(report.contains(line), "macos-report lacks {line}");
+    }
+    // It runs no repository code: nothing is checked out.
+    assert!(!report.contains("actions/checkout"), "{report}");
+    assert!(!report.contains("contents:"), "{report}");
 }
 
 /// Runs scripts/advisory-ignores.py over `dir` with `args`; returns
