@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/Langspan/LangSpan.dev/compare/v0.6.0...v0.7.0) (2026-11-27)
+
+
+### Features
+
+* classify commands by authority and check the socket peer's user ([#428](https://github.com/Langspan/LangSpan.dev/issues/428)) ([3046486](https://github.com/Langspan/LangSpan.dev/commit/30464860481a8ba1fd7ee3cb37bc546e8d5d461d))
+
 ## [0.6.0](https://github.com/Langspan/LangSpan.dev/compare/v0.5.1...v0.6.0) (2026-11-27)
 
 
