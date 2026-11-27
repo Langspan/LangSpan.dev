@@ -12,7 +12,7 @@ other document wins:
 - [Engineering practice](engineering.md) owns the rules for errors, output
   streams, evidence and Git.
 - [CONTRIBUTING.md](../CONTRIBUTING.md) owns pull request titles (Conventional
-  Commits), sign-off and what a pull request must contain.
+  Commits) and what a pull request must contain.
 - [`scripts/content-check.py`](../scripts/content-check.py) enforces the
   public-content rules. Its result is final; see [public text](#public-text).
 
