@@ -24,7 +24,7 @@ Find your platform's target. To check, run `uname -sm`.
 | Linux, ARM64 (`Linux aarch64`) | `aarch64-unknown-linux-gnu` |
 | Linux, x86-64 (`Linux x86_64`) | `x86_64-unknown-linux-gnu` |
 
-Close Claude Code. In an empty folder, set your target on the first line and paste the block into zsh or bash:
+Close Claude Code. In an empty folder, set your target on the first line and paste the block into zsh, or bash 5.1 or later:
 
 ```sh
 target=aarch64-apple-darwin
@@ -43,7 +43,7 @@ langspan setup
 langspan doctor
 ```
 
-The checksum line prints `OK`. On Linux without `shasum`, use `sha256sum -c` instead. The `echo` line keeps `langspan` on your `PATH` in new shells.
+The checksum line prints `OK`. On Linux without `shasum`, use `sha256sum -c` instead. The `echo` line keeps `langspan` on your `PATH` in new shells. An older bash, such as macOS's `/bin/bash`, runs pasted lines one at a time, so setup would read the `langspan doctor` line as its answer; use zsh there.
 
 Setup shows one plan and asks once. It connects the agent hosts it finds, starts the coordinator as a login service, and runs `langspan doctor`. On a new install, `doctor` reports that no workspace is registered yet; your first agent session registers one. In Codex, review and trust the hooks with `/hooks`.
 

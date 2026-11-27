@@ -15,7 +15,7 @@ Linux requires glibc 2.35 or later. The macOS binary isn't signed with an Apple 
 
 ## Install and connect
 
-Close Claude Code. In an empty folder, set your target on the first line and paste the block into zsh or bash:
+Close Claude Code. In an empty folder, set your target on the first line and paste the block into zsh, or bash 5.1 or later:
 
 ```sh
 target=aarch64-apple-darwin
@@ -41,6 +41,8 @@ The block does the following:
 3. Extracts the archive into a folder of the same name and enters it.
 4. Installs `langspan` in `~/.local/bin`, and adds that folder to `PATH` in your shell's startup file (`~/.zshrc` or `~/.bashrc`) for new shells.
 5. Runs `langspan setup`, which shows one plan, asks once, connects the agent hosts it finds, starts the coordinator and runs `langspan doctor`.
+
+zsh and bash 5.1 or later take a pasted block as a whole, so setup's question waits for you. An older bash, such as macOS's `/bin/bash` 3.2, runs pasted lines one at a time, and setup would read the next pasted line as its answer and change nothing; use zsh there, or run the last two lines one at a time.
 
 On a new install, `doctor` reports that no workspace is registered yet; your first agent session registers one. In Codex, use `/hooks` to review and trust the hooks. Open your agents in a Git repository, and run `langspan dashboard --open` to watch their activity. The [usage guide](usage.md#set-up-in-one-command) covers setup in detail.
 

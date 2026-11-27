@@ -192,6 +192,23 @@ fn the_install_guide_repeats_the_readme_quickstart() {
 }
 
 #[test]
+fn the_quickstart_names_shells_that_paste_it_whole() {
+    // A shell without bracketed paste runs pasted lines one at a time, and
+    // `langspan setup` would read the next pasted line as its answer.
+    for doc in ["README.md", "docs/install.md"] {
+        let text = read(doc);
+        assert!(
+            text.contains("paste the block into zsh, or bash 5.1 or later:"),
+            "{doc} must name the shells that take a pasted block whole"
+        );
+        assert!(
+            text.contains("macOS's `/bin/bash`"),
+            "{doc} must say why macOS's own bash is not one of them"
+        );
+    }
+}
+
+#[test]
 fn the_readme_states_each_host_status_once() {
     let readme = read("README.md");
     assert!(!readme.contains("pending"), "README.md calls a run pending");
