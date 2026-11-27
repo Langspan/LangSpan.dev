@@ -140,18 +140,23 @@ pub fn authority(command: &Command) -> Authority {
 mod tests {
     use crate::{Authority, Command, authority};
 
+    fn command(json: &str) -> Command {
+        serde_json::from_str(json).unwrap_or_else(|error| panic!("{json}: {error}"))
+    }
+
     #[test]
     fn owner_grants_are_the_commands_that_act_beyond_coordination_state() {
-        let compact = Command::Compact {
-            keep_days: 30,
-            apply: false,
-        };
-        let export = Command::GraphExport {
-            workspace_id: "w".into(),
-            path: "/tmp/x".into(),
-        };
-        assert_eq!(authority(&compact), Authority::OwnerGrant);
-        assert_eq!(authority(&export), Authority::OwnerGrant);
+        for json in [
+            r#"{"op":"auto_check_enable","workspace_id":"w","name":"t","argv":["true"],"timeout_s":1}"#,
+            r#"{"op":"remote_enable","workspace_id":"w","remote":"origin","participant":"p","name":"n","share_task":false}"#,
+            r#"{"op":"graph_export","workspace_id":"w","path":"/tmp/x"}"#,
+            r#"{"op":"graph_import","workspace_id":"w","path":"/tmp/x"}"#,
+            r#"{"op":"set_policy","workspace_id":"w","case":"conflict","policy":"refuse"}"#,
+            r#"{"op":"workspace_remove","workspace_id":"w"}"#,
+            r#"{"op":"compact","keep_days":30}"#,
+        ] {
+            assert_eq!(authority(&command(json)), Authority::OwnerGrant, "{json}");
+        }
         assert_eq!(authority(&Command::Status), Authority::Coordination);
         let disable = Command::AutoCheckDisable {
             workspace_id: "w".into(),
