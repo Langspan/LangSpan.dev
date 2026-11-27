@@ -1803,3 +1803,211 @@ fn doctor_takes_a_user_level_state_directory_named_through_a_link_for_the_same_o
         "{text}"
     );
 }
+
+/// Issue #292: uninstall stops the coordinator, takes out the folders the
+/// skill needed, and names what it leaves with the commands to remove it;
+/// `--purge` removes the state directory too.
+#[test]
+fn uninstall_stops_the_coordinator_and_names_everything_it_leaves() {
+    let mut home = Home::new();
+    fs::create_dir(home.home().join(".claude")).unwrap();
+    home.ok(&["install", "--hosts", "claude-code", "--skill", "--apply"]);
+    assert!(
+        home.home()
+            .join(".claude/skills/langspan/SKILL.md")
+            .is_file()
+    );
+    home.start();
+
+    let dry = home.ok(&["uninstall", "--purge"]);
+    assert!(dry.contains("The coordinator would be stopped."), "{dry}");
+    let state = home.state_dir();
+    assert!(
+        dry.contains(&format!("{} would be removed.", state.display())),
+        "{dry}"
+    );
+    assert!(
+        client::call(&state, &status()).is_ok(),
+        "a dry run stops nothing"
+    );
+
+    let removed = home.ok(&["uninstall", "--apply"]);
+    let mut daemon = home.daemon.take().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while daemon.try_wait().unwrap().is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "the coordinator still runs: {removed}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(removed.contains("Stopped the coordinator."), "{removed}");
+    // Only the folder the test made is left in the home.
+    assert!(
+        contents(&home.home()).is_empty(),
+        "{:?}",
+        contents(&home.home())
+    );
+    assert!(!home.home().join(".claude/skills").exists());
+    assert!(home.home().join(".claude").is_dir());
+    // What stays is named, with the commands that remove it.
+    let executable = fs::canonicalize(env!("CARGO_BIN_EXE_langspan")).unwrap();
+    assert!(
+        removed.contains(&format!("  rm '{}'", executable.display())),
+        "{removed}"
+    );
+    assert!(
+        removed.contains(&format!("  rm -r '{}'", state.display())),
+        "{removed}"
+    );
+    assert!(state.is_dir());
+
+    let purged = home.ok(&["uninstall", "--purge", "--apply"]);
+    assert!(!state.exists(), "{purged}");
+    assert!(
+        purged.contains(&format!("Removed {}.", state.display())),
+        "{purged}"
+    );
+    assert!(
+        purged.contains(&format!("  rm '{}'", executable.display())),
+        "{purged}"
+    );
+    assert!(!purged.contains("rm -r"), "{purged}");
+}
+
+/// `--purge` removes only a LangSpan state directory, and only on a whole
+/// uninstall: other hosts' hooks still use it after `--hosts`.
+#[test]
+fn purge_refuses_a_folder_that_is_not_a_state_directory_and_a_partial_uninstall() {
+    let home = Home::new();
+    fs::create_dir(home.home().join(".claude")).unwrap();
+    home.write("../state/notes.txt", "mine\n");
+    let refused = home.langspan(&["uninstall", "--purge", "--apply"]);
+    assert!(!refused.status.success(), "{refused:?}");
+    let said = String::from_utf8(refused.stderr).unwrap();
+    assert!(said.contains("not a LangSpan state directory"), "{said}");
+    assert!(home.state_dir().join("notes.txt").is_file());
+
+    let partial = home.langspan(&["uninstall", "--hosts", "claude-code", "--purge"]);
+    assert!(!partial.status.success(), "{partial:?}");
+    let said = String::from_utf8(partial.stderr).unwrap();
+    assert!(said.contains("--purge"), "{said}");
+}
+
+/// Uninstall signals the process id the coordinator reports only while a
+/// coordinator holds `daemon.lock`: without it the id may name another
+/// process, which is left running.
+#[test]
+fn uninstall_signals_no_process_when_no_coordinator_holds_the_lock() {
+    use std::io::{BufRead, BufReader};
+    let home = Home::new();
+    fs::create_dir(home.home().join(".claude")).unwrap();
+    let state = home.state_dir();
+    fs::create_dir(&state).unwrap();
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+    let socket = state.join("daemon.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut bystander = Process::new("sleep").arg("30").spawn().unwrap();
+    let pid = bystander.id();
+    // Answers every request with the bystander's id, as a coordinator that
+    // exited and whose id was reused would appear to.
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { return };
+            let mut line = String::new();
+            if BufReader::new(&stream).read_line(&mut line).unwrap_or(0) == 0 {
+                continue;
+            }
+            let asked: Value = serde_json::from_str(&line).unwrap();
+            let answer = langspan::protocol::Response {
+                version: u16::try_from(asked["version"].as_u64().unwrap()).unwrap(),
+                request_id: asked["request_id"].as_str().unwrap().into(),
+                replayed: false,
+                generation: 0,
+                lease_valid: None,
+                outcome: Outcome::Version {
+                    version: "0".into(),
+                    pid,
+                },
+            };
+            let _ = writeln!(stream, "{}", serde_json::to_string(&answer).unwrap());
+        }
+    });
+    let said = home.ok(&["uninstall", "--apply"]);
+    let alive = bystander.try_wait().unwrap().is_none();
+    let _ = bystander.kill();
+    let _ = bystander.wait();
+    assert!(alive, "{said}");
+    assert!(!said.contains("Stopped the coordinator."), "{said}");
+}
+
+/// A state directory holding `daemon.lock`, which the returned file locks,
+/// as a coordinator does from before it binds its socket.
+fn held_lock(home: &Home) -> (PathBuf, fs::File) {
+    fs::create_dir(home.home().join(".claude")).unwrap();
+    let state = home.state_dir();
+    fs::create_dir(&state).unwrap();
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(state.join("daemon.lock"))
+        .unwrap();
+    lock.set_permissions(fs::Permissions::from_mode(0o600))
+        .unwrap();
+    lock.try_lock().unwrap();
+    (state, lock)
+}
+
+/// Review of #418: a coordinator that is starting holds `daemon.lock` before
+/// it binds its socket. Uninstall treats a held lock as a running coordinator
+/// whether or not it answers: one that never answers fails the uninstall with
+/// the state directory kept, and a dry run says it would be stopped.
+#[test]
+fn uninstall_refuses_to_purge_while_a_silent_coordinator_holds_the_lock() {
+    let home = Home::new();
+    let (state, _lock) = held_lock(&home);
+    let dry = home.ok(&["uninstall", "--purge"]);
+    assert!(dry.contains("The coordinator would be stopped."), "{dry}");
+
+    let refused = home.langspan(&["uninstall", "--purge", "--apply"]);
+    assert!(!refused.status.success(), "{refused:?}");
+    let said = String::from_utf8(refused.stderr).unwrap();
+    assert!(said.contains("holds daemon.lock"), "{said}");
+    assert!(state.join("daemon.lock").is_file(), "{said}");
+}
+
+/// A coordinator that frees `daemon.lock` while uninstall waits for it to
+/// answer has stopped: the purge goes ahead and signals no process.
+#[test]
+fn uninstall_purges_once_a_silent_coordinator_frees_the_lock() {
+    let home = Home::new();
+    let (state, lock) = held_lock(&home);
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        drop(lock);
+    });
+    let purged = home.ok(&["uninstall", "--purge", "--apply"]);
+    release.join().unwrap();
+    assert!(!state.exists(), "{purged}");
+    assert!(!purged.contains("Stopped the coordinator."), "{purged}");
+}
+
+/// A state directory without `daemon.lock`, or none at all, has no
+/// coordinator to stop.
+#[test]
+fn uninstall_stops_nothing_without_a_state_directory_or_its_lock() {
+    let home = Home::new();
+    fs::create_dir(home.home().join(".claude")).unwrap();
+    let said = home.ok(&["uninstall", "--apply"]);
+    assert!(!said.contains("coordinator"), "{said}");
+    let state = home.state_dir();
+    fs::create_dir(&state).unwrap();
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+    let said = home.ok(&["uninstall", "--purge", "--apply"]);
+    assert!(!said.contains("coordinator"), "{said}");
+    assert!(!state.exists(), "{said}");
+}

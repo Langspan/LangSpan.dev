@@ -20,6 +20,8 @@ same: --verbose --state-dir --prompt-summary --presence --presence-minutes --hom
   exit 0: the help
 --skill
   exit 1: {"level":"error","message":"`setup` always installs the skill; leave out --skill"}
+--purge
+  exit 1: {"level":"error","message":"--purge is valid only for `uninstall`"}
 --yes
   exit 1: {"level":"error","message":"state files must belong to the current user and be owner-only (directory 0700, files 0600)"}
 every other option
@@ -281,7 +283,7 @@ every other option
 
 ## langspan check run w --name n -- true
 alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
-same: --json --apply --since-away --since-seq --open --allow-network --demo --check-again --rebase --adapt-renames --symbols --publish-as-branch --mine --detail --rank --renamed --recent --all --skill --create --yes --verbose --switch --off --state-dir --request-id --summary --ttl-ms --after --limit --workspace --root --budget-ms --event --settings --prompt-summary --code-briefing --presence --presence-minutes --max-peers --remote --share-task --onto --timeout-s --wait-s --session --to --from --home --hosts --listen -m --message --statusline --deadline-ms --forget --since --sound --depth --path --out --in --before --keep-days --month --format --file --tools --host --mcp-tools --wait-ms --max-hops --mode --outline-reads
+same: --json --apply --since-away --since-seq --open --allow-network --demo --check-again --rebase --adapt-renames --symbols --publish-as-branch --mine --detail --rank --renamed --recent --all --skill --purge --create --yes --verbose --switch --off --state-dir --request-id --summary --ttl-ms --after --limit --workspace --root --budget-ms --event --settings --prompt-summary --code-briefing --presence --presence-minutes --max-peers --remote --share-task --onto --timeout-s --wait-s --session --to --from --home --hosts --listen -m --message --statusline --deadline-ms --forget --since --sound --depth --path --out --in --before --keep-days --month --format --file --tools --host --mcp-tools --wait-ms --max-hops --mode --outline-reads
 --help -h
   exit 0: the help
 --name
@@ -291,7 +293,7 @@ every other option
 
 ## langspan check status w
 alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
-same: --json --apply --since-away --since-seq --open --allow-network --demo --check-again --rebase --adapt-renames --symbols --publish-as-branch --mine --detail --rank --renamed --recent --all --skill --create --yes --verbose --switch --off --state-dir --request-id --summary --ttl-ms --after --limit --workspace --root --budget-ms --event --settings --prompt-summary --code-briefing --presence --presence-minutes --max-peers --remote --name --share-task --onto --timeout-s --wait-s --session --to --from --home --hosts --listen -m --message --statusline --deadline-ms --forget --since --sound --depth --path --out --in --before --keep-days --month --format --file --tools --host --mcp-tools --wait-ms --max-hops --mode --outline-reads
+same: --json --apply --since-away --since-seq --open --allow-network --demo --check-again --rebase --adapt-renames --symbols --publish-as-branch --mine --detail --rank --renamed --recent --all --skill --purge --create --yes --verbose --switch --off --state-dir --request-id --summary --ttl-ms --after --limit --workspace --root --budget-ms --event --settings --prompt-summary --code-briefing --presence --presence-minutes --max-peers --remote --name --share-task --onto --timeout-s --wait-s --session --to --from --home --hosts --listen -m --message --statusline --deadline-ms --forget --since --sound --depth --path --out --in --before --keep-days --month --format --file --tools --host --mcp-tools --wait-ms --max-hops --mode --outline-reads
 --help -h
   exit 0: the help
 every other option
@@ -302,7 +304,7 @@ alone: exit 1: {"level":"error","message":"coordination unavailable: No such fil
 same: --json --apply --off --state-dir --home
 --help -h
   exit 0: the help
---since-away --since-seq --open --allow-network --demo --check-again --rebase --adapt-renames --symbols --publish-as-branch --mine --detail --rank --renamed --recent --all --skill --create --yes --verbose --switch --request-id --summary --ttl-ms --after --limit --workspace --root --budget-ms --event --settings --prompt-summary --code-briefing --presence --presence-minutes --max-peers --remote --share-task --onto --timeout-s --wait-s --session --to --from --hosts --listen -m --message --statusline --deadline-ms --forget --since --sound --depth --path --out --in --before --keep-days --month --format --file --tools --host --mcp-tools --wait-ms --max-hops --mode --outline-reads
+--since-away --since-seq --open --allow-network --demo --check-again --rebase --adapt-renames --symbols --publish-as-branch --mine --detail --rank --renamed --recent --all --skill --purge --create --yes --verbose --switch --request-id --summary --ttl-ms --after --limit --workspace --root --budget-ms --event --settings --prompt-summary --code-briefing --presence --presence-minutes --max-peers --remote --share-task --onto --timeout-s --wait-s --session --to --from --hosts --listen -m --message --statusline --deadline-ms --forget --since --sound --depth --path --out --in --before --keep-days --month --format --file --tools --host --mcp-tools --wait-ms --max-hops --mode --outline-reads
   exit 1: {"level":"error","message":"--name NAME is required: it is how this check's evidence is found again"}
 --name
   exit 1: {"level":"error","message":"give the check command after --, for example: -- cargo test"}
@@ -950,12 +952,14 @@ alone: exit 0
 same: --json --apply --skill --state-dir --prompt-summary --presence --presence-minutes --home --hosts --statusline --mcp-tools --outline-reads
 --help -h
   exit 0: the help
+--purge
+  exit 1: {"level":"error","message":"--purge is valid only for `uninstall`"}
 every other option
   exit 1: {"level":"error","message":"option {option} is not valid for this command"}
 
 ## langspan uninstall
 alone: exit 0
-same: --json --apply --state-dir --prompt-summary --presence --presence-minutes --home --hosts --outline-reads
+same: --json --apply --purge --state-dir --prompt-summary --presence --presence-minutes --home --hosts --outline-reads
 --help -h
   exit 0: the help
 --skill

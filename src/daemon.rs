@@ -2474,6 +2474,36 @@ mod unix {
         std::process::exit(code)
     }
 
+    /// The signal that asked the coordinator to stop, once one has.
+    type AskedToStop = Arc<std::sync::OnceLock<&'static str>>;
+
+    /// Catches SIGTERM (`uninstall`, a service manager), SIGINT and SIGHUP
+    /// (a terminal) so the state owner stops through [`stop`], which ends
+    /// any running automatic check: its command runs in its own process
+    /// group, so the default action would leave it running (issue #292).
+    /// Replaces an inherited ignored disposition too. Called before the
+    /// socket exists, so no client learns this process's id while a signal
+    /// would still end it at once.
+    fn stop_on_signal() -> Result<AskedToStop, crate::Error> {
+        use tokio::signal::unix::{SignalKind, signal};
+        let asked = AskedToStop::default();
+        for (kind, name) in [
+            (SignalKind::terminate(), "SIGTERM"),
+            (SignalKind::interrupt(), "SIGINT"),
+            (SignalKind::hangup(), "SIGHUP"),
+        ] {
+            let mut stream =
+                signal(kind).map_err(|e| format!("listen for {name} to stop cleanly: {e}"))?;
+            let asked = asked.clone();
+            tokio::spawn(async move {
+                if stream.recv().await.is_some() {
+                    let _ = asked.set(name);
+                }
+            });
+        }
+        Ok(asked)
+    }
+
     /// Makes a panic on any of the coordinator's threads end the process
     /// with status 1 (issue #329). Unwinding would end only that thread and
     /// leave the socket accepting requests nobody answers; a failed exit
@@ -2586,6 +2616,7 @@ mod unix {
             Config::read(&directory).map_err(|e| format!("read daemon configuration: {e}"))?;
         let _ = RECENT_WINDOW_MS.set(config.recent_window_ms);
         let _ = OUTLINE_MIN.set((config.outline_min_lines, config.outline_min_bytes));
+        let asked_to_stop = stop_on_signal()?;
         local::private_file(&directory.join("state.sqlite3"), true)?;
         for name in ["state.sqlite3-wal", "state.sqlite3-shm"] {
             local::check_existing_file(&directory.join(name))?;
@@ -2839,6 +2870,9 @@ mod unix {
                     }
                     // Between requests, so nothing this thread writes is cut
                     // short (issue #239).
+                    if let Some(signal) = asked_to_stop.get() {
+                        stop(&check_runs, "info", "signal", &format!("received {signal}"), 0);
+                    }
                     if Instant::now() >= next_watch {
                         next_watch = Instant::now() + WATCH_EVERY;
                         if let Some((reason, detail)) = anchor.lost() {
