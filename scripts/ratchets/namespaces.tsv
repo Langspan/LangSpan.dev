@@ -76,9 +76,7 @@ namespace	rewrite	application
 namespace	auto_check	application
 namespace	test_output	application
 namespace	definitions	application
-namespace	since	application
-namespace	recent	application
-namespace	trail	application
+namespace	briefing	application
 namespace	today	application
 namespace	count	application
 namespace	report	application
