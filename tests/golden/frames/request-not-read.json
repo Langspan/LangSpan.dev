@@ -1,0 +1,1 @@
+{"version":7,"request_id":"","replayed":false,"generation":0,"lease_valid":null,"outcome":{"type":"error","code":"invalid_request","message":"expected a typed version 1 request; unknown fields are rejected"}}
