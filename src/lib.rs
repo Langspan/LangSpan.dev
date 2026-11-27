@@ -7,6 +7,7 @@ pub mod between_steps;
 pub mod binary_version;
 pub mod breaks;
 pub mod claude_code;
+pub mod cli;
 pub mod client;
 pub mod clock;
 pub mod commit;
