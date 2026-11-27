@@ -1329,6 +1329,54 @@ mod since_away {
         assert_eq!(away.checks.failed, 1);
     }
 
+    /// The owner's last prompt, 30 minutes before `now`, is older than the
+    /// events read. They start with the landing's release, which has no
+    /// time of its own and so inherits the anchor's, ten hours old; a
+    /// headless agent's prompt 10 minutes before `now` follows it.
+    fn read_from_an_untimed_event(now: u64) -> Log {
+        let mut log = Log::ready();
+        log.prompted("claude-code.alice", now - 30 * 60_000);
+        log.landed(now - 20 * 60_000);
+        log.prompted("codex.bob", now - 10 * 60_000);
+        let taken = log
+            .events
+            .iter()
+            .position(|recorded| matches!(recorded.event, Event::TurnTaken { .. }))
+            .unwrap();
+        log.events.drain(..=taken);
+        assert!(matches!(log.events[0].event, Event::TurnReleased { .. }));
+        log
+    }
+
+    #[test]
+    fn an_inherited_time_at_the_start_of_the_events_read_does_not_make_a_gap() {
+        let now = EVENING + 10 * HOUR;
+        let log = read_from_an_untimed_event(now);
+        let away = SinceFrom::Away {
+            after_ms: AWAY_AFTER_MS,
+        };
+        // The oldest event with a time of its own is ten minutes old: no
+        // two-hour gap is shown by what was read.
+        assert_eq!(log.since_from(away, true, now), None);
+        // Three hours later the gap is real, and measured from that event,
+        // not from the inherited time.
+        let since = log.since_from(away, true, now + 3 * HOUR).unwrap();
+        assert!(since.ongoing && since.truncated, "{since:?}");
+        assert_eq!(since.away_ms, Some(3 * HOUR + 10 * 60_000));
+    }
+
+    #[test]
+    fn events_read_without_any_time_of_their_own_establish_no_gap() {
+        let now = EVENING + 10 * HOUR;
+        let mut log = read_from_an_untimed_event(now);
+        // Only the landing's release, which inherits the anchor's time.
+        log.events.truncate(1);
+        let away = SinceFrom::Away {
+            after_ms: AWAY_AFTER_MS,
+        };
+        assert_eq!(log.since_from(away, true, now), None);
+    }
+
     #[test]
     fn ended_sessions_and_held_messages_are_listed_without_message_text() {
         let (mut log, mark) = Log::overnight();

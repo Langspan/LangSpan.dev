@@ -171,13 +171,9 @@ fn away_mark(state: &State, query: &SinceQuery<'_>, after_ms: u64) -> Option<Mar
     // and wall time. An event without a time of its own inherits an older
     // one, which would invent a gap, so it neither starts nor ends one.
     let mut activity: Vec<(u64, u64)> = Vec::new();
-    let mut oldest_wall: Option<u64> = None;
     for recorded in query.events {
         let event = &recorded.event;
-        let wall = placement.place(event);
-        if oldest_wall.is_none() {
-            oldest_wall = wall;
-        }
+        placement.place(event);
         if let Some(wall) = work_time(state, query.workspace_id, event)
             .and_then(|(at_ms, generation)| placement.wall_of(at_ms, generation))
         {
@@ -201,9 +197,15 @@ fn away_mark(state: &State, query: &SinceQuery<'_>, after_ms: u64) -> Option<Mar
         });
     }
     // No interactive activity among the events read, and the oldest of them
-    // is from before the gap: the workspace is away, from a point older
-    // than what was read.
-    match (activity.is_empty(), query.earlier, oldest_wall) {
+    // with a time of its own (an anchor included) is from before the gap:
+    // the workspace is away, from a point older than what was read. An
+    // event before that one only inherits an older time, which proves no
+    // gap.
+    match (
+        activity.is_empty(),
+        query.earlier,
+        placement.covered_from(None),
+    ) {
         (true, true, Some(oldest)) if now.saturating_sub(oldest) >= after_ms => Some(Mark {
             from_seq: query
                 .events
