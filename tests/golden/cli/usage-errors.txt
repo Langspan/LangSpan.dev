@@ -1,0 +1,326 @@
+$ langspan frobnicate
+exit 1
+stderr: {"level":"error","message":"unknown or incomplete command; run `langspan --help`"}
+
+$ langspan admit
+exit 1
+stderr: {"level":"error","message":"unknown or incomplete command; run `langspan --help`"}
+
+$ langspan adopt
+exit 1
+stderr: {"level":"error","message":"unknown or incomplete command; run `langspan --help`"}
+
+$ langspan --version extra
+exit 1
+stderr: {"level":"error","message":"unknown option --version; use -- before a filename beginning with '-' "}
+
+$ langspan status --bogus
+exit 1
+stderr: {"level":"error","message":"unknown option --bogus; use -- before a filename beginning with '-' "}
+
+$ langspan status --limit
+exit 1
+stderr: {"level":"error","message":"--limit needs a value"}
+
+$ langspan status --symbol
+exit 1
+stderr: {"level":"error","message":"--symbol needs a value"}
+
+$ langspan status --tag
+exit 1
+stderr: {"level":"error","message":"--tag needs a value"}
+
+$ langspan events --limit 1 --limit 2
+exit 1
+stderr: {"level":"error","message":"duplicate option --limit"}
+
+$ langspan status --all --all
+exit 1
+stderr: {"level":"error","message":"duplicate option --all"}
+
+$ langspan status --symbol name
+exit 1
+stderr: {"level":"error","message":"option --symbol is not valid for this command"}
+
+$ langspan remember w text --symbol a --symbol b
+exit 1
+stderr: {"level":"error","message":"a note is anchored to one definition: give --symbol once"}
+
+$ langspan status --tag t
+exit 1
+stderr: {"level":"error","message":"option --tag is not valid for this command"}
+
+$ langspan recap w --tag a --tag b
+exit 1
+stderr: {"level":"error","message":"recap filters by one tag: give --tag once"}
+
+$ langspan status --home elsewhere
+exit 1
+stderr: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+
+$ langspan status --apply
+exit 1
+stderr: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+
+$ langspan status --limit 5
+exit 1
+stderr: {"level":"error","message":"option --limit is not valid for this command"}
+
+$ langspan setup --apply
+exit 1
+stderr: {"level":"error","message":"`setup` asks before it changes anything; use --yes to skip the question"}
+
+$ langspan setup --json
+exit 1
+stderr: {"level":"error","message":"--json is not valid for `setup`; run `langspan doctor --json` after it"}
+
+$ langspan setup --skill
+exit 1
+stderr: {"level":"error","message":"`setup` always installs the skill; leave out --skill"}
+
+$ langspan demo --json
+exit 1
+stderr: {"level":"error","message":"--json is not valid for `demo`"}
+
+$ langspan demo --state-dir elsewhere
+exit 1
+stderr: {"level":"error","message":"`demo` uses a temporary state directory of its own; leave out --state-dir"}
+
+$ langspan demo --limit 5
+exit 1
+stderr: {"level":"error","message":"option --limit is not valid for this command"}
+
+$ langspan dashboard --listen nowhere
+exit 1
+stderr: {"level":"error","message":"--listen must be an IP address and port, such as 127.0.0.1:7311"}
+
+$ langspan dashboard --json
+exit 1
+stderr: {"level":"error","message":"--json is not valid for `dashboard`; its JSON is served at /api/state"}
+
+$ langspan mcp --tools some
+exit 1
+stderr: {"level":"error","message":"--tools takes all or hooked, not \"some\""}
+
+$ langspan mcp --tools hooked
+exit 1
+stderr: {"level":"error","message":"--tools hooked needs --host claude-code or --host codex: the list is shortened only while that host's hooks report"}
+
+$ langspan mcp --host elsewhere
+exit 1
+stderr: {"level":"error","message":"--host is valid only with --tools hooked"}
+
+$ langspan admit s1 a.rs
+exit 1
+stderr: {"level":"error","message":"mutation requires --request-id ID; reuse it only for an identical retry"}
+
+$ langspan workspace remove w --apply
+exit 1
+stderr: {"level":"error","message":"mutation requires --request-id ID; reuse it only for an identical retry"}
+
+$ langspan admit s1 a.rs --ttl-ms soon --request-id r1
+exit 1
+stderr: {"level":"error","message":"--ttl-ms must be an integer"}
+
+$ langspan session attach-pid s1 one --request-id r1
+exit 1
+stderr: {"level":"error","message":"PID must be an unsigned integer"}
+
+$ langspan brief s1 --max-peers many
+exit 1
+stderr: {"level":"error","message":"--max-peers must be an integer"}
+
+$ langspan brief s1 --max-peers 99999999999
+exit 1
+stderr: {"level":"error","message":"--max-peers is too large"}
+
+$ langspan events --after start
+exit 1
+stderr: {"level":"error","message":"--after must be an integer"}
+
+$ langspan events --limit all
+exit 1
+stderr: {"level":"error","message":"--limit must be an integer"}
+
+$ langspan changes w --after start
+exit 1
+stderr: {"level":"error","message":"--after must be an integer"}
+
+$ langspan graph history w name --before then
+exit 1
+stderr: {"level":"error","message":"--before must be an integer"}
+
+$ langspan graph impact w a.rs --depth 99999999999
+exit 1
+stderr: {"level":"error","message":"--depth must be between 1 and 3"}
+
+$ langspan graph export w
+exit 1
+stderr: {"level":"error","message":"--out FILE is required"}
+
+$ langspan graph import w
+exit 1
+stderr: {"level":"error","message":"--in FILE is required"}
+
+$ langspan remote enable w --request-id r1
+exit 1
+stderr: {"level":"error","message":"--name NAME is required: it is what teammates will see"}
+
+$ langspan remote enable w --name n --share-task maybe --request-id r1
+exit 1
+stderr: {"level":"error","message":"--share-task must be on or off"}
+
+$ langspan policy set w nothing refuse --request-id r1
+exit 1
+stderr: {"level":"error","message":"unknown case \"nothing\"; the cases are advisory, conflict, stale_base, unread_lines, commit_held, landing_not_ready"}
+
+$ langspan policy set w conflict maybe --request-id r1
+exit 1
+stderr: {"level":"error","message":"the policy is refuse, wait or advisory"}
+
+$ langspan policy set w conflict wait --wait-ms long --request-id r1
+exit 1
+stderr: {"level":"error","message":"--wait-ms must be an integer from 0 to 2000"}
+
+$ langspan today --since yesterday
+exit 1
+stderr: {"level":"error","message":"--since \"yesterday\" is not an RFC 3339 time; write it as 2026-11-25T09:00:00Z or 2026-11-25T09:00:00+01:00"}
+
+$ langspan report w --since yesterday
+exit 1
+stderr: {"level":"error","message":"--since \"yesterday\" is not an RFC 3339 time; write it as 2026-11-25T09:00:00Z or 2026-11-25T09:00:00+01:00"}
+
+$ langspan count --month May
+exit 1
+stderr: {"level":"error","message":"--month \"May\" is not a month; write it as 2027-03"}
+
+$ langspan compact --keep-days 99999999999
+exit 1
+stderr: {"level":"error","message":"--keep-days is too large"}
+
+$ langspan notify maybe
+exit 1
+stderr: {"level":"error","message":"notify takes on, off or status, not \"maybe\""}
+
+$ langspan notify on --sound loud
+exit 1
+stderr: {"level":"error","message":"--sound takes on or off, not \"loud\""}
+
+$ langspan statusline --deadline-ms 1
+exit 1
+stderr: {"level":"error","message":"--deadline-ms must be between 100 and 5000"}
+
+$ langspan check auto w --off --name n
+exit 1
+stderr: {"level":"error","message":"option --name is not valid for this command"}
+
+$ langspan check flaky w --forget t1
+exit 1
+stderr: {"level":"error","message":"--forget requires --request-id ID; reuse it only for an identical retry"}
+
+$ langspan integrate check w --name n b -- true
+exit 1
+stderr: {"level":"error","message":"--onto BRANCH is required: the branch the work is to be integrated into"}
+
+$ langspan land w --onto main --name n b --wait-s 9999
+exit 1
+stderr: {"level":"error","message":"a landing waits 0 to 3600 seconds for the push turn"}
+
+$ langspan land-cancel w --onto main
+exit 1
+stderr: {"level":"error","message":"--request-id ID is required: the request ID of the waiting landing"}
+
+$ langspan commit --mine
+exit 1
+stderr: {"level":"error","message":"a commit message is required: -m MESSAGE"}
+
+$ langspan commit
+exit 1
+stderr: {"level":"error","message":"`commit` needs --mine: langspan commit --mine -m MESSAGE [--session ID] [--root DIR]"}
+
+$ langspan install --hosts nothing
+exit 1
+stderr: {"level":"error","message":"unknown host \"nothing\"; choose from claude-code, codex, cursor and antigravity"}
+
+$ langspan install --hosts claude-code --statusline maybe
+exit 1
+stderr: {"level":"error","message":"--statusline takes on or off, not \"maybe\""}
+
+$ langspan install --mcp-tools some
+exit 1
+stderr: {"level":"error","message":"--mcp-tools takes all or hooked, not \"some\""}
+
+$ langspan install --presence-minutes 99
+exit 1
+stderr: {"level":"error","message":"--presence-minutes must be a whole number of minutes from 1 to 30"}
+
+$ langspan guidance --format html
+exit 1
+stderr: {"level":"error","message":"--format html: expected agents|cursor-rules"}
+
+$ langspan guidance install
+exit 1
+stderr: {"level":"error","message":"guidance install and remove need --root DIR, the repository"}
+
+$ langspan guidance install --root .
+exit 1
+stderr: {"level":"error","message":"guidance install and remove need --file FILE, such as AGENTS.md"}
+
+$ langspan hooks install nothing --workspace w --root .
+exit 1
+stderr: {"level":"error","message":"unknown or incomplete command; run `langspan --help`"}
+
+$ langspan hooks install claude-code --root .
+exit 1
+stderr: {"level":"error","message":"--workspace ID is required"}
+
+$ langspan hook nothing
+exit 1
+stderr: {"level":"error","event":"langspan_hook","coverage":"unknown","message":"usage: langspan hook claude-code|codex|cursor|antigravity [--event NAME] [--workspace ID --root DIR]"}
+
+$ langspan hook antigravity
+exit 1
+stdout: {}
+stderr: {"level":"error","event":"langspan_hook","coverage":"unknown","message":"antigravity hooks need --event NAME"}
+
+$ langspan hook antigravity --event Nothing
+exit 1
+stdout: {}
+stderr: {"level":"error","event":"langspan_hook","coverage":"unknown","message":"--event \"Nothing\" is not an event LangSpan handles for antigravity"}
+
+$ langspan hook claude-code --event PreToolUse
+exit 1
+stderr: {"level":"error","event":"langspan_hook","coverage":"unknown","message":"--event is not used for claude-code"}
+
+$ langspan hook claude-code --workspace w
+exit 1
+stderr: {"level":"error","event":"langspan_hook","coverage":"unknown","message":"--workspace and --root go together; omit both for the user-level form"}
+
+$ langspan hook codex --mode between-steps
+exit 1
+stderr: {"level":"error","event":"langspan_hook","coverage":"unknown","message":"--mode \"between-steps\" is not a hook mode for codex; only claude-code takes --mode between-steps"}
+
+$ langspan hook claude-code --ttl-ms 0
+exit 1
+stderr: {"level":"error","event":"langspan_hook","coverage":"unknown","message":"hook limits: --ttl-ms 1..60000 and --budget-ms 1..4000"}
+
+$ langspan hook claude-code --presence maybe
+exit 1
+stderr: {"level":"error","event":"langspan_hook","coverage":"unknown","message":"--presence must be on or off"}
+
+$ langspan hook claude-code --bogus
+exit 1
+stderr: {"level":"error","event":"langspan_hook","coverage":"unknown","message":"unknown option --bogus; use -- before a filename beginning with '-' "}
+
+$ langspan hook claude-code --limit 5
+exit 1
+stderr: {"level":"error","event":"langspan_hook","coverage":"unknown","message":"option --limit is not valid for this command"}
+
+$ langspan request 'not json'
+exit 1
+stderr: {"level":"error","message":"expected ident at line 1 column 2"}
+
+$ langspan request <65536 bytes>
+exit 1
+stderr: {"level":"error","message":"request exceeds 64 KiB"}
+
