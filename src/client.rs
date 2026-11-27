@@ -36,12 +36,12 @@ mod unix {
         crate::hook::redact_command(&mut request.command);
         let mut response = exchange(state_dir, &request, deadline)?;
         // A daemon of an earlier build refuses this version before it reads
-        // the command, and answers in its own (version 6, 5, 4 or 3), so the
+        // the command, and answers in its own (version 7, 6, 5, 4 or 3), so the
         // same request in the version it names cannot take effect twice.
         // Requests are the same in every version it answers, except the one
         // version 6 changed (`protocol::fits`), which is not sent at all to
         // a daemon of version 5 or earlier, and a briefing of changes only,
-        // asked of an earlier daemon as the full view
+        // asked of a daemon before version 7 as the full view
         // (`protocol::for_version`).
         if request.version == PROTOCOL_VERSION
             && (OLDEST_PROTOCOL_VERSION..PROTOCOL_VERSION).contains(&response.version)
@@ -312,7 +312,8 @@ mod unix {
         /// Roadmap D7 (review comment 4707749784), H9 (review comment
         /// 4711096877) and issue #222 (review comments 4711375982 and
         /// 4712860167): a daemon of an earlier build answers only protocol
-        /// version 3, or only up to 4, 5 or 6 (roadmap F5's build). It
+        /// version 3, or only up to 4, 5, 6 (roadmap F5's build) or 7
+        /// (issue #222's). It
         /// refuses this build's version in its own, as that build does, and
         /// the client asks again once in that version, with the same
         /// request, and reads that answer.
@@ -323,6 +324,7 @@ mod unix {
                 crate::protocol::PROTOCOL_VERSION_4,
                 crate::protocol::PROTOCOL_VERSION_5,
                 crate::protocol::PROTOCOL_VERSION_6,
+                crate::protocol::PROTOCOL_VERSION_7,
             ] {
                 ask_an_earlier_daemon(version);
             }
@@ -449,12 +451,17 @@ mod unix {
                 ]
             );
             // The same request, except that a briefing of changes only,
-            // which an earlier daemon cannot read, is asked for as the full
-            // view (review follow-up #259).
+            // which a daemon before version 7 cannot read, is asked of it
+            // as the full view (review follow-up #259). A daemon of version
+            // 7, which gives changes only, is asked for them still.
             assert_eq!(asked[0]["command"]["changes_only"], true);
-            let mut full = asked[0]["command"].clone();
-            full.as_object_mut().unwrap().shift_remove("changes_only");
-            assert_eq!(full, asked[1]["command"]);
+            if version >= crate::protocol::PROTOCOL_VERSION_7 {
+                assert_eq!(asked[0]["command"], asked[1]["command"]);
+            } else {
+                let mut full = asked[0]["command"].clone();
+                full.as_object_mut().unwrap().shift_remove("changes_only");
+                assert_eq!(full, asked[1]["command"]);
+            }
             assert_eq!(asked[1]["request_id"], "read");
             assert_eq!(response.version, version);
             assert!(

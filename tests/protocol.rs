@@ -1,6 +1,7 @@
 use langspan::protocol::{
     OLDEST_PROTOCOL_VERSION, PROTOCOL_VERSION, PROTOCOL_VERSION_4, PROTOCOL_VERSION_5,
-    PROTOCOL_VERSION_6, Request, Response, encode, encode_for, encode_record_for, read_frame,
+    PROTOCOL_VERSION_6, PROTOCOL_VERSION_7, Request, Response, encode, encode_for,
+    encode_record_for, read_frame,
 };
 use langspan_core::Command;
 
@@ -1079,10 +1080,11 @@ fn v4_rename_history_response_and_its_version_3_form_match_the_golden_vectors() 
         history.entries[1].before_path.as_deref(),
         Some("app/old_users.py")
     );
-    // Versions 5, 6 and 7 added nothing to a history answer: 4 to 7 agree.
+    // Versions 5 to 8 added nothing to a history answer: 4 to 8 agree.
     assert_eq!(encode_for(PROTOCOL_VERSION_4, &response).unwrap(), wire);
     assert_eq!(encode_for(PROTOCOL_VERSION_5, &response).unwrap(), wire);
     assert_eq!(encode_for(PROTOCOL_VERSION_6, &response).unwrap(), wire);
+    assert_eq!(encode_for(PROTOCOL_VERSION_7, &response).unwrap(), wire);
     assert_eq!(encode_for(PROTOCOL_VERSION, &response).unwrap(), wire);
 
     response.version = OLDEST_PROTOCOL_VERSION;
@@ -1146,9 +1148,10 @@ fn v5_report_response_and_its_version_4_and_3_forms_match_the_golden_vectors() {
     assert_eq!(report.hosts[0].counts.refusal_outcomes["adapted"], 1);
     // A version 5 client still reads `refusal_outcomes`.
     assert_eq!(encode_for(PROTOCOL_VERSION_5, &response).unwrap(), wire);
-    // Version 6 changed landings and version 7 (issue #222) activity,
-    // briefings and events: their report is the version 5 form.
-    for later in [PROTOCOL_VERSION_6, PROTOCOL_VERSION] {
+    // Version 6 changed landings, version 7 (issue #222) activity,
+    // briefings and events, and version 8 (issue #262) briefings: their
+    // report is the version 5 form.
+    for later in [PROTOCOL_VERSION_6, PROTOCOL_VERSION_7, PROTOCOL_VERSION] {
         let mut current = response.clone();
         current.version = later;
         assert_eq!(
@@ -1379,6 +1382,42 @@ fn a_version_3_reply_leaves_out_trails() {
     );
 }
 
+/// Issue #262: a client of version 7 or earlier reads briefings with
+/// `deny_unknown_fields`, so its answer does not say the index was partial;
+/// a version 8 client's does.
+#[test]
+fn a_version_7_reply_leaves_out_a_partial_index() {
+    use langspan_core::{Briefing, Outcome};
+    let mut briefing: Briefing = serde_json::from_value(serde_json::json!({
+        "session_id": "codex.bob", "changed": true, "peers": [], "omitted_peers": 0,
+    }))
+    .unwrap();
+    briefing.inflight_partial = true;
+    let response = Response {
+        version: PROTOCOL_VERSION,
+        request_id: "r".into(),
+        replayed: false,
+        generation: 1,
+        lease_valid: None,
+        outcome: Outcome::Briefing { briefing },
+    };
+    for version in std::iter::once(PROTOCOL_VERSION_7).chain(EARLIER_VERSIONS) {
+        let earlier: serde_json::Value =
+            serde_json::from_slice(&encode_for(version, &response).unwrap()).unwrap();
+        assert!(
+            earlier["outcome"]["briefing"]
+                .get("inflight_partial")
+                .is_none(),
+            "{version}: {earlier:#}"
+        );
+    }
+    let current: Response =
+        serde_json::from_slice(&encode_for(PROTOCOL_VERSION, &response).unwrap()).unwrap();
+    assert!(
+        matches!(&current.outcome, Outcome::Briefing { briefing: read } if read.inflight_partial)
+    );
+}
+
 /// Roadmap D7 (review comment 4707749784): to a version 3 client an
 /// interface notice has no rename fields and no change of a definition that
 /// is not exported, while a version 4 client gets both.
@@ -1498,7 +1537,8 @@ const ADDED_IN_7: [&str; 6] = [
     "context_added",
     "told_forgotten",
 ];
-/// Every version the daemon answers before the current one.
+/// Every version the daemon answers before version 7. Version 8 (issue
+/// #262) keeps what version 7 added.
 const EARLIER_VERSIONS: [u16; 4] = [
     PROTOCOL_VERSION_6,
     PROTOCOL_VERSION_5,
@@ -1661,6 +1701,12 @@ fn an_earlier_reply_leaves_out_what_version_7_added_to_activity_briefings_and_ev
             serde_json::from_str::<Response>(&current).unwrap(),
             response
         );
+        // Version 8 (issue #262) keeps them: a version 7 client reads the
+        // same answer.
+        assert_eq!(
+            String::from_utf8(encode_for(PROTOCOL_VERSION_7, &response).unwrap()).unwrap(),
+            current
+        );
         for version in EARLIER_VERSIONS {
             let earlier = String::from_utf8(encode_for(version, &response).unwrap()).unwrap();
             for field in ADDED_IN_7 {
@@ -1812,5 +1858,43 @@ fn recording_a_rebased_or_adapted_landing_fits_only_version_6_and_later() {
     }
     for version in std::iter::once(PROTOCOL_VERSION).chain(EARLIER_VERSIONS) {
         assert!(fits(version, &with(false, false)), "version {version}");
+    }
+}
+
+/// Review follow-up #259: a briefing of changes only (issue #222) is new
+/// in version 7. A request to a daemon of version 7 or 8 keeps asking for
+/// changes only; one to a daemon of version 6 or earlier, which refuses
+/// the field, asks for the full view and is otherwise the same. Other
+/// requests are left as they are.
+#[test]
+fn a_briefing_of_changes_only_is_asked_of_version_7_and_later() {
+    use langspan::protocol::for_version;
+    let wire = include_bytes!("../fixtures/brief-changes-only-request-v7.json");
+    let request: Request = serde_json::from_slice(wire).unwrap();
+    assert_eq!(request.version, PROTOCOL_VERSION_7);
+    assert_eq!(encode(&request).unwrap(), wire);
+    let with_changes_only = |value: bool| {
+        let mut command = request.command.clone();
+        let Command::Brief { changes_only, .. } = &mut command else {
+            panic!("{request:?}");
+        };
+        assert!(*changes_only);
+        *changes_only = value;
+        command
+    };
+    for version in [PROTOCOL_VERSION, PROTOCOL_VERSION_7] {
+        let mut command = request.command.clone();
+        for_version(version, &mut command);
+        assert_eq!(command, with_changes_only(true), "version {version}");
+    }
+    for version in EARLIER_VERSIONS {
+        let mut command = request.command.clone();
+        for_version(version, &mut command);
+        assert_eq!(command, with_changes_only(false), "version {version}");
+    }
+    for version in std::iter::once(PROTOCOL_VERSION).chain(EARLIER_VERSIONS) {
+        let mut command = Command::Dashboard;
+        for_version(version, &mut command);
+        assert_eq!(command, Command::Dashboard, "version {version}");
     }
 }

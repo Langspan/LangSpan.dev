@@ -1861,12 +1861,52 @@ fn brief_with(
             changes_only: false,
             left: Vec::new(),
             inflight,
+            inflight_partial: false,
         },
         now,
     )) {
         Outcome::Briefing { briefing } => briefing,
         other => panic!("{other:?}"),
     }
+}
+
+/// Issue #262: the daemon's word that its index had no first scan of a
+/// worktree reaches the briefing, and alone does not make a briefing new.
+#[test]
+fn a_partial_index_is_told_beside_news_and_is_not_news_itself() {
+    let mut state = ready();
+    edited(&mut state, "carol", "src/quota.rs", 1_000);
+    edited(&mut state, "alice", "src/routes.rs", 1_000);
+    let mut prepared = |id: &str, now: u64, inflight_partial: bool| match ok(run(
+        &mut state,
+        id,
+        Command::BriefPrepared {
+            session_id: "alice".into(),
+            max_peers: 8,
+            deliver: true,
+            mid_turn: false,
+            recent: false,
+            recent_window_ms: None,
+            mcp: false,
+            left: Vec::new(),
+            changes_only: false,
+            inflight: Vec::new(),
+            inflight_partial,
+        },
+        now,
+    )) {
+        Outcome::Briefing { briefing } => briefing,
+        other => panic!("{other:?}"),
+    };
+    let first = prepared("p1", 2_000, true);
+    assert!(first.inflight_partial && first.changed, "{first:?}");
+    let complete = prepared("p2", 2_500, false);
+    assert!(
+        !complete.inflight_partial && !complete.changed,
+        "{complete:?}"
+    );
+    let again = prepared("p3", 3_000, true);
+    assert!(again.inflight_partial && !again.changed, "{again:?}");
 }
 
 /// Roadmap C7, as the core decides it: what the daemon found in flight in
@@ -1948,6 +1988,7 @@ fn an_in_flight_signature_is_told_once_per_signature_and_only_from_another_workt
             changes_only: false,
             left: Vec::new(),
             inflight: found(v3),
+            inflight_partial: false,
         },
         7_000,
     )) {
@@ -2004,6 +2045,7 @@ fn in_flight_lines_are_at_most_three_within_their_share_and_the_rest_counted() {
             changes_only: false,
             left: Vec::new(),
             inflight: too_many,
+            inflight_partial: false,
         },
         3_000,
     );
@@ -2140,6 +2182,7 @@ fn presence_and_an_in_flight_signature_are_each_news_once() {
             changes_only: false,
             left: Vec::new(),
             inflight: found(v1),
+            inflight_partial: false,
         },
         3_500,
     )) {
