@@ -218,6 +218,32 @@ class Indexing(unittest.TestCase):
         with open(os.path.join(HERE, "fixtures", "indexing.rs"), encoding="utf-8") as f:
             self.assertEqual(ratchets.Source(f.read()).indexing(), (6, 3))
 
+    def test_indexing_a_string_literal_counts(self):
+        # Each kind of string literal Rust can index, then literals that aren't indexed.
+        src = (
+            "fn f(i: usize) -> u8 {\n"
+            '    let a = b"abc"[i];\n'
+            '    let b = &"abc"[..i];\n'
+            '    let c = r"abc"[..i].len();\n'
+            '    let d = br#"a"b"#[i];\n'
+            '    let e = &"a\\"[b"[i..];\n'
+            '    let f = ["x"];\n'
+            "    let g = 'x';\n"
+            "    a + d\n"
+            "}\n"
+        )
+        self.assertEqual(ratchets.Source(src).indexing(), (2, 3))
+
+    def test_marking_literals_for_indexing_leaves_other_measures_alone(self):
+        src = 'pub extern "C" fn f() -> u8 {\n    b"x"[0]\n}\n'
+        source = ratchets.Source(src)
+        self.assertEqual(source.functions(), {"f": 3})
+        self.assertEqual(source.pub_items(), 1)
+        self.assertEqual(source.indexing(), (1, 0))
+
+    def test_marking_an_unterminated_string_keeps_its_lines(self):
+        self.assertEqual(ratchets.strip('x = "a\n', mark=True), "x =   \n")
+
     def test_recording_writes_both_counts(self):
         self.assertEqual(self.ws.baseline("src/a.rs"), "index\t2\nslice\t1\n")
         self.assertEqual(self.ws.check(), ([], []))

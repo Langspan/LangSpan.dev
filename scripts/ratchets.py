@@ -51,8 +51,11 @@ def _blank(text):
     return "".join(c if c == "\n" else " " for c in text)
 
 
-def strip(src):
-    """Blank comments, strings and character literals, keeping every offset."""
+def strip(src, mark=False):
+    """Blank comments, strings and character literals, keeping every offset.
+
+    With mark, a string literal keeps a closing `"`, so an index can see its operand.
+    """
     out, i, n = [], 0, len(src)
     while i < n:
         m = _TOKEN.search(src, i)
@@ -89,7 +92,10 @@ def strip(src):
             while j < n and src[j] != '"':
                 j += 2 if src[j] == "\\" else 1
             j = min(j + 1, n)
-        out.append(_blank(src[i:j]))
+        blank = _blank(src[i:j])
+        if mark and tok.endswith('"') and blank.endswith(" "):
+            blank = blank[:-1] + '"'
+        out.append(blank)
         i = j
     return "".join(out)
 
@@ -135,8 +141,9 @@ _PUB = re.compile(
     r"(?:fn|struct|enum|trait|type|const|static|mod|union)\b"
 )
 # A `[` right after an operand: rustfmt puts a space or `<`, `&`, `(` before an
-# array type, literal or slice pattern, and `!` before a macro's.
-_INDEX = re.compile(r"(?<=[\w)\]?])\[")
+# array type, literal or slice pattern, and `!` before a macro's. A `"` ends a
+# string literal (see strip's mark).
+_INDEX = re.compile(r"(?<=[\w)\]?\"])\[")
 
 
 class Source:
@@ -170,9 +177,11 @@ class Source:
                 if s[end] == "{":
                     end = _matching_brace(s, end)
             self.excluded.update(range(self._line(attr.start()), self._line(end) + 1))
-        self.text = "\n".join(
-            "" if i in self.excluded else line for i, line in enumerate(self.lines)
-        )
+        self.text = self._production(self.lines)
+        self._marked = self._production(strip(text, mark=True).split("\n"))
+
+    def _production(self, lines):
+        return "\n".join("" if i in self.excluded else line for i, line in enumerate(lines))
 
     def _line(self, offset):
         """0-based line of a byte offset."""
@@ -202,7 +211,7 @@ class Source:
         """(index, slice): `x[i]` and `x[a..b]` expressions, which can panic."""
         if self._indexing is not None:
             return self._indexing
-        counts, s = [0, 0], self.text
+        counts, s = [0, 0], self._marked
         for m in _INDEX.finditer(s):
             depth, j = 0, m.end()
             while j < len(s) and (depth or s[j] != "]"):
