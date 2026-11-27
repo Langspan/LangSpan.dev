@@ -22,7 +22,7 @@ fn pure_core_dependencies_point_inward_and_import_no_effect_adapters() {
         .take_while(|line| !line.starts_with('['))
         .filter_map(|line| line.split_once('=').map(|(name, _)| name.trim()))
         .collect();
-    assert_eq!(dev_dependencies, BTreeSet::from(["serde_json"]));
+    assert_eq!(dev_dependencies, BTreeSet::from(["proptest", "serde_json"]));
 
     // Keep the production std boundary explicit. An intentional new pure import
     // can extend this list; clocks, files, sockets and root adapters cannot slip
