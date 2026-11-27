@@ -91,22 +91,28 @@ pub fn input_directory(bytes: &[u8]) -> Option<PathBuf> {
 /// `from_ms` (wall clock). Any failure, including the deadline, is
 /// `Unavailable`.
 pub fn ask(state_dir: &Path, dir: &Path, from_ms: u64, deadline: Instant) -> Answer {
-    let root = std::fs::canonicalize(dir)
-        .or_else(|_| std::path::absolute(dir))
-        .unwrap_or_else(|_| dir.to_path_buf());
-    let request = Request::new(
-        "read",
-        Command::StatusLine {
-            root: root.to_string_lossy().into_owned(),
-            from_ms,
-        },
-    );
+    let request = Request::new("read", resolved(&dir.to_string_lossy(), from_ms));
     match crate::client::call_until(state_dir, &request, deadline) {
         Ok(response) => match response.outcome {
             Outcome::StatusLine { line } => Answer::Line(line),
             _ => Answer::Unavailable,
         },
         Err(_) => Answer::Unavailable,
+    }
+}
+
+/// The status-line query for `root` resolved as workspace roots are stored
+/// (links followed), so a folder reached through a link still matches. A
+/// root that cannot be resolved (gone, or over 4096 bytes) is made absolute
+/// or kept as given. The daemon applies it to every client's query.
+pub(crate) fn resolved(root: &str, from_ms: u64) -> Command {
+    let given = Path::new(root);
+    let path = (root.len() <= 4096)
+        .then(|| std::fs::canonicalize(given).or_else(|_| std::path::absolute(given)))
+        .and_then(Result::ok);
+    Command::StatusLine {
+        root: path.map_or_else(|| root.to_owned(), |path| path.to_string_lossy().into()),
+        from_ms,
     }
 }
 

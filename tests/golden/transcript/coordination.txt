@@ -201,8 +201,8 @@ exit 0
 $ langspan changes w --limit 3
 exit 0
 Latest complete scan: 1 files, 1 local branches, generation 1, observed at <ms> ms. Disk changes are unattributed.
-4 {"type":"branch_observed","observation":{"observation_id":"scan-1-3-0","workspace_id":"w","branch_ref":"HEAD","head_oid":"3151388a147d1a4c8b1a5a46910ac04c7cceb909","tree_oid":"e2dd98466274a2f79e9aaf75ddcb0a996b15fe76","observed_at_ms":<ms>,"generation":1}}
-5 {"type":"branch_observed","observation":{"observation_id":"scan-1-3-1","workspace_id":"w","branch_ref":"refs/heads/main","head_oid":"3151388a147d1a4c8b1a5a46910ac04c7cceb909","tree_oid":"e2dd98466274a2f79e9aaf75ddcb0a996b15fe76","observed_at_ms":<ms>,"generation":1}}
+4 {"type":"branch_observed","observation":{"observation_id":"scan-1-3-0","workspace_id":"w","branch_ref":"HEAD","head_oid":"3151388a147d1a4c8b1a5a46910ac04c7cceb909","tree_oid":"e2dd98466274a2f79e9aaf75ddcb0a996b15fe76","observed_at_ms":"<ms>","generation":1}}
+5 {"type":"branch_observed","observation":{"observation_id":"scan-1-3-1","workspace_id":"w","branch_ref":"refs/heads/main","head_oid":"3151388a147d1a4c8b1a5a46910ac04c7cceb909","tree_oid":"e2dd98466274a2f79e9aaf75ddcb0a996b15fe76","observed_at_ms":"<ms>","generation":1}}
 $ langspan changes w --limit 3 --json
 exit 0
 {"version":10,"request_id":"read","replayed":false,"generation":1,"lease_valid":null,"outcome":{"type":"changes","events":[{"seq":4,"event":{"type":"branch_observed","observation":{"observation_id":"scan-1-3-0","workspace_id":"w","branch_ref":"HEAD","head_oid":"3151388a147d1a4c8b1a5a46910ac04c7cceb909","tree_oid":"e2dd98466274a2f79e9aaf75ddcb0a996b15fe76","observed_at_ms":"<ms>","generation":1}}},{"seq":5,"event":{"type":"branch_observed","observation":{"observation_id":"scan-1-3-1","workspace_id":"w","branch_ref":"refs/heads/main","head_oid":"3151388a147d1a4c8b1a5a46910ac04c7cceb909","tree_oid":"e2dd98466274a2f79e9aaf75ddcb0a996b15fe76","observed_at_ms":"<ms>","generation":1}}}],"scan":{"workspace_id":"w","observed_at_ms":"<ms>","generation":1,"file_count":1,"branch_count":1,"head_oid":"3151388a147d1a4c8b1a5a46910ac04c7cceb909","branch_ref":"refs/heads/main"}}}
@@ -211,7 +211,7 @@ exit 0
 $ langspan events --limit 3
 exit 0
 1 {"type":"booted","generation":1}
-2 {"type":"clock_anchored","anchor":{"generation":1,"clock_ms":<ms>,"wall_ms":<ms>}}
+2 {"type":"clock_anchored","anchor":{"generation":1,"clock_ms":"<ms>","wall_ms":"<ms>"}}
 3 {"type":"workspace_registered","workspace":{"workspace_id":"w","root":"$TMP/work"}}
 $ langspan events --limit 3 --json
 exit 0
@@ -379,10 +379,10 @@ exit 0
 ## status line
 $ langspan request {"version":10,"request_id":"read","command":{"op":"status_line","root":"$TMP/work","from_ms":0}}
 exit 0
-langspan · 0 sessions here · 0 refusals today
+langspan · 1 session here · 1 refusal today
 $ langspan request {"version":10,"request_id":"read","command":{"op":"status_line","root":"$TMP/work","from_ms":0}} --json
 exit 0
-{"version":10,"request_id":"read","replayed":false,"generation":1,"lease_valid":null,"outcome":{"type":"status_line","line":{"workspace_id":null,"sessions_here":0,"refusals_today":0}}}
+{"version":10,"request_id":"read","replayed":false,"generation":1,"lease_valid":null,"outcome":{"type":"status_line","line":{"workspace_id":"w","sessions_here":1,"refusals_today":1}}}
 
 ## status
 $ langspan status

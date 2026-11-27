@@ -178,7 +178,9 @@ and records what it finds in the local store.
 adds three boundaries: Claude Code's status-line input on stdin, the
 system's time-zone file for the local offset (the file `TZ` or
 `/etc/localtime` names, at most 256 KiB, parsed as TZif with bounds-checked
-counts; anything else gives no offset and midnight UTC is used), and a `statusLine` entry in the user's `~/.claude/settings.json`. The coordinator gains a read (`status_line`) and
+counts; anything else gives no offset and midnight UTC is used), and a `statusLine` entry in the user's `~/.claude/settings.json`. The coordinator gains a read (`status_line`, whose root of at most
+4096 bytes it resolves through links before matching, as it does a
+registered root; the answer holds counts, never the resolved path) and
 one reported event (`record_refusal`, a held commit).
 
 | Threat | Control | Residual risk |

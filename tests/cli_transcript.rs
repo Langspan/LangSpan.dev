@@ -127,16 +127,20 @@ impl Transcript {
             text = text.replace(form.to_str().unwrap(), "$TMP");
         }
         for (value, name) in &self.names {
-            text = text.replace(value, name);
+            text = if value.bytes().all(|byte| byte.is_ascii_digit()) {
+                replace_number(&text, value, name)
+            } else {
+                text.replace(value, name)
+            };
         }
         human_times(&text)
     }
 
     /// Writes each clock value in `value` (a number under a key ending in
     /// `_ms`, or in an object under one) as `<ms>`, except the durations the
-    /// script chose. A large one is also replaced in the human output,
-    /// which prints the same values.
-    fn scrub(&mut self, value: &mut Value, timed: bool) {
+    /// script chose. Human output prints them in prose, which `human_times`
+    /// rewrites, or as JSON, which this rewrites.
+    fn scrub(&self, value: &mut Value, timed: bool) {
         match value {
             Value::Object(map) => {
                 // An export's size counts the digits of the clock reading
@@ -156,11 +160,7 @@ impl Transcript {
                 }
             }
             Value::Array(items) => items.iter_mut().for_each(|item| self.scrub(item, false)),
-            Value::Number(number) if timed => {
-                let text = number.to_string();
-                if text.len() >= 7 && !self.names.iter().any(|(seen, _)| *seen == text) {
-                    self.names.push((text, "<ms>".into()));
-                }
+            Value::Number(_) if timed => {
                 *value = Value::String("<ms>".into());
             }
             _ => {}
@@ -182,8 +182,7 @@ impl Transcript {
                         && text.len() >= 12
                         && !self.names.iter().any(|(seen, _)| seen == text)
                     {
-                        let ids = self.names.iter().filter(|(_, name)| name != "<ms>").count();
-                        let name = format!("<{key}-{}>", ids - 1);
+                        let name = format!("<{key}-{}>", self.names.len() - 1);
                         self.names.push((text.clone(), name));
                     }
                     self.learn(value);
@@ -230,13 +229,22 @@ impl Transcript {
         let (code, json_code) = (code.unwrap_or(-1), json_code.unwrap_or(-1));
         let mut text = format!("## {title}\n$ langspan {}\nexit {code}\n", args.join(" "));
         // A line of human output that is a JSON object (`status --all`,
-        // the dashboard) is normalized as the JSON answer is.
+        // the dashboard), or a sequence number and one (`events`,
+        // `changes`), is normalized as the JSON answer is.
         for line in stdout.lines() {
-            match serde_json::from_str::<Value>(line) {
+            let (seq, object) = match line.split_once(' ') {
+                Some((seq, rest))
+                    if !seq.is_empty() && seq.bytes().all(|byte| byte.is_ascii_digit()) =>
+                {
+                    (format!("{seq} "), rest)
+                }
+                _ => (String::new(), line),
+            };
+            match serde_json::from_str::<Value>(object) {
                 Ok(mut value) if value.is_object() => {
                     self.learn(&value);
                     self.scrub(&mut value, false);
-                    text.push_str(&format!("{value}\n"));
+                    text.push_str(&format!("{seq}{value}\n"));
                 }
                 // Trailing spaces are shown, as `cat -e` does.
                 _ if line.ends_with(char::is_whitespace) => {
@@ -601,6 +609,41 @@ fn clock_readings_and_export_sizes_are_placeholders_whatever_their_length() {
     }
 }
 
+/// `text` with each whole number `number` written as `name`: not a run of
+/// digits inside a longer number, a hex OID or a word.
+fn replace_number(text: &str, number: &str, name: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(at) = rest.find(number) {
+        let end = at + number.len();
+        let joined = |byte: Option<&u8>| byte.is_some_and(u8::is_ascii_alphanumeric);
+        let whole = !joined(
+            at.checked_sub(1)
+                .and_then(|before| rest.as_bytes().get(before)),
+        ) && !joined(rest.as_bytes().get(end));
+        out.push_str(&rest[..at]);
+        out.push_str(if whole { name } else { number });
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// A process ID is short on Linux and can be a run of digits in an OID or
+/// a number the script chose.
+#[test]
+fn a_process_id_is_replaced_only_as_a_whole_number() {
+    for (text, want) in [
+        ("\"pid\":4321,", "\"pid\":<pid>,"),
+        ("attach-pid s1 4321", "attach-pid s1 <pid>"),
+        ("[0,86432100]", "[0,86432100]"),
+        ("\"a4321ff\"", "\"a4321ff\""),
+        ("43210 4321", "43210 <pid>"),
+    ] {
+        assert_eq!(replace_number(text, "4321", "<pid>"), want, "{text}");
+    }
+}
+
 fn string<'a>(value: &'a Value, path: &[&str]) -> &'a str {
     let mut value = value;
     for key in path {
@@ -614,7 +657,6 @@ fn string<'a>(value: &'a Value, path: &[&str]) -> &'a str {
 /// Workspaces and sessions, admission, observation, messages and notes,
 /// and the projections (issue #324).
 #[test]
-#[ignore = "machine-dependent values on Linux: #397"]
 fn transcript_of_the_coordination_commands() {
     let mut t = Transcript::new("one");
     let work = t.work().display().to_string();
@@ -884,7 +926,6 @@ fn transcript_of_the_coordination_commands() {
 /// Graph queries, checks and landing turns, interface notices, the scan's
 /// and hosts' observations, remote awareness and the dashboard (issue #325).
 #[test]
-#[ignore = "machine-dependent values on Linux: #397"]
 fn transcript_of_the_remaining_outcomes() {
     let mut t = Transcript::new("two");
     let work = t.work().display().to_string();
