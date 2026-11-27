@@ -6,7 +6,10 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+mod admission;
 mod anchors;
+mod briefing;
+mod checks;
 mod classes;
 mod command;
 mod count;
@@ -15,13 +18,18 @@ mod event;
 mod flaky;
 mod history;
 mod lines;
+mod messages;
+mod notices;
+mod observation;
 mod outcome;
 mod policy;
 mod rank;
 mod recall;
 mod recent;
 mod refusal_outcome;
+mod remote;
 mod report;
+mod sessions;
 mod since;
 mod status;
 mod status_line;
@@ -30,10 +38,18 @@ mod trail;
 mod validate;
 mod workspaces;
 mod write_check;
+// The eight domain modules are empty until each domain moves in from its
+// banners below; the allow does nothing once one holds an item.
+#[allow(unused_imports)]
+pub use admission::*;
 pub use anchors::{
     ANCHOR_CANDIDATES, AnchorIndex, AnchorLookup, AnchorState, MAX_TAGS, NoteAnchor, SYMBOL_BYTES,
     TAG_BYTES, anchored, remember_lookups, validate_tag, validate_tags,
 };
+#[allow(unused_imports)]
+pub use briefing::*;
+#[allow(unused_imports)]
+pub use checks::*;
 pub use classes::{
     FailureClass, KeptTests, MAX_FIXED_NAMED, MAX_WRITE_RUNS, MAX_WRITERS_NAMED, WriteRun,
 };
@@ -59,6 +75,12 @@ pub use history::{
     HISTORY_RELATED, HISTORY_RELATED_MS, History, HistoryEntry, HistoryMessage, HistoryNote,
     HistoryQuery, history as definition_history,
 };
+#[allow(unused_imports)]
+pub use messages::*;
+#[allow(unused_imports)]
+pub use notices::*;
+#[allow(unused_imports)]
+pub use observation::*;
 pub use outcome::Outcome;
 pub use policy::{
     DEFAULT_WAIT_MS, MAX_UNSETTLED, MAX_WAIT_MS, Policy, PolicyCase, PolicyRow, SettledOutcome,
@@ -78,11 +100,15 @@ pub use recent::{
     RECENT_WINDOW_MS, RecentChanges, RecentInterfaceChange,
 };
 pub use refusal_outcome::{PENDING, REFUSAL_WINDOW_MS, RefusalOutcome};
+#[allow(unused_imports)]
+pub use remote::*;
 pub use report::{
     OTHER_HOST, REPORT_HISTORY_EVENTS, REPORT_SESSIONS, Report, ReportCounts, ReportHost,
     ReportKnown, ReportQuery, ReportSession, host_kind, known_sessions, open_intents, report,
     session_workspaces,
 };
+#[allow(unused_imports)]
+pub use sessions::*;
 pub use since::{
     AWAY_AFTER_MS, MAX_AWAY_AFTER_MS, SINCE_EVENTS, SINCE_ITEMS, Since, SinceChecks, SinceFailure,
     SinceFrom, SinceInterface, SinceLanding, SinceMessage, SinceQuery, since,
