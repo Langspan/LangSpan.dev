@@ -735,6 +735,32 @@ fn anchored_lists_each_notes_own_files_and_a_workspace_lookup_only_without_them(
     assert!(lookup["parse_upload"].workspace);
 }
 
+/// Review follow-up #281: the cap on looked-up paths is per note, so notes
+/// on one name that together name more than 65 files each keep theirs.
+#[test]
+fn anchored_keeps_every_notes_paths_when_notes_share_a_name() {
+    let mut state = ready();
+    let mut all = std::collections::BTreeSet::new();
+    for note in 0..9 {
+        let paths: Vec<String> = (0..8).map(|n| format!("n{note}/{n}.py")).collect();
+        let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+        let (outcome, _) = remember(
+            &mut state,
+            &format!("n{note}"),
+            &refs,
+            "check_size",
+            &[],
+            None,
+        );
+        assert!(!matches!(outcome, Outcome::Error { .. }), "{outcome:?}");
+        all.extend(paths);
+    }
+    assert_eq!(all.len(), 72);
+    let lookups = langspan_core::anchored(&state, "demo");
+    assert_eq!(lookups["check_size"].paths, all);
+    assert!(!lookups["check_size"].workspace);
+}
+
 /// A workspace-wide lookup that reached its cap counts what it found as a
 /// lower bound.
 #[test]
