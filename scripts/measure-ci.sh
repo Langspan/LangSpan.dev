@@ -60,12 +60,17 @@ done
 # The workspace's own crates; any other "Compiling" line is a dependency.
 cargo metadata --no-deps --format-version 1 --locked | jq -r '.packages[].name' > "$TMP/workspace"
 
+# Cargo colors its output. A gh that has --allow-escape-sequences rewrites
+# escape characters without it, and the parser below needs them as sent; an
+# older gh has no such flag and passes them through. The log is only parsed
+# here, and the one line the report quotes has its control characters removed.
+RAW=()
+if gh api --help 2>&1 | grep -q -- '--allow-escape-sequences'; then RAW=(--allow-escape-sequences); fi
+
 # Cache and compile facts from a job's log, within the build cache restore
 # and the scripts/check.sh step only (installing tools compiles crates too).
 log_facts() { # JOB_ID -> JSON
-  # Cargo colours its output; the log is only parsed here, and the one line
-  # the report quotes has its control characters removed below.
-  if ! gh api --allow-escape-sequences "repos/$REPO/actions/jobs/$1/logs" > "$TMP/log" 2> "$TMP/log.err"; then
+  if ! gh api ${RAW[@]+"${RAW[@]}"} "repos/$REPO/actions/jobs/$1/logs" > "$TMP/log" 2> "$TMP/log.err"; then
     echo "measure-ci: could not read the log of job $1 ($(head -c 200 "$TMP/log.err" | tr '\n' ' ')); its cache and compile facts are left out" >&2
     echo '{"log": false}'; return
   fi
