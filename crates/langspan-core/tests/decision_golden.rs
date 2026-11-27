@@ -1,4 +1,4 @@
-//! Golden decisions (issue #318): for a fixed sequence of commands, the
+//! Golden decisions (issues #318 and #319): for a fixed sequence of commands, the
 //! `(events, outcome)` that `decide` returns, kept in files so a change to
 //! any decision shows as a readable difference.
 //!
@@ -7,7 +7,9 @@
 //! either `command`, a wire command, or `prepared`, an adapter input that
 //! never crosses the wire. A domain starts from a booted, empty state and
 //! applies each decision's events before the next step. What `decide`
-//! returned for each step is in `<domain>.golden`.
+//! returned for each step is in `<domain>.golden`; for a command the daemon's
+//! stores answer, that is the core's routing error. Every command maps to
+//! its domain in `cases!`, an exhaustive match.
 //!
 //! To accept a changed decision on purpose, run
 //! `cargo nextest run -p langspan-core --test decision_golden --run-ignored only -E 'test(bless)'`
@@ -291,14 +293,15 @@ const BLESS: &str = "If the change is intended, run cargo nextest run -p langspa
                      --test decision_golden --run-ignored only -E 'test(bless)' \
                      and review the golden diff.";
 
-fn check(domain: &str) {
+/// Compares a domain's decisions with its golden file, and says which
+/// steps decided differently and how.
+fn check(domain: &str) -> Result<(), String> {
     let actual = decisions(domain);
     let path = golden_dir().join(format!("{domain}.golden"));
-    let bless = BLESS;
     let expected = fs::read_to_string(&path)
-        .unwrap_or_else(|error| panic!("cannot read {domain}.golden: {error}. {bless}"));
+        .map_err(|error| format!("{domain}: cannot read {domain}.golden: {error}"))?;
     if expected == actual {
-        return;
+        return Ok(());
     }
     let (want, got) = (blocks(&expected), blocks(&actual));
     let mut report = String::new();
@@ -325,13 +328,75 @@ fn check(domain: &str) {
         names.sort();
         names
     };
-    if report.is_empty() && order(&want) != order(&got) {
-        report.push_str("the steps run in a different order than the golden file records\n");
+    if report.is_empty() {
+        report.push_str(if order(&want) != order(&got) {
+            "the steps run in a different order than the golden file records\n"
+        } else {
+            "the golden file's layout differs from what this run writes\n"
+        });
     }
-    panic!("{domain}: decisions differ from {domain}.golden\n{report}{bless}");
+    Err(format!(
+        "{domain}: decisions differ from {domain}.golden\n{report}"
+    ))
 }
 
-const DOMAINS: &[&str] = &["sessions", "admission", "observation", "messages"];
+macro_rules! cases {
+    ($($domain:literal => [$($variant:ident),* $(,)?],)*) => {
+        /// The domain whose steps hold each command's golden decision. The
+        /// match is exhaustive, so a new command fails to compile here until
+        /// it has a case; a prepared adapter input is a case of its own.
+        fn case(command: &Command) -> (&'static str, &'static str) {
+            match command {
+                $($(Command::$variant { .. } => ($domain, stringify!($variant)),)*)*
+            }
+        }
+
+        const CASES: &[(&str, &str)] = &[$($(($domain, stringify!($variant)),)*)*];
+        const DOMAINS: &[&str] = &[$($domain),*];
+    };
+}
+
+cases! {
+    "sessions" => [
+        WorkspaceRegister, WorkspaceRegisterVerified, WorkspaceList, WorkspaceMove,
+        WorkspaceMoveVerified, WorkspaceRemove, SessionRegister, ObserveSessionLiveness,
+        SessionSeen, RecordContext, SessionPrompt, SetPromptTargets, ObservePresence,
+        SetPresence, SessionStop, SessionEnd, Adopt,
+    ],
+    "admission" => [
+        IntentSet, IntentEnd, Admit, AdmitTool, Holders, RecordWait, RecordRefusal, Policy,
+        SetPolicy, ObserveSource, OutlineRead, Observe, ObserveTool, ObserveToolBatch, Complete,
+    ],
+    "observation" => [
+        ObserveWorkspaceGit, ObserveBranch, ObserveDisk, ObserveScan, ObserveUncoordinated,
+        ObserveCheckout, ObserveCheckoutRun,
+    ],
+    "messages" => [
+        SendMessage, AckMessage, Handoff, RetractMessage, ShowMessage, MessageStatus, Remember,
+        RememberPrepared, ObserveNoteAnchors, NoteAnchorsPrepared, Recall, Recap, Forget,
+    ],
+    "remote" => [
+        RemoteEnable, RemoteDisable, RemoteOutbox, RemotePublished, RemoteSent, ObserveRemote,
+        ForgetRemote, RemoteWithdrawn,
+    ],
+    "checks" => [
+        RecordCheck, CheckStatus, FlakyTests, ForgetFlakyTest, AutoCheckEnable,
+        AutoCheckDisable, LandingReadiness, RecordLanding, TakeTurn, TurnQueue, ReleaseTurn,
+        LeaveTurnQueue,
+    ],
+    "graph" => [
+        ObserveInterface, ObserveInterfaceDependents, InterfaceShown, BetweenSteps,
+        AcknowledgeInterface, GraphSymbol, GraphReferences, GraphImpact, GraphBlindSpots,
+        GraphPath, GraphMap, GraphContext, GraphInflight, GraphExport, GraphImport, CheckWrite,
+        CheckCalls,
+    ],
+    "briefing" => [Brief, BriefPrepared, ForgetTold, Trails],
+    "hosts" => [ObserveHosts],
+    "projections" => [
+        Status, Dashboard, StatusLine, StatusRecords, Version, Events, Changes, Compact, Today,
+        Report, Count, History,
+    ],
+}
 
 /// Rewrites every golden file from this run's decisions.
 #[test]
@@ -344,21 +409,53 @@ fn bless() {
 }
 
 #[test]
-fn workspace_and_session_decisions_match_their_golden() {
-    check("sessions");
+fn decisions_match_their_golden() {
+    let failures: Vec<String> = DOMAINS
+        .iter()
+        .filter_map(|domain| check(domain).err())
+        .collect();
+    assert!(failures.is_empty(), "{}\n{BLESS}", failures.join("\n"));
 }
 
+/// Every command, prepared inputs included, has at least one step in its
+/// own domain's file, and the directory holds only those domains' files.
 #[test]
-fn admission_decisions_match_their_golden() {
-    check("admission");
-}
+fn every_command_has_a_golden_decision() {
+    let mut covered = BTreeSet::new();
+    for domain in DOMAINS {
+        for (_, _, command) in steps(domain) {
+            let (owner, variant) = case(&command);
+            if owner == *domain {
+                covered.insert(variant);
+            }
+        }
+    }
+    let missing: Vec<_> = CASES
+        .iter()
+        .filter(|(_, variant)| !covered.contains(variant))
+        .map(|(domain, variant)| format!("{variant} (in {domain}.steps.jsonl)"))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "commands without a golden decision: {missing:?}"
+    );
 
-#[test]
-fn observation_decisions_match_their_golden() {
-    check("observation");
-}
-
-#[test]
-fn message_and_note_decisions_match_their_golden() {
-    check("messages");
+    let expected: BTreeSet<String> = DOMAINS
+        .iter()
+        .flat_map(|domain| [format!("{domain}.steps.jsonl"), format!("{domain}.golden")])
+        .collect();
+    let present: BTreeSet<String> = fs::read_dir(golden_dir())
+        .expect("read the golden directory")
+        .map(|entry| {
+            entry
+                .expect("a directory entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert_eq!(
+        present, expected,
+        "the golden directory holds one steps and one golden file per domain"
+    );
 }

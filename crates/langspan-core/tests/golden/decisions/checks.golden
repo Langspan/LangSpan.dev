@@ -1,0 +1,545 @@
+## register-app
+{
+  "events": [
+    {
+      "type": "workspace_registered",
+      "workspace": {
+        "workspace_id": "app",
+        "root": "/work/app"
+      }
+    }
+  ],
+  "outcome": {
+    "type": "workspace",
+    "workspace": {
+      "workspace_id": "app",
+      "root": "/work/app"
+    }
+  }
+}
+## session-alice
+{
+  "events": [
+    {
+      "type": "session_registered",
+      "session": {
+        "session_id": "claude-code.alice",
+        "workspace_id": "app",
+        "generation": 1
+      }
+    }
+  ],
+  "outcome": {
+    "type": "session",
+    "session": {
+      "session_id": "claude-code.alice",
+      "workspace_id": "app",
+      "generation": 1
+    }
+  }
+}
+## session-bob
+{
+  "events": [
+    {
+      "type": "session_registered",
+      "session": {
+        "session_id": "codex.bob",
+        "workspace_id": "app",
+        "generation": 1
+      }
+    }
+  ],
+  "outcome": {
+    "type": "session",
+    "session": {
+      "session_id": "codex.bob",
+      "workspace_id": "app",
+      "generation": 1
+    }
+  }
+}
+## check-passed
+{
+  "events": [
+    {
+      "type": "check_recorded",
+      "check": {
+        "check_id": "check-passed",
+        "workspace_id": "app",
+        "name": "unit",
+        "command": "cargo test",
+        "tree_oid": "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+        "head_oid": "1111111111111111111111111111111111111111",
+        "inputs": [
+          "5555555555555555555555555555555555555555"
+        ],
+        "result": {
+          "type": "passed"
+        },
+        "duration_ms": 5000,
+        "recorded_ms": 2000,
+        "generation": 1
+      }
+    }
+  ],
+  "outcome": {
+    "type": "check_recorded",
+    "check": {
+      "check_id": "check-passed",
+      "workspace_id": "app",
+      "name": "unit",
+      "command": "cargo test",
+      "tree_oid": "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+      "head_oid": "1111111111111111111111111111111111111111",
+      "inputs": [
+        "5555555555555555555555555555555555555555"
+      ],
+      "result": {
+        "type": "passed"
+      },
+      "duration_ms": 5000,
+      "recorded_ms": 2000,
+      "generation": 1
+    }
+  }
+}
+## check-failed
+{
+  "events": [
+    {
+      "type": "check_recorded",
+      "check": {
+        "check_id": "check-failed",
+        "workspace_id": "app",
+        "name": "unit",
+        "command": "cargo test",
+        "tree_oid": "2222222222222222222222222222222222222222",
+        "head_oid": "1111111111111111111111111111111111111111",
+        "inputs": [
+          "5555555555555555555555555555555555555555"
+        ],
+        "result": {
+          "type": "failed",
+          "exit_code": 101
+        },
+        "duration_ms": 5000,
+        "recorded_ms": 2100,
+        "generation": 1
+      }
+    }
+  ],
+  "outcome": {
+    "type": "check_recorded",
+    "check": {
+      "check_id": "check-failed",
+      "workspace_id": "app",
+      "name": "unit",
+      "command": "cargo test",
+      "tree_oid": "2222222222222222222222222222222222222222",
+      "head_oid": "1111111111111111111111111111111111111111",
+      "inputs": [
+        "5555555555555555555555555555555555555555"
+      ],
+      "result": {
+        "type": "failed",
+        "exit_code": 101
+      },
+      "duration_ms": 5000,
+      "recorded_ms": 2100,
+      "generation": 1
+    }
+  }
+}
+## check-unknown-workspace
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "workspace_not_found",
+    "message": "Workspace is not registered; register it first"
+  }
+}
+## check-status-app
+{
+  "events": [],
+  "outcome": {
+    "type": "checks",
+    "checks": [
+      {
+        "record": {
+          "check_id": "check-failed",
+          "workspace_id": "app",
+          "name": "unit",
+          "command": "cargo test",
+          "tree_oid": "2222222222222222222222222222222222222222",
+          "head_oid": "1111111111111111111111111111111111111111",
+          "inputs": [
+            "5555555555555555555555555555555555555555"
+          ],
+          "result": {
+            "type": "failed",
+            "exit_code": 101
+          },
+          "duration_ms": 5000,
+          "recorded_ms": 2100,
+          "generation": 1
+        },
+        "applicability": "stale"
+      },
+      {
+        "record": {
+          "check_id": "check-passed",
+          "workspace_id": "app",
+          "name": "unit",
+          "command": "cargo test",
+          "tree_oid": "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+          "head_oid": "1111111111111111111111111111111111111111",
+          "inputs": [
+            "5555555555555555555555555555555555555555"
+          ],
+          "result": {
+            "type": "passed"
+          },
+          "duration_ms": 5000,
+          "recorded_ms": 2000,
+          "generation": 1
+        },
+        "applicability": "current"
+      }
+    ]
+  }
+}
+## check-status-unknown-workspace
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "workspace_not_found",
+    "message": "Workspace is not registered; register it first"
+  }
+}
+## flaky-tests-app
+{
+  "events": [],
+  "outcome": {
+    "type": "flaky_tests",
+    "workspace_id": "app",
+    "tests": []
+  }
+}
+## flaky-tests-unknown-workspace
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "workspace_not_found",
+    "message": "Workspace is not registered; register it first"
+  }
+}
+## forget-flaky-test
+{
+  "events": [],
+  "outcome": {
+    "type": "flaky_test_forgotten",
+    "workspace_id": "app",
+    "test": "api::refresh",
+    "forgotten": false
+  }
+}
+## forget-flaky-test-unknown-workspace
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "workspace_not_found",
+    "message": "Workspace is not registered; register it first"
+  }
+}
+## auto-check-enable
+{
+  "events": [
+    {
+      "type": "auto_check_enabled",
+      "check": {
+        "workspace_id": "app",
+        "name": "unit",
+        "argv": [
+          "cargo",
+          "test"
+        ],
+        "timeout_s": 600
+      }
+    }
+  ],
+  "outcome": {
+    "type": "auto_check",
+    "check": {
+      "workspace_id": "app",
+      "name": "unit",
+      "argv": [
+        "cargo",
+        "test"
+      ],
+      "timeout_s": 600
+    }
+  }
+}
+## auto-check-enable-empty-argv
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "invalid_check",
+    "message": "An automatic check has a name of at most 64 characters and a command of 1 to 64 arguments, each 1 to 1024 bytes without control characters"
+  }
+}
+## auto-check-disable
+{
+  "events": [
+    {
+      "type": "auto_check_disabled",
+      "workspace_id": "app"
+    }
+  ],
+  "outcome": {
+    "type": "auto_check_disabled",
+    "workspace_id": "app"
+  }
+}
+## auto-check-disable-unknown-workspace
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "workspace_not_found",
+    "message": "Workspace is not registered; register it first"
+  }
+}
+## landing-readiness
+{
+  "events": [],
+  "outcome": {
+    "type": "readiness",
+    "ready": true,
+    "reason": "a passing check exists for exactly this tree",
+    "check": {
+      "check_id": "check-passed",
+      "workspace_id": "app",
+      "name": "unit",
+      "command": "cargo test",
+      "tree_oid": "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+      "head_oid": "1111111111111111111111111111111111111111",
+      "inputs": [
+        "5555555555555555555555555555555555555555"
+      ],
+      "result": {
+        "type": "passed"
+      },
+      "duration_ms": 5000,
+      "recorded_ms": 2000,
+      "generation": 1
+    }
+  }
+}
+## landing-readiness-unknown-workspace
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "workspace_not_found",
+    "message": "Workspace is not registered; register it first"
+  }
+}
+## record-landing
+{
+  "events": [
+    {
+      "type": "landed",
+      "landing": {
+        "landing_id": "record-landing",
+        "workspace_id": "app",
+        "onto": "main",
+        "commit_oid": "3333333333333333333333333333333333333333",
+        "tree_oid": "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+        "inputs": [
+          "5555555555555555555555555555555555555555"
+        ],
+        "check_id": "check-passed"
+      }
+    }
+  ],
+  "outcome": {
+    "type": "landed",
+    "landing": {
+      "landing_id": "record-landing",
+      "workspace_id": "app",
+      "onto": "main",
+      "commit_oid": "3333333333333333333333333333333333333333",
+      "tree_oid": "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+      "inputs": [
+        "5555555555555555555555555555555555555555"
+      ],
+      "check_id": "check-passed"
+    }
+  }
+}
+## record-landing-unknown-check
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "no_current_evidence",
+    "message": "A landing must name a passing check recorded for exactly the landed tree"
+  }
+}
+## take-turn-alice
+{
+  "events": [
+    {
+      "type": "turn_taken",
+      "turn": {
+        "turn_id": "take-turn-alice",
+        "workspace_id": "app",
+        "onto": "main",
+        "session_id": "claude-code.alice",
+        "taken_ms": 5000,
+        "expires_at_ms": 65000,
+        "generation": 1
+      }
+    }
+  ],
+  "outcome": {
+    "type": "turn",
+    "turn": {
+      "turn_id": "take-turn-alice",
+      "workspace_id": "app",
+      "onto": "main",
+      "session_id": "claude-code.alice",
+      "taken_ms": 5000,
+      "expires_at_ms": 65000,
+      "generation": 1
+    }
+  }
+}
+## take-turn-bob-queued
+{
+  "events": [],
+  "outcome": {
+    "type": "turn_busy",
+    "holder": {
+      "turn_id": "take-turn-alice",
+      "workspace_id": "app",
+      "onto": "main",
+      "session_id": "claude-code.alice",
+      "taken_ms": 5000,
+      "expires_at_ms": 65000,
+      "generation": 1
+    },
+    "held_ms": 100
+  }
+}
+## take-turn-unknown-session
+{
+  "events": [],
+  "outcome": {
+    "type": "turn_busy",
+    "holder": {
+      "turn_id": "take-turn-alice",
+      "workspace_id": "app",
+      "onto": "main",
+      "session_id": "claude-code.alice",
+      "taken_ms": 5000,
+      "expires_at_ms": 65000,
+      "generation": 1
+    },
+    "held_ms": 200
+  }
+}
+## turn-queue
+{
+  "events": [],
+  "outcome": {
+    "type": "turn_queue",
+    "holder": {
+      "turn_id": "take-turn-alice",
+      "workspace_id": "app",
+      "onto": "main",
+      "session_id": "claude-code.alice",
+      "taken_ms": 5000,
+      "expires_at_ms": 65000,
+      "generation": 1
+    },
+    "held_ms": 300,
+    "waiting": []
+  }
+}
+## turn-queue-unknown-workspace
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "workspace_not_found",
+    "message": "Workspace is not registered; register it first"
+  }
+}
+## release-turn-alice
+{
+  "events": [
+    {
+      "type": "turn_released",
+      "workspace_id": "app",
+      "onto": "main",
+      "turn_id": "take-turn-alice",
+      "attempts": [
+        {
+          "target_oid": "1111111111111111111111111111111111111111",
+          "commit_oid": "3333333333333333333333333333333333333333",
+          "result": {
+            "type": "landed"
+          }
+        }
+      ]
+    }
+  ],
+  "outcome": {
+    "type": "turn_released",
+    "turn_id": "take-turn-alice",
+    "released": true
+  }
+}
+## release-unknown-turn
+{
+  "events": [
+    {
+      "type": "turn_released",
+      "workspace_id": "app",
+      "onto": "main",
+      "turn_id": "no-such-turn",
+      "attempts": []
+    }
+  ],
+  "outcome": {
+    "type": "turn_released",
+    "turn_id": "no-such-turn",
+    "released": false
+  }
+}
+## leave-queue-bob
+{
+  "events": [],
+  "outcome": {
+    "type": "turn_queue_left",
+    "ticket": "take-turn-bob-queued",
+    "left": false
+  }
+}
+## leave-queue-unknown-ticket
+{
+  "events": [],
+  "outcome": {
+    "type": "turn_queue_left",
+    "ticket": "no-such-ticket",
+    "left": false
+  }
+}

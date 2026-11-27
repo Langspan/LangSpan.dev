@@ -1,0 +1,4 @@
+{"name":"hosts-missing-codex","now_ms":1000,"command":{"op":"observe_hosts","not_installed":["codex"]}}
+{"name":"hosts-unchanged","now_ms":1100,"command":{"op":"observe_hosts","not_installed":["codex"]}}
+{"name":"hosts-all-installed","now_ms":1200,"command":{"op":"observe_hosts","not_installed":[]}}
+{"name":"hosts-unknown-host","now_ms":1300,"command":{"op":"observe_hosts","not_installed":["Not A Host"]}}

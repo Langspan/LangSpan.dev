@@ -155,6 +155,15 @@ A test seen flaky, in that issue, a summary or anywhere else, gets an issue
 and a deterministic fix the same day. Never rerun the job and move on, and
 never weaken an assertion to make it pass.
 
+The core's golden decision test
+(`crates/langspan-core/tests/decision_golden.rs`) records the events and
+outcome `decide` returns for every command. A new command doesn't compile
+there until it has a case, and fails the test until it has a step. A changed
+decision fails with a diff of each step that changed. To accept an intended
+change, run `cargo nextest run -p langspan-core --test decision_golden
+--run-ignored only -E 'test(bless)'` and review the golden diff in the pull
+request.
+
 ## Releases
 
 release-please keeps a release pull request open on `main`, built from the

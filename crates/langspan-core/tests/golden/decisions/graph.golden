@@ -1,0 +1,405 @@
+## register-app
+{
+  "events": [
+    {
+      "type": "workspace_registered",
+      "workspace": {
+        "workspace_id": "app",
+        "root": "/work/app"
+      }
+    }
+  ],
+  "outcome": {
+    "type": "workspace",
+    "workspace": {
+      "workspace_id": "app",
+      "root": "/work/app"
+    }
+  }
+}
+## session-alice
+{
+  "events": [
+    {
+      "type": "session_registered",
+      "session": {
+        "session_id": "claude-code.alice",
+        "workspace_id": "app",
+        "generation": 1
+      }
+    }
+  ],
+  "outcome": {
+    "type": "session",
+    "session": {
+      "session_id": "claude-code.alice",
+      "workspace_id": "app",
+      "generation": 1
+    }
+  }
+}
+## session-bob
+{
+  "events": [
+    {
+      "type": "session_registered",
+      "session": {
+        "session_id": "codex.bob",
+        "workspace_id": "app",
+        "generation": 1
+      }
+    }
+  ],
+  "outcome": {
+    "type": "session",
+    "session": {
+      "session_id": "codex.bob",
+      "workspace_id": "app",
+      "generation": 1
+    }
+  }
+}
+## register-app-worktree
+{
+  "events": [
+    {
+      "type": "workspace_registered",
+      "workspace": {
+        "workspace_id": "app-wt",
+        "root": "/work/app-wt"
+      }
+    }
+  ],
+  "outcome": {
+    "type": "workspace",
+    "workspace": {
+      "workspace_id": "app-wt",
+      "root": "/work/app-wt"
+    }
+  }
+}
+## git-app
+{
+  "events": [
+    {
+      "type": "workspace_git_observed",
+      "git": {
+        "workspace_id": "app",
+        "repository_id": "repository-1",
+        "branch_ref": "refs/heads/main"
+      }
+    }
+  ],
+  "outcome": {
+    "type": "workspace_git",
+    "git": {
+      "workspace_id": "app",
+      "repository_id": "repository-1",
+      "branch_ref": "refs/heads/main"
+    }
+  }
+}
+## git-app-worktree
+{
+  "events": [
+    {
+      "type": "workspace_git_observed",
+      "git": {
+        "workspace_id": "app-wt",
+        "repository_id": "repository-1",
+        "branch_ref": "refs/heads/login"
+      }
+    }
+  ],
+  "outcome": {
+    "type": "workspace_git",
+    "git": {
+      "workspace_id": "app-wt",
+      "repository_id": "repository-1",
+      "branch_ref": "refs/heads/login"
+    }
+  }
+}
+## interface-changed
+{
+  "events": [
+    {
+      "type": "interface_changed",
+      "notice": {
+        "notice_id": "interface-changed",
+        "workspace_id": "app",
+        "path": "src/api.rs",
+        "changes": [
+          {
+            "name": "refresh",
+            "kind": "function",
+            "change": "signature_changed",
+            "before": "fn refresh(session: &Session)",
+            "after": "fn refresh(session: &mut Session) -> Result<()>"
+          }
+        ],
+        "dependents": [
+          "src/login.rs"
+        ],
+        "by_session": null,
+        "at_ms": 2000,
+        "generation": 1
+      }
+    }
+  ],
+  "outcome": {
+    "type": "interface_observed",
+    "notice": {
+      "notice_id": "interface-changed",
+      "workspace_id": "app",
+      "path": "src/api.rs",
+      "changes": [
+        {
+          "name": "refresh",
+          "kind": "function",
+          "change": "signature_changed",
+          "before": "fn refresh(session: &Session)",
+          "after": "fn refresh(session: &mut Session) -> Result<()>"
+        }
+      ],
+      "dependents": [
+        "src/login.rs"
+      ],
+      "by_session": null,
+      "at_ms": 2000,
+      "generation": 1
+    }
+  }
+}
+## interface-unknown-workspace
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "workspace_not_found",
+    "message": "Workspace is not registered; register it first"
+  }
+}
+## interface-dependents-elsewhere
+{
+  "events": [
+    {
+      "type": "interface_dependents_found",
+      "notice_workspace_id": "app",
+      "notice_id": "interface-changed",
+      "files": [
+        {
+          "workspace_id": "app-wt",
+          "path": "tests/login.rs"
+        }
+      ]
+    }
+  ],
+  "outcome": {
+    "type": "interface_dependents_observed",
+    "notice_id": "interface-changed",
+    "added": 1
+  }
+}
+## interface-dependents-same-worktree
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "invalid_notice",
+    "message": "Dependents found elsewhere are files of another worktree of the notice's repository"
+  }
+}
+## interface-dependents-unknown-notice
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "unknown_notice",
+    "message": "The interface notice is not held: a newer one for its file replaced it, or it was never recorded"
+  }
+}
+## interface-shown-bob
+{
+  "events": [
+    {
+      "type": "interface_notices_told",
+      "session_id": "codex.bob",
+      "notice_ids": [
+        "interface-changed"
+      ],
+      "via": "briefing"
+    }
+  ],
+  "outcome": {
+    "type": "interface_acknowledged",
+    "session_id": "codex.bob",
+    "notice_ids": [
+      "interface-changed"
+    ]
+  }
+}
+## interface-shown-unknown-session
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "session_not_found",
+    "message": "Session is not registered; attach it to a workspace first"
+  }
+}
+## between-steps-bob
+{
+  "events": [],
+  "outcome": {
+    "type": "between_steps",
+    "session_id": "codex.bob",
+    "open": true,
+    "stops": 0
+  }
+}
+## between-steps-unknown-session
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "session_not_found",
+    "message": "Session is not registered; attach it to a workspace first"
+  }
+}
+## acknowledge-bob
+{
+  "events": [
+    {
+      "type": "interface_alerted",
+      "session_id": "codex.bob",
+      "notice_ids": [
+        "interface-changed"
+      ]
+    }
+  ],
+  "outcome": {
+    "type": "interface_acknowledged",
+    "session_id": "codex.bob",
+    "notice_ids": [
+      "interface-changed"
+    ]
+  }
+}
+## acknowledge-unknown-session
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "session_not_found",
+    "message": "Session is not registered; attach it to a workspace first"
+  }
+}
+## graph-symbol
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "storage_operation",
+    "message": "Event history, status pages, change projections, sent messages and index queries are answered by the daemon's stores"
+  }
+}
+## graph-references
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "storage_operation",
+    "message": "Event history, status pages, change projections, sent messages and index queries are answered by the daemon's stores"
+  }
+}
+## graph-impact
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "storage_operation",
+    "message": "Event history, status pages, change projections, sent messages and index queries are answered by the daemon's stores"
+  }
+}
+## graph-blind-spots
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "storage_operation",
+    "message": "Event history, status pages, change projections, sent messages and index queries are answered by the daemon's stores"
+  }
+}
+## graph-path
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "storage_operation",
+    "message": "Event history, status pages, change projections, sent messages and index queries are answered by the daemon's stores"
+  }
+}
+## graph-map
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "storage_operation",
+    "message": "Event history, status pages, change projections, sent messages and index queries are answered by the daemon's stores"
+  }
+}
+## graph-context
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "storage_operation",
+    "message": "Event history, status pages, change projections, sent messages and index queries are answered by the daemon's stores"
+  }
+}
+## graph-inflight
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "storage_operation",
+    "message": "Event history, status pages, change projections, sent messages and index queries are answered by the daemon's stores"
+  }
+}
+## graph-export
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "storage_operation",
+    "message": "Event history, status pages, change projections, sent messages and index queries are answered by the daemon's stores"
+  }
+}
+## graph-import
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "storage_operation",
+    "message": "Event history, status pages, change projections, sent messages and index queries are answered by the daemon's stores"
+  }
+}
+## check-write
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "storage_operation",
+    "message": "Event history, status pages, change projections, sent messages and index queries are answered by the daemon's stores"
+  }
+}
+## check-calls
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "storage_operation",
+    "message": "Event history, status pages, change projections, sent messages and index queries are answered by the daemon's stores"
+  }
+}

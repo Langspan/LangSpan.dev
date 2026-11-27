@@ -1,0 +1,278 @@
+## register-app
+{
+  "events": [
+    {
+      "type": "workspace_registered",
+      "workspace": {
+        "workspace_id": "app",
+        "root": "/work/app"
+      }
+    }
+  ],
+  "outcome": {
+    "type": "workspace",
+    "workspace": {
+      "workspace_id": "app",
+      "root": "/work/app"
+    }
+  }
+}
+## session-alice
+{
+  "events": [
+    {
+      "type": "session_registered",
+      "session": {
+        "session_id": "claude-code.alice",
+        "workspace_id": "app",
+        "generation": 1
+      }
+    }
+  ],
+  "outcome": {
+    "type": "session",
+    "session": {
+      "session_id": "claude-code.alice",
+      "workspace_id": "app",
+      "generation": 1
+    }
+  }
+}
+## session-bob
+{
+  "events": [
+    {
+      "type": "session_registered",
+      "session": {
+        "session_id": "codex.bob",
+        "workspace_id": "app",
+        "generation": 1
+      }
+    }
+  ],
+  "outcome": {
+    "type": "session",
+    "session": {
+      "session_id": "codex.bob",
+      "workspace_id": "app",
+      "generation": 1
+    }
+  }
+}
+## intent-bob
+{
+  "events": [
+    {
+      "type": "intent_set",
+      "intent": {
+        "session_id": "codex.bob",
+        "workspace_id": "app",
+        "paths": [
+          "src/api.rs"
+        ],
+        "summary": "Rework the session handler",
+        "generation": 1
+      }
+    }
+  ],
+  "outcome": {
+    "type": "intent",
+    "intent": {
+      "session_id": "codex.bob",
+      "workspace_id": "app",
+      "paths": [
+        "src/api.rs"
+      ],
+      "summary": "Rework the session handler",
+      "generation": 1
+    }
+  }
+}
+## admit-bob
+{
+  "events": [
+    {
+      "type": "lease_granted",
+      "lease": {
+        "lease_id": "admit-bob",
+        "session_id": "codex.bob",
+        "workspace_id": "app",
+        "paths": [
+          "src/api.rs"
+        ],
+        "generation": 1,
+        "expires_at_ms": 61400,
+        "status": "active"
+      }
+    }
+  ],
+  "outcome": {
+    "type": "admitted",
+    "lease": {
+      "lease_id": "admit-bob",
+      "session_id": "codex.bob",
+      "workspace_id": "app",
+      "paths": [
+        "src/api.rs"
+      ],
+      "generation": 1,
+      "expires_at_ms": 61400,
+      "status": "active"
+    }
+  }
+}
+## brief-alice
+{
+  "events": [
+    {
+      "type": "briefing_delivered",
+      "session_id": "claude-code.alice",
+      "signature": "4c6e8a3de1be8b2c",
+      "told": [
+        12037861595241662061,
+        3551154489461026735
+      ],
+      "told_at_ms": 2000
+    }
+  ],
+  "outcome": {
+    "type": "briefing",
+    "briefing": {
+      "session_id": "claude-code.alice",
+      "changed": true,
+      "peers": [
+        {
+          "session_id": "codex.bob",
+          "workspace_id": "app",
+          "workspace_root": "/work/app",
+          "same_workspace": true,
+          "branch_ref": null,
+          "liveness": null,
+          "ended": false,
+          "summary": null,
+          "intent": "Rework the session handler",
+          "editing": [
+            "src/api.rs"
+          ],
+          "recent": [],
+          "overlap": []
+        }
+      ],
+      "omitted_peers": 0
+    }
+  }
+}
+## brief-alice-again
+{
+  "events": [],
+  "outcome": {
+    "type": "briefing",
+    "briefing": {
+      "session_id": "claude-code.alice",
+      "changed": false,
+      "peers": [
+        {
+          "session_id": "codex.bob",
+          "workspace_id": "app",
+          "workspace_root": "/work/app",
+          "same_workspace": true,
+          "branch_ref": null,
+          "liveness": null,
+          "ended": false,
+          "summary": null,
+          "intent": "Rework the session handler",
+          "editing": [
+            "src/api.rs"
+          ],
+          "recent": [],
+          "overlap": []
+        }
+      ],
+      "omitted_peers": 0
+    }
+  }
+}
+## brief-unknown-session
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "session_not_found",
+    "message": "Session is not registered; attach it to a workspace first"
+  }
+}
+## brief-prepared-inflight
+{
+  "events": [],
+  "outcome": {
+    "type": "briefing",
+    "briefing": {
+      "session_id": "claude-code.alice",
+      "changed": false,
+      "peers": [
+        {
+          "session_id": "codex.bob",
+          "workspace_id": "app",
+          "workspace_root": "/work/app",
+          "same_workspace": true,
+          "branch_ref": null,
+          "liveness": null,
+          "ended": false,
+          "summary": null,
+          "intent": "Rework the session handler",
+          "editing": [
+            "src/api.rs"
+          ],
+          "recent": [],
+          "overlap": []
+        }
+      ],
+      "omitted_peers": 0
+    }
+  }
+}
+## brief-prepared-unknown-session
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "session_not_found",
+    "message": "Session is not registered; attach it to a workspace first"
+  }
+}
+## forget-told-alice
+{
+  "events": [],
+  "outcome": {
+    "type": "told_forgotten",
+    "session_id": "claude-code.alice",
+    "forgotten": 0
+  }
+}
+## forget-told-unknown-session
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "session_not_found",
+    "message": "Session is not registered; attach it to a workspace first"
+  }
+}
+## trails-app
+{
+  "events": [],
+  "outcome": {
+    "type": "trails",
+    "workspace_id": "app",
+    "trails": []
+  }
+}
+## trails-unknown-workspace
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "workspace_not_found",
+    "message": "Workspace is not registered; register it first"
+  }
+}
