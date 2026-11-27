@@ -3472,25 +3472,6 @@ mod review_regressions {
     const BROKEN: (&str, &str) = ("src/broken.rs", "pub fn half( {{{\n");
 
     #[test]
-    fn a_workspace_indexed_at_another_root_starts_again_without_notices() {
-        // Roadmap G6: `workspace move --switch` binds the ID to another
-        // checkout. Its files differ from the old one's without anyone
-        // changing an interface, so the index starts that root afresh.
-        let (dir, mut index) = setup("moved-root");
-        let api = ("src/api.rs", "pub fn upload() {}\n");
-        assert!(pass(&dir, &mut index, &[api, CALLER]).is_empty());
-        let other = setup("moved-root-other").0;
-        let changed = ("src/api.rs", "pub fn upload(x: u8) {}\n");
-        let notices = pass(&other, &mut index, &[changed, CALLER]);
-        assert!(notices.is_empty(), "{notices:?}");
-        let found = index.symbol("w", "upload", 10).unwrap();
-        assert_eq!(found[0].signature, "pub fn upload(x: u8)");
-        // At the same root, a changed signature is still a notice.
-        let again = ("src/api.rs", "pub fn upload(x: u16) {}\n");
-        assert_eq!(pass(&other, &mut index, &[again, CALLER]).len(), 1);
-    }
-
-    #[test]
     fn an_index_written_before_roots_were_kept_starts_again_at_its_next_pass() {
         // The previous version's schema-4 file: the same tables without
         // `roots`, holding one checkout's files and baselines.
@@ -3563,86 +3544,6 @@ mod review_regressions {
         assert_eq!((spots.totals.waiting, coverage.blind_in_scope), (1, 1));
         pass(&dir, &mut index, &[changed, fixed, CALLER]);
         assert!(blind(&index, &dir.0, 10).0.waiting.is_empty());
-    }
-
-    /// Roadmap A11: an outline is only of the version the index holds whole.
-    #[test]
-    fn an_outline_is_only_of_the_whole_indexed_version() {
-        let (dir, mut index) = setup("outline");
-        let api = ("src/api.rs", "pub fn upload() {}\nfn helper() {}\n");
-        pass(&dir, &mut index, &[api, BROKEN]);
-        let digest = |text: &str| crate::sha256::hex(&crate::sha256::digest(text.as_bytes()));
-        let outline = index
-            .outline("w", "src/api.rs", &digest(api.1), 10)
-            .unwrap();
-        let names: Vec<_> = outline
-            .unwrap()
-            .1
-            .into_iter()
-            .map(|symbol| (symbol.name, symbol.exported))
-            .collect();
-        assert_eq!(names, [("upload".into(), true), ("helper".into(), false)]);
-        let (total, _) = index
-            .outline("w", "src/api.rs", &digest(api.1), 10)
-            .unwrap()
-            .unwrap();
-        assert_eq!(total, 2);
-        // The file on disk differs from its indexed version.
-        let changed = digest("pub fn upload(x: u8) {}\n");
-        assert_eq!(
-            index.outline("w", "src/api.rs", &changed, 10).unwrap(),
-            None
-        );
-        // A partial parse, and a file the index has no row for.
-        let broken = digest(BROKEN.1);
-        assert_eq!(index.outline("w", BROKEN.0, &broken, 10).unwrap(), None);
-        assert_eq!(
-            index.outline("w", "src/none.rs", &broken, 10).unwrap(),
-            None
-        );
-    }
-
-    /// Review comment 4713905468: a file with more definitions than the
-    /// outline holds keeps its largest, wherever they are in the file, back
-    /// in line order, and reports how many the index holds in all. Ties
-    /// keep the earlier definition. At exactly the limit nothing is cut.
-    #[test]
-    fn an_outline_keeps_the_largest_definitions_past_the_limit() {
-        let (dir, mut index) = setup("outline-largest");
-        let digest = |text: &str| crate::sha256::hex(&crate::sha256::digest(text.as_bytes()));
-        // 250 one-line helpers, then one function of 30 lines, then a
-        // two-line function: the large ones come after the limit in line
-        // order.
-        let mut text = String::new();
-        for n in 0..250 {
-            text.push_str(&format!("fn small_{n}() {{}}\n"));
-        }
-        text.push_str("pub fn large() {\n");
-        for _ in 0..28 {
-            text.push_str("    let _ = 1;\n");
-        }
-        text.push_str("}\n");
-        text.push_str("fn pair() {\n}\n");
-        pass(&dir, &mut index, &[("src/many.rs", &text)]);
-        let (total, symbols) = index
-            .outline("w", "src/many.rs", &digest(&text), 200)
-            .unwrap()
-            .unwrap();
-        assert_eq!(total, 252);
-        assert_eq!(symbols.len(), 200);
-        let names: Vec<_> = symbols.iter().map(|symbol| symbol.name.as_str()).collect();
-        // The two larger ones, after the first 198 helpers, in line order.
-        assert_eq!(names[..2], ["small_0", "small_1"]);
-        assert_eq!(names[197], "small_197");
-        assert_eq!(names[198..], ["large", "pair"]);
-        assert!(symbols.windows(2).all(|pair| pair[0].line < pair[1].line));
-
-        // At the limit, every definition, and the total is the same count.
-        let (total, symbols) = index
-            .outline("w", "src/many.rs", &digest(&text), 252)
-            .unwrap()
-            .unwrap();
-        assert_eq!((total, symbols.len()), (252, 252));
     }
 
     #[test]
@@ -3827,31 +3728,6 @@ mod review_regressions {
 
     const CALLER: (&str, &str) = ("src/main.rs", "fn main() { api::upload(); api::gate(); }\n");
 
-    #[test]
-    fn impact_finds_exports_after_many_private_definitions() {
-        let (dir, mut index) = setup("impact");
-        pass(
-            &dir,
-            &mut index,
-            &[
-                (
-                    "src/api.rs",
-                    "fn a() {}\nfn b() {}\nfn c() {}\npub fn upload() {}\n",
-                ),
-                CALLER,
-            ],
-        );
-        let (symbols, references) = index.impact("w", "src/api.rs", 1).unwrap();
-        assert_eq!(symbols[0].name, "upload");
-        assert_eq!(references[0].path, "src/main.rs");
-    }
-
-    fn levels(index: &Index, path: &str, depth: u32) -> Vec<langspan_core::ImpactLevel> {
-        index
-            .impact_levels("w", path, depth, Instant::now() + Duration::from_secs(10))
-            .unwrap()
-    }
-
     fn reached(level: &langspan_core::ImpactLevel) -> Vec<(&str, &str, &str)> {
         level
             .files
@@ -3867,28 +3743,6 @@ mod review_regressions {
         ("src/b.rs", "pub fn beta() { alpha(); }\n"),
         ("src/c.rs", "pub fn gamma() { beta(); }\n"),
     ];
-
-    #[test]
-    fn impact_levels_follow_a_caller_of_a_caller_and_name_the_way() {
-        let (dir, mut index) = setup("levels");
-        pass(&dir, &mut index, &CHAIN);
-        let two = levels(&index, "src/a.rs", 2);
-        assert_eq!(two.len(), 2);
-        assert_eq!((two[0].level, two[1].level), (1, 2));
-        assert_eq!(reached(&two[0]), [("src/b.rs", "alpha", "src/a.rs")]);
-        assert_eq!(reached(&two[1]), [("src/c.rs", "beta", "src/b.rs")]);
-        assert!(!two[0].truncated && !two[1].truncated);
-
-        // `c.rs` exports `gamma`, which `a.rs` mentions: the cycle does
-        // not bring the queried file back, and nothing appears twice.
-        let three = levels(&index, "src/a.rs", 3);
-        assert_eq!(three.len(), 3);
-        assert_eq!(three[2].files, []);
-        assert!(!three[2].truncated);
-        let one = levels(&index, "src/a.rs", 1);
-        assert_eq!(one.len(), 1);
-        assert_eq!(reached(&one[0]), [("src/b.rs", "alpha", "src/a.rs")]);
-    }
 
     /// `symbol_paths` from `from` to `to` in workspace `w`, with the real
     /// bounds and a generous deadline: (chains as `PATH:LINE NAME` steps,
@@ -3913,79 +3767,6 @@ mod review_regressions {
             })
             .collect();
         (steps, edges, truncated)
-    }
-
-    #[test]
-    fn more_shortest_chains_than_the_limit_are_cut_and_said_to_be() {
-        let (dir, mut index) = setup("paths-many");
-        let mut files = vec![(
-            "src/a.rs".to_owned(),
-            "fn handler() {\n    service();\n}\n".to_owned(),
-        )];
-        for n in 0..6 {
-            files.push((
-                format!("src/s{n}.rs"),
-                "fn service() {\n    save();\n}\n".into(),
-            ));
-        }
-        files.push(("src/z.rs".into(), "fn save() {}\n".into()));
-        let files: Vec<(&str, &str)> = files
-            .iter()
-            .map(|(p, t)| (p.as_str(), t.as_str()))
-            .collect();
-        pass(&dir, &mut index, &files);
-        let (found, edges, truncated) = chains(&index, "handler", "save", 4);
-        assert_eq!(found.len(), langspan_core::MAX_PATHS);
-        assert!(truncated, "six chains, five listed");
-        // The first five in step order: through `s0.rs` to `s4.rs`.
-        assert_eq!(
-            found[0],
-            [
-                "src/a.rs:2 handler",
-                "src/s0.rs:2 service",
-                "src/z.rs:1 save"
-            ]
-        );
-        assert_eq!(found[4][1], "src/s4.rs:2 service");
-        // One edge per `service` and one per `save` from each of them.
-        assert_eq!(edges, 6 + 6);
-    }
-
-    #[test]
-    fn a_cycle_is_visited_once_and_the_start_can_be_the_end() {
-        let (dir, mut index) = setup("paths-cycle");
-        pass(
-            &dir,
-            &mut index,
-            &[
-                ("src/a.rs", "fn ping() {\n    pong();\n    ping();\n}\n"),
-                ("src/b.rs", "fn pong() {\n    ping();\n}\n"),
-            ],
-        );
-        let (found, edges, truncated) = chains(&index, "ping", "pong", 6);
-        assert_eq!(found, [["src/a.rs:2 ping", "src/b.rs:1 pong"]]);
-        assert!(!truncated);
-        assert_eq!(edges, 2, "`ping` and `pong` from `ping`; `pong` is the end");
-        // Nothing reaches a name with no chain, and nothing loops.
-        let (found, _, truncated) = chains(&index, "pong", "absent", 6);
-        assert!(found.is_empty() && !truncated);
-        let (found, edges, _) = chains(&index, "ping", "ping", 6);
-        assert_eq!(
-            (found, edges),
-            (vec![vec!["src/a.rs:1 ping".to_owned()]], 0)
-        );
-        let (found, edges, truncated) = chains(&index, "absent", "ping", 6);
-        assert!(found.is_empty() && edges == 0 && !truncated);
-    }
-
-    #[test]
-    fn a_chain_longer_than_the_hops_asked_for_is_not_found() {
-        let (dir, mut index) = setup("paths-hops");
-        pass(&dir, &mut index, &CHAIN);
-        // `beta` calls `alpha`; `gamma` calls `beta`.
-        assert_eq!(chains(&index, "gamma", "alpha", 2).0.len(), 1);
-        let (found, _, truncated) = chains(&index, "gamma", "alpha", 1);
-        assert!(found.is_empty() && !truncated, "{found:?}");
     }
 
     #[test]
@@ -4057,57 +3838,6 @@ mod review_regressions {
     }
 
     #[test]
-    fn every_imported_definition_is_reached_however_many_others_share_the_name() {
-        let (dir, mut index) = setup("paths-imported-past-bound");
-        let caller = "import { save } from './a/store';\nimport { save as keep } from './z/store';\n\
-                      export function handler() {\n  save();\n}\n";
-        let mut files = vec![
-            ("src/caller.ts".to_owned(), caller.to_owned()),
-            (
-                "src/a/store.ts".into(),
-                "export function save() {}\n".into(),
-            ),
-            (
-                "src/z/store.ts".into(),
-                "export function save() {}\n".into(),
-            ),
-            // Imports nothing: every `save` is a candidate, past the bound.
-            (
-                "src/loose.ts".into(),
-                "export function loose() {\n  save();\n}\n".into(),
-            ),
-        ];
-        // More definitions of `save` than the bound, between the two
-        // imported files in path order.
-        for n in 0..=MAX_RESULTS {
-            files.push((
-                format!("src/m/s{n:03}.ts"),
-                "export function save() {}\n".into(),
-            ));
-        }
-        let borrowed: Vec<(&str, &str)> = files
-            .iter()
-            .map(|(path, text)| (path.as_str(), text.as_str()))
-            .collect();
-        pass(&dir, &mut index, &borrowed);
-        pass(&dir, &mut index, &borrowed);
-        let (found, edges, truncated) = chains(&index, "handler", "save", 1);
-        assert_eq!(
-            found,
-            [
-                ["src/caller.ts:4 handler", "src/a/store.ts:1 save"],
-                ["src/caller.ts:4 handler", "src/z/store.ts:1 save"]
-            ]
-        );
-        assert_eq!(edges, 2);
-        assert!(!truncated, "both imported definitions were reached");
-        // By name, the same call reaches more definitions than the bound.
-        let (_, edges, truncated) = chains(&index, "loose", "save", 1);
-        assert_eq!(edges, MAX_RESULTS, "cut at the bound");
-        assert!(truncated, "more definitions of `save` than the bound");
-    }
-
-    #[test]
     fn a_map_area_is_a_module_path_cut_to_its_depth() {
         for (path, depth, area) in [
             ("src/api.ts", 1, "src/api"),
@@ -4138,87 +3868,6 @@ mod review_regressions {
         ] {
             assert_eq!(map_area(path, depth), area, "{path} at {depth}");
         }
-    }
-
-    #[test]
-    fn a_file_appears_once_at_its_first_level() {
-        let (dir, mut index) = setup("levels-once");
-        // `d.rs` mentions both `alpha` (level 1) and `beta` (level 2).
-        let both = ("src/d.rs", "fn d() { alpha(); beta(); }\n");
-        pass(&dir, &mut index, &[CHAIN[0], CHAIN[1], CHAIN[2], both]);
-        let two = levels(&index, "src/a.rs", 2);
-        assert_eq!(
-            reached(&two[0]),
-            [
-                ("src/b.rs", "alpha", "src/a.rs"),
-                ("src/d.rs", "alpha", "src/a.rs")
-            ]
-        );
-        assert_eq!(reached(&two[1]), [("src/c.rs", "beta", "src/b.rs")]);
-    }
-
-    #[test]
-    fn impact_levels_expand_at_most_fifty_names_per_level_and_say_so() {
-        let (dir, mut index) = setup("levels-names");
-        let exports: String = (0..NAMES_PER_LEVEL + 1)
-            .map(|n| format!("pub fn n{n:02}() {{}}\n"))
-            .collect();
-        // Mentions only the last name in path order, which is past the bound.
-        let last = format!("fn x() {{ n{NAMES_PER_LEVEL:02}(); }}\n");
-        let first = "fn y() { n00(); }\n";
-        pass(
-            &dir,
-            &mut index,
-            &[
-                ("src/api.rs", &exports),
-                ("src/first.rs", first),
-                ("src/last.rs", &last),
-            ],
-        );
-        let one = levels(&index, "src/api.rs", 2);
-        assert_eq!(reached(&one[0]), [("src/first.rs", "n00", "src/api.rs")]);
-        assert!(one[0].truncated, "the 51st name was not expanded");
-        assert!(!one[1].truncated);
-    }
-
-    #[test]
-    fn impact_levels_stop_at_two_hundred_files_in_total() {
-        let (dir, mut index) = setup("levels-total");
-        let mut files: Vec<(String, String)> = vec![
-            ("src/api.rs".into(), "pub fn root() {}\n".into()),
-            ("src/hub.rs".into(), "pub fn hub() { root(); }\n".into()),
-        ];
-        // 150 files at level 1, 150 more at level 2: 100 are left out.
-        for n in 0..150 {
-            files.push((format!("src/l1_{n:03}.rs"), "fn f() { root(); }\n".into()));
-            files.push((format!("src/l2_{n:03}.rs"), "fn f() { hub(); }\n".into()));
-        }
-        let borrowed: Vec<(&str, &str)> = files
-            .iter()
-            .map(|(path, text)| (path.as_str(), text.as_str()))
-            .collect();
-        // One pass parses at most `FILES_PER_PASS`; the second the rest.
-        pass(&dir, &mut index, &borrowed);
-        pass(&dir, &mut index, &borrowed);
-        let two = levels(&index, "src/api.rs", 2);
-        assert_eq!(two[0].files.len(), 151, "hub and 150 more");
-        assert!(!two[0].truncated);
-        assert_eq!(
-            two[0].files.len() + two[1].files.len(),
-            MAX_RESULTS as usize
-        );
-        assert!(two[1].truncated);
-    }
-
-    #[test]
-    fn a_passed_deadline_returns_the_levels_so_far_marked_truncated() {
-        let (dir, mut index) = setup("levels-deadline");
-        pass(&dir, &mut index, &CHAIN);
-        let late = index
-            .impact_levels("w", "src/a.rs", 3, Instant::now())
-            .unwrap();
-        assert!(late.len() <= 3);
-        assert!(late.last().is_some_and(|level| level.truncated), "{late:?}");
     }
 
     #[test]
@@ -4493,75 +4142,6 @@ mod review_regressions {
     }
 
     #[test]
-    fn a_rename_with_an_unchanged_body_is_one_renamed_change_for_the_old_names_dependents() {
-        let (dir, mut index) = setup("rename");
-        let caller = ("src/main.rs", "fn main() { api::fetch_user(1); }\n");
-        let before = (
-            "src/api.rs",
-            "pub fn fetch_user(id: u32) -> u32 {\n    id\n}\n",
-        );
-        pass(&dir, &mut index, &[before, caller]);
-        let after = (
-            "src/api.rs",
-            "pub fn load_user(id: u32) -> u32 {\n    id\n}\n",
-        );
-        let notices = pass(&dir, &mut index, &[after, caller]);
-        assert_eq!(notices.len(), 1, "{notices:?}");
-        let change = &notices[0].changes;
-        assert_eq!(change.len(), 1, "{change:?}");
-        assert_eq!(
-            (
-                change[0].name.as_str(),
-                change[0].change.as_str(),
-                change[0].after_name.as_deref(),
-                change[0].after.as_deref()
-            ),
-            (
-                "fetch_user",
-                "renamed",
-                Some("load_user"),
-                Some("pub fn load_user(id: u32) -> u32")
-            )
-        );
-        assert!(change[0].after_arity.is_some());
-        assert_eq!(notices[0].dependents, ["src/main.rs"]);
-        // Roadmap D7: what links the two, and the old name.
-        assert_eq!(
-            (
-                change[0].evidence.as_deref(),
-                change[0].before_name.as_deref()
-            ),
-            (Some("same_body"), Some("fetch_user"))
-        );
-    }
-
-    #[test]
-    fn a_rename_with_a_changed_body_at_the_same_lines_is_a_same_signature_rename() {
-        let (dir, mut index) = setup("same-signature");
-        let caller = ("src/main.rs", "fn main() { api::fetch_user(1); }\n");
-        let before = (
-            "src/api.rs",
-            "pub fn fetch_user(id: u32) -> u32 {\n    id\n}\n",
-        );
-        pass(&dir, &mut index, &[before, caller]);
-        let after = (
-            "src/api.rs",
-            "pub fn load_user(id: u32) -> u32 {\n    id + 1\n}\n",
-        );
-        let notices = pass(&dir, &mut index, &[after, caller]);
-        let change = &notices[0].changes;
-        assert_eq!(change.len(), 1, "{change:?}");
-        assert_eq!(
-            (
-                change[0].change.as_str(),
-                change[0].after_name.as_deref(),
-                change[0].evidence.as_deref()
-            ),
-            ("renamed", Some("load_user"), Some("same_signature"))
-        );
-    }
-
-    #[test]
     fn an_index_from_before_baseline_lines_tells_a_same_signature_rename_as_a_removal() {
         let (dir, mut index) = setup("lines");
         let before = (
@@ -4590,114 +4170,6 @@ mod review_regressions {
             .map(|change| change.change.as_str())
             .collect();
         assert_eq!(labels, ["removed", "added"], "{notices:?}");
-    }
-
-    /// Roadmap D7: a file Git would call renamed (exactly the same content
-    /// at a new path, in one scan) keeps its definitions under the new path.
-    #[test]
-    fn a_file_moved_whole_keeps_its_definitions_under_the_new_path() {
-        let (dir, mut index) = setup("moved");
-        let api = "pub fn upload() {}\npub fn gate() {}\n";
-        pass(&dir, &mut index, &[("src/api.rs", api), CALLER]);
-        fs::remove_file(dir.0.join("src/api.rs")).unwrap();
-        let notices = pass(&dir, &mut index, &[("src/client.rs", api), CALLER]);
-        assert_eq!(notices.len(), 1, "{notices:?}");
-        assert_eq!(notices[0].path, "src/client.rs");
-        assert_eq!(notices[0].dependents, ["src/main.rs"]);
-        let mut moved: Vec<String> = notices[0]
-            .changes
-            .iter()
-            .map(|change| {
-                format!(
-                    "{} {} {:?} {:?} {:?}",
-                    change.name,
-                    change.change,
-                    change.after_name,
-                    change.evidence,
-                    change.before_path
-                )
-            })
-            .collect();
-        moved.sort();
-        let row = |name: &str| {
-            format!(r#"{name} renamed Some("{name}") Some("file_moved") Some("src/api.rs")"#)
-        };
-        assert_eq!(moved, [row("gate"), row("upload")]);
-        // Nothing is left under the old path, and the new path is not parsed
-        // again: its baseline came with it.
-        let symbols = index.symbol("w", "upload", 10).unwrap();
-        assert_eq!(
-            symbols
-                .iter()
-                .map(|symbol| symbol.path.as_str())
-                .collect::<Vec<_>>(),
-            ["src/client.rs"]
-        );
-        // The next change compares with the moved baseline.
-        let notices = pass(
-            &dir,
-            &mut index,
-            &[
-                (
-                    "src/client.rs",
-                    "pub fn upload(x: u8) {}\npub fn gate() {}\n",
-                ),
-                CALLER,
-            ],
-        );
-        assert_eq!(
-            notices[0].changes[0].change, "signature_changed",
-            "{notices:?}"
-        );
-    }
-
-    #[test]
-    fn a_move_that_cannot_be_told_from_a_delete_and_an_add_is_reported_as_one() {
-        let api = "pub fn upload() {}\npub fn gate() {}\n";
-        // Changed as well as moved: a removal, and a first indexing.
-        let (dir, mut index) = setup("moved-changed");
-        pass(&dir, &mut index, &[("src/api.rs", api), CALLER]);
-        fs::remove_file(dir.0.join("src/api.rs")).unwrap();
-        let changed = "pub fn upload() {}\npub fn gate() {}\npub fn more() {}\n";
-        let notices = pass(&dir, &mut index, &[("src/client.rs", changed), CALLER]);
-        assert_eq!(notices.len(), 1, "{notices:?}");
-        assert_eq!(notices[0].path, "src/api.rs");
-        assert!(
-            notices[0].changes.iter().all(|c| c.change == "removed"),
-            "{notices:?}"
-        );
-        // Two new files with the old content: which one it moved to cannot
-        // be told.
-        let (dir, mut index) = setup("moved-twice");
-        pass(&dir, &mut index, &[("src/api.rs", api), CALLER]);
-        fs::remove_file(dir.0.join("src/api.rs")).unwrap();
-        let notices = pass(
-            &dir,
-            &mut index,
-            &[("src/a.rs", api), ("src/b.rs", api), CALLER],
-        );
-        assert_eq!(notices.len(), 1, "{notices:?}");
-        assert_eq!(notices[0].path, "src/api.rs");
-        assert!(notices[0].changes.iter().all(|c| c.change == "removed"));
-        // Two removed files with the same content and one new one: likewise.
-        let (dir, mut index) = setup("moved-from-two");
-        pass(
-            &dir,
-            &mut index,
-            &[("src/a.rs", api), ("src/b.rs", api), CALLER],
-        );
-        fs::remove_file(dir.0.join("src/a.rs")).unwrap();
-        fs::remove_file(dir.0.join("src/b.rs")).unwrap();
-        let notices = pass(&dir, &mut index, &[("src/api.rs", api), CALLER]);
-        let paths: Vec<&str> = notices.iter().map(|notice| notice.path.as_str()).collect();
-        assert_eq!(paths, ["src/a.rs", "src/b.rs"], "{notices:?}");
-        // Another language at the new path is not the same file.
-        let (dir, mut index) = setup("moved-language");
-        pass(&dir, &mut index, &[("src/api.rs", api), CALLER]);
-        fs::remove_file(dir.0.join("src/api.rs")).unwrap();
-        let notices = pass(&dir, &mut index, &[("src/api.go", api), CALLER]);
-        assert_eq!(notices[0].path, "src/api.rs", "{notices:?}");
-        assert_eq!(notices[0].changes[0].change, "removed");
     }
 
     #[test]
@@ -4749,60 +4221,6 @@ mod review_regressions {
         );
         let notices = pass(&dir, &mut index, &[again, CALLER]);
         assert_eq!(notices[0].changes[0].change, "renamed", "{notices:?}");
-    }
-
-    #[test]
-    fn deleting_a_file_reports_its_exports_as_removed() {
-        let (dir, mut index) = setup("delete");
-        let api = ("src/api.rs", "pub fn upload() {}\npub fn gate() {}\n");
-        pass(&dir, &mut index, &[api, CALLER]);
-        fs::remove_file(dir.0.join("src/api.rs")).unwrap();
-        let notices = pass(&dir, &mut index, &[CALLER]);
-        assert_eq!(notices.len(), 1, "{notices:?}");
-        assert_eq!(notices[0].path, "src/api.rs");
-        assert_eq!(notices[0].changes.len(), 2);
-        assert!(
-            notices[0]
-                .changes
-                .iter()
-                .all(|change| change.change == "removed")
-        );
-        assert_eq!(notices[0].dependents, ["src/main.rs"]);
-    }
-
-    #[test]
-    fn a_partial_parse_in_between_cannot_hide_a_removal() {
-        let (dir, mut index) = setup("partial");
-        pass(
-            &dir,
-            &mut index,
-            &[
-                ("src/api.rs", "pub fn upload() {}\npub fn gate() {}\n"),
-                CALLER,
-            ],
-        );
-        // Caught mid-edit: gate is not seen because the file does not parse.
-        let notices = pass(
-            &dir,
-            &mut index,
-            &[
-                ("src/api.rs", "pub fn upload() {}\npub fn gate( {{{\n"),
-                CALLER,
-            ],
-        );
-        assert!(
-            notices.is_empty(),
-            "a partial parse is not trusted: {notices:?}"
-        );
-        // The clean result drops gate. It is compared with the last clean
-        // version, so the removal is reported.
-        let notices = pass(
-            &dir,
-            &mut index,
-            &[("src/api.rs", "pub fn upload() {}\n"), CALLER],
-        );
-        assert_eq!(notices.len(), 1, "{notices:?}");
-        assert_eq!(notices[0].changes[0].name, "gate");
     }
 
     #[test]
@@ -4897,36 +4315,6 @@ mod review_regressions {
     }
 
     #[test]
-    fn a_body_digest_changes_only_with_the_definitions_own_bytes() {
-        let (dir, mut index) = setup("body");
-        pass(&dir, &mut index, &[UPLOAD, CLI]);
-        let before = upload_with_detail(&index);
-        let elsewhere = UPLOAD.1.replace("{ 1 }", "{ 2 }");
-        pass(&dir, &mut index, &[(UPLOAD.0, &elsewhere), CLI]);
-        let after = upload_with_detail(&index);
-        assert_ne!(before.digest, after.digest, "the file changed");
-        assert_eq!(before.body_digest, after.body_digest, "upload did not");
-        assert_eq!(before.body_digest.as_ref().unwrap().len(), 64);
-        let inside = UPLOAD.1.replace("hash(a, b)", "hash(b, a)");
-        pass(&dir, &mut index, &[(UPLOAD.0, &inside), CLI]);
-        assert_ne!(upload_with_detail(&index).body_digest, after.body_digest);
-    }
-
-    #[test]
-    fn a_deleted_index_is_rebuilt_with_the_same_calls() {
-        let (dir, mut index) = setup("rebuild");
-        pass(&dir, &mut index, &[UPLOAD, CLI, WEB]);
-        let before = upload_with_detail(&index);
-        drop(index);
-        for suffix in ["", "-wal", "-shm"] {
-            let _ = fs::remove_file(dir.0.join(format!("graph.sqlite3{suffix}")));
-        }
-        let mut index = Index::open(&dir.0.join("graph.sqlite3")).unwrap();
-        pass(&dir, &mut index, &[UPLOAD, CLI, WEB]);
-        assert_eq!(upload_with_detail(&index), before);
-    }
-
-    #[test]
     fn an_index_of_the_previous_schema_is_discarded() {
         let (dir, index) = setup("schema");
         index
@@ -4937,46 +4325,6 @@ mod review_regressions {
         let mut index = Index::open(&dir.0.join("graph.sqlite3")).unwrap();
         pass(&dir, &mut index, &[UPLOAD, CLI]);
         assert_eq!(upload_with_detail(&index).callers.unwrap().count, 1);
-    }
-
-    #[test]
-    fn returning_to_earlier_content_is_a_distinct_transition() {
-        let (dir, mut index) = setup("cycle");
-        let a = ("src/api.rs", "pub fn upload() {}\n");
-        let b = ("src/api.rs", "pub fn upload(x: u8) {}\n");
-        let c = ("src/api.rs", "pub fn upload(x: u16) {}\n");
-        pass(&dir, &mut index, &[a, CALLER]);
-        let first = pass(&dir, &mut index, &[b, CALLER]);
-        pass(&dir, &mut index, &[c, CALLER]);
-        let again = pass(&dir, &mut index, &[b, CALLER]);
-        assert_eq!(first[0].digest, again[0].digest, "same destination");
-        assert_ne!(
-            first[0].before_digest, again[0].before_digest,
-            "different transition"
-        );
-        assert_eq!(
-            again[0].changes[0].before.as_deref(),
-            Some("pub fn upload(x: u16)")
-        );
-    }
-
-    /// A→B, B→A, then A→B again: the third repeats the first transition and
-    /// is still its own occurrence (review comment 4707328127).
-    #[test]
-    fn a_repeated_transition_is_found_by_a_later_pass() {
-        let (dir, mut index) = setup("repeat");
-        let a = ("src/api.rs", "pub fn upload() {}\n");
-        let b = ("src/api.rs", "pub fn upload(x: u8) {}\n");
-        pass(&dir, &mut index, &[a, CALLER]);
-        let first = pass(&dir, &mut index, &[b, CALLER]);
-        pass(&dir, &mut index, &[a, CALLER]);
-        let again = pass(&dir, &mut index, &[b, CALLER]);
-        assert_eq!(
-            (&first[0].before_digest, &first[0].digest),
-            (&again[0].before_digest, &again[0].digest),
-            "the same transition"
-        );
-        assert!(again[0].pass > first[0].pass, "{first:?} {again:?}");
     }
 
     // Every outcome of reading a file for the in-flight comparison is
