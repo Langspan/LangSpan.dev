@@ -1,0 +1,1 @@
+{"version":10,"request_id":"graph-path-1","command":{"op":"graph_path","workspace_id":"app","from":"codex.bob","to":"codex.bob","max_hops":4}}

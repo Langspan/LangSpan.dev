@@ -1,0 +1,1 @@
+{"type":"intent_set","intent":{"session_id":"claude-code.alice","workspace_id":"app","paths":["src/api.rs"],"summary":"Rework the session handler","generation":2}}

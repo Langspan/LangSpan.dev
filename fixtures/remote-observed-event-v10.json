@@ -1,0 +1,1 @@
+{"type":"remote_observed","peer":{"workspace_id":"app","publication":{"participant":"codex.bob","name":"parse","sequence":1,"work":[{"host":"codex","session":"claude-code.alice","branch_ref":"refs/heads/main","summary":"Rework the session handler","editing":["src/api.rs"],"recent":["example"]}]},"received_ms":5000,"generation":2}}

@@ -1,0 +1,1 @@
+{"version":10,"request_id":"observe-source-1","command":{"op":"observe_source","session_id":"claude-code.alice","files":[{"path":"src/api.rs","state":{"type":"missing"}}],"origin":"read"}}

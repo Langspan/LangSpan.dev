@@ -1,0 +1,1 @@
+{"version":10,"request_id":"workspaces-1","replayed":false,"generation":4,"lease_valid":null,"outcome":{"type":"workspaces","workspaces":[{"workspace_id":"app","root":"/work/app","root_exists":true,"sessions_current":1,"notes":1,"messages_pending":1,"checks":1,"auto_check":true,"remote_sharing":true}]}}

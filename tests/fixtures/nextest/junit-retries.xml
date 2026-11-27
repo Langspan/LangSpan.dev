@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Written by cargo-nextest 0.9.152 with retries = 2 for a sample crate:
+     one test passes, one fails its first try and passes its second, one
+     fails all three tries. Captured output is shortened. -->
+<testsuites name="nextest-run" tests="3" skipped="0" failures="1" errors="0" uuid="8ef05a3a-5883-4060-adbe-80ccfe888c3f" timestamp="2026-11-26T21:07:34.912-06:00" time="0.027">
+    <testsuite name="flaky_sample" tests="3" skipped="0" errors="0" failures="1">
+        <testcase name="always_passes" classname="flaky_sample" timestamp="2026-11-26T21:07:34.912-06:00" time="0.007"/>
+        <testcase name="passes_on_its_second_try" classname="flaky_sample" timestamp="2026-11-26T21:07:34.926-06:00" time="0.006">
+            <flakyFailure timestamp="2026-11-26T21:07:34.912-06:00" time="0.008" message="thread &apos;passes_on_its_second_try&apos; (238666005) panicked at src/lib.rs:3:5" type="test failure with exit code 101">thread &apos;passes_on_its_second_try&apos; (238666005) panicked at src/lib.rs:3:5:
+assertion `left != right` failed
+                <system-out>
+test passes_on_its_second_try ... FAILED
+</system-out>
+                <system-err>
+thread &apos;passes_on_its_second_try&apos; (238666005) panicked at src/lib.rs:3:5:
+</system-err>
+            </flakyFailure>
+        </testcase>
+        <testcase name="fails_every_try" classname="flaky_sample" timestamp="2026-11-26T21:07:34.912-06:00" time="0.013">
+            <failure message="thread &apos;fails_every_try&apos; (238666006) panicked at src/lib.rs:8:5" type="test failure with exit code 101">thread &apos;fails_every_try&apos; (238666006) panicked at src/lib.rs:8:5:
+always fails</failure>
+            <rerunFailure timestamp="2026-11-26T21:07:34.926-06:00" time="0.006" message="thread &apos;fails_every_try&apos; (238666015) panicked at src/lib.rs:8:5" type="test failure with exit code 101">thread &apos;fails_every_try&apos; (238666015) panicked at src/lib.rs:8:5:
+always fails
+            </rerunFailure>
+            <rerunFailure timestamp="2026-11-26T21:07:34.934-06:00" time="0.005" message="thread &apos;fails_every_try&apos; (238666021) panicked at src/lib.rs:8:5" type="test failure with exit code 101">thread &apos;fails_every_try&apos; (238666021) panicked at src/lib.rs:8:5:
+always fails
+            </rerunFailure>
+        </testcase>
+    </testsuite>
+</testsuites>

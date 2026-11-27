@@ -11,7 +11,7 @@
 //! The dry runs are the slow part: about 11 minutes of an 18-minute macOS
 //! job (issue #286). CI sets `LANGSPAN_BENCH_DRY_RUNS=skip` when a change
 //! touches no benchmark, briefing, hook or daemon code, and runs them every
-//! night on `main`; `.github/workflows/check.yml` owns the list of paths.
+//! night on `main`; `scripts/ci-changes.sh` owns the list of paths.
 //! Any other value, or none, runs them, so a local check always does.
 
 use std::ffi::OsStr;
@@ -123,6 +123,11 @@ fn dry_run_a_changer_that_works_around_the_change_is_change_not_made() {
 #[test]
 fn dry_run_with_stagger_tells_dependents_before_their_first_write() {
     dry_run("dry_run_with_stagger_tells_every_dependent_before_its_first_write");
+}
+
+#[test]
+fn dry_run_with_the_watcher_installed_a_session_takes_its_turn() {
+    python_suite("test_driver.py", Some("WatcherDryRun"));
 }
 
 #[test]

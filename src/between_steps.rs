@@ -217,6 +217,17 @@ mod tests {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::fs::PermissionsExt;
 
+    /// Issue #288: the watcher ends itself before its entry's host timeout.
+    /// Past `WATCH_LIMIT` it can still be reading its input (the hook's
+    /// largest budget, 4 s), resolving its workspace and making one ask
+    /// (`CALL_BUDGET` each), then polling once.
+    #[test]
+    fn the_watcher_ends_itself_well_before_its_host_timeout() {
+        let overrun = Duration::from_secs(4) + CALL_BUDGET * 2 + POLL;
+        assert!(WATCH_LIMIT + overrun < Duration::from_secs(HOST_TIMEOUT_SECONDS));
+        assert!(START_GRACE < WATCH_LIMIT);
+    }
+
     /// Review follow-up #266: the coordinator may record what an ask told
     /// and then lose the answer, so the watcher asks again under the same
     /// request ID and its receipt answers.

@@ -1,0 +1,1 @@
+{"version":10,"request_id":"trails-1","replayed":false,"generation":4,"lease_valid":null,"outcome":{"type":"trails","workspace_id":"app","trails":[{"trail":{"session_id":"claude-code.alice","workspace_id":"app","at_ms":5000,"generation":2}}]}}

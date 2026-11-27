@@ -1,0 +1,53 @@
+# cargo-nextest runs the test suite, locally and in CI
+# (docs/development-process.md#which-tests-run-when). Doc tests run with
+# `cargo test --doc`, which nextest does not run.
+#
+# Profiles: `default` for a local `cargo nextest run`, and `ci`, which adds
+# the JUnit report. Retries come from NEXTEST_RETRIES, which check.yml sets
+# by event: none on a pull request, so a flaky test shows, and 2 in the
+# merge queue and on main, where a test that passes on a later try is named
+# by scripts/flaky-tests.py. A test that fails every try fails the run.
+nextest-version = { required = "0.9.152" }
+
+[profile.default]
+# Every failing test shows in one run, not only the first.
+fail-fast = false
+# One thread per core, so a larger runner is used fully.
+test-threads = "num-cpus"
+# A test still running after 60 s is reported as slow, and after 180 s it is
+# killed and fails, so a hung test or a coordinator that never exits can't
+# stall the run. The slowest test waits about 35 s by design.
+slow-timeout = { period = "60s", terminate-after = 3 }
+# A test whose child process still holds its output 1 s after the test ends
+# has left a process behind: that fails the test.
+leak-timeout = { period = "1s", result = "fail" }
+
+# The benchmark harness's dry runs drive whole runs of the coordination
+# benchmark: the longest took 67 s on an Apple M-series laptop, and they ran
+# several times slower on CI's macOS runner. They are killed after 8 minutes.
+[[profile.default.overrides]]
+filter = "binary(benchmark_harness)"
+slow-timeout = { period = "120s", terminate-after = 4 }
+
+[profile.ci]
+failure-output = "immediate-final"
+# target/nextest/<profile>/junit.xml, read by scripts/flaky-tests.py.
+junit.path = "junit.xml"
+
+# A pull request's fast lane: every unit test, every test of the two pure
+# crates, and the integration tests of wire formats, stored data, workflows
+# and docs, none of which starts a coordinator. Measured on an Apple
+# M-series laptop with 4 test threads: 1,103 tests in 15 s, against 1,866
+# in about 113 s with one thread per core for the whole suite. The rest run
+# in the merge queue, on main and nightly (the `ci` profile, no filter).
+[profile.ci-fast]
+inherits = "ci"
+default-filter = """
+kind(lib) | kind(bin)
+| package(langspan-core) | package(langspan-graph)
+| binary_id(langspan::protocol) | binary_id(langspan::store)
+| binary_id(langspan::git_output) | binary_id(langspan::mcp_frame)
+| binary_id(langspan::ci_workflows)
+| binary_id(langspan::readme_and_agent_docs)
+| binary_id(langspan::tool_count_in_docs)
+"""

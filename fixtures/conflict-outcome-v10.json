@@ -1,0 +1,1 @@
+{"version":10,"request_id":"conflict-1","replayed":false,"generation":4,"lease_valid":null,"outcome":{"type":"conflict","holders":[{"lease_id":"lease-1","session_id":"claude-code.alice","paths":["src/api.rs"]}]}}

@@ -1,0 +1,1 @@
+{"type":"refusal_settled","session_id":"claude-code.alice","workspace_id":"app","kind":"conflict","paths":["src/api.rs"],"refused_at_ms":5000,"outcome":"retried_admitted","at_ms":5000,"generation":2}

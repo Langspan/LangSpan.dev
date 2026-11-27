@@ -1,0 +1,1 @@
+{"version":10,"request_id":"observe-disk-1","command":{"op":"observe_disk","workspace_id":"app","path":"src/api.rs","before":{"type":"missing"},"after":{"type":"missing"},"related_operation_ids":["related-operation-1"]}}

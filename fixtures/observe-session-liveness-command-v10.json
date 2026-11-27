@@ -1,0 +1,1 @@
+{"version":10,"request_id":"observe-session-liveness-1","command":{"op":"observe_session_liveness","session_id":"claude-code.alice","process":{"pid":1,"start_token":"example"},"status":"alive"}}

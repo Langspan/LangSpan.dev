@@ -1,0 +1,1 @@
+{"version":10,"request_id":"workspace-git-1","replayed":false,"generation":4,"lease_valid":null,"outcome":{"type":"workspace_git","git":{"workspace_id":"app","repository_id":"repository-1","branch_ref":"refs/heads/main"}}}

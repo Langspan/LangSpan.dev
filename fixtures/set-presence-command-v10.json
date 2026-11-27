@@ -1,0 +1,1 @@
+{"version":10,"request_id":"set-presence-1","command":{"op":"set_presence","session_id":"claude-code.alice","shown":true,"window_ms":5000}}

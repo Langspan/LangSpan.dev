@@ -1,0 +1,1 @@
+{"type":"turn_queue_joined","waiter":{"ticket":"ticket-1","workspace_id":"app","onto":"main","session_id":"claude-code.alice","joined_ms":5000,"deadline_ms":5000,"seen_until_ms":5000,"generation":2}}

@@ -1,0 +1,1 @@
+{"version":10,"request_id":"adopt-1","command":{"op":"adopt","session_id":"claude-code.alice","from":"codex.bob"}}

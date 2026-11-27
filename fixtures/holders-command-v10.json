@@ -1,0 +1,1 @@
+{"version":10,"request_id":"holders-1","command":{"op":"holders","session_id":"claude-code.alice","paths":["src/api.rs"]}}

@@ -46,6 +46,38 @@ pub struct Config {
     pub user_level: bool,
 }
 
+impl Config {
+    /// A project-level hook's configuration with the `langspan hook`
+    /// command's defaults for every option. Callers that set an option
+    /// override it with `Config { field: value, ..Config::new(..) }`, so a
+    /// new option does not break them.
+    pub fn new(
+        state_dir: PathBuf,
+        workspace_id: impl Into<String>,
+        root: PathBuf,
+        vendor: crate::install::Vendor,
+    ) -> Self {
+        Self {
+            state_dir,
+            workspace_id: workspace_id.into(),
+            root,
+            ttl_ms: 30_000,
+            budget: Duration::from_millis(1500),
+            share_prompt: true,
+            code_briefing: true,
+            presence: true,
+            presence_window_ms: crate::install::Presence {
+                shown: true,
+                minutes: None,
+            }
+            .window_ms(),
+            outline_reads: false,
+            vendor,
+            user_level: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reply {
     pub stdout: String,

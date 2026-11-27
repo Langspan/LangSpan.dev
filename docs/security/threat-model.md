@@ -954,6 +954,24 @@ below has been observed in a real run.
 | **Information disclosure**: build paths or tokens in the binary or logs | Paths remapped with `--remap-path-prefix`; checkouts do not persist credentials. The only secret is the release GitHub App's private key, held in Actions secrets and used only in the release-please job to mint a short-lived installation token for this repository, with contents, pull requests and issues write. No other step or job receives the token, and the app's OAuth client secrets are not used. | Anyone who can change `release.yml` on `main` can use the key; that already requires a reviewed merge. A leaked key mints tokens until it is revoked in the app's settings. |
 | **Elevation of privilege**: a pull request or a dependency gains write access | `permissions: {}` at the top of each workflow; each job names its own. Release jobs never run on `pull_request`. Signing permissions are only in jobs that compile nothing. | A maintainer merging the release pull request publishes whatever `main` holds. |
 
+## CI build cache
+
+The Rust checks (`check.yml`) restore a build cache: the crates registry,
+compiled dependencies in `target/` and the cargo-nextest binary. What a job
+restores is code it then runs, so the cache is a boundary between runs. The
+threat to rule out is a pull request writing an entry that a later run on
+`main`, or a release, restores. The release workflow uses no cache.
+
+| Threat | Control | Residual risk |
+| --- | --- | --- |
+| **Tampering** (cache poisoning): a pull request plants compiled code that `main` runs | Only a run on `refs/heads/main` saves (`actions/cache/save`, after the checks pass); a pull request or merge-queue run only restores. GitHub also scopes an entry to the ref that saved it, so `main` can't restore one saved by a pull request's ref. Every action is pinned by commit. | Code merged to `main` runs with the job's token and saves what it builds; that already requires a reviewed merge through the merge queue. A compromised runner image or cache service is outside this control. |
+| **Tampering**: a release built from cached artifacts | `release.yml` restores no cache and builds with `--locked` from the tag (see the release pipeline). | None known. |
+| **Spoofing**: a stale entry taken for a current one | The key names the runner's OS and architecture, the job, the toolchain, the lockfile and `scripts/install-ci-tools.sh`; cargo's own fingerprints rebuild anything whose inputs differ. `main` restores only its exact key, so what it saves holds no stale dependency. | A pull request may restore `main`'s entry for an older lockfile; cargo rebuilds what changed. |
+| **Repudiation** | The run log names the key restored and saved. | Log retention is GitHub's. |
+| **Information disclosure**: a secret in a cached path | The paths hold build outputs, the public crates registry and a public tool; no step that writes them receives a secret, and checkouts don't persist credentials. | Anyone who can read the repository's Actions caches can read the entries, which hold only what a public build produces. |
+| **Denial of service**: an entry that grows until it evicts the others | Main prunes the workspace's own crates, the release build and test reports, then saves only when the total is at most `CACHE_LIMIT_MB` (2,048 MB), and otherwise saves nothing and warns (`scripts/ci-cache-size.sh`). An entry is saved once per key. | A cold cache slows a run: it builds every dependency and cargo-nextest, which the fast lane's 10-minute limit is set to allow. |
+| **Elevation of privilege** | The cache needs no token permission beyond `contents: read`. The flaky test report, the only other writer in `check.yml`, holds `issues: write`, checks out nothing and runs no repository code; the test names it writes come from the jobs' outputs through the environment. | A test name is repository text; it reaches the issue as data. |
+
 ## Mixed versions and `doctor`'s version check
 
 Roadmap I5 ([ADR 0025](../adr/0025-distribution-lifecycle-and-store-beyond-the-first-release.md#i5-mixed-versions-as-built))
