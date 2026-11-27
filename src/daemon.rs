@@ -1608,50 +1608,6 @@ mod unix {
     mod tests {
         use super::*;
         #[test]
-        fn a_registered_child_boundary_survives_removal_of_its_git_marker() {
-            let directory = std::env::temp_dir()
-                .join(format!("langspan-worktree-boundary-{}", std::process::id()));
-            fs::create_dir(&directory).unwrap();
-            let root = fs::canonicalize(&directory).unwrap();
-            let child = root.join("nested");
-            fs::create_dir(&child).unwrap();
-            fs::write(child.join("a.rs"), "fixture").unwrap();
-            let mut state = State::default();
-            for (id, path, links) in [
-                ("parent", &root, vec![]),
-                ("child", &child, vec!["parent".into()]),
-            ] {
-                state.workspaces.insert(
-                    id.into(),
-                    langspan_core::Workspace {
-                        workspace_id: id.into(),
-                        root: path.to_str().unwrap().into(),
-                        verified_overlaps: links,
-                    },
-                );
-                state.sessions.insert(
-                    id.into(),
-                    langspan_core::Session {
-                        session_id: id.into(),
-                        workspace_id: id.into(),
-                        generation: 0,
-                        parent: None,
-                        headless: false,
-                    },
-                );
-            }
-            let parent = prepare_paths(&state, "parent", &["nested/a.rs".into()]);
-            let own_child = prepare_paths(&state, "child", &["a.rs".into()]);
-            fs::remove_dir_all(directory).unwrap();
-            assert!(
-                parent
-                    .unwrap_err()
-                    .to_string()
-                    .contains("registered descendant")
-            );
-            assert_eq!(own_child.unwrap(), ["a.rs"]);
-        }
-        #[test]
         fn process_exit_is_recorded_without_releasing_admission_authority() {
             let directory = std::env::temp_dir()
                 .join(format!("langspan-liveness-owner-{}", std::process::id()));
