@@ -1,4 +1,4 @@
-//! Version 8 of the local IPC contract. One bounded JSON line per connection.
+//! Version 9 of the local IPC contract. One bounded JSON line per connection.
 
 use langspan_core::{
     Command, ContextUse, Event, Outcome, RecordedEvent, SessionActivity, StatusRecord,
@@ -6,9 +6,10 @@ use langspan_core::{
 use serde::{Deserialize, Serialize};
 use std::io::{self, BufRead, BufReader, Read};
 
-/// Version 8 is version 7 with roadmap E1's `anchor`, `anchor_state` and
+/// Version 9 is version 8 with roadmap E1's `anchor`, `anchor_state` and
 /// `tags` in a note, `symbol` and `tags` in `remember` and `tag` in
-/// `recap` (`fits`).
+/// `recap` (`fits`). Version 8 is version 7 with issue #262's
+/// `inflight_partial` in a briefing.
 /// Version 7 is version 6 with issue #222's briefing memory and context
 /// measurement: a session activity's `told`, `told_at_ms` and `context`, a
 /// briefing's `unchanged`, a briefing delivery's `told` and `told_at_ms`,
@@ -22,7 +23,9 @@ use std::io::{self, BufRead, BufReader, Read};
 /// in-flight symbols. Apart from recording a rebased or adapted landing and
 /// a note's symbol and tags, requests of an earlier version are requests of
 /// this one.
-pub const PROTOCOL_VERSION: u16 = 8;
+pub const PROTOCOL_VERSION: u16 = 9;
+/// Issue #262's version, answered in its own shape.
+pub const PROTOCOL_VERSION_8: u16 = 8;
 /// Issue #222's version, answered in its own shape.
 pub const PROTOCOL_VERSION_7: u16 = 7;
 /// Roadmap F5's version, answered in its own shape.
@@ -45,14 +48,18 @@ pub fn answers(version: u16) -> bool {
 /// earlier version read the objects later versions extended with
 /// `deny_unknown_fields`, so an answer carrying a field they lack would fail
 /// to read as a whole: theirs is encoded without what later versions added
-/// (`protocol_7_shape`, `protocol_6_outcome`, then `protocol_5_shape`,
-/// `protocol_4_shape` and `protocol_3_shape`). A state record given in
-/// parts is encoded by `encode_record_for` before it is cut.
+/// (`protocol_8_shape`, `protocol_7_outcome`, `protocol_6_outcome`, then
+/// `protocol_5_shape`, `protocol_4_shape` and `protocol_3_shape`). A state
+/// record given in parts is encoded by `encode_record_for` before it is
+/// cut.
 pub fn encode_for(version: u16, response: &Response) -> Result<Vec<u8>, crate::Error> {
     if version >= PROTOCOL_VERSION {
         return encode(response);
     }
     let mut earlier = response.clone();
+    if version < PROTOCOL_VERSION_8 {
+        protocol_7_outcome(&mut earlier.outcome);
+    }
     if version < PROTOCOL_VERSION_7 {
         protocol_6_outcome(&mut earlier.outcome);
     }
@@ -70,8 +77,8 @@ pub fn encode_record_for(version: u16, record: &StatusRecord) -> Result<String, 
         return Ok(serde_json::to_string(record)?);
     }
     let mut earlier = record.clone();
-    if let StatusRecord::Activity { activity, .. } = &mut earlier
-        && version < PROTOCOL_VERSION_7
+    if version < PROTOCOL_VERSION_7
+        && let StatusRecord::Activity { activity, .. } = &mut earlier
     {
         protocol_6_activity(activity);
     }
@@ -84,7 +91,7 @@ pub fn encode_record_for(version: u16, record: &StatusRecord) -> Result<String, 
 /// from issue #222's (`protocol_6_outcome`, `protocol_6_activity`).
 fn earlier_shape(version: u16, value: &mut serde_json::Value) {
     if version < PROTOCOL_VERSION {
-        protocol_7_shape(value);
+        protocol_8_shape(value);
     }
     if version < PROTOCOL_VERSION_6 {
         protocol_5_shape(value);
@@ -94,6 +101,14 @@ fn earlier_shape(version: u16, value: &mut serde_json::Value) {
     }
     if version < PROTOCOL_VERSION_4 {
         protocol_3_shape(value);
+    }
+}
+
+/// `outcome` without what version 8 (issue #262) added: a briefing's
+/// `inflight_partial`, which is skipped when false.
+fn protocol_7_outcome(outcome: &mut Outcome) {
+    if let Outcome::Briefing { briefing } = outcome {
+        briefing.inflight_partial = false;
     }
 }
 
@@ -174,10 +189,10 @@ pub fn older_daemon(version: u16) -> String {
     )
 }
 
-/// The fields version 8 added to a note (`Note` and a recall's
+/// The fields version 9 added to a note (`Note` and a recall's
 /// `RecalledNote`: the only objects of the protocol with `note_id`, `text`
 /// and `paths`), roadmap E1.
-const NOTE_FIELDS_SINCE_8: [&str; 3] = ["anchor", "anchor_state", "tags"];
+const NOTE_FIELDS_SINCE_9: [&str; 3] = ["anchor", "anchor_state", "tags"];
 
 fn is_note(fields: &serde_json::Map<String, serde_json::Value>) -> bool {
     ["note_id", "text", "paths"]
@@ -185,11 +200,11 @@ fn is_note(fields: &serde_json::Map<String, serde_json::Value>) -> bool {
         .all(|key| fields.contains_key(*key))
 }
 
-/// `value` without the fields version 8 added. An earlier client would
+/// `value` without the fields version 9 added. An earlier client would
 /// show an anchored note without its state, so one whose definition is not
 /// known to be unchanged is left out; a current one is shown as a plain
 /// note about its files.
-fn protocol_7_shape(value: &mut serde_json::Value) {
+fn protocol_8_shape(value: &mut serde_json::Value) {
     use serde_json::Value;
     match value {
         Value::Array(items) => {
@@ -199,15 +214,15 @@ fn protocol_7_shape(value: &mut serde_json::Value) {
                     .is_none_or(|held| held == "current"),
                 _ => true,
             });
-            items.iter_mut().for_each(protocol_7_shape);
+            items.iter_mut().for_each(protocol_8_shape);
         }
         Value::Object(fields) => {
             if is_note(fields) {
-                for key in NOTE_FIELDS_SINCE_8 {
+                for key in NOTE_FIELDS_SINCE_9 {
                     fields.shift_remove(key);
                 }
             }
-            fields.values_mut().for_each(protocol_7_shape);
+            fields.values_mut().for_each(protocol_8_shape);
         }
         _ => {}
     }

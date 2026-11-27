@@ -417,10 +417,11 @@ fn every_counts(reply: &Value) -> Vec<&Value> {
 fn clients_of_protocol_4_and_3_get_reports_without_refusal_outcomes() {
     let f = Fixture::new();
     stale_refusal(&f);
-    // Version 5 added it, and versions 6 (roadmap F5) and 7 (issue #222)
-    // keep it.
+    // Version 5 added it, and versions 6 (roadmap F5), 7 (issue #222) and
+    // 8 (issue #262) keep it.
     for version in [
         langspan::protocol::PROTOCOL_VERSION,
+        langspan::protocol::PROTOCOL_VERSION_7,
         langspan::protocol::PROTOCOL_VERSION_6,
         langspan::protocol::PROTOCOL_VERSION_5,
     ] {

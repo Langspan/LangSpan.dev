@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.3.0](https://github.com/Langspan/LangSpan.dev/compare/v0.2.0...v0.3.0) (2026-11-26)
+
+
+### ⚠ BREAKING CHANGES
+
+* remove Gemini CLI support; Antigravity is the Google host ([#264](https://github.com/Langspan/LangSpan.dev/issues/264))
+
+### Features
+
+* a coordination policy for each kind of refusal, with an opt-in wait for a current holder (B28) ([#232](https://github.com/Langspan/LangSpan.dev/issues/232)) ([f8f1c1f](https://github.com/Langspan/LangSpan.dev/commit/f8f1c1fe92ed79518592542a19fd26a8a2a9832e))
+* ask before a write what changed in its symbols (B26) ([#210](https://github.com/Langspan/LangSpan.dev/issues/210)) ([820e660](https://github.com/Langspan/LangSpan.dev/commit/820e660a2c407bae23d9d6aeeb0d4a29eac82a34))
+* brief only what changed since a session was last told ([#222](https://github.com/Langspan/LangSpan.dev/issues/222)) ([#242](https://github.com/Langspan/LangSpan.dev/issues/242)) ([0232b1a](https://github.com/Langspan/LangSpan.dev/commit/0232b1abd1402c2bfc1d71fce03d10333f6ae708))
+* commit --mine evidence for Codex, Cursor and Gemini CLI, and a status --mine pointer (B7) ([#225](https://github.com/Langspan/LangSpan.dev/issues/225)) ([3c15b14](https://github.com/Langspan/LangSpan.dev/commit/3c15b14d0853313be8f425fbb0241fb784cc00d9))
+* hold broad commits on every host's shell and read only the taken paths' journal (B6) ([#233](https://github.com/Langspan/LangSpan.dev/issues/233)) ([458bd58](https://github.com/Langspan/LangSpan.dev/commit/458bd58987280a592c0a64f5c9f77820f81917c4))
+* index C# source files (D6, second language) ([#240](https://github.com/Langspan/LangSpan.dev/issues/240)) ([6863694](https://github.com/Langspan/LangSpan.dev/commit/686369473032037942e1cf188623ca2b1c14c4d6))
+* leave a trail when a session ends and tell the next session once (C9) ([#236](https://github.com/Langspan/LangSpan.dev/issues/236)) ([d17c1a6](https://github.com/Langspan/LangSpan.dev/commit/d17c1a6d950bafa5f797df139ff999426050eb53))
+* measure the K1 benchmark's cost to a correct result with one repair round ([#224](https://github.com/Langspan/LangSpan.dev/issues/224)) ([82779d7](https://github.com/Langspan/LangSpan.dev/commit/82779d7784b0395652359674795364f5cdb4cde7))
+* name definitions a clean combination breaks, on request (D9) ([#258](https://github.com/Langspan/LangSpan.dev/issues/258)) ([54fa757](https://github.com/Langspan/LangSpan.dev/commit/54fa757d28bb499dc36b461d599a5f2ae7ed822b))
+* paths between symbols and a repository map (D3) ([#252](https://github.com/Langspan/LangSpan.dev/issues/252)) ([2c510dc](https://github.com/Langspan/LangSpan.dev/commit/2c510dc41944e208349c1dfe0f97c5e28ff3af86))
+* protect a peer's recent lines from unread shell and whole-file writes (B4) ([#271](https://github.com/Langspan/LangSpan.dev/issues/271)) ([0e52ec0](https://github.com/Langspan/LangSpan.dev/commit/0e52ec031ec2a979944782e38652a3ede1f3c41c))
+* rank the code briefing and name each definition's dependents (C2) ([#227](https://github.com/Langspan/LangSpan.dev/issues/227)) ([23cac44](https://github.com/Langspan/LangSpan.dev/commit/23cac44ebe44d97b92e7f227674190ffc54e1b12))
+* remove Gemini CLI support; Antigravity is the Google host ([#264](https://github.com/Langspan/LangSpan.dev/issues/264)) ([7af8526](https://github.com/Langspan/LangSpan.dev/commit/7af852643bdb1627fac1fc41c07ab253e5140278)), closes [#246](https://github.com/Langspan/LangSpan.dev/issues/246) [#195](https://github.com/Langspan/LangSpan.dev/issues/195)
+* report a coordinator and hook binary of different versions in doctor (I5) ([#248](https://github.com/Langspan/LangSpan.dev/issues/248)) ([46fc3ad](https://github.com/Langspan/LangSpan.dev/commit/46fc3adf091459f880c6f19eeecb8d85378781f3))
+* report identifier renames, adapt them on request, and rebase landings (F5) ([#254](https://github.com/Langspan/LangSpan.dev/issues/254)) ([d3f2b7c](https://github.com/Langspan/LangSpan.dev/commit/d3f2b7ccf81f5687fde6b4e4d58122d8b805390f))
+* show what a session did after each refusal in the report (H9) ([#237](https://github.com/Langspan/LangSpan.dev/issues/237)) ([a9b6f88](https://github.com/Langspan/LangSpan.dev/commit/a9b6f880bc6fc3a656dfb4a876e27d303fcada09))
+* tell interface notices between a Claude Code session's steps ([#214](https://github.com/Langspan/LangSpan.dev/issues/214)) ([#260](https://github.com/Langspan/LangSpan.dev/issues/260)) ([bf38316](https://github.com/Langspan/LangSpan.dev/commit/bf3831665f95ae709f370cf72c376fa76e5c2f2a))
+* tell other worktrees about committed but unmerged interface changes ([#220](https://github.com/Langspan/LangSpan.dev/issues/220)) ([000360e](https://github.com/Langspan/LangSpan.dev/commit/000360e71c407a7466c1719e1d1b5b867d6ffa3b))
+* track renames so history and notices follow the new name (D7) ([#203](https://github.com/Langspan/LangSpan.dev/issues/203)) ([89af39c](https://github.com/Langspan/LangSpan.dev/commit/89af39cf9d453818aeb50603fb35753a213d8178))
+
+
+### Bug fixes
+
+* make the K1 discovered_change interface change unavoidable and report change_not_made ([#219](https://github.com/Langspan/LangSpan.dev/issues/219)) ([6572357](https://github.com/Langspan/LangSpan.dev/commit/657235735846bfcb79da3d1229f1fdc29416900b)), closes [#218](https://github.com/Langspan/LangSpan.dev/issues/218)
+* stop test coordinators on every exit path, and when their state folder goes ([#251](https://github.com/Langspan/LangSpan.dev/issues/251)) ([a65ba50](https://github.com/Langspan/LangSpan.dev/commit/a65ba50c7a5287a9d8cc9d576631acf8760469f8))
+
 ## [0.2.0](https://github.com/Langspan/LangSpan.dev/compare/v0.1.0...v0.2.0) (2026-11-26)
 
 

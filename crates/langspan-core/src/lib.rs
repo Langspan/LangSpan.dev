@@ -2852,6 +2852,12 @@ pub struct Briefing {
     /// briefing.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub omitted_inflight: u32,
+    /// The source index has not finished a first scan of this session's
+    /// workspace or of another worktree of its repository, so `inflight`
+    /// may leave out work in flight there (issue #262). Not part of the
+    /// signature: it is said beside news, and is not news by itself.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub inflight_partial: bool,
     /// Remembered notes about the workspace or about files this session
     /// works on.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -4643,7 +4649,8 @@ pub enum Command {
     /// Prepared adapter input only, as `WorkspaceRegisterVerified`: the
     /// receipt stores the original `Brief`. `inflight` is what the daemon's
     /// source index found other worktrees have in flight that the session's
-    /// workspace mentions (roadmap C7).
+    /// workspace mentions (roadmap C7), and `inflight_partial` that the
+    /// index had not finished a first scan of a worktree it reads.
     #[serde(skip_serializing)]
     BriefPrepared {
         session_id: String,
@@ -4656,6 +4663,8 @@ pub enum Command {
         left: Vec<String>,
         changes_only: bool,
         inflight: Vec<InflightSymbol>,
+        #[serde(default)]
+        inflight_partial: bool,
         /// Names of anchored notes that the session's files mention, as
         /// the index found them (roadmap E1).
         mentioned: BTreeSet<String>,
@@ -7889,9 +7898,10 @@ fn decide_checked(
             }
             let window = recent::window(*recent_window_ms)?;
             let none = BTreeSet::new();
-            let (inflight, mentioned) = match command {
+            let (inflight, inflight_partial, mentioned) = match command {
                 Command::BriefPrepared {
                     inflight,
+                    inflight_partial,
                     mentioned,
                     ..
                 } => {
@@ -7901,9 +7911,9 @@ fn decide_checked(
                             "A briefing is offered at most 32 in-flight symbols",
                         ));
                     }
-                    (inflight.as_slice(), mentioned)
+                    (inflight.as_slice(), *inflight_partial, mentioned)
                 }
-                _ => (&[][..], &none),
+                _ => (&[][..], false, &none),
             };
             let (mut briefing, signature, inflight_keys) = brief(
                 state,
@@ -7914,6 +7924,8 @@ fn decide_checked(
                 (inflight, mentioned),
             )?;
             briefing.left_work = left_work(state, session_id, left)?;
+            // Not part of the signature (see `Briefing::inflight_partial`).
+            briefing.inflight_partial = inflight_partial;
             // Not part of the signature: a prompt's briefing never carries
             // it, so it must not make the next one look new.
             if *recent {
@@ -10755,6 +10767,8 @@ fn brief(
             omitted_inflight: u32::try_from(owed.len() - inflight_notices.len())
                 .unwrap_or(u32::MAX),
             inflight: inflight_notices,
+            // Set by the request that carries the index's answer.
+            inflight_partial: false,
             notes,
             messages,
             retracted,

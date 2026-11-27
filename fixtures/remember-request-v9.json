@@ -1,0 +1,1 @@
+{"version":9,"request_id":"note-1","command":{"op":"remember","workspace_id":"app","author":"codex.bob","text":"keep it pure","paths":["src/api.rs"],"symbol":"parse_upload","tags":["api"]}}

@@ -1,7 +1,7 @@
 use langspan::protocol::{
     OLDEST_PROTOCOL_VERSION, PROTOCOL_VERSION, PROTOCOL_VERSION_4, PROTOCOL_VERSION_5,
-    PROTOCOL_VERSION_6, PROTOCOL_VERSION_7, Request, Response, encode, encode_for,
-    encode_record_for, read_frame,
+    PROTOCOL_VERSION_6, PROTOCOL_VERSION_7, PROTOCOL_VERSION_8, Request, Response, encode,
+    encode_for, encode_record_for, read_frame,
 };
 use langspan_core::Command;
 
@@ -1080,10 +1080,11 @@ fn v4_rename_history_response_and_its_version_3_form_match_the_golden_vectors() 
         history.entries[1].before_path.as_deref(),
         Some("app/old_users.py")
     );
-    // Versions 5, 6 and 7 added nothing to a history answer: 4 to 7 agree.
+    // Versions 5 to 8 added nothing to a history answer: 4 to 8 agree.
     assert_eq!(encode_for(PROTOCOL_VERSION_4, &response).unwrap(), wire);
     assert_eq!(encode_for(PROTOCOL_VERSION_5, &response).unwrap(), wire);
     assert_eq!(encode_for(PROTOCOL_VERSION_6, &response).unwrap(), wire);
+    assert_eq!(encode_for(PROTOCOL_VERSION_7, &response).unwrap(), wire);
     assert_eq!(encode_for(PROTOCOL_VERSION, &response).unwrap(), wire);
 
     response.version = OLDEST_PROTOCOL_VERSION;
@@ -1147,9 +1148,15 @@ fn v5_report_response_and_its_version_4_and_3_forms_match_the_golden_vectors() {
     assert_eq!(report.hosts[0].counts.refusal_outcomes["adapted"], 1);
     // A version 5 client still reads `refusal_outcomes`.
     assert_eq!(encode_for(PROTOCOL_VERSION_5, &response).unwrap(), wire);
-    // Version 6 changed landings and version 7 (issue #222) activity,
-    // briefings and events: their report is the version 5 form.
-    for later in [PROTOCOL_VERSION_6, PROTOCOL_VERSION] {
+    // Version 6 changed landings, version 7 (issue #222) activity,
+    // briefings and events, version 8 (issue #262) briefings and version 9
+    // (roadmap E1) notes: their report is the version 5 form.
+    for later in [
+        PROTOCOL_VERSION_6,
+        PROTOCOL_VERSION_7,
+        PROTOCOL_VERSION_8,
+        PROTOCOL_VERSION,
+    ] {
         let mut current = response.clone();
         current.version = later;
         assert_eq!(
@@ -1380,6 +1387,45 @@ fn a_version_3_reply_leaves_out_trails() {
     );
 }
 
+/// Issue #262: a client of version 7 or earlier reads briefings with
+/// `deny_unknown_fields`, so its answer does not say the index was partial;
+/// a client of version 8 or later is told.
+#[test]
+fn a_version_7_reply_leaves_out_a_partial_index() {
+    use langspan_core::{Briefing, Outcome};
+    let mut briefing: Briefing = serde_json::from_value(serde_json::json!({
+        "session_id": "codex.bob", "changed": true, "peers": [], "omitted_peers": 0,
+    }))
+    .unwrap();
+    briefing.inflight_partial = true;
+    let response = Response {
+        version: PROTOCOL_VERSION,
+        request_id: "r".into(),
+        replayed: false,
+        generation: 1,
+        lease_valid: None,
+        outcome: Outcome::Briefing { briefing },
+    };
+    for version in std::iter::once(PROTOCOL_VERSION_7).chain(EARLIER_VERSIONS) {
+        let earlier: serde_json::Value =
+            serde_json::from_slice(&encode_for(version, &response).unwrap()).unwrap();
+        assert!(
+            earlier["outcome"]["briefing"]
+                .get("inflight_partial")
+                .is_none(),
+            "{version}: {earlier:#}"
+        );
+    }
+    for version in [PROTOCOL_VERSION_8, PROTOCOL_VERSION] {
+        let current: Response =
+            serde_json::from_slice(&encode_for(version, &response).unwrap()).unwrap();
+        assert!(
+            matches!(&current.outcome, Outcome::Briefing { briefing: read } if read.inflight_partial),
+            "version {version}"
+        );
+    }
+}
+
 /// Roadmap D7 (review comment 4707749784): to a version 3 client an
 /// interface notice has no rename fields and no change of a definition that
 /// is not exported, while a version 4 client gets both.
@@ -1499,7 +1545,8 @@ const ADDED_IN_7: [&str; 6] = [
     "context_added",
     "told_forgotten",
 ];
-/// Every version the daemon answers before the current one.
+/// Every version the daemon answers before version 7. Version 8 (issue
+/// #262) keeps what version 7 added.
 const EARLIER_VERSIONS: [u16; 4] = [
     PROTOCOL_VERSION_6,
     PROTOCOL_VERSION_5,
@@ -1662,18 +1709,20 @@ fn an_earlier_reply_leaves_out_what_version_7_added_to_activity_briefings_and_ev
                 .any(|field| current.contains(&format!("\"{field}\""))),
             "a version 7 client reads them: {current}"
         );
-        // Version 8 (roadmap E1) changed only notes: a version 7 client
-        // reads the same answer.
-        let mut seven = response.clone();
-        seven.version = PROTOCOL_VERSION_7;
-        assert_eq!(
-            String::from_utf8(encode_for(PROTOCOL_VERSION_7, &seven).unwrap()).unwrap(),
-            String::from_utf8(encode(&seven).unwrap()).unwrap()
-        );
         assert_eq!(
             serde_json::from_str::<Response>(&current).unwrap(),
             response
         );
+        // Version 8 (issue #262) changed only a partial index and version 9
+        // (roadmap E1) only notes: version 7 and 8 clients read the same
+        // answer.
+        for version in [PROTOCOL_VERSION_7, PROTOCOL_VERSION_8] {
+            assert_eq!(
+                String::from_utf8(encode_for(version, &response).unwrap()).unwrap(),
+                current,
+                "version {version}"
+            );
+        }
         for version in EARLIER_VERSIONS {
             let earlier = String::from_utf8(encode_for(version, &response).unwrap()).unwrap();
             for field in ADDED_IN_7 {
@@ -1828,8 +1877,8 @@ fn recording_a_rebased_or_adapted_landing_fits_only_version_6_and_later() {
     }
 }
 
-/// Version 8 (roadmap E1): a note carries `anchor`, `anchor_state` and
-/// `tags`. A client of version 7 or earlier reads a note with
+/// Version 9 (roadmap E1): a note carries `anchor`, `anchor_state` and
+/// `tags`. A client of version 8 or earlier reads a note with
 /// `deny_unknown_fields` and would show an anchored note without its state,
 /// so it is told an anchored note only while its definition is current, as
 /// a plain note; a changed, gone or unknown one is left out.
@@ -1898,7 +1947,10 @@ fn anchored_notes_reach_an_earlier_client_only_while_current_and_without_the_new
         now["outcome"]["recap"]["notes"][2]["anchor_state"],
         "changed"
     );
-    for version in std::iter::once(PROTOCOL_VERSION_7).chain(EARLIER_VERSIONS) {
+    for version in [PROTOCOL_VERSION_8, PROTOCOL_VERSION_7]
+        .into_iter()
+        .chain(EARLIER_VERSIONS)
+    {
         let earlier: serde_json::Value =
             serde_json::from_slice(&encode_for(version, &response).unwrap()).unwrap();
         let notes = earlier["outcome"]["recap"]["notes"].as_array().unwrap();
@@ -1918,10 +1970,10 @@ fn anchored_notes_reach_an_earlier_client_only_while_current_and_without_the_new
     }
 }
 
-/// A note with a symbol or tags, and a recap by tag, need version 8; the
+/// A note with a symbol or tags, and a recap by tag, need version 9; the
 /// same requests without them fit every version.
 #[test]
-fn a_note_with_a_symbol_or_tags_fits_only_version_8() {
+fn a_note_with_a_symbol_or_tags_fits_only_version_9() {
     use langspan::protocol::fits;
     let remember = |symbol: Option<&str>, tags: &[&str]| Command::Remember {
         workspace_id: "app".into(),
@@ -1941,15 +1993,72 @@ fn a_note_with_a_symbol_or_tags_fits_only_version_8() {
         recap(Some("api")),
     ] {
         assert!(fits(PROTOCOL_VERSION, &command));
-        for version in std::iter::once(PROTOCOL_VERSION_7).chain(EARLIER_VERSIONS) {
+        for version in [PROTOCOL_VERSION_8, PROTOCOL_VERSION_7]
+            .into_iter()
+            .chain(EARLIER_VERSIONS)
+        {
             assert!(!fits(version, &command), "version {version}: {command:?}");
         }
     }
-    for version in std::iter::once(PROTOCOL_VERSION)
-        .chain([PROTOCOL_VERSION_7])
+    for version in [PROTOCOL_VERSION, PROTOCOL_VERSION_8, PROTOCOL_VERSION_7]
+        .into_iter()
         .chain(EARLIER_VERSIONS)
     {
         assert!(fits(version, &remember(None, &[])));
         assert!(fits(version, &recap(None)));
     }
+}
+
+/// Golden vectors for version 9 (roadmap E1): a note with a symbol and
+/// tags, and a recap by tag, read and encode as the fixtures, and only a
+/// version 9 daemon is sent them.
+#[test]
+fn v9_note_requests_match_the_golden_vectors() {
+    use langspan::protocol::fits;
+    for wire in [
+        &include_bytes!("../fixtures/remember-request-v9.json")[..],
+        &include_bytes!("../fixtures/recap-tag-request-v9.json")[..],
+    ] {
+        let request: Request = serde_json::from_slice(wire).unwrap();
+        assert_eq!(request.version, PROTOCOL_VERSION);
+        assert_eq!(encode(&request).unwrap(), wire);
+        assert!(fits(PROTOCOL_VERSION, &request.command));
+        assert!(!fits(PROTOCOL_VERSION_8, &request.command));
+    }
+    let remember: Request =
+        serde_json::from_slice(include_bytes!("../fixtures/remember-request-v9.json")).unwrap();
+    assert!(matches!(
+        &remember.command,
+        Command::Remember { symbol: Some(name), tags, .. } if name == "parse_upload" && tags == &["api"]
+    ));
+}
+
+/// A version 9 recall answer and its version 8 form: an earlier client is
+/// told an anchored note only while its definition is current, as a plain
+/// note, and a version 8 client keeps everything else.
+#[test]
+fn v9_recall_response_and_its_version_8_form_match_the_golden_vectors() {
+    use langspan_core::{AnchorState, Outcome};
+    let wire = include_bytes!("../fixtures/recall-response-v9.json");
+    let mut response: Response = serde_json::from_slice(wire).unwrap();
+    assert_eq!(response.version, PROTOCOL_VERSION);
+    let Outcome::Recall { recall } = &response.outcome else {
+        panic!("{response:?}");
+    };
+    let states: Vec<Option<AnchorState>> =
+        recall.notes.iter().map(|note| note.anchor_state).collect();
+    assert_eq!(
+        states,
+        [None, Some(AnchorState::Current), Some(AnchorState::Changed)]
+    );
+    assert_eq!(encode_for(PROTOCOL_VERSION, &response).unwrap(), wire);
+
+    let earlier = include_bytes!("../fixtures/recall-response-v8.json");
+    response.version = PROTOCOL_VERSION_8;
+    assert_eq!(
+        String::from_utf8(encode_for(PROTOCOL_VERSION_8, &response).unwrap()).unwrap(),
+        String::from_utf8_lossy(earlier)
+    );
+    let read: Response = serde_json::from_slice(earlier).unwrap();
+    assert_eq!(read.version, PROTOCOL_VERSION_8);
 }

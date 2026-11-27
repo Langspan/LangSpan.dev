@@ -379,6 +379,7 @@ fn brief(
             mcp: false,
             left: Vec::new(),
             inflight: Vec::new(),
+            inflight_partial: false,
             mentioned: mentioned.iter().map(|name| (*name).into()).collect(),
         },
         now,
