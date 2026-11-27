@@ -114,6 +114,17 @@ fn report(name: &str, has_flag: bool, content: &str) -> Option<String> {
 
 /// [`report`] with the merge-queue run's jobs given.
 fn report_with(name: &str, has_flag: bool, content: &str, queue_jobs: &str) -> Option<String> {
+    report_jobs(name, has_flag, content, JOBS, queue_jobs)
+}
+
+/// [`report`] with both runs' jobs given.
+fn report_jobs(
+    name: &str,
+    has_flag: bool,
+    content: &str,
+    jobs: &str,
+    queue_jobs: &str,
+) -> Option<String> {
     if Command::new("jq").arg("--version").output().is_err() {
         assert!(
             std::env::var_os("LANGSPAN_REQUIRE_TOOLS").is_none(),
@@ -131,7 +142,7 @@ fn report_with(name: &str, has_flag: bool, content: &str, queue_jobs: &str) -> O
     fs::write(&gh, GH).unwrap();
     fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
     fs::write(base.join("runs.json"), RUNS).unwrap();
-    fs::write(base.join("jobs.json"), JOBS).unwrap();
+    fs::write(base.join("jobs.json"), jobs).unwrap();
     fs::write(base.join("queue-jobs.json"), queue_jobs).unwrap();
     fs::write(base.join("content.json"), content).unwrap();
     fs::write(base.join("log"), LOG).unwrap();
@@ -206,6 +217,139 @@ fn a_queue_run_without_a_workflows_result_is_left_out_of_the_gate_and_counted() 
     let jobs = QUEUE_JOBS.replace(r#""name": "Workflows""#, r#""name": "Other""#);
     if let Some(report) = report_with("no-workflows", false, &content_first(), &jobs) {
         assert!(report.contains(WORKFLOW_ROW), "{report}");
+        assert!(
+            report.contains("| merge_group | 0 | – | – | – | 1 |"),
+            "{report}"
+        );
+    }
+}
+
+/// The sharded layout's pull-request run: the fast lane ran in `Linux build`,
+/// the shard was skipped, `Linux` only reported, and `macOS build` passed at
+/// once.
+const SHARDED_JOBS: &str = r#"{"jobs": [
+ {"run_id": 1, "id": 11, "name": "Linux build", "conclusion": "success",
+  "started_at": "2026-11-27T04:00:30Z", "completed_at": "2026-11-27T04:09:30Z",
+  "steps": [{"name": "Check formatting, dependencies, lint, real integration tests and the demonstration",
+             "conclusion": "success", "started_at": "2026-11-27T04:01:00Z", "completed_at": "2026-11-27T04:09:00Z"}]},
+ {"run_id": 1, "id": 12, "name": "Linux tests 1", "conclusion": "skipped",
+  "started_at": "2026-11-27T04:09:31Z", "completed_at": "2026-11-27T04:09:31Z", "steps": []},
+ {"run_id": 1, "id": 13, "name": "Linux", "conclusion": "success",
+  "started_at": "2026-11-27T04:09:40Z", "completed_at": "2026-11-27T04:09:50Z",
+  "steps": [{"name": "Pass only when the build and every shard passed", "conclusion": "success",
+             "started_at": "2026-11-27T04:09:42Z", "completed_at": "2026-11-27T04:09:45Z"}]},
+ {"run_id": 1, "id": 14, "name": "macOS build", "conclusion": "success",
+  "started_at": "2026-11-27T04:00:30Z", "completed_at": "2026-11-27T04:00:40Z",
+  "steps": [{"name": "Pass a pull request at once", "conclusion": "success",
+             "started_at": "2026-11-27T04:00:31Z", "completed_at": "2026-11-27T04:00:32Z"}]}]}"#;
+
+/// The sharded layout's merge-queue run. `Linux build` takes 5.5 minutes,
+/// two Linux shards take 2 and 1 minutes (their step 1 minute each), the
+/// required `Linux` result ends at 05:09, and `macOS` at 05:20.
+const SHARDED_QUEUE_JOBS: &str = r#"{"jobs": [
+ {"run_id": 2, "id": 21, "name": "Linux build", "conclusion": "success",
+  "started_at": "2026-11-27T05:00:30Z", "completed_at": "2026-11-27T05:06:00Z",
+  "steps": [{"name": "Check formatting, dependencies, lint, real integration tests and the demonstration",
+             "conclusion": "success", "started_at": "2026-11-27T05:01:00Z", "completed_at": "2026-11-27T05:05:30Z"}]},
+ {"run_id": 2, "id": 24, "name": "Linux tests 1", "conclusion": "success",
+  "started_at": "2026-11-27T05:06:10Z", "completed_at": "2026-11-27T05:08:10Z",
+  "steps": [{"name": "Run this shard of the tests", "conclusion": "success",
+             "started_at": "2026-11-27T05:07:00Z", "completed_at": "2026-11-27T05:08:00Z"}]},
+ {"run_id": 2, "id": 25, "name": "Linux tests 2", "conclusion": "success",
+  "started_at": "2026-11-27T05:06:10Z", "completed_at": "2026-11-27T05:07:10Z",
+  "steps": [{"name": "Run this shard of the tests", "conclusion": "success",
+             "started_at": "2026-11-27T05:06:20Z", "completed_at": "2026-11-27T05:07:20Z"}]},
+ {"run_id": 2, "id": 26, "name": "Linux", "conclusion": "success",
+  "started_at": "2026-11-27T05:08:30Z", "completed_at": "2026-11-27T05:09:00Z",
+  "steps": [{"name": "Pass only when the build and every shard passed", "conclusion": "success",
+             "started_at": "2026-11-27T05:08:40Z", "completed_at": "2026-11-27T05:08:50Z"}]},
+ {"run_id": 2, "id": 22, "name": "macOS build", "conclusion": "success",
+  "started_at": "2026-11-27T05:00:30Z", "completed_at": "2026-11-27T05:10:00Z",
+  "steps": [{"name": "Check formatting, dependencies, lint, real integration tests and the demonstration",
+             "conclusion": "success", "started_at": "2026-11-27T05:01:00Z", "completed_at": "2026-11-27T05:09:30Z"}]},
+ {"run_id": 2, "id": 27, "name": "macOS tests 1", "conclusion": "success",
+  "started_at": "2026-11-27T05:10:10Z", "completed_at": "2026-11-27T05:19:10Z",
+  "steps": [{"name": "Run this shard of the tests", "conclusion": "success",
+             "started_at": "2026-11-27T05:11:00Z", "completed_at": "2026-11-27T05:19:00Z"}]},
+ {"run_id": 2, "id": 28, "name": "macOS", "conclusion": "success",
+  "started_at": "2026-11-27T05:19:30Z", "completed_at": "2026-11-27T05:20:00Z", "steps": []},
+ {"run_id": 2, "id": 23, "name": "Workflows", "conclusion": "success",
+  "started_at": "2026-11-27T05:00:20Z", "completed_at": "2026-11-27T05:01:00Z", "steps": []}]}"#;
+
+/// The fixtures above copy check.yml's job and step names, which the script
+/// selects by; a rename there must come here and to the script too.
+#[test]
+fn the_fixtures_name_the_jobs_and_steps_check_yml_has() {
+    let check = fs::read_to_string(repo(".github/workflows/check.yml")).unwrap();
+    for name in [
+        "name: Linux build\n",
+        "name: macOS build\n",
+        "name: Linux tests ${{ matrix.shard }}\n",
+        "name: macOS tests ${{ matrix.shard }}\n",
+        "name: Linux\n",
+        "name: macOS\n",
+        "name: Workflows\n",
+    ] {
+        assert!(check.contains(&format!("    {name}")), "no job {name}");
+    }
+    let step = |prefix: &str| check.matches(&format!("- name: {prefix}")).count();
+    // One build step in each build job, one shard step in each shard job.
+    assert_eq!(step("Check formatting, "), 2);
+    assert_eq!(step("Run this shard of the tests\n"), 2);
+}
+
+fn sharded(name: &str, queue_jobs: &str) -> Option<String> {
+    report_jobs(name, false, &content_first(), SHARDED_JOBS, queue_jobs)
+}
+
+#[test]
+fn a_sharded_run_counts_as_built_and_its_gate_ends_with_the_linux_result() {
+    if let Some(report) = sharded("sharded", SHARDED_QUEUE_JOBS) {
+        assert!(
+            report.contains("| pull_request | 1 | 10 | 10 | 10 | 0 |"),
+            "{report}"
+        );
+        assert!(report.contains(WORKFLOW_ROW), "{report}");
+        assert!(
+            report.contains("| merge_group | 1 | 9 | 9 | 9 | 0 |"),
+            "{report}"
+        );
+    }
+}
+
+#[test]
+fn a_sharded_run_reports_build_jobs_with_cache_facts_and_shards_together() {
+    if let Some(report) = sharded("sharded-jobs", SHARDED_QUEUE_JOBS) {
+        for row in [
+            "| pull_request | Linux build | exact | 1 | 9 | 8 | 1 |",
+            "| merge_group | Linux build | exact | 1 | 5.5 | 4.5 | 1 |",
+            "| merge_group | macOS build | exact | 1 | 9.5 | 8.5 | 1 |",
+            "| merge_group | Linux tests | no log read | 2 | 1.5 | 1 | – |",
+            "| merge_group | macOS tests | no log read | 1 | 9 | 8 | – |",
+            "| 2 | merge_group | Linux build | exact | 1 | 1 | 5.5 |",
+        ] {
+            assert!(report.contains(row), "no row {row}: {report}");
+        }
+        // The result jobs only report, and a skipped shard or a build job
+        // that passed at once ran nothing.
+        for absent in [
+            "| Linux | ",
+            "| macOS | ",
+            "| pull_request | Linux tests",
+            "| pull_request | macOS build",
+        ] {
+            assert!(!report.contains(absent), "row {absent}: {report}");
+        }
+    }
+}
+
+#[test]
+fn a_sharded_run_whose_build_jobs_skipped_their_check_is_markdown_only() {
+    let jobs = SHARDED_QUEUE_JOBS.replace(
+        r#""conclusion": "success", "started_at": "2026-11-27T05:01:00Z""#,
+        r#""conclusion": "skipped", "started_at": "2026-11-27T05:01:00Z""#,
+    );
+    if let Some(report) = sharded("sharded-markdown", &jobs) {
         assert!(
             report.contains("| merge_group | 0 | – | – | – | 1 |"),
             "{report}"

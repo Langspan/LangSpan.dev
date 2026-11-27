@@ -209,8 +209,9 @@ The two times are targets the lanes should meet, not gates: a run over
 them still passes. `bash scripts/measure-ci.sh` reports them from GitHub's
 run data: the median and 90th percentile of workflow completion per event,
 the merge-queue gate (run creation to the end of the last required check,
-which leaves out macOS), the Linux and macOS job times by cache state, and
-how many dependency crates each job compiled. `--since` and `--until`
+which leaves out macOS), the Linux and macOS build and test-shard job
+times by cache state, and how many dependency crates each build job
+compiled. It reads runs from before the shards too. `--since` and `--until`
 bound the runs, and `--rows DIR` keeps one row per run, per job and per
 Content run. The latest figures, the gap to each
 target and what would close it are in
