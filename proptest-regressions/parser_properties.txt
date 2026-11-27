@@ -1,0 +1,3 @@
+# Seeds for failure cases proptest has generated in the past. They are
+# replayed before any novel cases are generated.
+cc efeb752d820001f85600414d1e325f87a2e1d0863602edd7439c3bf863d02814 # shrinks to text = "password=-----BEGIN -----END -----BEGIN "

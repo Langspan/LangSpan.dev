@@ -170,7 +170,25 @@ pub(crate) fn bounded(text: &str, limit: usize, home: Option<&str>) -> String {
     MARK.to_owned()
 }
 
+/// One pass can leave text that a second pass redacts further: a PEM block
+/// that ends inside a value merges with it, and the value then runs on from
+/// the mark through what followed the block. So passes repeat until nothing
+/// changes. Each pass after the first only replaces text with the mark, so
+/// that comes within a pass or two; the bound keeps it a guarantee, and text
+/// that has not settled by then becomes the mark alone, itself a fixed point.
 fn redact_with_home(text: &str, home: Option<&str>) -> String {
+    let mut text = redact_once(text, home);
+    for _ in 0..4 {
+        let next = redact_once(&text, home);
+        if next == text {
+            return text;
+        }
+        text = next;
+    }
+    MARK.to_owned()
+}
+
+fn redact_once(text: &str, home: Option<&str>) -> String {
     let mut spans = Vec::new();
     pem_blocks(text, &mut spans);
     url_userinfo(text, &mut spans);
@@ -655,6 +673,13 @@ mod tests {
         for text in [
             secret_shape("STRIPE_KEY=sk_", "live_51HqLZ2EYpK8dQ8X5vT3nR9bC now"),
             "https://a:b@h/x --token t password=p /Users/owner/x".to_owned(),
+            // A PEM block that ends inside an assignment's value: the first
+            // pass leaves `BEGIN` after the mark, and a second pass found the
+            // value running on through it (found by `redaction_never_panics`).
+            "password=-----BEGIN -----END -----BEGIN ".to_owned(),
+            "password=-----BEGIN -----END ------x ".to_owned(),
+            "--token -----BEGIN -----END x-----&y".to_owned(),
+            "password='-----BEGIN -----END x-----' z\nnext".to_owned(),
         ] {
             let once = r(&text);
             assert_eq!(r(&once), once);
