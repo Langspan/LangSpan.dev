@@ -19,7 +19,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{io::Read, time::Instant};
 
-pub const SOURCE: &str = langspan_core::CURSOR_HOST;
+pub use crate::hosts::CURSOR_SOURCE as SOURCE;
 /// Tools whose calls are admitted before they run. `Write` creates or
 /// replaces a file, `Delete` removes one, `Shell` runs a command.
 pub const ADMITTED_TOOLS: [&str; 3] = ["Write", "Delete", "Shell"];

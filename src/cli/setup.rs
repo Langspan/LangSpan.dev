@@ -2,7 +2,7 @@
 
 use super::doctor::doctor;
 use super::options::{no_unused_options, outline_reads, presence, switch};
-use crate::hosts::UserHome;
+use crate::install::detect::UserHome;
 use std::{collections::BTreeMap, path::PathBuf};
 
 pub fn hooks(
@@ -194,7 +194,7 @@ pub fn hosts_report(
     state_dir: &std::path::Path,
     json: bool,
 ) -> Result<u8, crate::Error> {
-    let reports = crate::hosts::report(home, state_dir);
+    let reports = crate::install::detect::report(home, state_dir);
     if json {
         println!("{}", serde_json::json!({ "hosts": reports }));
         return Ok(0);
@@ -206,7 +206,7 @@ pub fn hosts_report(
                 host.error.as_deref().unwrap_or("not readable")
             ),
             (Some(false), _) => "not present".to_owned(),
-            (Some(true), crate::hosts::UserInstall::Unknown) => format!(
+            (Some(true), crate::install::detect::UserInstall::Unknown) => format!(
                 "present; install unknown: {}",
                 host.error.as_deref().unwrap_or("not readable")
             ),

@@ -7,9 +7,8 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::{collections::BTreeSet, io::Read, time::Instant};
 
-/// The core names a Codex session by this prefix of its ID (issue #129).
-pub const SOURCE: &str = langspan_core::CODEX_HOST;
 pub use crate::hook::MAX_EVENT_BYTES;
+pub use crate::hosts::CODEX_SOURCE as SOURCE;
 
 const MAX_PATCH_BYTES: usize = 4 * 1024 * 1024;
 const MAX_PATCH_PATHS: usize = 64;

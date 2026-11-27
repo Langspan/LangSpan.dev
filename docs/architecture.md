@@ -61,7 +61,7 @@ its old path as a re-export in the compatibility block at the end of
 | | `time` | `clock`, `local_day`, `zone` |
 | | `protocol` | the wire protocol and page budgets |
 | | `regions` | `regions`, `breaks` |
-| | `hosts` | the host catalog and the hook's port types: `vendor`, `tool_names` |
+| | `hosts` | the host catalog and the hook's port types: `vendor`, `tool_names`, the hosts' session namespaces (`SOURCE`), `HOST_DIRS` and the watcher's limits |
 | infrastructure | `fs` | `local`, `file_state`, `input` |
 | | `git` | `git`, `sha1`, `observer`, `remote` |
 | | `process` | child processes |
@@ -69,7 +69,7 @@ its old path as a re-export in the compatibility block at the end of
 | | `store` | the SQLite event store |
 | | `graph` | the source index: `graph`, `index_file` |
 | | `shell` | shell command parsing and snapshots |
-| | `install` | `install`, install detection (today's `hosts`), `user_install`, `guidance`, `service`, `binary_version` |
+| | `install` | `install`, install detection (`install::detect`), `user_install`, `guidance`, `service`, `binary_version` |
 | application | `ownership` | `journal`, `lines`, `reformat`, `formatter`, `adopt`, `commit` |
 | | `checks` | `integrate`, `landing`, `rewrite`, `auto_check`, `test_output`, `definitions` |
 | | `briefing` | the briefing and its render: `since`, `recent`, `trail` |

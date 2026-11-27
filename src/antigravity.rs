@@ -29,8 +29,7 @@ use std::{
     time::Instant,
 };
 
-/// The session namespace: a conversation is `antigravity.<conversationId>`.
-pub const SOURCE: &str = langspan_core::ANTIGRAVITY_HOST;
+pub use crate::hosts::ANTIGRAVITY_SOURCE as SOURCE;
 /// What `install`, `hooks install` and `doctor` say was verified, and its
 /// limits: the real-host run on issue #110 (ADR 0035, "Evidence").
 pub const VERIFIED: &str = "verified on a real host, Antigravity CLI (agy) 1.5.14 (ADR 0035): admission, conflict and stale-source refusals, and an allowed harmless command. A resumed conversation sends no SessionStart; its first prompt registers it.";
