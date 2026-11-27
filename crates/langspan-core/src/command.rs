@@ -771,10 +771,13 @@ pub enum Command {
     /// `calls` whose argument count does not fit a signature another live
     /// session changed, from notices not yet alerted to this session. The
     /// daemon records the notices it alerts to (`AcknowledgeInterface`);
-    /// the calls themselves are never recorded.
+    /// the calls themselves are never recorded. `renamed` (`rename_holds`,
+    /// issue #213): names the write renames or removes; `calls` may then be empty.
     CheckCalls {
         session_id: String,
         calls: Vec<CallSite>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        renamed: Vec<String>,
     },
     /// The session was alerted to these interface notices at a write; it
     /// is not alerted to them again.
@@ -1738,10 +1741,13 @@ enum CommandWire {
     /// `calls` whose argument count does not fit a signature another live
     /// session changed, from notices not yet alerted to this session. The
     /// daemon records the notices it alerts to (`AcknowledgeInterface`);
-    /// the calls themselves are never recorded.
+    /// the calls themselves are never recorded. `renamed` (`rename_holds`,
+    /// issue #213): names the write renames or removes; `calls` may then be empty.
     CheckCalls {
         session_id: String,
         calls: Vec<CallSite>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        renamed: Vec<String>,
     },
     /// The session was alerted to these interface notices at a write; it
     /// is not alerted to them again.

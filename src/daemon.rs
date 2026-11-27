@@ -23,7 +23,7 @@ pub async fn run(_state_dir: PathBuf) -> Result<(), crate::Error> {
 mod unix {
     use super::Registration;
     use super::index_queries::{
-        check_calls, check_write, graph_blind_spots, graph_context, graph_inflight, graph_map,
+        check_write, checked_calls, graph_blind_spots, graph_context, graph_inflight, graph_map,
         graph_path, graph_query, observe_elsewhere, outline_read, prepare_anchors, prepare_brief,
     };
     use super::index_worker::{
@@ -1293,8 +1293,8 @@ mod unix {
                 },
             };
         }
-        if let Command::CheckCalls { session_id, calls } = &command {
-            return check_calls(store, graph, request_id, session_id, calls);
+        if let Command::CheckCalls { .. } = &command {
+            return checked_calls(store, graph, request_id, &command);
         }
         if let Command::OutlineRead { .. } = &command {
             return outline_read(store, graph, request_id, command);

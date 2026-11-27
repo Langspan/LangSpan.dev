@@ -45,6 +45,29 @@ impl Index {
             .collect())
     }
 
+    /// The files of `workspace_id` that differ from its `HEAD` (its
+    /// in-flight files) and mention `name`, in path order, at most
+    /// `limit`: a worktree's uncommitted callers of a name another
+    /// worktree renames (issue #213). A name match, not a resolved call.
+    pub(crate) fn inflight_mentioning(
+        &self,
+        workspace_id: &str,
+        name: &str,
+        limit: usize,
+    ) -> Result<Vec<String>, Failure> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT DISTINCT refs.path FROM refs JOIN inflight_files
+                ON inflight_files.workspace_id = refs.workspace_id
+                AND inflight_files.path = refs.path
+             WHERE refs.workspace_id = ?1 AND refs.name = ?2 ORDER BY refs.path LIMIT ?3",
+        )?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        statement
+            .query_map(params![workspace_id, name, limit], |row| row.get(0))?
+            .collect::<Result<_, _>>()
+            .map_err(Into::into)
+    }
+
     /// The workspace's files that mention `name`, or that import (in
     /// `imports`, from `imports_of`) a path whose last part is `name` or
     /// the module of `path` (see `module_name`). Only files in `among` when

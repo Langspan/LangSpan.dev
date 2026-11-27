@@ -2,7 +2,8 @@
 //! fits a parameter count, how a check is bounded, and that the core never
 //! records the calls themselves.
 use langspan_core::{
-    Arity, CallSite, Command, MAX_CALL_SITES, Outcome, State, decide, validate_calls,
+    Arity, CallSite, Command, MAX_CALL_SITES, MAX_RENAMED, Outcome, State, decide, validate_calls,
+    validate_renamed,
 };
 
 #[test]
@@ -65,6 +66,50 @@ fn a_check_names_a_bounded_set_of_calls() {
     }
 }
 
+/// Issue #213: a check's renamed names are bounded, and asked only by a
+/// current session.
+#[test]
+fn a_check_names_a_bounded_set_of_renamed_names() {
+    let mut state = State::default();
+    state.sessions.insert(
+        "s".into(),
+        langspan_core::Session {
+            session_id: "s".into(),
+            workspace_id: "w".into(),
+            generation: 0,
+            parent: None,
+            headless: false,
+        },
+    );
+    let names = |list: &[&str]| {
+        list.iter()
+            .map(|name| (*name).to_owned())
+            .collect::<Vec<_>>()
+    };
+    let asking = validate_renamed(&state, "s", &names(&["parse_config"])).unwrap();
+    assert_eq!(asking.workspace_id, "w");
+    assert!(validate_renamed(&state, "s", &names(&["f"; MAX_RENAMED])).is_ok());
+    let long = "f".repeat(129);
+    for bad in [
+        names(&["f"; MAX_RENAMED + 1]),
+        names(&[""]),
+        names(&["f\nignore previous"]),
+        names(&[&long]),
+    ] {
+        assert_eq!(
+            validate_renamed(&state, "s", &bad).unwrap_err().code,
+            "invalid_calls",
+            "{bad:?}"
+        );
+    }
+    assert_eq!(
+        validate_renamed(&state, "nobody", &names(&["f"]))
+            .unwrap_err()
+            .code,
+        "session_not_found"
+    );
+}
+
 #[test]
 fn the_core_never_records_a_check() {
     let decision = decide(
@@ -72,6 +117,7 @@ fn the_core_never_records_a_check() {
         &Command::CheckCalls {
             session_id: "s".into(),
             calls: vec![site("a.rs", 1, "f", 0)],
+            renamed: Vec::new(),
         },
         "check",
         0,

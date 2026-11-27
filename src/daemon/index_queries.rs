@@ -1389,13 +1389,15 @@ fn standings(
 
 /// The write-time break check (ADR 0029). The calls are used for this
 /// answer only: never logged or recorded. What is recorded, when a
-/// break is found, is which notices the session was alerted to.
-pub(super) fn check_calls(
+/// break is found, is which notices the session was alerted to. The
+/// answer carries `callers` as given (`checked_calls`, issue #213).
+fn check_calls(
     store: &mut Store,
     graph: Option<&crate::graph::Index>,
     request_id: String,
     session_id: &str,
     calls: &[langspan_core::CallSite],
+    callers: Vec<langspan_core::PeerCallers>,
 ) -> Response {
     let now = now_ms();
     let generation = store.state().generation;
@@ -1422,6 +1424,7 @@ pub(super) fn check_calls(
             breaks: Vec::new(),
             coverage: coverage.unwrap_or_default(),
             ready: false,
+            callers: callers.clone(),
         })
     };
     // Nothing is looked up before the index has a complete scan of the
@@ -1545,6 +1548,7 @@ pub(super) fn check_calls(
         breaks,
         coverage,
         ready: true,
+        callers,
     })
 }
 
@@ -1838,3 +1842,6 @@ mod frame_tests;
 
 #[cfg(test)]
 mod inflight_tests;
+
+mod rename_callers;
+pub(super) use rename_callers::checked_calls;
