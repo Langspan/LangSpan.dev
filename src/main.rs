@@ -19,6 +19,10 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  coordinator and runs `doctor`. --yes applies without
                                  asking; without a terminal and without --yes it only
                                  prints the plan. A second run changes nothing
+  demo                           Show a real refusal with no agent: two example
+                                 sessions edit one file in a temporary workspace,
+                                 with a coordinator of the demo's own. Removes
+                                 everything it made
   daemon                         Run the local coordinator in the foreground
   mcp [--tools all|hooked --host claude-code|codex]
                                  Serve MCP over stdin/stdout using the coordinator.
@@ -1662,6 +1666,7 @@ fn setup(options: &mut BTreeMap<String, String>, json: bool) -> Result<u8, langs
     );
     if files == 0 && !service_changes && running {
         println!("Already set up; nothing to change.");
+        println!("{TRY_IT}");
         return Ok(0);
     }
     if !yes {
@@ -1729,8 +1734,12 @@ fn setup(options: &mut BTreeMap<String, String>, json: bool) -> Result<u8, langs
     println!("langspan doctor:");
     // Setup itself succeeded; what doctor finds is reported, not its exit.
     doctor(&state_dir, None, &home, false)?;
+    println!("{TRY_IT}");
     Ok(0)
 }
+
+/// Setup's last line: the next step, which needs no agent (issue #290).
+const TRY_IT: &str = "Try it: langspan demo";
 
 /// Writes the login service file, unless it changed from `planned` since
 /// the plan was shown, and starts it, then waits up to five seconds for the
@@ -4452,6 +4461,21 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
             );
         }
         return setup(&mut options, json);
+    }
+    if args == ["demo"] {
+        if json {
+            return Err("--json is not valid for `demo`".into());
+        }
+        if options.contains_key("--state-dir") {
+            return Err(
+                "`demo` uses a temporary state directory of its own; leave out --state-dir".into(),
+            );
+        }
+        no_unused_options(&options)?;
+        let executable = std::env::current_exe()?;
+        let mut stdout = std::io::stdout().lock();
+        langspan::demo::run(&executable, &mut stdout)?;
+        return Ok(0);
     }
     if args.first().map(String::as_str) == Some("guidance") && command.is_empty() {
         return guidance(&args[1..], &mut options, json, apply);

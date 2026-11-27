@@ -144,6 +144,15 @@ fn text(output: &Output) -> String {
     )
 }
 
+/// The last line setup printed to stdout.
+fn last_line(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .last()
+        .unwrap_or_default()
+        .to_owned()
+}
+
 #[test]
 fn setup_without_a_terminal_or_yes_prints_the_plan_and_changes_nothing() {
     let base = Base::new();
@@ -184,6 +193,8 @@ fn setup_yes_without_a_service_starts_a_coordinator_and_a_second_run_changes_not
     );
     assert!(shown.contains("langspan doctor:"), "{shown}");
     assert!(shown.contains("ok Coordinator reachable"), "{shown}");
+    // Setup ends on the next step, after whatever doctor found (issue #290).
+    assert_eq!(last_line(&output), "Try it: langspan demo", "{shown}");
     assert!(
         base.home()
             .join(".claude/skills/langspan/SKILL.md")
@@ -203,6 +214,7 @@ fn setup_yes_without_a_service_starts_a_coordinator_and_a_second_run_changes_not
         "{shown}"
     );
     assert!(!shown.contains("Wrote "), "{shown}");
+    assert_eq!(last_line(&again), "Try it: langspan demo", "{shown}");
     assert_eq!(base.snapshot_of_setup(), before, "{shown}");
     assert_eq!(daemons_for(&base.0), coordinator, "{shown}");
 }
