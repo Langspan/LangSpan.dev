@@ -13,7 +13,8 @@
 # `build` runs everything `full` does except the tests themselves, building
 # them into the nextest archive LANGSPAN_TEST_ARCHIVE instead; `shard` runs
 # only the tests of that archive that the partition LANGSPAN_TEST_PARTITION
-# (`hash:K/N`) selects.
+# (`time:K/N`: shard K of N, by measured test time; scripts/ci-shards.py)
+# selects.
 #
 # LANGSPAN_CHECK_RELEASE=false skips the release build and the demonstration
 # on it. CI sets that except on the nightly run; nothing else reads the
@@ -56,9 +57,9 @@ esac
 partition=${LANGSPAN_TEST_PARTITION:-}
 if [ "$lane" = shard ]; then
   case $partition in
-    hash:[1-9]*/[1-9]*) ;;
+    time:[1-9]*/[1-9]*) ;;
     *)
-      echo "check.sh: LANGSPAN_TEST_PARTITION is '$partition'; the shard lane needs hash:K/N" >&2
+      echo "check.sh: LANGSPAN_TEST_PARTITION is '$partition'; the shard lane needs time:K/N" >&2
       exit 2
       ;;
   esac
@@ -95,7 +96,7 @@ leftovers() {
 # A shard runs its part of the tests the build lane archived, under the
 # same foreign home, and nothing else: the build lane ran the other checks.
 if [ "$lane" = shard ]; then
-  sh scripts/test-foreign-home.sh --partition "$partition"
+  LANGSPAN_TEST_SHARD=${partition#time:} sh scripts/test-foreign-home.sh
   leftovers
   exit 0
 fi
