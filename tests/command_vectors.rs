@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use langspan::protocol::{PROTOCOL_VERSION, Request, encode};
-use langspan_core::Command;
+use langspan_core::{Command, Outcome, Route, State, decide};
 
 macro_rules! vectors {
     (
@@ -169,6 +169,104 @@ fn every_command_variant_has_a_golden_vector_that_round_trips_byte_for_byte() {
         .filter(|name| name.ends_with("-command-v10.json"))
         .collect();
     assert_eq!(on_disk, named, "a vector on disk that no variant names");
+}
+
+/// Today's route of each command, read from the three routing sites before
+/// `Command::route` existed (issue #371): the core's refusal of commands
+/// answered by the daemon's stores, the store's reads that it never records,
+/// and the daemon's answers from itself and its source index.
+fn recorded_route(op: &str) -> Route {
+    match op {
+        "version" => Route::Internal,
+        "check_write" | "check_calls" => Route::Index,
+        op if op.starts_with("graph_") => Route::Index,
+        "events" | "today" | "report" | "count" | "history" | "status_records" | "changes"
+        | "remote_sent" | "compact" | "show_message" | "message_status" => Route::Store,
+        "status" | "dashboard" | "status_line" | "remote_outbox" | "check_status"
+        | "flaky_tests" | "landing_readiness" | "turn_queue" | "workspace_list" | "recap"
+        | "trails" | "policy" | "holders" | "recall" => Route::Read,
+        // A dry run without `apply`, as its vector sends it.
+        "workspace_remove" => Route::Read,
+        _ => Route::Decide,
+    }
+}
+
+#[test]
+fn every_command_routes_as_recorded() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+    let mut cases: Vec<(String, Command, Route)> = FIXTURES
+        .iter()
+        .map(|file| {
+            let wire = std::fs::read(dir.join(file)).unwrap();
+            let request: Request = serde_json::from_slice(&wire).unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&wire).unwrap();
+            let op = value["command"]["op"].as_str().unwrap().to_string();
+            let route = recorded_route(&op);
+            (op, request.command, route)
+        })
+        .collect();
+    for (json, route) in [
+        (
+            r#"{"op":"workspace_remove","workspace_id":"app","apply":true}"#,
+            Route::Decide,
+        ),
+        (
+            r#"{"op":"compact","keep_days":1,"apply":true}"#,
+            Route::Store,
+        ),
+        (
+            r#"{"op":"graph_import","workspace_id":"app","path":"/x","apply":true}"#,
+            Route::Index,
+        ),
+    ] {
+        cases.push((json.into(), serde_json::from_str(json).unwrap(), route));
+    }
+    for (name, command) in [
+        (
+            "workspace_register_verified",
+            Command::WorkspaceRegisterVerified {
+                workspace_id: "app".into(),
+                root: "/app".into(),
+                verified_overlaps: Vec::new(),
+            },
+        ),
+        (
+            "workspace_move_verified",
+            Command::WorkspaceMoveVerified {
+                workspace_id: "app".into(),
+                root: "/app".into(),
+                verified_overlaps: Vec::new(),
+            },
+        ),
+        (
+            "remember_prepared",
+            Command::RememberPrepared {
+                workspace_id: "app".into(),
+                author: None,
+                text: "t".into(),
+                paths: Vec::new(),
+                symbol: None,
+                tags: Vec::new(),
+                index: None,
+            },
+        ),
+    ] {
+        cases.push((name.into(), command, Route::Decide));
+    }
+    let state = State::default();
+    for (name, command, route) in &cases {
+        assert_eq!(command.route(), *route, "{name}");
+        // The core refuses exactly what the daemon answers elsewhere.
+        let refused = matches!(
+            decide(&state, command, "r-1", 0).outcome,
+            Outcome::Error { ref code, .. } if code == "storage_operation"
+        );
+        assert_eq!(
+            refused,
+            matches!(route, Route::Store | Route::Index | Route::Internal),
+            "{name}"
+        );
+    }
 }
 
 #[test]

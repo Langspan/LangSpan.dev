@@ -7,7 +7,7 @@
 use langspan_core::{
     ClockAnchor, Command, DASHBOARD_ITEMS, DENIAL_WINDOW, DenialRecord, Denials, Event,
     HISTORY_EVENTS, HISTORY_MOVES, HistoryQuery, LeaseStatus, Outcome, RecordedEvent, ReportQuery,
-    SentPublication, State, StatusRecord, TODAY_EVENTS, TodayQuery, TodayWindow, apply,
+    Route, SentPublication, State, StatusRecord, TODAY_EVENTS, TodayQuery, TodayWindow, apply,
     dashboard_denials, decide, definition_history, expiry_events, shrink_status, status_records,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -902,37 +902,9 @@ impl Store {
         now_ms: u64,
     ) -> StoreResult<Option<Execution>> {
         self.refresh(now_ms)?;
-        if matches!(
-            original,
-            Command::Status
-                | Command::StatusRecords { .. }
-                | Command::Events { .. }
-                | Command::Changes { .. }
-                | Command::RemoteOutbox { .. }
-                | Command::RemoteSent { .. }
-                | Command::ShowMessage { .. }
-                | Command::MessageStatus { .. }
-                | Command::CheckStatus { .. }
-                | Command::FlakyTests { .. }
-                | Command::LandingReadiness { .. }
-                | Command::TurnQueue { .. }
-                | Command::Recap { .. }
-                | Command::Trails { .. }
-                | Command::Recall { .. }
-                | Command::Policy { .. }
-                | Command::Holders { .. }
-                | Command::Today { .. }
-                | Command::Report { .. }
-                | Command::Count { .. }
-                | Command::History { .. }
-                | Command::StatusLine { .. }
-                | Command::Dashboard
-                | Command::Version
-                | Command::Compact { .. }
-                | Command::WorkspaceList { .. }
-                | Command::WorkspaceRemove { apply: false, .. }
-        ) {
-            return Ok(None);
+        match original.route() {
+            Route::Read | Route::Store | Route::Internal => return Ok(None),
+            Route::Decide | Route::Index => {}
         }
         let receipt: Option<(String, String)> = self
             .connection
@@ -1028,44 +1000,28 @@ impl Store {
         if let Some(replayed) = self.replay(request_id, original, now_ms)? {
             return Ok(replayed);
         }
-        let outcome = match original {
-            // What matters now, in one frame however long the history.
-            Command::Status => match decide(&self.state, prepared, request_id, now_ms).outcome {
-                Outcome::Status {
-                    mut state,
-                    summary: Some(mut summary),
-                } => {
-                    shrink_status(&mut state, &mut summary, |state, summary| {
-                        serde_json::to_vec(&(state, summary))
-                            .is_ok_and(|bytes| bytes.len() <= PAGE_BUDGET_BYTES)
-                    });
-                    Outcome::Status {
-                        state,
-                        summary: Some(summary),
-                    }
-                }
-                outcome => outcome,
-            },
-            Command::StatusRecords { after, page_bytes } => {
-                self.status_page(after.as_deref(), *page_bytes, |record| {
-                    serde_json::to_string(record).map_err(|error| error.to_string())
-                })
-            }
+        let outcome = match original.route() {
             // A read: decided by the core, never recorded.
-            Command::RemoteOutbox { .. }
-            | Command::CheckStatus { .. }
-            | Command::FlakyTests { .. }
-            | Command::LandingReadiness { .. }
-            | Command::TurnQueue { .. }
-            | Command::StatusLine { .. }
-            | Command::WorkspaceList { .. }
-            | Command::WorkspaceRemove { apply: false, .. }
-            | Command::Recap { .. }
-            | Command::Trails { .. }
-            | Command::Policy { .. }
-            | Command::Holders { .. }
-            | Command::Recall { .. } => {
+            Route::Read => {
                 match decide(&self.state, prepared, request_id, now_ms).outcome {
+                    // What matters now, in one frame however long the history.
+                    Outcome::Status {
+                        mut state,
+                        summary: Some(mut summary),
+                    } => {
+                        shrink_status(&mut state, &mut summary, |state, summary| {
+                            serde_json::to_vec(&(state, summary))
+                                .is_ok_and(|bytes| bytes.len() <= PAGE_BUDGET_BYTES)
+                        });
+                        Outcome::Status {
+                            state,
+                            summary: Some(summary),
+                        }
+                    }
+                    Outcome::Dashboard { mut dashboard } => {
+                        dashboard.denials = Some(self.denials(now_ms)?);
+                        Outcome::Dashboard { dashboard }
+                    }
                     Outcome::Workspaces { workspaces, next } => workspace_page(workspaces, next),
                     // Oldest trails first out of an answer past one frame,
                     // counted in `omitted`.
@@ -1107,12 +1063,46 @@ impl Store {
                     outcome => outcome,
                 }
             }
-            Command::Dashboard => {
-                let mut outcome = decide(&self.state, prepared, request_id, now_ms).outcome;
-                if let Outcome::Dashboard { dashboard } = &mut outcome {
-                    dashboard.denials = Some(self.denials(now_ms)?);
+            Route::Store => self.stored(original, prepared, request_id, now_ms)?,
+            Route::Decide | Route::Index | Route::Internal => {
+                let decision = decide(&self.state, prepared, request_id, now_ms);
+                // A hook run inside the interval writes nothing, not even a
+                // receipt, so a burst of them costs no storage (roadmap J12).
+                // Nor does a between-step watcher's ask with nothing to tell,
+                // made about once a second while a turn runs (issue #214), or
+                // the indexer's anchor recheck after a pass that changed no
+                // note's state (roadmap E1).
+                let quiet = matches!(
+                    original,
+                    Command::SessionSeen { .. }
+                        | Command::BetweenSteps { .. }
+                        | Command::ObserveNoteAnchors { .. }
+                ) && decision.events.is_empty();
+                if !quiet {
+                    self.commit(
+                        &decision.events,
+                        Some((request_id, original, &decision.outcome)),
+                    )?;
                 }
-                outcome
+                decision.outcome
+            }
+        };
+        Ok(self.execution(outcome, false, now_ms))
+    }
+
+    /// A command answered from the event log, not decided by the core.
+    fn stored(
+        &mut self,
+        command: &Command,
+        prepared: &Command,
+        request_id: &str,
+        now_ms: u64,
+    ) -> StoreResult<Outcome> {
+        Ok(match command {
+            Command::StatusRecords { after, page_bytes } => {
+                self.status_page(after.as_deref(), *page_bytes, |record| {
+                    serde_json::to_string(record).map_err(|error| error.to_string())
+                })
             }
             Command::Events { after, limit } => self.events(*after, *limit)?,
             Command::Compact { keep_days, apply } => self.compact(*keep_days, *apply)?,
@@ -1157,34 +1147,9 @@ impl Store {
                 after,
                 limit,
             } => self.changes(workspace_id, *after, *limit)?,
-            // A hook run inside the interval writes nothing, not even a
-            // receipt, so a burst of them costs no storage (roadmap J12).
-            // Nor does a between-step watcher's ask with nothing to tell,
-            // made about once a second while a turn runs (issue #214), or
-            // the indexer's anchor recheck after a pass that changed no
-            // note's state (roadmap E1).
-            Command::SessionSeen { .. }
-            | Command::BetweenSteps { .. }
-            | Command::ObserveNoteAnchors { .. } => {
-                let decision = decide(&self.state, prepared, request_id, now_ms);
-                if !decision.events.is_empty() {
-                    self.commit(
-                        &decision.events,
-                        Some((request_id, original, &decision.outcome)),
-                    )?;
-                }
-                decision.outcome
-            }
-            _ => {
-                let decision = decide(&self.state, prepared, request_id, now_ms);
-                self.commit(
-                    &decision.events,
-                    Some((request_id, original, &decision.outcome)),
-                )?;
-                decision.outcome
-            }
-        };
-        Ok(self.execution(outcome, false, now_ms))
+            // Nothing else routes here; the core refuses it.
+            _ => decide(&self.state, prepared, request_id, now_ms).outcome,
+        })
     }
 
     fn execution(&self, outcome: Outcome, replayed: bool, now_ms: u64) -> Execution {
