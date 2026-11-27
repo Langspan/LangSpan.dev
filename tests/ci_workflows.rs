@@ -1169,6 +1169,39 @@ fn cargo_audit_has_its_own_cache_and_the_build_cache_paths_stay_put() {
     assert!(save.contains("key: ${{ steps.keys.outputs.audit }}"));
 }
 
+#[test]
+fn ci_downloads_cargo_nextest_checked_against_a_pinned_digest_for_each_platform() {
+    let script = read("scripts/install-ci-tools.sh");
+    assert!(
+        script.contains(
+            "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$nextest"
+        ),
+        "the installer doesn't download cargo-nextest's upstream release"
+    );
+    for platform in ["  Linux-x86_64)\n", "  Darwin-arm64)\n"] {
+        let block = script
+            .split(platform)
+            .nth(1)
+            .and_then(|rest| rest.split(";;").next())
+            .unwrap_or_else(|| panic!("the installer has no {platform:?} case"));
+        let sha = block
+            .split("nextest_sha=")
+            .nth(1)
+            .and_then(|rest| rest.lines().next())
+            .unwrap_or_else(|| panic!("{platform:?} pins no nextest_sha"));
+        assert!(
+            sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_hexdigit()),
+            "{platform:?} nextest_sha {sha:?} isn't a SHA-256"
+        );
+    }
+    // A digest check before anything is unpacked, as for cargo-deny.
+    assert!(script.contains("\"$nextest_sha\""));
+    assert!(
+        !script.contains("build cargo-nextest"),
+        "the installer still compiles cargo-nextest"
+    );
+}
+
 /// The steps of a job, each from its `- ` line to the next.
 fn steps(job: &str) -> Vec<String> {
     job.split("\n      - ")

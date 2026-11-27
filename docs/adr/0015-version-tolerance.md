@@ -41,6 +41,11 @@ including publication, checks, landing and push-turn events. Every later build
 must open them (`stores_written_by_earlier_releases_still_open`). Renaming the
 `turn_renewed` event made that test fail. A release that changes the event
 format adds a directory of its own stores; earlier ones are never replaced.
+Every release has one, `store-0.1.0/` through `store-0.8.0/`; each was made
+by `scripts/golden-stores.sh VERSION`, which builds `langspan` from tag
+`vVERSION` with its lockfile and runs that tag's own demonstration with it.
+`every_release_has_a_golden_store_directory` fails for a changelog version
+without a directory.
 Event types the demonstration does not produce (for example `scan_failed`,
 `message_sent`, `checkout_changed`) are not covered by these fixtures.
 Each store's events, folded by the core's `apply`, must also give the state
@@ -113,5 +118,6 @@ client without it is not sent the event (ADR 0037).
 - A field a later daemon adds to a response-only object is invisible to this
   client, not an error. One it adds to a stored type still needs a
   capability, until those readers are tolerant too.
-- The golden stores are binary SQLite files in the repository, 188 KiB in
-  all; they hold temporary demo paths and no personal data.
+- The golden stores are binary SQLite files in the repository, 188 KiB for
+  0.1.0 and 2.4 MiB through 0.8.0, about 280 KiB more for each release;
+  they hold temporary demo paths and no personal data.
