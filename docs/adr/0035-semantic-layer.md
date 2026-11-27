@@ -62,6 +62,23 @@ only on an established rule with a reproducible answer, such as:
 needs such a rule and its own ADR. A model's
 judgment, and a name match from the index, inform; they never refuse.
 
+**Amendment ([issue #213](https://github.com/Langspan/LangSpan.dev/issues/213)):
+a rename is held once.** One exception to "a name match never refuses", and
+only as a pause. Rule: a Claude Code or Codex file-tool write whose text,
+extracted before and after by the index's parser (both versions parsed
+without error), renames or removes an exported name, while another
+worktree of the same repository has uncommitted files whose index mentions
+that name, is refused once per session, file and name. The refusal names
+those worktrees, sessions and files and suggests the compatible path: keep
+the old name as a forwarding alias until the callers move. Why: in
+issue #194's rerun the caller-side notice reached 0 of 20 callers before
+their write, so the renaming write is the only decision point the
+information reaches in time. Override: repeat the write; it is not held
+again, and nothing is enforced after it. The pause takes no admission, and
+any failure (no index, an older daemon, a mark that cannot be written)
+lets the write through. Callers committed on a peer's branch, changed
+signatures and shell writes are not held yet.
+
 **No planning or reasoning engine.** The agents own execution: they choose
 tasks, plan and write code. LangSpan owns coordination. LangSpan does not
 assign, sequence or run agent work, and it does not host an agent runtime.
