@@ -93,6 +93,12 @@ def hook_commands(settings, event, tool):
 # The hook running now, if any. Its process group is outside the runner's,
 # so the stand-in ends it before it exits on a signal (see stop_on_signal).
 RUNNING = []
+# Set while a hook starts. A signal can arrive once `Popen` has started the
+# hook but before it is in RUNNING; it waits in PENDING until then, as in
+# the driver's `hook-log`, so its group is still ended. Blocking the signal
+# instead would leave it blocked in the hook too, which inherits the mask.
+STARTING = False
+PENDING = []
 
 
 def signal_group(process, signum):
@@ -126,9 +132,16 @@ def run_hook(command, payload, cwd):
     Every process left in the hook's group when it returns is ended too
     (see kill_group), so a background child the hook started cannot act
     after the call."""
-    process = subprocess.Popen(["/bin/sh", "-c", command], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE, cwd=cwd, text=True, start_new_session=True)
-    RUNNING.append(process)
+    global STARTING
+    STARTING = True
+    try:
+        process = subprocess.Popen(["/bin/sh", "-c", command], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, cwd=cwd, text=True, start_new_session=True)
+        RUNNING.append(process)
+    finally:
+        STARTING = False
+        if PENDING:
+            stop_on_signal(PENDING[0], None)
     try:
         stdout, _ = process.communicate(payload, timeout=HOOK_SECONDS)
         return stdout, process.returncode
@@ -149,7 +162,11 @@ def stop_on_signal(signum, _frame):
     reach the hook's. SIGKILL cannot be caught; the runner sends SIGTERM
     first. The hook's group has its SIGTERM before any wait, so a wrapper
     there ends its own hook even when the runner kills the stand-in
-    during the wait."""
+    during the wait. One that arrives while a hook starts waits for it
+    (see STARTING)."""
+    if STARTING:
+        PENDING.append(signum)
+        return
     for process in list(RUNNING):
         # A reaped leader's PID can be reused; its group is no longer ours.
         if process.returncode is None:

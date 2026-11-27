@@ -22,7 +22,9 @@
 //! (`interface_notices_told`, via `between_steps`), so a briefing leaves it
 //! out and no second watcher tells it again.
 use crate::client;
-use crate::hook::{BRIEFING, Config, wire_id};
+use crate::hook::BRIEFING;
+use crate::hosts::port::Config;
+use crate::ids::wire_id;
 use crate::protocol::Request;
 use langspan_core::{Command, Outcome};
 use serde::Deserialize;
@@ -116,7 +118,7 @@ pub fn watch_within(bytes: &[u8], config: &Config, limit: Duration) -> Watched {
     if event.hook_event_name != "UserPromptSubmit" || event.agent_id.is_some() {
         return Watched::quiet("the watcher runs for a session's own prompt only");
     }
-    let Some(host_session) = event.session_id.filter(|id| crate::hook::valid_host_id(id)) else {
+    let Some(host_session) = event.session_id.filter(|id| crate::ids::valid_host_id(id)) else {
         return Watched::quiet("event lacks a usable session identity");
     };
     // Where the main checkout's install steps aside for a worktree's own,
