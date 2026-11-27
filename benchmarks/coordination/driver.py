@@ -807,7 +807,11 @@ def hook_log_main(log, command, timeout=HOOK_LOG_SECONDS, background=False):
     seconds, or given input past the bound, is refused (exit 2), as a
     failed safety control must be. A BACKGROUND hook there fails open
     (exit 0): the host gives its exit 2 the meaning "wake the model", and
-    a refusal of the prompt from the wrapper is never the hook's own."""
+    a refusal of the prompt from the wrapper is never the hook's own.
+    Every process the hook started in its group ends with it: when it
+    returns, at the bound, and when SIGTERM, SIGINT or SIGHUP ends the
+    wrapper. SIGKILL ends the wrapper alone, so whatever stops a hook
+    sends one of those first."""
     refused = 0 if background else 2
     payload = sys.stdin.buffer.read(MAX_HOOK_INPUT + 1)
     if len(payload) > MAX_HOOK_INPUT:
@@ -828,8 +832,14 @@ def hook_log_main(log, command, timeout=HOOK_LOG_SECONDS, background=False):
 
     # Its own group no longer receives a signal the host sends to the
     # wrapper's group: end the hook's group too, then end as that signal
-    # would. Set before the hook starts, so no signal finds it unhandled.
+    # would. Set before the hook starts, so no signal finds it unhandled;
+    # one that arrives while the hook starts waits until its group is known.
+    pending = []
+
     def forward(signum, _frame):
+        if not hook:
+            pending.append(signum)
+            return
         end_group()
         os._exit(128 + signum)
 
@@ -838,9 +848,14 @@ def hook_log_main(log, command, timeout=HOOK_LOG_SECONDS, background=False):
     process = subprocess.Popen(["/bin/sh", "-c", command], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE, start_new_session=True)
     hook.append(process)
+    if pending:
+        forward(pending[0], None)
     try:
         stdout, stderr = process.communicate(payload, timeout=timeout)
         code = process.returncode
+        # A child the hook left behind with its streams closed is in a
+        # group nothing else can signal.
+        end_group()
     except subprocess.TimeoutExpired:
         timed_out = True
         end_group()

@@ -1141,6 +1141,25 @@ class DriverUnitTests(Temporary):
             wrapper.send_signal(signum)
             self.assertEqual(wrapper.wait(timeout=10), 128 + signum)
             cases.append(late)
+        # A signal that arrives while the hook starts, before the wrapper
+        # knows its group, still ends that group. The signal is sent from
+        # inside the call that starts the hook.
+        late = self.root / "late-starting"
+        script = (
+            "import os, signal, subprocess, sys\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "import driver\n"
+            "class Signaled(subprocess.Popen):\n"
+            "    def __init__(self, *args, **kwargs):\n"
+            "        super().__init__(*args, **kwargs)\n"
+            "        os.kill(os.getpid(), signal.SIGTERM)\n"
+            "subprocess.Popen = Signaled\n"
+            "sys.exit(driver.hook_log_main(sys.argv[2], sys.argv[3], 30, True))\n")
+        done = subprocess.run([sys.executable, "-I", "-B", "-c", script, str(HERE), str(log),
+                               "cat >/dev/null; sleep 2; echo late > %s" % shlex.quote(str(late))],
+                              input="", capture_output=True, text=True, timeout=30)
+        self.assertEqual(done.returncode, 128 + signal.SIGTERM, done.stderr)
+        cases.append(late)
         time.sleep(3)
         for late in cases:
             self.assertFalse(late.exists(), late)
@@ -1552,6 +1571,15 @@ class StandinHooks(Temporary):
         self.addCleanup(log.close)
         return standin_agent.Session(settings, log, str(self.root)), log
 
+    def commands(self, command):
+        """COMMAND as a hook entry gives it, bare and behind the driver's
+        `hook-log` wrapper, as `install_hooks` writes every LangSpan hook.
+        The wrapper runs COMMAND in a process group of its own, which a
+        signal to the wrapper's group does not reach."""
+        wrapper = [sys.executable, "-I", "-B", str(HERE / "driver.py"), "hook-log", str(self.root / "hooks.jsonl")]
+        return (("bare", command),
+                ("wrapped", " ".join(shlex.quote(part) for part in wrapper) + " " + shlex.quote(command)))
+
     def test_a_following_wait_lasts_until_just_before_the_session_limit(self):
         # A fixed wait ran out on a loaded machine before LangSpan's notice
         # arrived, and the session ended uninformed. Every wait now shares
@@ -1586,40 +1614,50 @@ class StandinHooks(Temporary):
         # The child's heartbeat shows whether it still acts. Its PID alone
         # does not: where PID 1 does not reap orphans, a killed child stays
         # a zombie and `kill(pid, 0)` still succeeds.
-        heartbeat, group = self.root / "heartbeat", self.root / "group"
-        command = "echo $$ > %s; while :; do printf x >> %s; sleep 0.05; done & wait" % (
-            shlex.quote(str(group)), shlex.quote(str(heartbeat)))
-        session, _ = self.session(command, 1)
+        # The same holds behind the `hook-log` wrapper, whose hook the
+        # stand-in's SIGKILL does not reach, and for a child that ignores
+        # the SIGTERM sent first.
         original = standin_agent.HOOK_SECONDS
         standin_agent.HOOK_SECONDS = 2
-        try:
-            denied = session.fire("PreToolUse", "Write", {"file_path": "x"}, "edit-1")
-            self.assertFalse(denied)
-            self.assertGreater(heartbeat.stat().st_size, 0, "the hook's child never ran")
-            self.assert_stopped(heartbeat)
-        finally:
-            standin_agent.HOOK_SECONDS = original
-            self.kill_groups(group)
+        self.addCleanup(setattr, standin_agent, "HOOK_SECONDS", original)
+        for trap in ("", "trap '' TERM; "):
+            for kind, command in self.commands(
+                    "echo $$ > %s; " + trap + "while :; do printf x >> %s; sleep 0.05; done & wait"):
+                with self.subTest(kind=kind, trap=trap):
+                    name = "%s-%d" % (kind, len(trap))
+                    heartbeat, group = self.root / ("heartbeat-" + name), self.root / ("group-" + name)
+                    session, _ = self.session(command % (shlex.quote(str(group)), shlex.quote(str(heartbeat))), 1)
+                    try:
+                        denied = session.fire("PreToolUse", "Write", {"file_path": "x"}, "edit-1")
+                        self.assertFalse(denied)
+                        self.assertGreater(heartbeat.stat().st_size, 0, "the hook's child never ran")
+                        self.assert_stopped(heartbeat)
+                    finally:
+                        self.kill_groups(group)
 
     def test_a_hook_that_exits_leaves_no_background_child_running(self):
         # A hook can start a child with its streams redirected and exit 0.
         # The child is in the hook's process group, outside the runner's, so
         # once the hook returns nothing else would stop it.
-        heartbeat, group = self.root / "heartbeat", self.root / "group"
-        command = "echo $$ > %s; (while :; do printf x >> %s; sleep 0.05; done) </dev/null >/dev/null 2>&1 & " \
-                  "sleep 0.3; exit 0" % (shlex.quote(str(group)), shlex.quote(str(heartbeat)))
-        session, log = self.session(command, 5)
-        try:
-            denied = session.fire("PreToolUse", "Write", {"file_path": "x"}, "edit-1")
-            log.flush()
-            entry = json.loads((self.root / "standin.jsonl").read_text().splitlines()[0])
-            self.assertFalse(denied, entry)
-            self.assertEqual(entry["exit_code"], 0, entry)
-            self.assertEqual(standin_agent.RUNNING, [])
-            self.assertGreater(heartbeat.stat().st_size, 0, "the hook's child never ran")
-            self.assert_stopped(heartbeat)
-        finally:
-            self.kill_groups(group)
+        # Behind the `hook-log` wrapper the child is in a group only the
+        # wrapper can end, so the wrapper ends it when the hook returns.
+        for kind, command in self.commands(
+                "echo $$ > %s; (while :; do printf x >> %s; sleep 0.05; done) </dev/null >/dev/null 2>&1 & "
+                "sleep 0.3; exit 0"):
+            with self.subTest(kind=kind):
+                heartbeat, group = self.root / ("heartbeat-" + kind), self.root / ("group-" + kind)
+                session, log = self.session(command % (shlex.quote(str(group)), shlex.quote(str(heartbeat))), 5)
+                try:
+                    denied = session.fire("PreToolUse", "Write", {"file_path": "x"}, "edit-1")
+                    log.flush()
+                    entry = json.loads((self.root / "standin.jsonl").read_text().splitlines()[0])
+                    self.assertFalse(denied, entry)
+                    self.assertEqual(entry["exit_code"], 0, entry)
+                    self.assertEqual(standin_agent.RUNNING, [])
+                    self.assertGreater(heartbeat.stat().st_size, 0, "the hook's child never ran")
+                    self.assert_stopped(heartbeat)
+                finally:
+                    self.kill_groups(group)
 
     def kill_groups(self, group_file, *groups):
         """Kill GROUPS and the hook's group named in GROUP_FILE, so a failed
@@ -1649,31 +1687,36 @@ class StandinHooks(Temporary):
         # The runner ends an attempt by signaling the stand-in's process
         # group. Each hook runs in a group of its own, so the stand-in must
         # end the running hook's group before it exits.
-        heartbeat = self.root / "heartbeat"
-        started = self.root / "started"
-        command = "echo $$ > %s; while :; do printf x >> %s; sleep 0.05; done" % (
-            shlex.quote(str(started)), shlex.quote(str(heartbeat)))
-        settings = {"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": command}]}]}}
+        # A hook behind the `hook-log` wrapper is a group further away:
+        # the stand-in's signal lets the wrapper end it.
         (self.root / ".claude").mkdir()
-        (self.root / ".claude" / "settings.local.json").write_text(json.dumps(settings))
         plan = {"sessions": 1, "prompts": ["p"],
                 "tasks": [{"task": "t", "details": "d", "standin": {"ignore": [], "follow": []}}]}
         (self.root / "plan.json").write_text(json.dumps(plan))
         env = dict(os.environ, LANGSPAN_BENCH_RUN_DIR=str(self.root))
-        standin = subprocess.Popen([sys.executable, str(HERE / "standin_agent.py"), "plan.json", "1", "ignore"],
-                                   cwd=self.root, env=env, stdout=subprocess.DEVNULL,
-                                   stderr=subprocess.DEVNULL, start_new_session=True)
-        try:
-            deadline = time.monotonic() + 10
-            while not (started.exists() and started.read_text().strip() and heartbeat.exists()):
-                self.assertLess(time.monotonic(), deadline, "the hook never started")
-                time.sleep(0.05)
-            os.killpg(standin.pid, signal.SIGTERM)
-            standin.wait(timeout=10)
-            self.assert_stopped(heartbeat)
-        finally:
-            self.kill_groups(started, standin.pid)
-            standin.wait()
+        for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            for kind, command in self.commands("echo $$ > %s; while :; do printf x >> %s; sleep 0.05; done"):
+                with self.subTest(kind=kind, signum=signum):
+                    heartbeat = self.root / ("heartbeat-%s-%d" % (kind, signum))
+                    started = self.root / ("started-%s-%d" % (kind, signum))
+                    command = command % (shlex.quote(str(started)), shlex.quote(str(heartbeat)))
+                    settings = {"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": command}]}]}}
+                    (self.root / ".claude" / "settings.local.json").write_text(json.dumps(settings))
+                    standin = subprocess.Popen(
+                        [sys.executable, str(HERE / "standin_agent.py"), "plan.json", "1", "ignore"],
+                        cwd=self.root, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        start_new_session=True)
+                    try:
+                        deadline = time.monotonic() + 10
+                        while not (started.exists() and started.read_text().strip() and heartbeat.exists()):
+                            self.assertLess(time.monotonic(), deadline, "the hook never started")
+                            time.sleep(0.05)
+                        os.killpg(standin.pid, signum)
+                        self.assertEqual(standin.wait(timeout=10), -signum)
+                        self.assert_stopped(heartbeat)
+                    finally:
+                        self.kill_groups(started, standin.pid)
+                        standin.wait()
 
 
 class RefusalCollection(Temporary):
