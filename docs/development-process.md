@@ -192,6 +192,33 @@ Before 1.0, a breaking change (`feat!:`) raises the minor version.
 [CONTRIBUTING.md](../CONTRIBUTING.md) lists how each title type affects the
 version.
 
+Each build job runs `scripts/demo-two-developers.sh` on its target's
+binary, so a failure on any target stops the release while it is a draft.
+After publishing, `verify-published` downloads each target's archive on that
+target's runner, checks `SHA256SUMS` and the attestations, installs it with
+the published `install.sh` and runs the demonstration again.
+
+### Withdraw a release
+
+When `verify-published` fails, the `withdraw` job marks the release a
+prerelease, makes the previous release latest again and opens an issue that
+links the run. The install script's `latest` URL then serves the previous
+release. For a fault found later, do the same by hand:
+
+1. `gh release edit vX.Y.Z --prerelease --latest=false`, then
+   `gh release edit vPREVIOUS --latest`.
+2. Put a first line in the release notes saying it is withdrawn, why, and
+   which version to use. If it changed the store's schema marker, say that
+   the earlier version can't read a store this one wrote, and fix forward.
+3. Keep the release and its tag: pinned installs and the golden stores
+   refer to them.
+4. Land the fix with a `fix:` pull request and merge the next release pull
+   request as usual. Close the issue with a link to the fixed release.
+
+If the failure was the runner or the network, re-run the failed jobs; once
+they pass, `gh release edit vX.Y.Z --prerelease=false --latest` and close
+the issue.
+
 ## Metrics
 
 Review every metric in each status report. The metrics come in three

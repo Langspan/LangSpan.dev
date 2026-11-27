@@ -3,9 +3,15 @@ name: Release
 # keeps one release pull request open on main with the next version, the
 # Cargo.toml and Cargo.lock bump and the CHANGELOG.md section. Merging it
 # creates the tag vX.Y.Z at once and a draft Release. The jobs below then build
-# the binaries from that tag, write checksums, an SBOM per target and
-# attestations, attach them to the draft and publish it. A draft first,
-# because a published immutable release takes no more assets.
+# the binaries from that tag, run the two-developer demonstration on each,
+# write checksums, an SBOM per target and attestations, attach them to the
+# draft and publish it. verify-published then downloads each archive, checks
+# it and runs the demonstration again; withdraw handles a failure.
+#
+# A draft first, so the assets are attached before anyone sees the release.
+# A release is immutable only when the repository setting "Enable release
+# immutability" is on; it was off when 0.3.0 was published (isImmutable is
+# false), so the owner must turn it on before releases take no more assets.
 #
 # release-please acts with a short-lived installation token of the project's
 # release GitHub App, so the release pull request's pull_request checks run
@@ -149,12 +155,17 @@ jobs:
         run: |
           RUSTFLAGS="--remap-path-prefix=$HOME=~ --remap-path-prefix=$PWD=." \
             cargo build --release --locked --target "$TARGET" --bin langspan
-      - name: Smoke test
+      - name: Version
         run: |
           set -eu
           got=$("./target/$TARGET/release/langspan" --version)
           echo "$got"
           [ "$got" = "langspan ${TAG#v}" ]
+      # The binary that is packaged, on its own target's runner. publish
+      # needs every build job, so a failure here stops the release while it
+      # is still a draft.
+      - name: Two-developer demonstration on the release binary
+        run: LANGSPAN="target/$TARGET/release/langspan" bash scripts/demo-two-developers.sh
       - name: SBOM (CycloneDX) for this target
         run: |
           cargo install --locked cargo-cyclonedx --version 0.5.10
@@ -263,3 +274,109 @@ jobs:
           gh release upload "$TAG" dist/langspan-*.tar.gz dist/langspan-*.cdx.json dist/install.sh dist/SHA256SUMS \
             "dist/langspan-$TAG.sigstore.json"
           gh release edit "$TAG" --draft=false --latest
+
+  # What a user gets: the published assets, downloaded on each target's own
+  # runner, checked the way docs/install.md says, then run. The targets and
+  # runners are the build job's.
+  verify-published:
+    name: Verify the published ${{ matrix.target }} archive
+    needs: [release-please, publish]
+    if: github.repository == 'Langspan/LangSpan.dev' && needs.release-please.outputs.release_created == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: aarch64-apple-darwin, os: macos-26 }
+          - { target: x86_64-apple-darwin, os: macos-26-intel }
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04 }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    permissions:
+      contents: read # download the release assets
+      attestations: read # gh attestation verify
+    env:
+      TAG: ${{ needs.release-please.outputs.tag }}
+      TARGET: ${{ matrix.target }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      # Only the demonstration is taken from the tag; the binary under test
+      # and the install script come from the published release.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.TAG }}
+          path: source
+          sparse-checkout: scripts/demo-two-developers.sh
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - name: Download, check SHA256SUMS and verify the attestations
+        run: |
+          set -euo pipefail
+          archive="langspan-$TAG-$TARGET.tar.gz"
+          mkdir published && cd published
+          gh release download "$TAG" --pattern SHA256SUMS --pattern "$archive" \
+            --pattern install.sh --pattern "langspan-$TAG.sigstore.json"
+          awk -v a="$archive" '$2 == a || $2 == "install.sh"' SHA256SUMS > mine
+          [ "$(awk 'END { print NR }' mine)" = 2 ] || { echo "SHA256SUMS lacks $archive or install.sh" >&2; exit 1; }
+          if command -v sha256sum >/dev/null; then sha256sum -c mine; else shasum -a 256 -c mine; fi
+          workflow="$GH_REPO/.github/workflows/release.yml"
+          gh attestation verify "$archive" --repo "$GH_REPO" --signer-workflow "$workflow"
+          gh attestation verify "$archive" --repo "$GH_REPO" --signer-workflow "$workflow" \
+            --bundle "langspan-$TAG.sigstore.json"
+          gh attestation verify "$archive" --repo "$GH_REPO" --signer-workflow "$workflow" \
+            --predicate-type https://cyclonedx.org/bom
+          tar -xzf "$archive"
+      - name: Install with the published install script
+        run: |
+          set -euo pipefail
+          HOME="$RUNNER_TEMP/home" sh published/install.sh "$TAG"
+          cmp "$RUNNER_TEMP/home/.local/bin/langspan" "published/langspan-$TAG-$TARGET/langspan"
+          got=$("$RUNNER_TEMP/home/.local/bin/langspan" --version)
+          echo "$got"
+          [ "$got" = "langspan ${TAG#v}" ]
+      - name: Two-developer demonstration on the installed binary
+        run: LANGSPAN="$RUNNER_TEMP/home/.local/bin/langspan" bash source/scripts/demo-two-developers.sh
+
+  # A published release that fails verification stops being the one users
+  # get: it is marked a prerelease, the previous release becomes latest
+  # again, and an issue links the run. This job checks out and runs nothing
+  # from the repository. docs/development-process.md#withdraw-a-release.
+  withdraw:
+    name: Withdraw a release that failed verification
+    needs: [release-please, verify-published]
+    if: always() && github.repository == 'Langspan/LangSpan.dev' && needs.verify-published.result == 'failure'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write # edit the release's prerelease and latest flags
+      issues: write # open the issue
+    env:
+      TAG: ${{ needs.release-please.outputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      # The issue is opened even when an edit fails, and says which happened;
+      # the job then fails so the run shows the withdrawal is incomplete.
+      - name: Mark the release a prerelease, restore the previous latest and open an issue
+        run: |
+          set -uo pipefail
+          previous=$(gh release list --exclude-drafts --exclude-pre-releases --limit 20 \
+            --json tagName --jq "[.[] | select(.tagName != \"$TAG\")][0].tagName // empty") || previous=
+          if gh release edit "$TAG" --prerelease --latest=false &&
+            { [ -z "$previous" ] || gh release edit "$previous" --latest; }; then
+            outcome="The withdraw job marked $TAG a prerelease and made ${previous:-no earlier release} the latest release."
+            status=0
+          else
+            outcome="The withdraw job could not finish marking $TAG a prerelease and restoring ${previous:-an earlier release} as latest; its log says which edit failed. Do it by hand."
+            status=1
+          fi
+          runbook="$GITHUB_SERVER_URL/$GH_REPO/blob/main/docs/development-process.md#withdraw-a-release"
+          gh issue create --title "Release $TAG failed verification after publishing" --body "$(cat <<EOF
+          The published $TAG archives failed \`verify-published\`: $RUN_URL
+
+          $outcome Follow [Withdraw a release]($runbook) to find the cause and publish a fix.
+          EOF
+          )" || status=1
+          exit "$status"
