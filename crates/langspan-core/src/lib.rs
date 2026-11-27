@@ -8087,7 +8087,20 @@ fn decide_checked(
                                 .any(|known| known.path == path && known.at_ms > since)
                     })
                 };
-                let shown_keys = keep_changes(&mut briefing, &told, &acted, *mid_turn, once);
+                // That read may still have come after the briefing, from a
+                // concurrent hook: a peer's edit after that millisecond makes
+                // the file stale again (issue #259).
+                let stale_again = |stale: &StaleRead| {
+                    now_ms.saturating_sub(stale.age_ms) > since
+                        && activity.is_some_and(|activity| {
+                            activity
+                                .known
+                                .iter()
+                                .any(|known| known.path == stale.path && known.at_ms >= since)
+                        })
+                };
+                let shown_keys =
+                    keep_changes(&mut briefing, &told, &acted, &stale_again, *mid_turn, once);
                 briefing.changed = once || shown_anything(&briefing);
                 let next: Vec<u64> = keys
                     .iter()
@@ -10965,11 +10978,20 @@ fn interface_key(impact: &InterfaceImpact) -> u64 {
         .changes
         .iter()
         .map(|change| {
+            // Everything that says what changed: a removal's signature and
+            // a count change's counts too (issue #270).
             format!(
-                "{}:{}:{}",
-                change.name,
-                change.change,
-                change.after.as_deref().unwrap_or("")
+                "{:?}",
+                (
+                    &change.name,
+                    &change.kind,
+                    &change.change,
+                    &change.before,
+                    &change.after,
+                    &change.after_name,
+                    change.before_count,
+                    change.after_count,
+                )
             )
         })
         .collect();
@@ -11060,6 +11082,7 @@ fn keep_changes(
     briefing: &mut Briefing,
     told: &BTreeSet<u64>,
     acted: &dyn Fn(&str) -> bool,
+    stale_again: &dyn Fn(&StaleRead) -> bool,
     mid_turn: bool,
     once: bool,
 ) -> BTreeSet<u64> {
@@ -11076,17 +11099,27 @@ fn keep_changes(
     };
     briefing
         .stale_reads
-        .retain(|stale| keep(stale_key(stale), acted(&stale.path)));
+        .retain(|stale| keep(stale_key(stale), acted(&stale.path) || stale_again(stale)));
     briefing
         .checkout_changes
         .retain(|change| keep(checkout_key(change), false));
     briefing.notes.retain(|note| keep(note_key(note), false));
+    // Each notice's ID goes with its change, so the hook's report of what it
+    // showed names the right one (issue #269).
+    let mut ids = briefing.interface_notice_ids.clone().into_iter();
+    let mut kept_ids = Vec::new();
     briefing.interface_changes.retain(|impact| {
-        keep(
+        let id = ids.next();
+        let fresh = keep(
             interface_key(impact),
             impact.affected.iter().any(|path| acted(path)),
-        )
+        );
+        if fresh {
+            kept_ids.extend(id);
+        }
+        fresh
     });
+    briefing.interface_notice_ids = kept_ids;
     // Presence counted apart: alone, mid-turn, it is held back.
     let mut presence = Vec::new();
     let mut work_news = false;

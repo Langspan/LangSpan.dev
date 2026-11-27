@@ -1362,6 +1362,40 @@ impl Log {
 /// until completed, expired or a restart. A conflict whose ended holder
 /// still holds the path is therefore not `waited`, and a conflict refused
 /// after the holder ended still knows its holder.
+/// Review follow-up #256: a holder that lets go and then takes a refused
+/// path again holds it, so a write while it holds the path is not
+/// `waited`.
+#[test]
+fn a_holder_taking_the_path_again_is_holding_it() {
+    let (alice, bob) = ("claude-code.alice", "codex.bob");
+    let mut log = Log::ready(&[alice, bob]);
+    log.edit(bob, "hold", "src/lib.rs", present('a'), 'b', START + MINUTE);
+    let refused = log.edit(
+        alice,
+        "try",
+        "src/lib.rs",
+        present('a'),
+        'c',
+        START + MINUTE,
+    );
+    assert!(matches!(refused, Outcome::Conflict { .. }), "{refused:?}");
+    log.record(Event::LeaseExpired {
+        lease_id: "admit-codex.bob-hold".into(),
+    });
+    log.prompt(bob, START + 2 * MINUTE);
+    let again = log.edit(
+        bob,
+        "again",
+        "src/lib.rs",
+        present('a'),
+        'b',
+        START + 2 * MINUTE,
+    );
+    assert!(matches!(again, Outcome::Admitted { .. }), "{again:?}");
+    log.shell_wrote(alice, "src/lib.rs", START + 2 * MINUTE);
+    assert_eq!(log.outcomes(alice), only("retried_unchanged"));
+}
+
 #[test]
 fn a_holder_ending_its_session_is_not_its_admission_ending() {
     let (alice, bob) = ("claude-code.alice", "codex.bob");

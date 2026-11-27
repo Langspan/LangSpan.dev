@@ -142,6 +142,60 @@ fn rust_crate_super_and_self_paths_resolve_to_module_files() {
 }
 
 #[test]
+fn a_typescript_directory_import_of_the_workspace_root_resolves_to_its_index() {
+    let files = ["index.ts", "a.ts", "src/a.ts"];
+    assert_eq!(
+        resolved("src/a.ts", "..", &files).as_deref(),
+        Some("index.ts")
+    );
+    assert_eq!(resolved("a.ts", ".", &files).as_deref(), Some("index.ts"));
+    assert_eq!(resolved("a.ts", "./", &files).as_deref(), Some("index.ts"));
+    // Above the root is still nothing.
+    assert_eq!(resolved("src/a.ts", "../..", &files), None);
+}
+
+#[test]
+fn a_rust_crate_path_naming_no_module_file_resolves_to_the_crate_root() {
+    let files = ["src/lib.rs", "src/store.rs", "src/service.rs"];
+    let from = "src/service.rs";
+    // `Language` is defined in `lib.rs` itself.
+    assert_eq!(
+        resolved(from, "crate::Language", &files).as_deref(),
+        Some("src/lib.rs")
+    );
+    assert_eq!(
+        resolved(from, "crate::{Language, extract}", &files).as_deref(),
+        Some("src/lib.rs")
+    );
+    // A module file still wins.
+    assert_eq!(
+        resolved(from, "crate::store::save", &files).as_deref(),
+        Some("src/store.rs")
+    );
+}
+
+#[test]
+fn a_rust_glob_import_resolves_to_its_module() {
+    let written = targets(Language::Rust, "use crate::store::*;\nuse super::api::*;\n");
+    assert_eq!(written, ["crate::store::*", "super::api::*"]);
+    let files = [
+        "src/lib.rs",
+        "src/store.rs",
+        "src/api/mod.rs",
+        "src/service.rs",
+    ];
+    let from = "src/service.rs";
+    assert_eq!(
+        resolved(from, &written[0], &files).as_deref(),
+        Some("src/store.rs")
+    );
+    assert_eq!(
+        resolved(from, &written[1], &files).as_deref(),
+        Some("src/api/mod.rs")
+    );
+}
+
+#[test]
 fn go_java_and_csharp_imports_are_left_as_written() {
     let files = ["store/store.go", "com/app/Store.java", "App/Store.cs"];
     assert_eq!(resolved("main.go", "example.com/app/store", &files), None);

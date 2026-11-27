@@ -456,6 +456,18 @@ pub fn combine(
             match replay(root, &current, &theirs, room, deadline)? {
                 Replayed::Done { tip, rewritten } => {
                     current = tip;
+                    // The adapted commit was replayed too: name the copy that
+                    // lands, or none when its replay changed nothing.
+                    if let Some(last) = notes.adapted.last_mut()
+                        && last.commit == theirs
+                    {
+                        match rewritten.iter().find(|r| r.from == theirs) {
+                            Some(replayed) => last.commit = replayed.to.clone(),
+                            None => {
+                                notes.adapted.pop();
+                            }
+                        }
+                    }
                     notes.rebased.extend(rewritten);
                     kept = (current.clone(), notes.adapted.len());
                 }
