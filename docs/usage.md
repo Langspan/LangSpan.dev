@@ -41,7 +41,35 @@ changes nothing and prints `Already set up; nothing to change.` Close Claude
 Code first, as for [`install --apply`](#all-repositories-for-this-user).
 `--hosts`, `--home` and `--state-dir` work as they do for `install`; with
 `--home`, setup installs no login service. `langspan uninstall --apply` stops
-and removes the service with everything else.
+and removes the service with everything else. Setup's last line is the next
+step: `Try it: langspan demo`.
+
+### See a refusal without an agent
+
+To see LangSpan refuse an overlapping edit before you open an agent, run:
+
+```sh
+langspan demo
+```
+
+The demo needs no agent CLI or sign-in. It makes a temporary directory with
+a home, a state directory and a small workspace of its own, and starts a
+coordinator there. It then sends the
+coordinator two example Claude Code sessions, `alice` and `bob`, through the
+same hook code an installed hook runs:
+
+1. `alice` edits `src/session.rs` and holds the file.
+2. `bob` edits the same function. The hook refuses the edit and prints the
+   exact reason that `bob`'s agent would receive.
+3. `alice`'s edit is written, and the hold ends.
+4. `bob` reads the file with `alice`'s change and edits it again. The hook
+   admits that edit.
+
+The demo then stops its coordinator and removes the temporary directory. It
+doesn't connect to your coordinator, read your state directory or host
+settings, or touch your repositories: its coordinator gets the temporary
+home as `HOME`. It takes no options. If you stop it with Ctrl-C, remove the
+directory it names on its second line.
 
 An install script and a Homebrew formula that run `langspan setup` for you
 are not published yet ([ADR 0035](adr/0035-one-command-setup.md)).
@@ -1082,8 +1110,9 @@ access can run these CLI commands under its host's permission controls.
 
 ## Try the coordination loop with the CLI
 
-This standalone example uses a fresh state directory, so its demo workspace
-cannot collide with an existing hook setup. In a new terminal at the LangSpan
+For a one-command version through the hook, run
+[`langspan demo`](#see-a-refusal-without-an-agent). This standalone example
+uses a fresh state directory, so its demo workspace cannot collide with an existing hook setup. In a new terminal at the LangSpan
 repository root, create the private directory, note its printed path, and run a
 separate coordinator:
 

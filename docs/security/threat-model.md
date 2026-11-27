@@ -710,6 +710,20 @@ messages, notes and workspace roots.
 | Denial of service | At most 16 connections at once, the rest closed unanswered; one thread each. A request head of at most 8 KiB and 64 headers, 2 s per read and 5 s in total, then 408 or 431. Each view is one socket request to the coordinator, under its own 64 KiB frame and deadlines; the denial search reads at most the newest 5,000 receipts and events. A page polls every 2 s; many open pages multiply that load. |
 | Elevation of privilege | The server runs as the owner and can only read. It has no route that changes state, runs a command or reads a file other than through the coordinator's view. |
 
+## The first-run demo
+
+`langspan demo` (issue #290) starts a child process, a second coordinator,
+and opens no other boundary. It takes no input besides `TMPDIR`.
+
+| Concern | Behavior and remaining boundary |
+| --- | --- |
+| Spoofing | The demo's coordinator listens only on a Unix socket in a new directory of its own, created `0700` with a name made from the process ID and the clock; creation fails rather than reuse an existing path. A same-user process could connect to that socket while the demo runs, as it could to any coordinator of that user. |
+| Tampering | It never connects to the user's coordinator or opens the user's state directory: the state directory is the demo's own and `--state-dir` is refused. The coordinator's `HOME` is the demo's empty home, with the host-location variables dropped, so its host checks read nothing of the user's. The only files written are the demo's own, under its directory. |
+| Repudiation | Nothing is recorded outside the demo's directory, which is removed. |
+| Information disclosure | The two sessions, the file and its text are fixed in the binary; no repository text, prompt or credential is read. The output prints the refusal reason the hook built from that fixed data. |
+| Denial of service | The coordinator must accept connections within 10 seconds, and each hook call has the hook's own 4-second budget. The coordinator is stopped and reaped, and the directory removed, on success, on an error and on a panic. A Ctrl-C or a kill leaves the directory, which the output names; Ctrl-C reaches the coordinator too, which runs in the demo's process group. |
+| Elevation of privilege | The child is the same `langspan` executable, run as the owner, with `LANGSPAN_AUTOSTART=off`. |
+
 ## Daily summary
 
 `langspan today` and `langspan_today` (roadmap H4,

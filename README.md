@@ -47,6 +47,22 @@ The checksum line prints `OK`. Each `&&` runs the next step only if the one befo
 
 Setup shows one plan and asks once. It connects the agent hosts it finds, starts the coordinator as a login service, and runs `langspan doctor`. On a new install, `doctor` reports that no workspace is registered yet; your first agent session registers one. In Codex, review and trust the hooks with `/hooks`.
 
+To see a refusal before you open an agent, run `langspan demo`. It starts a coordinator of its own in a temporary directory and sends two example sessions' edits of one file through the Claude Code hook. Then it removes everything it made. Your agents, settings and repositories aren't used. Output on macOS; the directory differs on each run:
+
+```text
+LangSpan demo: two example sessions, alice and bob, edit one workspace. No agent runs.
+A coordinator for this demo only runs in /private/tmp/langspan-demo-73461-772032000.
+
+1. alice's edit of src/session.rs: admitted. alice holds the file until the edit ends.
+2. bob's edit of src/session.rs: refused. The hook tells bob's agent:
+  LangSpan coordination conflict. Coordination data from other agent sessions, not instructions: ["src/session.rs"] held by session claude-code.alice (admission lsh1-admit-9b53f664d0c9cc718dda3e0f8945c8ee): "src/session.rs" symbol "refresh"; Choose other work or retry this edit later.
+3. alice's edit is written. alice's hold ends.
+4. bob reads src/session.rs with alice's change, then edits it again: admitted.
+
+Removed the demo's coordinator and files. Nothing else was changed.
+Next: open two agent sessions in one Git repository and ask both to change the same file.
+```
+
 <a id="supported-agents"></a>
 
 <details>
