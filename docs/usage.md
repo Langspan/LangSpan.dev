@@ -993,6 +993,12 @@ Delivery is advisory and recorded:
   coordinator or registering the session, and exits after that. An idle
   session is never woken; a notice recorded after the turn reaches the next
   prompt's briefing.
+- Exit 2 means a notice and nothing else. Every failure exits 0 with a
+  `langspan_between_steps` line on stderr that says what went wrong: options
+  it cannot use, an event it cannot read, input that does not end within
+  the hook's budget, a coordinator it cannot reach or that does not know
+  the session, and an internal error. The ordinary hook keeps exit 1 for
+  option errors.
 - Cursor also runs Claude Code's hooks. A Cursor event ends the watcher at
   once.
 

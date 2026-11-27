@@ -58,6 +58,13 @@ TRANSCRIPT_BYTES = 64 * 1024 * 1024
 MAX_HOOK_INPUT = 64 * 1024 * 1024
 HOOK_LOG_STDOUT = 16 * 1024
 HOOK_LOG_SECONDS = 900
+# How much longer than its entry's own `timeout` hook-log waits for a
+# background hook (issue #288), so the host, not the wrapper, ends one that
+# runs that long. The watcher's entry gives 1,260 s.
+BACKGROUND_MARGIN_SECONDS = 60
+# How long hook-log waits for a killed hook's output before it gives up on
+# a child that still holds its pipes.
+HOOK_LOG_DRAIN_SECONDS = 2
 MAX_CONFIG_BYTES = 32 * 1024 * 1024
 MAX_NOTES = 100
 MAX_NOTE_BYTES = 1024 * 1024
@@ -509,18 +516,29 @@ def langspan_cli(langspan, state_dir, *args, timeout=30, env=None):
 def install_hooks(langspan, state_dir, index, clone, hook_log):
     """LangSpan's project hooks in one checkout, each run through `hook-log`,
     which passes everything through unchanged and keeps what the hook said
-    and when, so a briefing can be checked against the session's actions."""
+    and when, so a briefing can be checked against the session's actions.
+    A background hook (`async` or `asyncRewake`, such as LangSpan's
+    between-step watcher) is wrapped with `--background` and a bound past
+    its entry's own `timeout`, so the wrapper never refuses a prompt for it
+    (issue #288)."""
     langspan_cli(langspan, state_dir, "hooks", "install", "claude-code", "--workspace",
                  workspace_id(index), "--root", str(clone), "--apply")
     path = clone / ".claude" / "settings.local.json"
     settings = json.loads(path.read_text(encoding="utf-8"))
-    prefix = " ".join(shlex.quote(part) for part in (sys.executable, "-I", "-B", str(Path(__file__).resolve()),
-                                                     "hook-log", str(hook_log)))
+    wrapper = [sys.executable, "-I", "-B", str(Path(__file__).resolve()), "hook-log"]
     for entries in settings.get("hooks", {}).values():
         for entry in entries:
             for hook in entry.get("hooks", []):
-                if hook.get("type") == "command":
-                    hook["command"] = prefix + " " + shlex.quote(hook["command"])
+                if hook.get("type") != "command":
+                    continue
+                options = []
+                if hook.get("async") or hook.get("asyncRewake"):
+                    timeout = hook.get("timeout")
+                    if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout < 1:
+                        timeout = HOOK_LOG_SECONDS
+                    options = ["--background", "--timeout", str(timeout + BACKGROUND_MARGIN_SECONDS)]
+                prefix = [*wrapper, *options, str(hook_log)]
+                hook["command"] = " ".join(shlex.quote(part) for part in prefix) + " " + shlex.quote(hook["command"])
     path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
 
 
@@ -782,22 +800,41 @@ def tool_check(text):
     return {"status": "unknown", "unexpected": []}
 
 
-def hook_log_main(log, command):
+def hook_log_main(log, command, timeout=HOOK_LOG_SECONDS, background=False):
     """Run one hook COMMAND exactly as the host would (stdin, stdout,
     stderr and exit code passed through) and append what it said, when, and
-    for which call to LOG. Input past the bound is refused (exit 2), as a
-    failed safety control must."""
+    for which call to LOG. A foreground hook still running after TIMEOUT
+    seconds, or given input past the bound, is refused (exit 2), as a
+    failed safety control must be. A BACKGROUND hook there fails open
+    (exit 0): the host gives its exit 2 the meaning "wake the model", and
+    a refusal of the prompt from the wrapper is never the hook's own."""
+    refused = 0 if background else 2
     payload = sys.stdin.buffer.read(MAX_HOOK_INPUT + 1)
     if len(payload) > MAX_HOOK_INPUT:
         print("hook-log: the hook input exceeds %d bytes" % MAX_HOOK_INPUT, file=sys.stderr)
-        return 2
+        return refused
     at, started = utc_now(), time.monotonic()
+    timed_out = False
+    process = subprocess.Popen(["/bin/sh", "-c", command], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE)
     try:
-        done = subprocess.run(["/bin/sh", "-c", command], input=payload, capture_output=True,
-                              timeout=HOOK_LOG_SECONDS)
-        code, stdout, stderr = done.returncode, done.stdout, done.stderr
+        stdout, stderr = process.communicate(payload, timeout=timeout)
+        code = process.returncode
     except subprocess.TimeoutExpired:
-        code, stdout, stderr = 2, b"", b"hook-log: the hook did not finish in time\n"
+        timed_out = True
+        process.kill()
+        # A child the hook started can keep its pipes open: wait for the
+        # output briefly, then go on without it.
+        try:
+            process.communicate(timeout=HOOK_LOG_DRAIN_SECONDS)
+        except subprocess.TimeoutExpired:
+            pass
+        process.wait()
+        code, stdout = refused, b""
+        if background:
+            stderr = b"hook-log: the background hook ran past %d s; it was ended, exit 0\n" % timeout
+        else:
+            stderr = b"hook-log: the hook did not finish in time\n"
     sys.stdout.buffer.write(stdout)
     sys.stdout.flush()
     sys.stderr.buffer.write(stderr)
@@ -815,6 +852,7 @@ def hook_log_main(log, command):
         "file_path": file_path[:4096] if isinstance(file_path, str) else None,
         "exit_code": code, "stdout": stdout[:HOOK_LOG_STDOUT].decode("utf-8", "replace"),
         "stdout_truncated": len(stdout) > HOOK_LOG_STDOUT,
+        "background": background, "timed_out": timed_out,
     }) + "\n"
     # A log that cannot be written must not change the hook's decision.
     try:
@@ -826,6 +864,23 @@ def hook_log_main(log, command):
     except OSError as error:
         print("hook-log: cannot append to %s: %s" % (log, error), file=sys.stderr)
     return code
+
+
+def hook_log_args(args):
+    """`hook-log [--background] [--timeout SECONDS] LOG COMMAND`."""
+    usage = "usage: driver.py hook-log [--background] [--timeout SECONDS] LOG COMMAND"
+    background, timeout = False, HOOK_LOG_SECONDS
+    while len(args) > 2:
+        if args[0] == "--background":
+            background, args = True, args[1:]
+        elif args[0] == "--timeout" and re.fullmatch(r"[1-9][0-9]{0,5}", args[1]):
+            timeout, args = int(args[1]), args[2:]
+        else:
+            break
+    if len(args) != 2 or args[0].startswith("--"):
+        print(usage + "; SECONDS is 1 to 999999", file=sys.stderr)
+        return 2
+    return hook_log_main(args[0], args[1], timeout, background)
 
 
 def unit_source(text, unit):
@@ -1985,8 +2040,8 @@ def main(argv=None):
         return session_main(argv[1], int(argv[2]))
     if argv[:1] == ["integrate"] and len(argv) == 2:
         return integrate_main(argv[1])
-    if argv[:1] == ["hook-log"] and len(argv) == 3:
-        return hook_log_main(argv[1], argv[2])
+    if argv[:1] == ["hook-log"]:
+        return hook_log_args(argv[1:])
     if argv[:1] == ["repair-session"] and len(argv) == 2:
         return repair_session_main(argv[1])
     if argv[:1] == ["repair-check"] and len(argv) == 2:

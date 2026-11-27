@@ -184,3 +184,19 @@ pub fn render(impacts: &[langspan_core::InterfaceImpact]) -> String {
     text.push_str("Re-read a listed file before changing it.");
     text
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Issue #288: the watcher ends itself before its entry's host timeout.
+    /// Past `WATCH_LIMIT` it can still be reading its input (the hook's
+    /// largest budget, 4 s), resolving its workspace and making one ask
+    /// (`CALL_BUDGET` each), then polling once.
+    #[test]
+    fn the_watcher_ends_itself_well_before_its_host_timeout() {
+        let overrun = Duration::from_secs(4) + CALL_BUDGET * 2 + POLL;
+        assert!(WATCH_LIMIT + overrun < Duration::from_secs(HOST_TIMEOUT_SECONDS));
+        assert!(START_GRACE < WATCH_LIMIT);
+    }
+}

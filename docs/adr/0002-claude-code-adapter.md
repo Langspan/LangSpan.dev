@@ -24,7 +24,7 @@ Event shapes were captured from Claude Code 2.1.331 rather than assumed.
 - **Host mapping:**
   - a conflict with a current holder → JSON `permissionDecision: "deny"`, exit 0;
   - everything else → no stdout, exit 0;
-  - argument errors → exit 1, which the host treats as a non-blocking error;
+  - argument errors → exit 1, which the host treats as a non-blocking error (the between-step watcher exits 0 for them, and for every other failure, issue #288);
   - `allow` is never used, and the synchronous hook never exits 2. Only the between-step watcher below exits 2, to wake the model; it runs in the background, where Claude Code gives no exit code or decision field a blocking effect.
 
   The installer registers a 5 s host timeout and leaves `onFailure` unset. The adapter's own total deadline is 1.5 s.

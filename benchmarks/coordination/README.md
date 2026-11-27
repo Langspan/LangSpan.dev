@@ -498,6 +498,16 @@ delivered after it, and `at` orders them against the other sessions' calls.
 Hook context does not appear in `stream-json`, so the hook log is the only
 copy of what LangSpan said.
 
+Each line also says whether the hook ran in the background (`background`)
+and whether the wrapper ended it at its bound (`timed_out`). A foreground
+hook still running after 900 s is refused (exit 2), as a failed safety
+control must be. A background hook, such as LangSpan's between-step
+watcher (`asyncRewake`), gets 60 s more than its entry's own `timeout`, so
+Claude Code ends it first; if it still runs past that, the wrapper ends it
+with exit 0 and refuses nothing (issue #288). The watcher's notice goes to
+stderr, which the log does not keep; the coordinator's event log records it
+as `interface_notices_told` with `via` `between_steps`.
+
 Nothing is committed automatically. Review transcripts before committing any
 record under `docs/evidence/`.
 

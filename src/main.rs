@@ -476,6 +476,13 @@ fn hook(input: Vec<String>) -> ExitCode {
         )),
         _ => None,
     };
+    // The between-step watcher runs in the background, where exit 2 wakes
+    // the model: it exits 2 only to tell a notice, and 0 for every failure,
+    // its options' included (issue #288).
+    let background_watcher = input.get(1).map(String::as_str) == Some("claude-code")
+        && input
+            .windows(2)
+            .any(|pair| pair[0] == "--mode" && pair[1] == langspan::between_steps::MODE);
     if let Some(fallback) = fallback {
         let default = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
@@ -575,7 +582,15 @@ fn hook(input: Vec<String>) -> ExitCode {
         // the log line is written only when it does not wake the session.
         if watcher {
             let watched = match &input {
-                Ok(bytes) => langspan::between_steps::watch(bytes, &config),
+                // A panic is a bug, but must not become the host's error.
+                Ok(bytes) => std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    langspan::between_steps::watch(bytes, &config)
+                }))
+                .unwrap_or_else(|_| langspan::between_steps::Watched {
+                    exit: 0,
+                    stderr: String::new(),
+                    detail: "the watcher stopped on an internal error (a panic); report it".into(),
+                }),
                 Err(error) => langspan::between_steps::Watched {
                     exit: 0,
                     stderr: String::new(),
@@ -668,6 +683,13 @@ fn hook(input: Vec<String>) -> ExitCode {
         Ok(code) => ExitCode::from(code),
         // Exit 1 is a non-blocking error for Claude Code. Only the background
         // between-step watcher exits 2, to wake the model (above).
+        Err(error) if background_watcher => {
+            eprintln!(
+                "{}",
+                serde_json::json!({"level":"error","event":"langspan_between_steps","detail":error.to_string()})
+            );
+            ExitCode::SUCCESS
+        }
         Err(error) => {
             if let Some(fallback) = fallback {
                 print!("{fallback}");

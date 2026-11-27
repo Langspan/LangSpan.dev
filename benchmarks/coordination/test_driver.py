@@ -1070,6 +1070,43 @@ class DriverUnitTests(Temporary):
         self.assertEqual(entry["stdout"], '{"decision":"deny"}')
         self.assertEqual(os.stat(self.root / "hooks.jsonl").st_mode & 0o777, 0o600)
 
+    def hook_log(self, log, command, *options, payload="{}"):
+        started = time.monotonic()
+        done = subprocess.run([sys.executable, "-I", "-B", str(HERE / "driver.py"), "hook-log", *options,
+                               str(log), command], input=payload, capture_output=True, text=True, timeout=60)
+        return done, time.monotonic() - started
+
+    def test_the_hook_log_fails_open_for_a_background_hook_past_its_bound(self):
+        """Issue #288: a background hook (`asyncRewake`, LangSpan's
+        between-step watcher) still running at the wrapper's bound ends with
+        exit 0, logged as timed out. A foreground hook there is refused
+        (exit 2), as a failed safety control must be. A child that keeps the
+        hook's pipes open does not hold the wrapper past its bound."""
+        command = "cat >/dev/null; sleep 20; exit 2"
+        payload = json.dumps({"hook_event_name": "UserPromptSubmit", "session_id": "s"})
+        log = self.root / "hooks.jsonl"
+        done, elapsed = self.hook_log(log, command, "--background", "--timeout", "1", payload=payload)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("ran past 1 s", done.stderr)
+        self.assertLess(elapsed, 10)
+        done, elapsed = self.hook_log(log, command, "--timeout", "1", payload=payload)
+        self.assertEqual(done.returncode, 2, done.stderr)
+        self.assertIn("did not finish in time", done.stderr)
+        self.assertLess(elapsed, 10)
+        background, foreground = (json.loads(line) for line in log.read_text().splitlines())
+        self.assertEqual((background["exit_code"], background["timed_out"], background["background"]), (0, True, True))
+        self.assertEqual((foreground["exit_code"], foreground["timed_out"], foreground["background"]),
+                         (2, True, False))
+        # Within its bound, a background hook's own exit code passes through:
+        # 2 is how the watcher wakes the model.
+        done, _ = self.hook_log(log, "cat >/dev/null; echo told >&2; exit 2", "--background", "--timeout", "30")
+        self.assertEqual((done.returncode, done.stderr), (2, "told\n"))
+        self.assertFalse(json.loads(log.read_text().splitlines()[-1])["timed_out"])
+        for options in (["--timeout"], ["--timeout", "0"], ["--timeout", "x"], ["--later"]):
+            done = subprocess.run([sys.executable, "-I", "-B", str(HERE / "driver.py"), "hook-log", *options,
+                                   str(log), "true"], input="", capture_output=True, text=True, timeout=30)
+            self.assertNotEqual(done.returncode, 0, options)
+
     def test_notes_and_merge_logs_survive_a_failed_merge(self):
         work = self.root / "work"
         work.mkdir()
@@ -1700,6 +1737,76 @@ class RefusalCollection(Temporary):
         self.assertIn("lease_granted", [record.get("event", {}).get("type") for record in events], seen)
         self.assertGreaterEqual(session.late_hooks, 1, seen)
         self.assertIn("no owner", target.read_text())
+
+
+class WatcherDryRun(Temporary):
+    def test_dry_run_with_the_watcher_installed_a_session_takes_its_turn(self):
+        """Issue #288: with LangSpan's between-step watcher installed, run as
+        Claude Code runs it (in the background, from the prompt, through its
+        hook-log wrapper), a stand-in session's prompt is not refused and its
+        turn goes on. The watcher ends with exit 0 at the turn's end, and
+        also when the turn outlasts the wrapper's bound (here shortened to
+        2 s): it is logged as timed out and refuses nothing."""
+        work = self.root / "work"
+        work.mkdir()
+        _, _, clones = driver.prepare_fixture(work, 1, "langspan")
+        state = Path(tempfile.mkdtemp(prefix="lsb-", dir="/tmp"))
+        self.addCleanup(shutil.rmtree, state, True)
+        hook_log = self.root / "hook-log.jsonl"
+        driver.install_hooks(langspan_binary(), state, 1, clones[0], hook_log)
+        settings = json.loads((clones[0] / ".claude" / "settings.local.json").read_text())
+        prompt_hooks = [hook for entry in settings["hooks"]["UserPromptSubmit"] for hook in entry["hooks"]]
+        watchers = [hook for hook in prompt_hooks if hook.get("asyncRewake")]
+        self.assertEqual(len(watchers), 1, prompt_hooks)
+        argv = shlex.split(watchers[0]["command"])
+        self.assertIn("--mode between-steps", argv[-1])
+        self.assertIn("--background", argv)
+        # The wrapper outlasts the entry's own timeout, so the host, not the
+        # wrapper, ends a watcher that runs that long.
+        self.assertGreater(int(argv[argv.index("--timeout") + 1]), watchers[0]["timeout"])
+        for hook in prompt_hooks:
+            if not hook.get("asyncRewake"):
+                self.assertNotIn("--background", shlex.split(hook["command"]), hook)
+        target = (clones[0] / "shelf" / "report.py").resolve()
+        coordinator = driver.Coordinator(langspan_binary(), state, self.root / "coordinator.log")
+        try:
+            for turn, bound in enumerate((None, 2)):
+                command = argv
+                if bound is not None:
+                    command = list(argv)
+                    command[command.index("--timeout") + 1] = str(bound)
+                with self.subTest(bound=bound), open(self.root / "hooks.jsonl", "a") as log:
+                    session = standin_agent.Session(settings, log, str(clones[0].resolve()))
+                    self.assertFalse(session.fire("SessionStart", source="startup"))
+                    prompt = {"session_id": session.session_id, "cwd": session.cwd,
+                              "hook_event_name": "UserPromptSubmit", "prompt": "Task: shorten the summary"}
+                    watcher = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                               stderr=subprocess.PIPE, cwd=session.cwd, start_new_session=True)
+                    self.addCleanup(lambda process=watcher: process.returncode is None
+                                    and standin_agent.kill_group(process))
+                    watcher.stdin.write(json.dumps(prompt).encode())
+                    watcher.stdin.close()
+                    self.assertFalse(session.fire("UserPromptSubmit", prompt=prompt["prompt"]), "prompt refused")
+                    # The turn runs past the shortened bound before it edits.
+                    time.sleep(4)
+                    session.read(target)
+                    old, new = ("one-line summary", "short summary") if turn == 0 else ("short summary", "summary")
+                    self.assertTrue(session.edit(target, "Edit", {"file_path": str(target), "old_string": old,
+                                                                  "new_string": new, "replace_all": False},
+                                                 lambda: target.write_text(target.read_text().replace(old, new))))
+                    session.fire("Stop", stop_hook_active=False)
+                    self.assertEqual(watcher.wait(timeout=30), 0, watcher.stderr.read())
+                    watcher.stderr.close()
+                    session.fire("SessionEnd", reason="other")
+                    self.assertEqual(session.refusals, [])
+                    entries = [json.loads(line) for line in hook_log.read_text().splitlines()]
+                    logged = [entry for entry in entries
+                              if entry["background"] and entry["session_id"] == session.session_id]
+                    self.assertEqual(len(logged), 1, entries)
+                    self.assertEqual((logged[0]["event"], logged[0]["exit_code"], logged[0]["timed_out"]),
+                                     ("UserPromptSubmit", 0, bound is not None))
+        finally:
+            coordinator.stop()
 
 
 class DryRun(Temporary):
