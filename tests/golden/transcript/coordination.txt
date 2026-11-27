@@ -379,10 +379,10 @@ exit 0
 ## status line
 $ langspan request {"version":10,"request_id":"read","command":{"op":"status_line","root":"$TMP/work","from_ms":0}}
 exit 0
-langspan · 0 sessions here · 0 refusals today
+langspan · 1 session here · 1 refusal today
 $ langspan request {"version":10,"request_id":"read","command":{"op":"status_line","root":"$TMP/work","from_ms":0}} --json
 exit 0
-{"version":10,"request_id":"read","replayed":false,"generation":1,"lease_valid":null,"outcome":{"type":"status_line","line":{"workspace_id":null,"sessions_here":0,"refusals_today":0}}}
+{"version":10,"request_id":"read","replayed":false,"generation":1,"lease_valid":null,"outcome":{"type":"status_line","line":{"workspace_id":"w","sessions_here":1,"refusals_today":1}}}
 
 ## status
 $ langspan status

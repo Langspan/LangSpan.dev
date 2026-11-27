@@ -1,9 +1,9 @@
-lines	4765
+lines	4768
 pub	5
 fn	answer	229
 fn	check_calls	163
 fn	check_write	171
-fn	prepare	163
+fn	prepare	166
 fn	remote_pass	156
 fn	run	355
 edge	auto_check
