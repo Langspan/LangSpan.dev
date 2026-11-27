@@ -56,6 +56,24 @@ fn start(root: &Path, idle_ms: Option<u64>) -> Owned {
 /// `start`, with `env` set for the coordinator.
 fn start_with(root: &Path, idle_ms: Option<u64>, env: &[(&str, &str)]) -> Owned {
     let state_dir = root.join("state");
+    let mut daemon = spawn_with(root, idle_ms, env);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !answers(&state_dir) {
+        if let Some(status) = daemon.child().try_wait().unwrap() {
+            panic!(
+                "daemon exited before readiness: {status}: {}",
+                fs::read_to_string(root.join("daemon.log")).unwrap_or_default()
+            );
+        }
+        assert!(Instant::now() < deadline, "daemon did not become ready");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    daemon
+}
+
+/// Spawns the coordinator `start_with` describes, without waiting for it.
+fn spawn_with(root: &Path, idle_ms: Option<u64>, env: &[(&str, &str)]) -> Owned {
+    let state_dir = root.join("state");
     let log = fs::File::create(root.join("daemon.log")).unwrap();
     let mut command = Process::new(env!("CARGO_BIN_EXE_langspan"));
     command
@@ -70,19 +88,7 @@ fn start_with(root: &Path, idle_ms: Option<u64>, env: &[(&str, &str)]) -> Owned 
     if let Some(ms) = idle_ms {
         command.env(IDLE, ms.to_string());
     }
-    let mut daemon = Owned::spawn(&mut command);
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !answers(&state_dir) {
-        if let Some(status) = daemon.child().try_wait().unwrap() {
-            panic!(
-                "daemon exited before readiness: {status}: {}",
-                fs::read_to_string(root.join("daemon.log")).unwrap_or_default()
-            );
-        }
-        assert!(Instant::now() < deadline, "daemon did not become ready");
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    daemon
+    Owned::spawn(&mut command)
 }
 
 /// Waits up to `limit` for `daemon` to exit by itself, and returns its log.
@@ -356,6 +362,48 @@ fn a_coordinator_thread_that_panics_stops_the_coordinator() {
     assert!(detail.contains("LANGSPAN_TEST_PANIC_ON_REQUEST"), "{log}");
     // One line: the default hook's unstructured message is not written too.
     assert!(!log.contains("panicked at"), "{log}");
+}
+
+/// Starts a coordinator whose worker `thread` panics as it starts, and
+/// checks that the panic stops the whole process the way a panic in the
+/// state owner does (issue #360). A process test on purpose: what it checks
+/// is the process-wide panic hook, the exit status and the socket. The
+/// socket exists before any worker starts, so its absence shows the hook
+/// removed it.
+#[cfg(debug_assertions)]
+fn a_panic_in_the_worker_stops_the_coordinator(thread: &str) {
+    let root = Root::new();
+    let state_dir = root.0.join("state");
+    let mut daemon = spawn_with(&root.0, None, &[("LANGSPAN_TEST_PANIC_IN_THREAD", thread)]);
+    let log = exits_within(&mut daemon, &root.0, Duration::from_secs(10));
+    let status = daemon.child().wait().unwrap();
+    assert!(!status.success(), "{status}: {log}");
+    assert!(!state_dir.join("daemon.sock").exists(), "{log}");
+    let line = stopping_line(&log);
+    assert_eq!(line["level"], "error", "{log}");
+    assert_eq!(line["reason"], "panic", "{log}");
+    assert_eq!(line["thread"], thread, "{log}");
+    let detail = line["detail"].as_str().unwrap_or_default();
+    assert!(detail.contains("LANGSPAN_TEST_PANIC_IN_THREAD"), "{log}");
+    assert!(!log.contains("panicked at"), "{log}");
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn a_panic_in_the_index_worker_stops_the_coordinator() {
+    a_panic_in_the_worker_stops_the_coordinator("langspan-indexer");
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn a_panic_in_the_remote_worker_stops_the_coordinator() {
+    a_panic_in_the_worker_stops_the_coordinator("langspan-remote");
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn a_panic_in_the_host_worker_stops_the_coordinator() {
+    a_panic_in_the_worker_stops_the_coordinator("langspan-hosts");
 }
 
 /// A state directory whose socket listens but never answers, and an empty
