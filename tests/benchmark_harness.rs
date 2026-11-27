@@ -7,8 +7,37 @@
 //! The harness is Python (standard library only), so these tests need
 //! `python3` 3.9 or later on `PATH`. Each Rust test runs one part of the
 //! Python suite, so `cargo test` runs the parts in parallel.
+//!
+//! The dry runs are the slow part: about 11 minutes of an 18-minute macOS
+//! job (issue #286). CI sets `LANGSPAN_BENCH_DRY_RUNS=skip` when a change
+//! touches no benchmark, briefing, hook or daemon code, and runs them every
+//! night on `main`; `.github/workflows/check.yml` owns the list of paths.
+//! Any other value, or none, runs them, so a local check always does.
 
+use std::ffi::OsStr;
+use std::io::Write;
 use std::process::Command;
+
+const DRY_RUNS: &str = "LANGSPAN_BENCH_DRY_RUNS";
+
+/// Only the exact value `skip` skips, so a misspelt value runs the dry runs.
+fn dry_runs_skipped(value: Option<&OsStr>) -> bool {
+    value == Some(OsStr::new("skip"))
+}
+
+/// One dry-run part of the Python suite, unless CI said to skip it.
+fn dry_run(filter: &str) {
+    if dry_runs_skipped(std::env::var_os(DRY_RUNS).as_deref()) {
+        // Written to stderr directly: the test harness keeps `eprintln!`
+        // output of a passing test, and this line has to reach the CI log.
+        let _ = writeln!(
+            std::io::stderr(),
+            "{filter}: skipped: no benchmark or briefing change ({DRY_RUNS}=skip)"
+        );
+        return;
+    }
+    python_suite("test_driver.py", Some(filter));
+}
 
 fn python_suite(pattern: &str, filter: Option<&str>) {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/benchmarks/coordination");
@@ -33,6 +62,15 @@ fn python_suite(pattern: &str, filter: Option<&str>) {
 }
 
 #[test]
+fn only_the_exact_value_skip_skips_the_dry_runs() {
+    assert!(dry_runs_skipped(Some(OsStr::new("skip"))));
+    for value in ["", "0", "1", "true", "SKIP", "skip ", "run"] {
+        assert!(!dry_runs_skipped(Some(OsStr::new(value))), "{value:?}");
+    }
+    assert!(!dry_runs_skipped(None));
+}
+
+#[test]
 fn runner_mechanics() {
     python_suite("test_runner.py", None);
 }
@@ -54,51 +92,42 @@ fn standin_hooks() {
 
 #[test]
 fn dry_run_worktrees_arm() {
-    python_suite("test_driver.py", Some("dry_run_arm_worktrees"));
+    dry_run("dry_run_arm_worktrees");
 }
 
 #[test]
 fn dry_run_awareness_only_arm() {
-    python_suite("test_driver.py", Some("dry_run_arm_awareness_only"));
+    dry_run("dry_run_arm_awareness_only");
 }
 
 #[test]
 fn dry_run_langspan_arm_ignoring_briefings() {
-    python_suite("test_driver.py", Some("dry_run_arm_langspan_ignore"));
+    dry_run("dry_run_arm_langspan_ignore");
 }
 
 #[test]
 fn dry_run_langspan_arm_following_briefings() {
-    python_suite("test_driver.py", Some("dry_run_arm_langspan_follow"));
+    dry_run("dry_run_arm_langspan_follow");
 }
 
 #[test]
 fn dry_run_hedging_fails_in_every_arm() {
-    python_suite("test_driver.py", Some("dry_run_hedging_fails_in_every_arm"));
+    dry_run("dry_run_hedging_fails_in_every_arm");
 }
 
 #[test]
 fn dry_run_a_changer_that_works_around_the_change_is_change_not_made() {
-    python_suite(
-        "test_driver.py",
-        Some("dry_run_a_changer_that_works_around_the_change_is_change_not_made_in_every_arm"),
-    );
+    dry_run("dry_run_a_changer_that_works_around_the_change_is_change_not_made_in_every_arm");
 }
 
 #[test]
 fn dry_run_with_stagger_tells_dependents_before_their_first_write() {
-    python_suite(
-        "test_driver.py",
-        Some("dry_run_with_stagger_tells_every_dependent_before_its_first_write"),
-    );
+    dry_run("dry_run_with_stagger_tells_every_dependent_before_its_first_write");
 }
 
 #[test]
 fn dry_run_records_an_ignored_option() {
-    python_suite(
-        "test_driver.py",
-        Some("a_dry_run_records_an_option_its_arm_ignores"),
-    );
+    dry_run("a_dry_run_records_an_option_its_arm_ignores");
 }
 
 #[test]

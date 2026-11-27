@@ -6,7 +6,13 @@ on:
   # The release workflow starts this on release-please's branch: a pull
   # request opened with GITHUB_TOKEN starts no pull_request run of its own.
   workflow_dispatch:
-# No token permission unless a job asks for it; each job reads only.
+  # Every night on main (schedules run on the default branch), with the
+  # benchmark harness's dry runs whatever changed. A failure opens or
+  # updates one issue (job nightly-report).
+  schedule:
+    - cron: "23 3 * * *"
+# No token permission unless a job asks for it; each job reads only, except
+# nightly-report, which writes issues.
 permissions: {}
 env:
   # Line numbers in backtraces and no other debug info. Measured on an
@@ -19,9 +25,10 @@ env:
   # it again on that.
   LANGSPAN_CHECK_RELEASE: ${{ github.event_name != 'pull_request' }}
 # A newer push to a pull request cancels its older run. Runs on main are
-# never cancelled, so every commit on main keeps its own result.
+# never cancelled, so every commit on main keeps its own result; the nightly
+# run has a group of its own, so it never replaces a push's pending run.
 concurrency:
-  group: check-${{ github.event.pull_request.number || github.sha }}
+  group: check-${{ github.event.pull_request.number || github.sha }}${{ github.event_name == 'schedule' && '-nightly' || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 # Job names are the check names a ruleset requires: keep them stable.
 jobs:
@@ -33,6 +40,7 @@ jobs:
       contents: read
     outputs:
       code: ${{ steps.changes.outputs.code }}
+      dry_runs: ${{ steps.changes.outputs.dry_runs }}
     steps:
       # Two commits deep: a pull request's run checks out the merge commit,
       # whose first parent is the base, so the change is HEAD^1..HEAD with
@@ -46,23 +54,57 @@ jobs:
       # since a test replays a recorded host session kept in docs/evidence/.
       # The jobs still run and pass, so a required check is never left
       # waiting, as it would be with a workflow-level paths filter. Pushes
-      # to main and manual runs always check.
-      - name: Decide whether the change touches code
+      # to main, manual runs and the nightly run always check.
+      #
+      # The benchmark harness's dry runs (tests/benchmark_harness.rs) took
+      # about 11 minutes of macOS's 18 (issue #286). They run only when the
+      # change touches a path in BENCH_PATHS: the harness, the briefing,
+      # hook and daemon code it drives, and what builds or runs the suite.
+      # A pull request is HEAD^1..HEAD; a push to main is that too when it
+      # adds one commit (a squash merge), and otherwise runs them. Manual
+      # and nightly runs always run them. Anything unsure runs them.
+      - name: Decide what the change touches
         id: changes
         env:
           EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          BENCH_PATHS: >-
+            ^benchmarks/
+            |^tests/benchmark_harness\.rs$
+            |^src/(daemon|hook|claude_code|recent)\.rs$
+            |^src/hook/
+            |^crates/langspan-core/src/lib\.rs$
+            |^(Cargo\.toml|Cargo\.lock|rust-toolchain\.toml)$
+            |^\.github/workflows/check\.yml$
+            |^scripts/(check|test-foreign-home)\.sh$
         run: |
+          # A failed git command stops the step (bash -e) instead of
+          # reading as "nothing changed".
           code=true
+          dry_runs=run
+          diff=false
           if [ "$EVENT" = pull_request ]; then
-            # A failed diff stops the step (bash -e) instead of reading as
-            # "nothing but Markdown".
+            diff=true
+          elif [ "$EVENT" = push ] && [ "$(git rev-parse HEAD^1)" = "$BEFORE" ]; then
+            diff=true
+          fi
+          if [ "$diff" = true ]; then
             changed=$(git diff --name-only HEAD^1 HEAD)
-            if [ -n "$changed" ] && ! printf '%s\n' "$changed" | grep -Ev '\.md$' | grep -q .; then
+            if [ "$EVENT" = pull_request ] && [ -n "$changed" ] && ! printf '%s\n' "$changed" | grep -Ev '\.md$' | grep -q .; then
               code=false
+            fi
+            pattern=$(printf '%s' "$BENCH_PATHS" | tr -d ' ')
+            # grep exits 1 for no match; anything else (a bad pattern)
+            # stops the step rather than skip the dry runs.
+            matches=$(grep -Ec -- "$pattern" <<< "$changed") || [ $? -eq 1 ]
+            if [ -n "$changed" ] && [ "$matches" -eq 0 ]; then
+              dry_runs=skip
             fi
           fi
           echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "dry_runs=$dry_runs" >> "$GITHUB_OUTPUT"
           echo "touches code: $code"
+          echo "benchmark dry runs: $dry_runs"
       # rustup 1.28 and later no longer install the toolchain on first use;
       # with no argument this installs the one rust-toolchain.toml names.
       - name: Install the toolchain from rust-toolchain.toml
@@ -84,6 +126,9 @@ jobs:
           echo "$RUNNER_TEMP/ci-tools" >> "$GITHUB_PATH"
       - name: Check formatting, dependencies, lint, real integration tests and the demonstration
         if: steps.changes.outputs.code == 'true'
+        env:
+          # `skip` or `run`; tests/benchmark_harness.rs skips on `skip` only.
+          LANGSPAN_BENCH_DRY_RUNS: ${{ steps.changes.outputs.dry_runs }}
         run: sh scripts/check.sh
   # The same check on Apple silicon. `macos-26` is GitHub's current arm64
   # image (`macos-latest` points at it); a pinned label, so an image change
@@ -119,7 +164,41 @@ jobs:
           bash scripts/install-ci-tools.sh "$RUNNER_TEMP/ci-tools"
           echo "$RUNNER_TEMP/ci-tools" >> "$GITHUB_PATH"
       - name: Check formatting, dependencies, lint, real integration tests and the demonstration
+        env:
+          # Linux's decision, so both jobs run the same tests.
+          LANGSPAN_BENCH_DRY_RUNS: ${{ needs.linux.outputs.dry_runs }}
         run: sh scripts/check.sh
+  # A nightly run that fails opens one issue, or comments on it while it is
+  # still open, so the failure isn't missed. Only this job can write, and
+  # only issues; it checks out nothing and runs no repository code. The
+  # title is fixed text and the body only the commit and the run's link.
+  nightly-report:
+    name: Nightly failure report
+    needs: [linux, macos]
+    if: github.event_name == 'schedule' && failure()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update the nightly failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TITLE: Nightly Rust checks on main failed
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.sha }}
+        run: |
+          body=$(printf 'The nightly Rust checks failed on main at %s.\n\nRun: %s\n\nThe nightly run includes the benchmark harness dry runs, which pull requests skip when they touch no benchmark, briefing, hook or daemon code. Fix the failure the same day (docs/development-process.md).' "$SHA" "$RUN_URL")
+          number=$(gh issue list --state open --search "\"$TITLE\" in:title" --json number,title \
+            --jq 'map(select(.title == env.TITLE)) | .[0].number // empty')
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body "$body"
+          else
+            # No label: a missing label would fail the create and lose
+            # the report.
+            gh issue create --title "$TITLE" --body "$body"
+          fi
   # zizmor audits the workflows and dependabot.yml: injection, over-broad
   # permissions, credential persistence, unpinned or impostor action
   # commits. Its online audits read public GitHub data with this job's
