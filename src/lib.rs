@@ -26,8 +26,7 @@ pub mod breaks;
 pub mod regions;
 
 // hosts
-mod tool_names;
-mod vendor;
+mod hosts;
 
 // Infrastructure layer.
 
@@ -123,6 +122,8 @@ pub mod skill;
 use fs::file_state;
 use fs::input;
 use fs::local;
+use hosts::tool_names;
+use hosts::vendor;
 use ids::registration;
 use ids::sha256;
 use text::redact;

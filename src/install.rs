@@ -943,7 +943,7 @@ fn watcher_entry(vendor: Vendor, command: &str, user: bool) -> Option<Map<String
     entry.insert("asyncRewake".into(), true.into());
     entry.insert(
         "timeout".into(),
-        crate::between_steps::HOST_TIMEOUT_SECONDS.into(),
+        crate::hosts::WATCHER_TIMEOUT_SECONDS.into(),
     );
     Some(entry)
 }
@@ -2335,7 +2335,7 @@ mod tests {
             assert_eq!(watcher["asyncRewake"], json!(true));
             assert_eq!(
                 watcher["timeout"],
-                json!(crate::between_steps::HOST_TIMEOUT_SECONDS)
+                json!(crate::hosts::WATCHER_TIMEOUT_SECONDS)
             );
             let group = &settings["hooks"]["UserPromptSubmit"][0]["hooks"];
             assert_eq!(group.as_array().unwrap().len(), 2, "{group:#}");

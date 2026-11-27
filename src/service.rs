@@ -23,10 +23,7 @@ pub const UNIT: &str = "langspan.service";
 pub const MARKER: &str = "Written by `langspan setup`; `langspan uninstall --apply` removes it.";
 /// The bound on one service-manager command.
 pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
-/// The host directory overrides a service keeps from setup's environment,
-/// the ones `UserHome::files` reads. Directory names only, never a secret.
-/// A coordinator started on demand makes the same ones absolute.
-pub const HOST_DIRS: [&str; 3] = ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "GEMINI_CLI_HOME"];
+pub use crate::hosts::HOST_DIRS;
 /// The largest service file read.
 const MAX_FILE_BYTES: u64 = 64 << 10;
 

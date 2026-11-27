@@ -9,10 +9,10 @@
 
 pub use crate::hook::{Config, Identities, MAX_EVENT_BYTES, Reply, wire_id, workspace_request_id};
 use crate::hook::{file_key, valid_host_id};
+pub use crate::hosts::CLAUDE_CODE_SOURCE as SOURCE;
 use langspan_core::ToolResult;
 use serde::Deserialize;
 use std::{io::Read, time::Instant};
-pub const SOURCE: &str = langspan_core::CLAUDE_CODE_HOST;
 pub const SUPPORTED_TOOLS: [&str; 4] = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
 /// A completed `Read` is recorded as the version the session saw. It is
 /// never admitted or denied.

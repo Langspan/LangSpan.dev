@@ -30,7 +30,8 @@ the LAYOUT.md move recipe. B4 is a pure move; B5 is moves plus one rename.
 
 ## B5: hosts
 
-- New `src/hosts.rs` root, `pub mod hosts;` in lib.rs's hosts block replacing
+- New `src/hosts.rs` root, `mod hosts;` (private, like `text` and `ids`, so the library's
+  public surface and pub count don't change) in lib.rs's hosts block replacing
   `mod tool_names; mod vendor;`; compatibility block gets `use hosts::tool_names;` and
   `use hosts::vendor;`, so their importers don't change.
 - `git mv src/vendor.rs src/hosts/vendor.rs`, `src/tool_names.rs src/hosts/tool_names.rs`,

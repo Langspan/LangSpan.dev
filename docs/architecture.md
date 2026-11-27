@@ -61,7 +61,7 @@ its old path as a re-export in the compatibility block at the end of
 | | `time` | `clock`, `local_day`, `zone` |
 | | `protocol` | the wire protocol and page budgets |
 | | `regions` | `regions`, `breaks` |
-| | `hosts` | the host catalog and the hook's port types: `vendor`, `tool_names` |
+| | `hosts` | the host catalog and the hook's port types: `vendor`, `tool_names`, the hosts' session namespaces (`SOURCE`), `HOST_DIRS` and the watcher's limits |
 | infrastructure | `fs` | `local`, `file_state`, `input` |
 | | `git` | `git`, `sha1`, `observer`, `remote` |
 | | `process` | child processes |

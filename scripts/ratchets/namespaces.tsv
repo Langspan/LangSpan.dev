@@ -23,8 +23,7 @@ namespace	zone	utility
 namespace	protocol	utility
 namespace	regions	utility
 namespace	breaks	utility
-namespace	vendor	utility
-namespace	tool_names	utility
+namespace	hosts	utility
 allow	breaks	regions
 allow	breaks	text
 allow	regions	ids
