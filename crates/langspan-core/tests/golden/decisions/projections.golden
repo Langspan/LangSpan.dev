@@ -1,0 +1,295 @@
+## register-app
+{
+  "events": [
+    {
+      "type": "workspace_registered",
+      "workspace": {
+        "workspace_id": "app",
+        "root": "/work/app"
+      }
+    }
+  ],
+  "outcome": {
+    "type": "workspace",
+    "workspace": {
+      "workspace_id": "app",
+      "root": "/work/app"
+    }
+  }
+}
+## session-alice
+{
+  "events": [
+    {
+      "type": "session_registered",
+      "session": {
+        "session_id": "claude-code.alice",
+        "workspace_id": "app",
+        "generation": 1
+      }
+    }
+  ],
+  "outcome": {
+    "type": "session",
+    "session": {
+      "session_id": "claude-code.alice",
+      "workspace_id": "app",
+      "generation": 1
+    }
+  }
+}
+## admit-alice
+{
+  "events": [
+    {
+      "type": "lease_granted",
+      "lease": {
+        "lease_id": "admit-alice",
+        "session_id": "claude-code.alice",
+        "workspace_id": "app",
+        "paths": [
+          "src/api.rs"
+        ],
+        "generation": 1,
+        "expires_at_ms": 61200,
+        "status": "active"
+      }
+    }
+  ],
+  "outcome": {
+    "type": "admitted",
+    "lease": {
+      "lease_id": "admit-alice",
+      "session_id": "claude-code.alice",
+      "workspace_id": "app",
+      "paths": [
+        "src/api.rs"
+      ],
+      "generation": 1,
+      "expires_at_ms": 61200,
+      "status": "active"
+    }
+  }
+}
+## status
+{
+  "events": [],
+  "outcome": {
+    "type": "status",
+    "state": {
+      "generation": 1,
+      "workspaces": {
+        "app": {
+          "workspace_id": "app",
+          "root": "/work/app"
+        }
+      },
+      "sessions": {
+        "claude-code.alice": {
+          "session_id": "claude-code.alice",
+          "workspace_id": "app",
+          "generation": 1
+        }
+      },
+      "intents": {},
+      "leases": {
+        "admit-alice": {
+          "lease_id": "admit-alice",
+          "session_id": "claude-code.alice",
+          "workspace_id": "app",
+          "paths": [
+            "src/api.rs"
+          ],
+          "generation": 1,
+          "expires_at_ms": 61200,
+          "status": "active"
+        }
+      }
+    },
+    "summary": {}
+  }
+}
+## dashboard
+{
+  "events": [],
+  "outcome": {
+    "type": "dashboard",
+    "dashboard": {
+      "generation": 1,
+      "uptime_ms": null,
+      "active_agents": 1,
+      "teammates_heard": 0,
+      "teammates_known": 0,
+      "agents": [
+        {
+          "id": "local:claude-code.alice",
+          "group": "workspace:app",
+          "local": true,
+          "machine": null,
+          "host": "claude-code",
+          "session": "alice",
+          "session_id": "claude-code.alice",
+          "workspace_id": "app",
+          "branch_ref": null,
+          "task": null,
+          "intent": null,
+          "editing": [
+            "src/api.rs"
+          ],
+          "recent": [],
+          "more_files": 0,
+          "state": "editing",
+          "liveness": null,
+          "active_age_ms": null,
+          "heard_age_ms": null
+        }
+      ],
+      "more_agents": 0,
+      "editing": [
+        {
+          "workspace_id": "app",
+          "path": "src/api.rs",
+          "session_id": "claude-code.alice",
+          "expires_in_ms": 59100,
+          "base_unknown": false
+        }
+      ],
+      "more_editing": 0,
+      "overlaps": [],
+      "more_overlaps": 0,
+      "interface_changes": [],
+      "more_interface_changes": 0,
+      "denials": null,
+      "checks": [],
+      "more_checks": 0,
+      "landings": [],
+      "more_landings": 0,
+      "push_turns": [],
+      "more_push_turns": 0,
+      "messages": [],
+      "more_messages": 0,
+      "notes": [],
+      "more_notes": 0,
+      "workspaces": [
+        {
+          "workspace_id": "app",
+          "group": "workspace:app",
+          "root": "/work/app",
+          "branch_ref": null,
+          "sessions": 1,
+          "scan_failure": null,
+          "publishing": null,
+          "teammates": 0,
+          "coverage": null
+        }
+      ],
+      "more_workspaces": 0,
+      "uninstalled_hosts": []
+    }
+  }
+}
+## status-line
+{
+  "events": [],
+  "outcome": {
+    "type": "status_line",
+    "line": {
+      "workspace_id": "app",
+      "sessions_here": 0,
+      "refusals_today": 0
+    }
+  }
+}
+## status-line-unregistered-root
+{
+  "events": [],
+  "outcome": {
+    "type": "status_line",
+    "line": {
+      "workspace_id": null,
+      "sessions_here": 0,
+      "refusals_today": 0
+    }
+  }
+}
+## status-records
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "storage_operation",
+    "message": "Event history, status pages, change projections, sent messages and index queries are answered by the daemon's stores"
+  }
+}
+## version
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "storage_operation",
+    "message": "Event history, status pages, change projections, sent messages and index queries are answered by the daemon's stores"
+  }
+}
+## events
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "storage_operation",
+    "message": "Event history, status pages, change projections, sent messages and index queries are answered by the daemon's stores"
+  }
+}
+## changes
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "storage_operation",
+    "message": "Event history, status pages, change projections, sent messages and index queries are answered by the daemon's stores"
+  }
+}
+## compact
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "storage_operation",
+    "message": "Event history, status pages, change projections, sent messages and index queries are answered by the daemon's stores"
+  }
+}
+## today
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "storage_operation",
+    "message": "Event history, status pages, change projections, sent messages and index queries are answered by the daemon's stores"
+  }
+}
+## report
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "storage_operation",
+    "message": "Event history, status pages, change projections, sent messages and index queries are answered by the daemon's stores"
+  }
+}
+## count
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "storage_operation",
+    "message": "Event history, status pages, change projections, sent messages and index queries are answered by the daemon's stores"
+  }
+}
+## history
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "storage_operation",
+    "message": "Event history, status pages, change projections, sent messages and index queries are answered by the daemon's stores"
+  }
+}

@@ -1,0 +1,14 @@
+{"name":"register-app","now_ms":1000,"command":{"op":"workspace_register","workspace_id":"app","root":"/work/app"}}
+{"name":"session-alice","now_ms":1100,"command":{"op":"session_register","session_id":"claude-code.alice","workspace_id":"app"}}
+{"name":"session-bob","now_ms":1200,"command":{"op":"session_register","session_id":"codex.bob","workspace_id":"app"}}
+{"name":"intent-bob","now_ms":1300,"command":{"op":"intent_set","session_id":"codex.bob","paths":["src/api.rs"],"summary":"Rework the session handler"}}
+{"name":"admit-bob","now_ms":1400,"command":{"op":"admit","session_id":"codex.bob","paths":["src/api.rs"],"ttl_ms":60000}}
+{"name":"brief-alice","now_ms":2000,"command":{"op":"brief","session_id":"claude-code.alice","max_peers":4,"deliver":true}}
+{"name":"brief-alice-again","now_ms":2100,"command":{"op":"brief","session_id":"claude-code.alice","max_peers":4,"deliver":true}}
+{"name":"brief-unknown-session","now_ms":2200,"command":{"op":"brief","session_id":"codex.nobody","max_peers":4,"deliver":true}}
+{"name":"brief-prepared-inflight","now_ms":2300,"prepared":{"op":"brief_prepared","session_id":"claude-code.alice","max_peers":4,"deliver":true,"mid_turn":true,"inflight":[{"workspace_id":"app","path":"src/api.rs","name":"refresh","kind":"function","signature":"fn refresh(session: &mut Session) -> Result<()>","mentioned_in":["src/login.rs"]}],"mentioned":["refresh"]}}
+{"name":"brief-prepared-unknown-session","now_ms":2400,"prepared":{"op":"brief_prepared","session_id":"codex.nobody","max_peers":4}}
+{"name":"forget-told-alice","now_ms":3000,"command":{"op":"forget_told","session_id":"claude-code.alice","keys":[1]}}
+{"name":"forget-told-unknown-session","now_ms":3100,"command":{"op":"forget_told","session_id":"codex.nobody","keys":[1]}}
+{"name":"trails-app","now_ms":4000,"command":{"op":"trails","workspace_id":"app"}}
+{"name":"trails-unknown-workspace","now_ms":4100,"command":{"op":"trails","workspace_id":"nowhere"}}
