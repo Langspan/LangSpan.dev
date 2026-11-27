@@ -40,18 +40,13 @@ mod trail;
 mod validate;
 mod workspaces;
 mod write_check;
-// The eight domain modules are empty until each domain moves in from its
-// banners below; the allow does nothing once one holds an item.
-#[allow(unused_imports)]
 pub use admission::*;
 pub use anchors::{
     ANCHOR_CANDIDATES, AnchorIndex, AnchorLookup, AnchorState, MAX_TAGS, NoteAnchor, SYMBOL_BYTES,
     TAG_BYTES, anchored, remember_lookups, validate_tag, validate_tags,
 };
 pub use authority::{Authority, authority};
-#[allow(unused_imports)]
 pub use briefing::*;
-#[allow(unused_imports)]
 pub use checks::*;
 pub use classes::{
     FailureClass, KeptTests, MAX_FIXED_NAMED, MAX_WRITE_RUNS, MAX_WRITERS_NAMED, WriteRun,
@@ -78,11 +73,8 @@ pub use history::{
     HISTORY_RELATED, HISTORY_RELATED_MS, History, HistoryEntry, HistoryMessage, HistoryNote,
     HistoryQuery, history as definition_history,
 };
-#[allow(unused_imports)]
 pub use messages::*;
-#[allow(unused_imports)]
 pub use notices::*;
-#[allow(unused_imports)]
 pub use observation::*;
 pub use outcome::Outcome;
 pub use policy::{
@@ -103,14 +95,12 @@ pub use recent::{
     RECENT_WINDOW_MS, RecentChanges, RecentInterfaceChange,
 };
 pub use refusal_outcome::{PENDING, REFUSAL_WINDOW_MS, RefusalOutcome};
-#[allow(unused_imports)]
 pub use remote::*;
 pub use report::{
     OTHER_HOST, REPORT_HISTORY_EVENTS, REPORT_SESSIONS, Report, ReportCounts, ReportHost,
     ReportKnown, ReportQuery, ReportSession, host_kind, known_sessions, open_intents, report,
     session_workspaces,
 };
-#[allow(unused_imports)]
 pub use sessions::*;
 pub(crate) use shared::*;
 pub use since::{
@@ -153,36 +143,6 @@ pub use write_check::{
     WriteCheckPath, WriteCheckRequest, WriteCheckSymbol, write_check, write_check_noticed,
     write_check_request,
 };
-
-// ---- domain: messages ----
-// ---- end domain: messages ----
-
-// ---- domain: remote ----
-// ---- end domain: remote ----
-
-// ---- domain: checks ----
-
-// ---- end domain: checks ----
-
-// ---- domain: observation ----
-
-// ---- end domain: observation ----
-
-// ---- domain: notices ----
-
-// ---- end domain: notices ----
-
-// ---- domain: sessions ----
-
-// ---- end domain: sessions ----
-
-// ---- domain: admission ----
-
-// ---- end domain: admission ----
-
-// ---- domain: briefing ----
-
-// ---- end domain: briefing ----
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -403,7 +363,6 @@ fn decide_checked(
 ) -> Result<Decision, CoreError> {
     validate_request_id(request_id)?;
     match command {
-        // ---- domain: messages ----
         Command::SendMessage {
             workspace_id,
             from,
@@ -497,8 +456,6 @@ fn decide_checked(
             path,
             limit,
         } => messages::decide_recall(state, workspace_id, query, path, limit),
-        // ---- end domain: messages ----
-        // ---- domain: remote ----
         Command::RemoteEnable {
             workspace_id,
             remote,
@@ -548,8 +505,6 @@ fn decide_checked(
             workspace_id,
             participant,
         } => remote::decide_forget_remote(state, workspace_id, participant),
-        // ---- end domain: remote ----
-        // ---- domain: checks ----
         Command::RecordCheck {
             workspace_id,
             name,
@@ -672,8 +627,6 @@ fn decide_checked(
             turn_id,
             attempts,
         } => checks::decide_release_turn(state, workspace_id, onto, turn_id, attempts),
-        // ---- end domain: checks ----
-        // ---- domain: observation ----
         Command::Observe {
             session_id,
             operation_id,
@@ -816,8 +769,6 @@ fn decide_checked(
             request_id,
             now_ms,
         ),
-        // ---- end domain: observation ----
-        // ---- domain: notices ----
         Command::AcknowledgeInterface {
             session_id,
             notice_ids,
@@ -863,8 +814,6 @@ fn decide_checked(
             workspace_id,
             paths,
         ),
-        // ---- end domain: notices ----
-        // ---- domain: sessions ----
         Command::WorkspaceRegister { workspace_id, root }
         | Command::WorkspaceRegisterVerified {
             workspace_id, root, ..
@@ -940,8 +889,6 @@ fn decide_checked(
             prompt_id,
         } => sessions::decide_session_stop(state, session_id, failure, prompt_id, now_ms),
         Command::Adopt { session_id, from } => adopt(state, session_id, from, now_ms),
-        // ---- end domain: sessions ----
-        // ---- domain: admission ----
         Command::Admit {
             session_id,
             paths,
@@ -1016,8 +963,6 @@ fn decide_checked(
             peer_session_id,
             now_ms,
         ),
-        // ---- end domain: admission ----
-        // ---- domain: briefing ----
         Command::Brief {
             session_id,
             max_peers,
@@ -1058,7 +1003,6 @@ fn decide_checked(
             workspace_id,
             limit,
         } => briefing::decide_trails(state, workspace_id, limit, now_ms),
-        // ---- end domain: briefing ----
         Command::Dashboard => Ok(Decision {
             events: Vec::new(),
             outcome: Outcome::Dashboard {
@@ -1124,7 +1068,6 @@ fn decide_checked(
 /// the writer calling `expiry_events` before command admission and persistence.
 pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
     match event {
-        // ---- domain: messages ----
         Event::Remembered { note, .. } => messages::apply_remembered(state, note)?,
         Event::Forgotten {
             workspace_id,
@@ -1154,8 +1097,6 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             session_id,
             message_id,
         } => messages::apply_retraction_delivered(state, session_id, message_id)?,
-        // ---- end domain: messages ----
-        // ---- domain: remote ----
         Event::RemoteEnabled { link } => remote::apply_remote_enabled(state, link)?,
         Event::RemoteDisabled { workspace_id } => {
             remote::apply_remote_disabled(state, workspace_id)?
@@ -1174,8 +1115,6 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             workspace_id,
             participant,
         } => remote::apply_remote_forgotten(state, workspace_id, participant)?,
-        // ---- end domain: remote ----
-        // ---- domain: checks ----
         Event::CheckRecorded { check, tests } => checks::apply_check_recorded(state, check, tests)?,
         Event::AutoCheckEnabled { check } => checks::apply_auto_check_enabled(state, check)?,
         Event::AutoCheckDisabled { workspace_id } => {
@@ -1248,8 +1187,6 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             onto,
             turn_id,
         } => checks::apply_turn_expired(state, workspace_id, onto, turn_id)?,
-        // ---- end domain: checks ----
-        // ---- domain: observation ----
         Event::OperationObserved { observation } => {
             observation::apply_operation_observed(state, observation)?
         }
@@ -1284,8 +1221,6 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
         Event::BranchObserved { observation } => {
             observation::apply_branch_observed(state, observation)?
         }
-        // ---- end domain: observation ----
-        // ---- domain: notices ----
         Event::InterfaceChanged { notice } => notices::apply_interface_changed(state, notice)?,
         Event::InterfaceDependentsFound {
             notice_workspace_id,
@@ -1311,8 +1246,6 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
         Event::InflightDelivered { session_id, keys } => {
             notices::apply_inflight_delivered(state, session_id, keys)?
         }
-        // ---- end domain: notices ----
-        // ---- domain: sessions ----
         Event::WorkspaceRegistered { workspace } => {
             sessions::apply_workspace_registered(state, workspace)?
         }
@@ -1385,8 +1318,6 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
         Event::ToldForgotten { session_id, keys } => {
             sessions::apply_told_forgotten(state, session_id, keys)?
         }
-        // ---- end domain: sessions ----
-        // ---- domain: admission ----
         Event::WriteRefused {
             session_id,
             workspace_id,
@@ -1459,8 +1390,6 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
         Event::LeaseCompleted { lease_id } | Event::LeaseExpired { lease_id } => {
             admission::apply_lease_ended(state, event, lease_id)?
         }
-        // ---- end domain: admission ----
-        // ---- domain: briefing ----
         Event::TrailRecorded { trail } => briefing::apply_trail_recorded(state, trail)?,
         Event::TrailTaken {
             workspace_id,
@@ -1473,7 +1402,6 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
             told,
             told_at_ms,
         } => briefing::apply_briefing_delivered(state, session_id, signature, told, told_at_ms)?,
-        // ---- end domain: briefing ----
         Event::Booted { generation } => {
             if *generation <= state.generation {
                 return Err(error(
