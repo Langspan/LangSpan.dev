@@ -440,7 +440,9 @@ the stores' state snapshots with `LANGSPAN_UPDATE_GOLDEN=1` on
 `tests/golden_stores.rs`, and say in the pull request how the stores were
 made. `every_release_has_a_golden_store_directory` fails for a changelog
 version with no `tests/fixtures/store-VERSION/`, whether or not the release
-changed the event set or the schema.
+changed the event set or the schema. As for the frozen list below, the
+version being released counts only once its `v` tag exists, since its stores
+are built from the tag.
 
 Add its frozen event-type list in the same pull request: copy the sorted
 `type` of each `fixtures/*-event-v10.json` at the new tag into

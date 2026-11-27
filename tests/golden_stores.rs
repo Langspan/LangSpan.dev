@@ -79,8 +79,64 @@ fn released() -> Vec<String> {
         .collect()
 }
 
+/// The releases that need a store directory and have none. `current`, the
+/// version a release PR bumps to, needs one only once `tagged` finds its
+/// tag: the stores are built from the tag, so the release PR cannot hold
+/// them (as for the frozen event-type lists, issue #518).
+fn missing_stores<'a>(
+    releases: &'a [String],
+    current: &str,
+    has_directory: impl Fn(&str) -> bool,
+    tagged: impl Fn(&str) -> bool,
+) -> Vec<&'a String> {
+    releases
+        .iter()
+        .filter(|release| *release != current || tagged(release))
+        .filter(|release| !has_directory(release))
+        .collect()
+}
+
+/// Whether the repository has the tag `v<release>`. A failing `git` fails
+/// the test: it never counts as untagged.
+fn has_release_tag(release: &str) -> bool {
+    let output = std::process::Command::new("git")
+        .args(["--no-optional-locks", "tag", "--list", &format!("v{release}")])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .unwrap_or_else(|e| panic!("cannot run git to list the tags: {e}; install git"));
+    assert!(
+        output.status.success(),
+        "git tag --list v{release} failed: {}; run the test in a Git checkout",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    !output.stdout.trim_ascii().is_empty()
+}
+
+fn versions(list: &[&str]) -> Vec<String> {
+    list.iter().map(|v| v.to_string()).collect()
+}
+
+/// A release PR names 0.9.0 before its tag exists: no store is asked of it,
+/// while an older release without one is still missing.
+#[test]
+fn the_untagged_version_of_a_release_pr_needs_no_stores_yet() {
+    let releases = versions(&["0.9.0", "0.8.0", "0.7.0"]);
+    let missing = missing_stores(&releases, "0.9.0", |r| r == "0.8.0", |_| false);
+    assert_eq!(missing, ["0.7.0"]);
+}
+
+/// Once 0.9.0 is tagged, its stores are missing until they land.
+#[test]
+fn a_tagged_release_without_stores_is_missing() {
+    let releases = versions(&["0.9.0", "0.8.0"]);
+    let missing = missing_stores(&releases, "0.9.0", |r| r == "0.8.0", |r| r == "0.9.0");
+    assert_eq!(missing, ["0.9.0"]);
+}
+
 /// A release that changed nothing the store holds still gets its own
 /// directory: the check is then mechanical, and a release cannot be missed.
+/// The version the manifest names counts once its `v` tag exists; this test
+/// runs `git` because what it checks is the repository's tags.
 #[test]
 fn every_release_has_a_golden_store_directory() {
     let releases = released();
@@ -94,10 +150,12 @@ fn every_release_has_a_golden_store_directory() {
         releases.iter().any(|release| release == current),
         "CHANGELOG.md has no heading for {current}, the version .release-please-manifest.json names"
     );
-    let missing: Vec<&String> = releases
-        .iter()
-        .filter(|release| !fixtures().join(format!("store-{release}")).is_dir())
-        .collect();
+    let missing = missing_stores(
+        &releases,
+        current,
+        |release| fixtures().join(format!("store-{release}")).is_dir(),
+        has_release_tag,
+    );
     assert!(
         missing.is_empty(),
         "no golden stores for release {missing:?}: write them with `bash scripts/golden-stores.sh VERSION`, \
