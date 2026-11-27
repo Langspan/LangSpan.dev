@@ -1809,8 +1809,7 @@ fn a_workspace_where_a_session_acts_is_indexed_promptly_among_many() {
         assert_eq!(code, 0, "{text}");
     }
     // A session edits the main workspace; it is scanned next, not 30th.
-    // Let the first scan of every workspace pass first, so the touched one
-    // is behind all thirty in round-robin order.
+    // Let the first scan of every workspace pass first.
     let main = fs::read_to_string(w.work().join("src/main.rs")).unwrap();
     for n in 0..30 {
         let id = format!("other-{n:02}");
@@ -1824,28 +1823,26 @@ fn a_workspace_where_a_session_acts_is_indexed_promptly_among_many() {
             }
         });
     }
-    let started = Instant::now();
-    w.edits(
-        "alice",
-        "a1",
-        "src/main.rs",
-        &format!("{main}pub fn fresh_name() {{}}\n"),
-    );
-    w.wait_for(
-        "the new function indexed",
-        "symbol",
-        "fresh_name",
-        |outcome| {
+    // Issue #146: the second of two edits in a row lands within seconds of
+    // the scan that saw the first, which leaves the round-robin turn just
+    // past this workspace. It is scanned 5 s after that scan, not about a
+    // minute later on its next turn.
+    let mut content = main;
+    for (call, name) in [("a1", "first_name"), ("a2", "fresh_name")] {
+        content.push_str(&format!("pub fn {name}() {{}}\n"));
+        let started = Instant::now();
+        w.edits("alice", call, "src/main.rs", &content);
+        w.wait_for(&format!("{name} indexed"), "symbol", name, |outcome| {
             outcome["symbols"]
                 .as_array()
                 .is_some_and(|symbols| !symbols.is_empty())
-        },
-    );
-    assert!(
-        started.elapsed() < Duration::from_secs(20),
-        "took {:?}; round-robin alone needs about a minute",
-        started.elapsed()
-    );
+        });
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "{name} took {:?}; round-robin alone needs about a minute",
+            started.elapsed()
+        );
+    }
 }
 
 /// The in-flight names `graph inflight` lists, as `name: signature`.

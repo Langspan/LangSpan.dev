@@ -213,16 +213,15 @@ proptest! {
     }
 }
 
-/// Every limit below the mark's length. Known failure: the cut underflows
-/// (`limit - MARK.len()`) and panics, and the fallback returns the whole
-/// mark. Latent, since every caller's limit is at least 256 bytes. Filed as
-/// #392; run it with `--run-ignored only`, and remove the `ignore` with the fix.
+/// Every limit below the mark's length, where the mark itself is cut to fit
+/// (#392). Every caller's limit is at least 256 bytes, so this guards the
+/// function's contract rather than a path a caller takes today.
 #[test]
-#[ignore = "known failure #392: bounded redaction underflows below a 10-byte limit"]
 fn bounded_redaction_fits_a_limit_shorter_than_the_mark() {
     proptest!(config(), |(text in assembled(REDACT_FRAGMENTS), limit in 0_usize..10)| {
         let bounded = redact::bounded(&text, limit, None);
-        prop_assert!(bounded.len() <= limit, "{} bytes for a limit of {limit}", bounded.len());
+        prop_assert!(bounded.len() <= limit, "{} bytes for a limit of {limit}: {bounded:?}", bounded.len());
+        prop_assert_eq!(redact::bounded(&bounded, limit, None), bounded.clone());
     });
 }
 

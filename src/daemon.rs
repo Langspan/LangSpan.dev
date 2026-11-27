@@ -606,10 +606,8 @@ mod unix {
                                     eprintln!("{}", serde_json::json!({"level":"warn","event":"auto_check_unavailable","detail":error.to_string()}));
                                 }
                             }
-                            // A workspace where a session just acted is scanned
-                            // next, not after every other workspace in turn.
+                            // A workspace where a session just acted is scanned ahead of the rest.
                             if let Some(id) = touched
-                                && last_scanned.get(&id).is_none_or(|at| at.elapsed() >= URGENT_AFTER)
                                 && !urgent.contains(&id)
                                 && urgent.len() < 64
                             {
@@ -715,8 +713,9 @@ mod unix {
                     for notice in notify::notices_for(store.state(), &tapped) {
                         raise(notice);
                     }
-                    if !scan_pending && (!urgent.is_empty() || Instant::now() >= next_scan) {
-                        let workspace = std::iter::from_fn(|| urgent.pop_front())
+                    let due = |id: &String| last_scanned.get(id).is_none_or(|at| at.elapsed() >= URGENT_AFTER);
+                    if !scan_pending && (urgent.iter().any(due) || Instant::now() >= next_scan) {
+                        let workspace = std::iter::from_fn(|| urgent.iter().position(due).and_then(|at| urgent.remove(at)))
                             .find_map(|id| Registration::of(store.state(), &id))
                             .or_else(|| {
                                 let next = next_workspace(store.state(), previous_workspace.as_deref())
@@ -727,6 +726,7 @@ mod unix {
                                 next
                             });
                         if let Some(of) = workspace {
+                            urgent.retain(|id| *id != of.workspace_id);
                             last_scanned.insert(of.workspace_id.clone(), Instant::now());
                             match scan_sender.try_send(of) {
                                 Ok(()) => { scan_pending = true; }
@@ -886,7 +886,7 @@ mod unix {
     /// The defaults of `outline_min_lines` and `outline_min_bytes`.
     pub(super) const OUTLINE_MIN_LINES: u64 = 1500;
     pub(super) const OUTLINE_MIN_BYTES: u64 = 64 * 1024;
-    /// A workspace scanned less than this long ago is not moved up again.
+    /// A touch waits until this long after the last scan, never dropped (#146).
     const URGENT_AFTER: Duration = Duration::from_secs(5);
 
     /// The workspace a request is about, when it is one where a session is
