@@ -270,6 +270,13 @@ mod unix {
         )
     }
 
+    /// Whether the writer starts a Git scan at `now`: never while one is
+    /// running, and otherwise when an urgent rescan is due or the tick at
+    /// `next_scan` has come.
+    fn scan_due(now: Instant, next_scan: Instant, scan_pending: bool, urgent_due: bool) -> bool {
+        !scan_pending && (urgent_due || now >= next_scan)
+    }
+
     /// When a client last connected or finished, for the idle limit.
     #[derive(Clone)]
     struct Activity(Arc<std::sync::Mutex<Instant>>);
@@ -733,7 +740,7 @@ mod unix {
                         raise(notice);
                     }
                     let due = |id: &String| last_scanned.get(id).is_none_or(|at| at.elapsed() >= urgent_after);
-                    if !scan_pending && (urgent.iter().any(due) || Instant::now() >= next_scan) {
+                    if scan_due(Instant::now(), next_scan, scan_pending, urgent.iter().any(due)) {
                         let workspace = std::iter::from_fn(|| urgent.iter().position(due).and_then(|at| urgent.remove(at)))
                             .find_map(|id| Registration::of(store.state(), &id))
                             .or_else(|| {
@@ -1629,6 +1636,61 @@ mod unix {
                 scan_timing_of(Some(" 200 ")),
                 (Duration::from_millis(200), Duration::from_millis(500))
             );
+        }
+
+        /// Starts on a simulated clock every scan the writer's schedule lets
+        /// through in 3 s, each taking `takes`, and returns their start
+        /// times in ms. A unit test: the schedule is pure, so load cannot
+        /// change the count (#469).
+        fn scan_starts(setting: Option<&str>, takes: Duration) -> Vec<u128> {
+            let (every, _) = scan_timing_of(setting);
+            let start = Instant::now();
+            let mut next_scan = start;
+            let mut running_until: Option<Instant> = None;
+            let mut starts = Vec::new();
+            for step in 0..3000 {
+                let now = start + Duration::from_millis(step);
+                if running_until.is_some_and(|until| now >= until) {
+                    running_until = None;
+                }
+                if scan_due(now, next_scan, running_until.is_some(), false) {
+                    starts.push(now.duration_since(start).as_millis());
+                    running_until = Some(now + takes);
+                    next_scan = now + every;
+                }
+            }
+            starts
+        }
+
+        #[test]
+        fn the_scan_interval_test_setting_shortens_the_scan_tick() {
+            let starts = scan_starts(Some("100"), Duration::ZERO);
+            assert_eq!(starts, (0..30).map(|i| i * 100).collect::<Vec<_>>());
+        }
+
+        #[test]
+        fn without_the_test_setting_scans_start_two_seconds_apart() {
+            assert_eq!(scan_starts(None, Duration::ZERO), [0, 2000]);
+            assert_eq!(scan_starts(Some("soon"), Duration::ZERO), [0, 2000]);
+        }
+
+        #[test]
+        fn a_scan_slower_than_the_tick_delays_the_next_and_never_overlaps() {
+            // A 250 ms scan at a 100 ms tick: the next starts as the
+            // previous finishes, since its tick has already passed.
+            let starts = scan_starts(Some("100"), Duration::from_millis(250));
+            assert_eq!(starts, (0..12).map(|i| i * 250).collect::<Vec<_>>());
+        }
+
+        #[test]
+        fn an_urgent_rescan_skips_the_tick_but_never_overlaps_a_running_scan() {
+            let now = Instant::now();
+            let later = now + Duration::from_secs(2);
+            assert!(!scan_due(now, later, false, false));
+            assert!(scan_due(now, later, false, true));
+            assert!(!scan_due(now, later, true, true));
+            assert!(!scan_due(later, now, true, false));
+            assert!(scan_due(later, now, false, false));
         }
 
         #[cfg(not(debug_assertions))]

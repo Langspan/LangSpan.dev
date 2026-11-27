@@ -627,17 +627,10 @@ fn scans_seen_in_three_seconds(env: &[(&str, &str)]) -> usize {
         .count()
 }
 
-#[test]
-fn the_scan_interval_test_setting_shortens_the_scan_tick() {
-    // At the 2 s default, scans start at least 2 s apart, so 3 s hold at
-    // most 3 of them; load only makes them rarer.
-    let seen = scans_seen_in_three_seconds(&[("LANGSPAN_TEST_SCAN_EVERY_MS", "100")]);
-    assert!(
-        seen >= 8,
-        "{seen} scans saw the file change at a 100 ms tick"
-    );
-}
-
+/// Holds under any load: at the 2 s default, scans start at least 2 s apart,
+/// so 3 s hold at most 3 of them, and load only makes them rarer. The
+/// schedule at a shortened tick is a unit test in `src/daemon.rs`, since a
+/// minimum number of scans in a fixed window depends on load (#469).
 #[test]
 fn without_the_test_setting_scans_are_at_least_two_seconds_apart() {
     let seen = scans_seen_in_three_seconds(&[]);
