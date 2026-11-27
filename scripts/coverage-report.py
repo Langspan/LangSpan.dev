@@ -18,13 +18,17 @@ closes its first top-level "{". The report counts only relative paths, and
 it names exports that were never prepared.
 
 The floor: production lines of the whole workspace 90% covered or more, and
-none of the ten files with the most production lines more than 2 points
-under its row in ROOT/scripts/coverage-baseline.tsv. A file among them
-with no row is named, not failed.
+no file more than 2 points under its row in ROOT/scripts/coverage-baseline.tsv.
+Every row is checked. A row whose file no longer exists fails, so a split or
+move carries its rows to the new files; so does a row whose file measures no
+production lines. A file with 100 production lines or more and no row fails.
+Under 100 lines, one line is more than one point, so a 2-point margin is a
+line or two of noise; those files may still have a row.
 
 Prints the summary and table as Markdown on stdout; each failure goes to
 stderr too, and the exit status is 1. With --write-baseline it rewrites the
-baseline with one row per measured file instead of checking it.
+baseline with one row per measured file of 100 production lines or more
+instead of checking it.
 
 Usage: coverage-report.py [--prepare | --write-baseline] ROOT DIR
 """
@@ -34,7 +38,7 @@ import re
 import sys
 
 FLOOR = 90
-LARGEST = 10
+NEEDS_ROW = 100
 MARGIN = 2.0
 BASELINE = os.path.join("scripts", "coverage-baseline.tsv")
 PRODUCTION = re.compile(r"(src|crates/[^/]+/src)/")
@@ -244,25 +248,36 @@ def main(argv):
     baseline_path = os.path.join(root, BASELINE)
     current = {file: tenths(c, t) for file, (t, c) in measured.items()}
     if write:
-        write_baseline(baseline_path, current)
+        write_baseline(baseline_path, {f: v for f, v in current.items() if measured[f][0] >= NEEDS_ROW})
     baseline = read_baseline(baseline_path)
 
     total = sum(t for t, _ in measured.values())
     covered = sum(c for _, c in measured.values())
-    failures, notes = [], []
+    failures = []
     if covered * 100 < FLOOR * total:
         failures.append(
             "the total, %s%% of production lines, is under the %d%% floor"
             % (shown(tenths(covered, total)), FLOOR)
         )
-    largest = sorted(measured, key=lambda f: (-measured[f][0], f))[:LARGEST]
-    for file in largest:
-        if file not in baseline:
-            notes.append("`%s` has no baseline row; add one (docs/development-process.md#coverage)" % file)
+    how = " (docs/development-process.md#coverage)"
+    for file in sorted(baseline):
+        if file not in measured and not os.path.isfile(os.path.join(root, file)):
+            failures.append(
+                "`%s` has a baseline row but no longer exists; move its row to the "
+                "files its lines went to%s" % (file, how)
+            )
+        elif file not in measured:
+            failures.append("`%s` has a baseline row but no production lines measured; remove the row%s" % (file, how))
         elif baseline[file] - current[file] > MARGIN * 10:
             failures.append(
                 "`%s` covers %s%% of its production lines, more than %d points under "
                 "its baseline of %s%%" % (file, shown(current[file]), MARGIN, shown(baseline[file]))
+            )
+    for file in sorted(measured):
+        if file not in baseline and measured[file][0] >= NEEDS_ROW:
+            failures.append(
+                "`%s` has %d production lines and no baseline row; add one%s"
+                % (file, measured[file][0], how)
             )
 
     print("## Coverage\n")
@@ -271,15 +286,13 @@ def main(argv):
         % (shown(tenths(covered, total)), covered, total, FLOOR)
     )
     print(
-        "The %d largest files may fall at most %d points under their baseline row.\n"
-        % (LARGEST, MARGIN)
+        "No file may fall more than %d points under its baseline row; a file of "
+        "%d production lines or more needs one.\n" % (MARGIN, NEEDS_ROW)
     )
     for failure in failures:
-        print("- **Below the floor:** " + failure)
+        print("- **Fails:** " + failure)
         print("coverage-report.py: " + failure, file=sys.stderr)
-    for note in notes:
-        print("- " + note)
-    if failures or notes:
+    if failures:
         print()
     print("| File | Lines | Covered | % | Baseline |")
     print("| --- | ---: | ---: | ---: | ---: |")
