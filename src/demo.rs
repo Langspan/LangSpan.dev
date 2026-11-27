@@ -254,6 +254,7 @@ pub fn run(executable: &Path, out: &mut dyn Write) -> Result<(), crate::Error> {
         code_briefing: false,
         presence: false,
         presence_window_ms: langspan_core::PRESENCE_WINDOW_MS,
+        outline_reads: false,
         vendor: crate::install::Vendor::ClaudeCode,
         user_level: false,
     };

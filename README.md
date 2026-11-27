@@ -15,16 +15,37 @@ Command blocked by PreToolUse hook: LangSpan coordination conflict.
 
 ## Quickstart
 
-[Download the binary](https://github.com/Langspan/LangSpan.dev/releases/latest) for macOS or Linux ([verify and extract it](docs/install.md)), run `langspan setup`, then open your agents as usual in a Git repository. Close Claude Code first, and run this from the extracted folder:
+Find your platform's target. To check, run `uname -sm`.
+
+| Platform | Target |
+| --- | --- |
+| macOS, Apple silicon (`Darwin arm64`) | `aarch64-apple-darwin` |
+| macOS, Intel (`Darwin x86_64`) | `x86_64-apple-darwin` |
+| Linux, ARM64 (`Linux aarch64`) | `aarch64-unknown-linux-gnu` |
+| Linux, x86-64 (`Linux x86_64`) | `x86_64-unknown-linux-gnu` |
+
+Close Claude Code. In an empty folder, set your target on the first line and paste the block into zsh, or bash 5.1 or later:
 
 ```sh
-mkdir -p "$HOME/.local/bin"
-install -m 0755 langspan "$HOME/.local/bin/langspan"
-export PATH="$HOME/.local/bin:$PATH"
-langspan setup
+target=aarch64-apple-darwin
+url=https://github.com/Langspan/LangSpan.dev/releases/latest/download
+curl -fsSLO "$url/SHA256SUMS" &&
+archive=$(awk -v t="-$target.tar.gz" 'index($2, t) { print $2 }' SHA256SUMS) &&
+curl -fsSLO "$url/$archive" &&
+awk -v a="$archive" '$2 == a' SHA256SUMS | shasum -a 256 -c &&
+tar -xzf "$archive" &&
+cd "${archive%.tar.gz}" &&
+mkdir -p "$HOME/.local/bin" &&
+install -m 0755 langspan "$HOME/.local/bin/langspan" &&
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.$(basename "$SHELL")rc" &&
+export PATH="$HOME/.local/bin:$PATH" &&
+langspan setup &&
+langspan doctor
 ```
 
-Setup shows one plan and asks once. It connects the agent hosts it finds, starts the coordinator as a login service, and runs `langspan doctor`. In Codex, review and trust the hooks with `/hooks`.
+The checksum line prints `OK`. Each `&&` runs the next step only if the one before succeeds, so a failed download or checksum installs nothing. On Linux without `shasum`, use `sha256sum -c` instead. The `echo` line keeps `langspan` on your `PATH` in new shells. An older bash, such as macOS's `/bin/bash`, runs pasted lines one at a time, and this block isn't tested there; use zsh.
+
+Setup shows one plan and asks once. It connects the agent hosts it finds, starts the coordinator as a login service, and runs `langspan doctor`. On a new install, `doctor` reports that no workspace is registered yet; your first agent session registers one. In Codex, review and trust the hooks with `/hooks`.
 
 To see a refusal before you open an agent, run `langspan demo`. It starts a coordinator of its own in a temporary directory and sends two example sessions' edits of one file through the Claude Code hook. Then it removes everything it made. Your agents, settings and repositories aren't used. Output on macOS; the directory differs on each run:
 
@@ -47,9 +68,7 @@ Next: open two agent sessions in one Git repository and ask both to change the s
 <details>
 <summary>Host support and evidence</summary>
 
-Claude Code and Codex: recorded on real sessions. Cursor: built from its documentation, not yet run on a real host. Antigravity: corrected after one real run; a repeat run is pending.
-
-Setup connects Claude Code, Codex and Cursor when it finds them. To add Antigravity, name it with `--hosts` ([Antigravity setup](docs/usage.md#antigravity)). [Host evidence and versions](docs/reference-overview.md#current-availability) list what each run covered.
+Setup connects Claude Code, Codex and Cursor when it finds them. To add Antigravity, name it with `--hosts` ([Antigravity setup](docs/usage.md#antigravity)). The [host table](#how-it-works) gives each host's status. [Host evidence and versions](docs/reference-overview.md#current-availability) list what each run covered.
 
 </details>
 
@@ -115,7 +134,7 @@ One Rust executable runs the local coordinator, the hooks, the CLI and a stdio M
 | --- | --- |
 | Claude Code | Verified on a real host |
 | Codex | Verified on a real host (codex-cli 0.171.0) |
-| Antigravity, the Google host | Verified on Antigravity CLI (`agy`) 1.5.14: edit admission, conflict and stale-source refusals, and the install ([evidence](https://github.com/Langspan/LangSpan.dev/issues/110#issuecomment-7182408496)). `admit --ttl-ms` is capped at 60 seconds, and a resumed conversation sends no `SessionStart`; its first `PreInvocation` registers it. |
+| Antigravity, the Google host | Verified on a real host (Antigravity CLI `agy` 1.5.14): edit admission, conflict and stale-source refusals, and the install ([evidence](https://github.com/Langspan/LangSpan.dev/issues/110#issuecomment-7182408496)). `admit --ttl-ms` is capped at 60 seconds, and a resumed conversation sends no `SessionStart`; its first `PreInvocation` registers it. |
 | Cursor | Built from documentation; not yet verified on a real host |
 
 Gemini CLI support was removed after Google deprecated it. To remove an earlier install, run `langspan uninstall --hosts gemini-cli --apply`.

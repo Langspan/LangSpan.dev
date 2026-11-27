@@ -3,6 +3,9 @@ on:
   pull_request:
     # `edited` re-runs the check when the title or body changes.
     types: [opened, edited, reopened, synchronize]
+  # The merge queue's commits. The pull request's title and body passed
+  # this check before it was queued, so here only the tree is checked.
+  merge_group:
   push:
     branches: [main]
   # release.yml starts it on the release branch: the release bot's pull
@@ -30,7 +33,8 @@ jobs:
           persist-credentials: false
       # The title and body reach the script only through the environment,
       # never through the command line or the script's text. On a push to
-      # main both are empty and only the tree is checked.
+      # main or a merge-queue commit the event has no pull request, so both
+      # are empty and only the tree is checked.
       - name: Check the tree and the pull request's title and body
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}

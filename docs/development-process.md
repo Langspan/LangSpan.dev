@@ -70,10 +70,13 @@ by priority:
 
 ## Integration
 
-A pull request merges only after CI has tested it with the latest `main`.
-If `main` changed a code file that the pull request also changes after the
-pull request's CI started, merge `main` into the branch again and let CI
-run again.
+Pull requests merge through GitHub's merge queue. The queue tests each pull
+request on top of `main` and every pull request queued ahead of it, under
+the same required checks (Linux, macOS, Workflows and Content), and merges
+it only if they pass. A pull request whose checks fail there leaves the
+queue, and the ones behind it are tested again without it. The Content
+check on a queued commit checks the tree only; the pull request's title and
+body passed it before the pull request was queued.
 
 While the Linux check on `main` fails, merge only the fix for that failure.
 
@@ -94,6 +97,9 @@ event:
   `scripts/test-foreign-home.sh`). The dry runs took about 11 minutes of
   an 18-minute macOS job. A pull request that changes only Markdown builds
   nothing.
+- **A merge-queue commit** follows the pull request's rules, judged on
+  every change from the queue's base on `main` to that commit, so a
+  benchmark change in a pull request queued ahead runs the dry runs.
 - **A push to `main`** that adds one commit, as a squash merge does,
   follows the same rule for the dry runs. A push of several commits runs
   them, and it always builds and runs the release binary.
