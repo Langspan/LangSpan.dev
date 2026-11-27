@@ -1670,18 +1670,23 @@ class StandinHooks(Temporary):
             except (ProcessLookupError, PermissionError):
                 pass
 
-    def assert_stopped(self, heartbeat):
-        """HEARTBEAT stops growing within a bound, and stays the same for a
-        second after that, many times the child's 0.05 s beat."""
+    def assert_stopped(self, group, heartbeat):
+        """Every process in the hook's process GROUP is gone within a bound,
+        and HEARTBEAT doesn't change after that. Waiting for the writer to
+        exit, not for a quiet spell, keeps a write in flight when the signal
+        landed from failing the test."""
         deadline = time.monotonic() + 10
-        size = heartbeat.stat().st_size if heartbeat.exists() else 0
         while True:
-            time.sleep(1)
-            now = heartbeat.stat().st_size if heartbeat.exists() else 0
-            if now == size:
-                return
-            self.assertLess(time.monotonic(), deadline, "the hook's child is still writing %s" % heartbeat)
-            size = now
+            try:
+                os.killpg(group, 0)
+            except ProcessLookupError:
+                break
+            self.assertLess(time.monotonic(), deadline,
+                            "the hook's process group %d is still running" % group)
+            time.sleep(0.05)
+        size = heartbeat.stat().st_size
+        time.sleep(0.2)
+        self.assertEqual(heartbeat.stat().st_size, size, "%s grew after its writer exited" % heartbeat)
 
     def test_terminating_the_standin_stops_the_hook_it_is_running(self):
         # The runner ends an attempt by signaling the stand-in's process
