@@ -200,7 +200,7 @@ fn usable(name: &str) -> Option<String> {
     (!name.is_empty()
         && name.len() <= MAX_TEST_NAME_BYTES
         && !name.chars().any(char::is_control)
-        && !crate::hook::contains_secret(name))
+        && !crate::text::redact::contains_secret(name))
     .then(|| name.to_owned())
 }
 

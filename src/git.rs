@@ -224,7 +224,8 @@ pub fn said(errors: &[u8]) -> String {
         })
         .filter(|line| !line.is_empty())
         .collect();
-    let mut kept = crate::redact::redact(&lines[lines.len().saturating_sub(LINES)..].join(" | "));
+    let mut kept =
+        crate::text::redact::redact(&lines[lines.len().saturating_sub(LINES)..].join(" | "));
     if kept.len() > SAID_LIMIT {
         let mut start = kept.len() - SAID_LIMIT;
         while !kept.is_char_boundary(start) {

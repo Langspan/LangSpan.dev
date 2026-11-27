@@ -174,7 +174,7 @@ pub enum Message {
 /// A check's command may not carry what looks like a secret: it is stored
 /// in the event log as it is, to be run again.
 pub fn refuse_secrets(argv: &[String]) -> Result<(), String> {
-    if crate::hook::contains_secret(&argv.join(" ")) {
+    if crate::text::redact::contains_secret(&argv.join(" ")) {
         return Err(
             "this command looks like it holds a secret (a token, password or key); LangSpan stores the command to run it again, so pass the secret through your environment or a script instead. Nothing was changed".into(),
         );
@@ -1143,7 +1143,7 @@ fn tail(bytes: &[u8], cut: bool) -> String {
         None if cut => &[],
         _ => bytes,
     };
-    let text = crate::hook::redact(&String::from_utf8_lossy(bytes));
+    let text = crate::text::redact::redact(&String::from_utf8_lossy(bytes));
     let lines: Vec<String> = text
         .lines()
         .map(|line| {
