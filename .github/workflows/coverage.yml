@@ -26,8 +26,8 @@ jobs:
   coverage:
     name: Coverage
     runs-on: ${{ vars.LINUX_RUNNER || 'ubuntu-24.04' }}
-    # A cold build of the instrumented tests, cargo-nextest and
-    # cargo-llvm-cov, then the whole suite once.
+    # A cold build of the instrumented tests and cargo-llvm-cov, then the
+    # whole suite once.
     timeout-minutes: 60
     permissions:
       contents: read
