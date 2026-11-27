@@ -1,9 +1,8 @@
-lines	4016
+lines	3360
 pub	63
 fn	execute	273
 fn	lifecycle	290
 fn	pre	174
-fn	shell_post	194
 edge	adopt
 edge	antigravity
 edge	breaks
