@@ -66,5 +66,8 @@ not. It failed before the change.
 - A coordinator restarted on another build starts whatever its receipts hold;
   only retries of unreadable receipts' requests are refused.
 - A field a newer peer adds is invisible to an older one until it upgrades.
+- On the internal protocol, a client and daemon of different builds agree
+  on named capabilities, not one version per feature
+  ([ADR 0037](0037-protocol-capabilities.md)).
 - The golden stores are binary SQLite files in the repository, 188 KiB in
   all; they hold temporary demo paths and no personal data.

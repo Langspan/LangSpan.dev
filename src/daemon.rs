@@ -3820,6 +3820,7 @@ mod unix {
         request: Request,
     ) -> Response {
         let version = request.version;
+        let granted = protocol::Capabilities::negotiate(version, request.capabilities.as_deref());
         let request_id = request.request_id;
         let command = request.command;
         if !protocol::answers(version) {
@@ -4010,15 +4011,15 @@ mod unix {
         match store.execute(&request_id, &command, &prepared, now_ms()) {
             Ok(mut execution) => {
                 // A record given in parts is cut from its JSON in the
-                // client's version, which the reply's own reshaping cannot
+                // client's shape, which the reply's own reshaping cannot
                 // reach (review comment 4712860167).
-                if version < PROTOCOL_VERSION
+                if granted != protocol::Capabilities::ALL
                     && let Command::StatusRecords { after, page_bytes } = &command
                     && matches!(execution.outcome, Outcome::StatusRecords { .. })
                 {
                     execution.outcome =
                         store.status_page(after.as_deref(), *page_bytes, |record| {
-                            protocol::encode_record_for(version, record)
+                            protocol::encode_record_with(granted, record)
                                 .map_err(|error| error.to_string())
                         });
                 }
@@ -4080,11 +4081,16 @@ mod unix {
         // Answered in the version the client asked in, and in that
         // version's shape; a request that does not parse, in the version it
         // names when the daemon answers that one.
+        // So are the capabilities it named, of a request that does not
+        // parse too, so that its client can ask again with those granted
+        // (ADR 0037).
         let mut asked = PROTOCOL_VERSION;
+        let mut named: Option<Vec<String>> = None;
         let mut reply = match timeout(Duration::from_millis(config.io_timeout_ms), read).await {
             Ok(Ok(bytes)) => match serde_json::from_slice::<Request>(&bytes) {
                 Ok(mut request) => {
                     asked = request.version;
+                    named.clone_from(&request.capabilities);
                     // Clients redact before sending; a client that did not
                     // still cannot have a secret recorded.
                     crate::hook::redact_command(&mut request.command);
@@ -4121,13 +4127,16 @@ mod unix {
                     }
                 }
                 Err(_) => {
-                    if let Some(version) = serde_json::from_slice::<serde_json::Value>(&bytes)
-                        .ok()
-                        .and_then(|request| request.get("version")?.as_u64())
+                    let request = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
+                    let field = |key| request.as_ref().and_then(|request| request.get(key));
+                    if let Some(version) = field("version")
+                        .and_then(serde_json::Value::as_u64)
                         .and_then(|version| u16::try_from(version).ok())
                     {
                         asked = version;
                     }
+                    named = field("capabilities")
+                        .and_then(|names| serde_json::from_value(names.clone()).ok());
                     error(
                         String::new(),
                         0,
@@ -4148,7 +4157,8 @@ mod unix {
             asked = PROTOCOL_VERSION;
         }
         reply.version = asked;
-        let bytes = protocol::encode_for(asked, &reply).or_else(|_| {
+        let granted = protocol::Capabilities::negotiate(asked, named.as_deref());
+        let bytes = protocol::encode_with(granted, named.as_deref(), &reply).or_else(|_| {
             let mut too_large = error(
                 reply.request_id,
                 reply.generation,
@@ -5344,6 +5354,74 @@ mod unix {
             assert!(!partial(&solo, &state));
             drop((index, solo));
             fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    #[cfg(test)]
+    mod capability_tests {
+        use super::*;
+        use std::io::Write;
+
+        /// ADR 0037, against this daemon on a real socket: it grants the
+        /// names it knows and says which only when it granted fewer than
+        /// were named, including to a request it could not read.
+        #[test]
+        fn the_daemon_names_what_it_granted_only_when_fewer_than_asked() {
+            let directory = std::env::temp_dir().join(format!("ls-caps-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&directory);
+            let state_dir = directory.clone();
+            std::thread::spawn(move || {
+                let runtime = tokio::runtime::Runtime::new().unwrap();
+                let _ = runtime.block_on(run(state_dir));
+            });
+            let socket = directory.join("daemon.sock");
+            let started = Instant::now();
+            while !socket.exists() {
+                assert!(started.elapsed() < Duration::from_secs(20), "no socket");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let ask = |request: serde_json::Value| -> serde_json::Value {
+                let mut stream = std::os::unix::net::UnixStream::connect(&socket).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(10)))
+                    .unwrap();
+                writeln!(stream, "{request}").unwrap();
+                serde_json::from_slice(&protocol::read_frame(stream).unwrap()).unwrap()
+            };
+            let all = protocol::Capabilities::ALL.names();
+            let with = |command: serde_json::Value, names: &[String]| {
+                serde_json::json!({"version": PROTOCOL_VERSION, "request_id": "caps",
+                    "command": command, "capabilities": names})
+            };
+            let version = serde_json::json!({"op": "version"});
+
+            let reply = ask(with(version.clone(), &all));
+            assert!(reply.get("capabilities").is_none(), "{reply}");
+            let reply = ask(serde_json::json!({"version": PROTOCOL_VERSION,
+                "request_id": "caps", "command": version}));
+            assert!(reply.get("capabilities").is_none(), "{reply}");
+
+            let mut later = all.clone();
+            later.push("from_a_later_build".into());
+            let reply = ask(with(version, &later));
+            assert_eq!(reply["capabilities"], serde_json::json!(all), "{reply}");
+            assert_eq!(reply["outcome"]["type"], "version", "{reply}");
+
+            // A field of a capability this daemon lacks fails the request.
+            let unread = serde_json::json!({"op": "version", "from_a_later_build": true});
+            let fewer = &all[1..];
+            let reply = ask(with(unread, fewer));
+            assert_eq!(reply["outcome"]["code"], "invalid_request", "{reply}");
+            assert!(reply.get("capabilities").is_none(), "{reply}");
+            let reply = ask(serde_json::json!({"version": PROTOCOL_VERSION,
+                "request_id": "caps", "command": {"op": "version", "x": 1},
+                "capabilities": later}));
+            assert_eq!(reply["outcome"]["code"], "invalid_request", "{reply}");
+            assert_eq!(reply["capabilities"], serde_json::json!(all), "{reply}");
+            // Without the request ID, as the client's fallback tests
+            // answer (review comment 4715859499).
+            assert_eq!(reply["request_id"], "", "{reply}");
+            fs::remove_dir_all(&directory).unwrap();
         }
     }
 }
