@@ -33,7 +33,20 @@ library's `TcpListener`: no new dependency. It serves `GET /` (one page with its
 script and style inline and nothing loaded from anywhere) and
 `GET /api/state` (the view as JSON, with this local month's refusal count as
 `refusals_this_month`, the fields `langspan count --json` prints; see
-[ADR 0019](0019-person-facing-surfaces-and-usage-accounting.md), H5). It reads only a request head of at most
+[ADR 0019](0019-person-facing-surfaces-and-usage-accounting.md), H5), and
+`GET /api/events?after=SEQ&limit=N` (issue #500): a page of the coordinator's
+event log through the existing `Command::Events`, one row per stored event in
+seq order, so a poll from the last `next` misses none. `after` defaults to 0
+and `limit` to 100, at most 1000; anything else is a 400 that says the range.
+The page is `{"available": true, "version": 1, "next": SEQ, "events": [...]}`
+and each row is an allowlist: `seq`, `type`, the first `session_id`,
+`workspace_id` and `at_ms` the event names, and its `path` and `paths`
+values, at most 8 and every string clipped as in the view (`more_paths`
+counts the rest). Every other field, and any added later, is left out, so
+prompt summaries, message and note text, task lines and publication payloads
+are never sent; the page still shows message and note text only through
+`/api/state`. `--demo` answers it with 404, and an unreachable coordinator
+with 503 and `available: false`. It reads only a request head of at most
 8 KiB and 64 headers, within 2 s per read and 5 s in total; refuses every other
 method, any request with a body, and unknown paths; and serves at most 16
 connections at once, closing the rest unanswered.
@@ -134,9 +147,9 @@ page is plain HTTP, so anyone on the path can read the token and the view.
 - No TLS. Off the machine, the transport's security is the tunnel's.
 - The counts are what one bounded view reports, not daily totals or measured
   outcomes. Refusals are a lower bound when the store found more than it
-  passed. A daily count through `langspan today` and a cursor-based,
-  read-only event feed remain possible later additions; the page does not
-  build a chronology from successive polls.
+  passed. A daily count through `langspan today` remains a possible later
+  addition. The page does not yet read `/api/events`; until it does, it does
+  not build a chronology from successive polls.
 - A binary older than this change cannot decode a newer coordinator's view,
   as with every earlier addition to it; the dashboard and the daemon normally
   run from one binary.

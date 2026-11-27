@@ -1,0 +1,1 @@
+none: says the client ignores fields it does not know in a response's objects that are not stored ([ADR 0015](0015-version-tolerance.md), issue #332)

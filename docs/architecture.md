@@ -41,6 +41,52 @@ coordination or an owner grant, the commands that act with the owner's
 authority beyond the coordination state
 ([ADR 0039](adr/0039-caller-authority.md)).
 
+### Module map
+
+The `langspan` crate is moving from flat top-level modules into namespaces,
+grouped by capability, in four layers. A namespace may depend on namespaces in
+lower layers. Within one layer it may depend only on the namespaces listed
+below. `src/lib.rs` keeps one block per namespace, and
+[`scripts/ratchets/namespaces.tsv`](../scripts/ratchets/namespaces.tsv) gives
+each of today's modules its layer. An edge that breaks these rules is recorded
+debt in that module's ratchet baseline
+([ratchets](development-process.md#ratchets)). A module that has moved keeps
+its old path as a re-export in the compatibility block at the end of
+`src/lib.rs` until its importers are repointed.
+
+| Layer | Namespace | Holds |
+| --- | --- | --- |
+| utility | `text` | text helpers and redaction |
+| | `ids` | ids, `sha256`, `registration` |
+| | `time` | `clock`, `local_day`, `zone` |
+| | `protocol` | the wire protocol and page budgets |
+| | `regions` | `regions`, `breaks` |
+| | `hosts` | the host catalog and the hook's port types: `vendor`, `tool_names` |
+| infrastructure | `fs` | `local`, `file_state`, `input` |
+| | `git` | `git`, `sha1`, `observer`, `remote` |
+| | `process` | child processes |
+| | `ipc` | `client`, `autostart` |
+| | `store` | the SQLite event store |
+| | `graph` | the source index: `graph`, `index_file` |
+| | `shell` | shell command parsing and snapshots |
+| | `install` | `install`, install detection (today's `hosts`), `user_install`, `guidance`, `service`, `binary_version` |
+| application | `ownership` | `journal`, `lines`, `reformat`, `formatter`, `adopt`, `commit` |
+| | `checks` | `integrate`, `landing`, `rewrite`, `auto_check`, `test_output`, `definitions` |
+| | `briefing` | the briefing and its render: `since`, `recent`, `trail` |
+| | `person` | `today`, `count`, `report`, `status_line`, `notify`, `dashboard` |
+| | `hook` | the hook pipeline and its host adapters: `claude_code`, `codex`, `cursor`, `antigravity`, `gemini_removed`, `between_steps`, `spool`, `wait` |
+| interface | `daemon` | the daemon |
+| | `mcp` | the MCP adapter |
+| | `cli` | the CLI, `demo`, `skill` |
+
+The edges allowed within a layer are: `regions` to `text` and `ids`;
+`hosts` to `regions`; `git`, `ipc`, `shell` and `install` to `fs`; `shell`,
+`store` and `graph` to `git`; `install` to `ipc`; `briefing` to `ownership`;
+`person` to `briefing`; `hook` to `ownership` and `briefing`; and `cli` to
+`mcp` and `daemon`. Only `daemon` may name `store` and `graph`, and only `cli`
+may name `hook`, `daemon` and `mcp`. A host adapter in `hook` depends only on
+the `hook` root, `hosts`, `regions`, `ids`, `text` and `fs`.
+
 ## Decisions by milestone
 
 Moved unchanged in substance from AGENTS.md on 26 November 2026. Later

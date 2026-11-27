@@ -1,0 +1,1 @@
+Send a local message to one session or every other session in the workspace

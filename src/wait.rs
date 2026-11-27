@@ -9,6 +9,7 @@
 //! the host delivers twice finds the same admission; marks a day old are
 //! removed at a later mark.
 
+pub use crate::ids::{admission_id, record_id};
 use std::path::{Path, PathBuf};
 
 const DIR: &str = "waited";
@@ -17,18 +18,6 @@ const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
 fn path(state_dir: &Path, operation_id: &str) -> PathBuf {
     let name = crate::sha256::hex(&crate::sha256::digest(operation_id.as_bytes()));
     state_dir.join(DIR).join(&name[..32])
-}
-
-/// The request ID, and so the admission ID, of the admission asked for
-/// after a wait.
-pub fn admission_id(first: &str) -> String {
-    crate::ids::wire_id("admit-waited", &[first])
-}
-
-/// The request ID of the record of how the wait that `first` started
-/// ended.
-pub fn record_id(first: &str) -> String {
-    crate::ids::wire_id("waited", &[first])
 }
 
 /// The admission the post-tool run of `operation_id` observes: the one

@@ -60,9 +60,9 @@ pub use count::{
 };
 pub use dashboard::{
     AgentRow, AgentState, ChangeRow, CheckRow, DASHBOARD_AGENTS, DASHBOARD_ITEMS, DASHBOARD_PATHS,
-    DASHBOARD_TEXT, DENIAL_WINDOW, Dashboard, DenialRecord, DenialRow, Denials, EditRow,
-    LandingRow, MessageRow, NoteRow, NoticeRow, OverlapRow, PublishRow, RecentFile, ScanRow,
-    WorkspaceRow, dashboard_denials,
+    DASHBOARD_TEXT, DENIAL_WINDOW, Dashboard, DashboardEvent, DashboardEvents, DenialRecord,
+    DenialRow, Denials, EditRow, LandingRow, MessageRow, NoteRow, NoticeRow, OverlapRow,
+    PublishRow, RecentFile, ScanRow, WorkspaceRow, dashboard_denials,
 };
 pub use event::Event;
 pub use flaky::{

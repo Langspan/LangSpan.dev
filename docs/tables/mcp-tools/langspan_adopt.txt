@@ -1,0 +1,1 @@
+Take over an ended session's uncommitted lines in the same workspace; refused for a live session or another workspace's

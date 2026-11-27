@@ -70,9 +70,47 @@ fn only_the_exact_value_skip_skips_the_dry_runs() {
     assert!(!dry_runs_skipped(None));
 }
 
+/// Every test in `test_driver.py` is selected by a test in this file, so
+/// splitting a class for parallel runs cannot drop a test from the suite.
+/// A filter here (`Some("…")` or `dry_run("…")`) selects, as unittest's
+/// `-k` does, each `Class.test_name` it is a substring of. Reads the two
+/// sources only: no process.
+#[test]
+fn every_driver_test_is_run_by_a_test_here() {
+    let python = include_str!("../benchmarks/coordination/test_driver.py");
+    let rust = include_str!("benchmark_harness.rs");
+    let filters: Vec<&str> = ["Some(\"", "dry_run(\""]
+        .iter()
+        .flat_map(|call| rust.split(call).skip(1))
+        .filter_map(|rest| rest.split('"').next())
+        .filter(|filter| !filter.is_empty())
+        .collect();
+    let mut class = "";
+    let mut unselected = Vec::new();
+    for line in python.lines() {
+        if let Some(rest) = line.strip_prefix("class ") {
+            class = rest.split('(').next().unwrap_or(rest);
+        } else if let Some(rest) = line.strip_prefix("    def test_") {
+            let test = format!("{class}.test_{}", rest.split('(').next().unwrap_or(rest));
+            if !filters.iter().any(|filter| test.contains(filter)) {
+                unselected.push(test);
+            }
+        }
+    }
+    assert!(
+        unselected.is_empty(),
+        "no test in tests/benchmark_harness.rs runs: {unselected:?}"
+    );
+}
+
 #[test]
 fn runner_mechanics() {
     python_suite("test_runner.py", None);
+}
+
+#[test]
+fn stale_callers() {
+    python_suite("test_stale_callers.py", None);
 }
 
 #[test]
@@ -81,8 +119,31 @@ fn driver_planning_oracle_and_refusals() {
 }
 
 #[test]
+fn the_hook_log_wrapper() {
+    python_suite("test_driver.py", Some("HookLogWrapper"));
+}
+
+#[test]
+fn repair_records_and_summary() {
+    python_suite("test_driver.py", Some("RepairAndSummary"));
+}
+
+// `RefusalCollection`'s two tests each start a coordinator; separate Rust
+// tests let nextest run them side by side.
+#[test]
 fn a_real_refusal_reaches_the_run_record() {
-    python_suite("test_driver.py", Some("RefusalCollection"));
+    python_suite(
+        "test_driver.py",
+        Some("RefusalCollection.test_a_real_refusal_is_collected"),
+    );
+}
+
+#[test]
+fn a_pre_tool_hook_that_starts_late_refuses_nothing() {
+    python_suite(
+        "test_driver.py",
+        Some("RefusalCollection.test_a_pre_tool_hook_that_starts_late"),
+    );
 }
 
 #[test]
