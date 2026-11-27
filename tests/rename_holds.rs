@@ -6,6 +6,8 @@
 //! the real observer and index see it, and the real hook executable's exit
 //! and reply, against a real daemon.
 
+mod support;
+
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -235,20 +237,18 @@ fn a_rename_with_a_peers_uncommitted_caller_is_held_once_and_a_repeat_goes_throu
     // Alice renames parse_config. Until the index has Bob's file, her
     // write is admitted; each such attempt is reported failed.
     let renamed = CONFIG.replace("parse_config", "load_config");
-    let deadline = Instant::now() + WAIT;
     let mut call = 0;
-    let held = loop {
+    let held = support::wait_for("the rename to be held", WAIT, || {
         call += 1;
         let id = format!("a{call}");
         let run = w.write("app", "alice", &id, "src/config.rs", &renamed);
         if run.coverage == "held_rename" {
-            break (id, run);
+            return Ok((id, run));
         }
         assert_eq!(run.coverage, "admitted", "{}", run.detail);
         w.failed("app", "alice", &id, "src/config.rs", &renamed);
-        assert!(Instant::now() < deadline, "never held: {}", run.detail);
-        std::thread::sleep(Duration::from_millis(200));
-    };
+        Err(run.detail)
+    });
     let reason = held.1.reason();
     let expected = format!(
         r#""parse_config" (renamed to "load_config") is used in worktree "{}" (claude-code session bob, not committed): "src/main.rs""#,
