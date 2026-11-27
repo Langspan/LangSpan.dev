@@ -568,17 +568,15 @@ fn a_watcher_ends_quietly_at_its_bound() {
             .is_none_or(|text| !text.contains("Interface change"))
     );
     let config = langspan::claude_code::Config {
-        state_dir: w.base.join("state"),
-        workspace_id: "app".into(),
-        root: w.work(),
-        ttl_ms: 30_000,
-        budget: Duration::from_millis(1500),
         share_prompt: false,
         code_briefing: false,
-        presence: true,
         presence_window_ms: 600_000,
-        vendor: langspan::install::Vendor::ClaudeCode,
-        user_level: false,
+        ..langspan::claude_code::Config::new(
+            w.base.join("state"),
+            "app",
+            w.work(),
+            langspan::install::Vendor::ClaudeCode,
+        )
     };
     let limit = Duration::from_secs(3);
     let event = prompt_event(&w.work(), "alice").to_string();
