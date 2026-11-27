@@ -107,7 +107,7 @@ v[0-9]*.[0-9]*.[0-9]* | [0-9]*.[0-9]*.[0-9]*)
 	;;
 esac
 
-for tool in uname curl awk tar mktemp; do
+for tool in uname curl awk tar mktemp dirname; do
 	need "$tool"
 done
 target=$(detect_target)
@@ -167,17 +167,28 @@ chmod 0755 "$bin_dir/.langspan.install.$$"
 mv -f "$bin_dir/.langspan.install.$$" "$bin_dir/langspan"
 
 printf 'Installed %s to %s/langspan\n\nNext steps:\n' "$stem" "$bin_dir"
+# The langspan this shell would run is the first one on PATH. Folders are
+# compared after resolving symlinks, so a trailing slash or a linked folder
+# still counts as this folder.
+first=$(command -v langspan 2>/dev/null || true)
+here=$(CDPATH='' cd -- "$bin_dir" && pwd -P)
+there=
+case "$first" in
+*/*) there=$(CDPATH='' cd -- "$(dirname -- "$first")" 2>/dev/null && pwd -P || true) ;;
+esac
 step=1
-case ":${PATH:-}:" in
-*":$bin_dir:"*) ;;
-*)
-	printf '  %s. Add %s to PATH for this shell and new ones:\n' "$step" "$bin_dir"
+if [ "$there" != "$here" ]; then
+	if [ -n "$there" ]; then
+		printf '  %s. %s runs first, not this install. Put %s first on PATH\n' "$step" "$first" "$bin_dir"
+		printf '     for this shell and new ones:\n'
+	else
+		printf '  %s. Add %s to PATH for this shell and new ones:\n' "$step" "$bin_dir"
+	fi
 	# shellcheck disable=SC2016 # the line is printed for the user to run
 	printf '       export PATH="$HOME/.local/bin:$PATH"\n'
 	# shellcheck disable=SC2016
 	printf '       echo '\''export PATH="$HOME/.local/bin:$PATH"'\'' >> ~/.%src\n' "$(basename "${SHELL:-sh}")"
 	step=$((step + 1))
-	;;
-esac
+fi
 printf '  %s. Close Claude Code, then connect your agents: langspan setup\n' "$step"
 printf '  %s. See a refusal without an agent: langspan demo\n' "$((step + 1))"

@@ -27,7 +27,7 @@ The script does the following:
 2. Downloads `SHA256SUMS` and your target's archive over HTTPS.
 3. Checks the archive's SHA-256 against `SHA256SUMS` before it extracts anything.
 4. Copies `langspan` to `~/.local/bin`. It doesn't use root or change your shell startup files.
-5. Prints the next steps: add `~/.local/bin` to `PATH` if it isn't there, run `langspan setup`, then run `langspan demo`.
+5. Prints the next steps: add `~/.local/bin` to `PATH` if it isn't there, or put it first if an earlier `langspan` elsewhere on `PATH` would run instead (the script names that file), run `langspan setup`, then run `langspan demo`.
 
 The script doesn't run `langspan setup` itself. A failed download, a checksum that doesn't match or an unknown platform stops it with a message that says what failed and what to do; nothing is installed. Each release attaches the script as `install.sh`, and `SHA256SUMS` lists it.
 

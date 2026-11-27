@@ -954,6 +954,26 @@ below has been observed in a real run.
 | **Information disclosure**: build paths or tokens in the binary or logs | Paths remapped with `--remap-path-prefix`; checkouts do not persist credentials. The only secret is the release GitHub App's private key, held in Actions secrets and used only in the release-please job to mint a short-lived installation token for this repository, with contents, pull requests and issues write. No other step or job receives the token, and the app's OAuth client secrets are not used. | Anyone who can change `release.yml` on `main` can use the key; that already requires a reviewed merge. A leaked key mints tokens until it is revoked in the app's settings. |
 | **Elevation of privilege**: a pull request or a dependency gains write access | `permissions: {}` at the top of each workflow; each job names its own. Release jobs never run on `pull_request`. Signing permissions are only in jobs that compile nothing. | A maintainer merging the release pull request publishes whatever `main` holds. |
 
+## The install script
+
+[`scripts/install.sh`](../../scripts/install.sh), attached to each release,
+is the quickstart's one-line install. Piped to `sh`, it runs as the user and
+trusts what the release serves: it downloads `SHA256SUMS` and one archive,
+checks the archive's SHA-256, extracts one file and replaces
+`~/.local/bin/langspan`. The script itself is checked only by HTTPS; the
+user who wants more downloads it first and runs
+`gh attestation verify install.sh -R Langspan/LangSpan.dev`.
+
+| Threat | Control | Residual risk |
+| --- | --- | --- |
+| **Spoofing**: a server other than GitHub answers | Every download uses `curl --proto '=https' --tlsv1.2`, so a redirect to plain HTTP is refused; the URLs are fixed to this repository's releases. A test runs the script against a stand-in `curl` that refuses any call without `--proto =https`. | Whoever controls the release, or a certificate authority the system trusts, can serve any file. |
+| **Tampering**: an altered archive | The archive's SHA-256 must match its line in `SHA256SUMS` before it is extracted; a mismatch installs nothing. | `SHA256SUMS` comes from the same release as the archive, so the check catches a broken or partial download, not a replaced release. Provenance needs `gh attestation verify`, which the script does not run (see [Release pipeline](#release-pipeline)). |
+| **Tampering**: a crafted `SHA256SUMS` or archive writes outside the temporary folder | Exactly one listed name must match `langspan-v*-TARGET.tar.gz` with only `[0-9A-Za-z._-]`; only `NAME/langspan` is extracted, into a fresh `mktemp -d` folder removed on exit; the extracted file must be a regular file, not a symlink. Downloads are capped at 64 KiB and 256 MiB. A version argument must look like `v1.2.3`. The script never runs `eval`, `sudo` or a downloaded file. | `tar` itself parses the archive. |
+| **Tampering**: a failed install breaks the old binary | The new binary is copied next to the destination, made `0755`, then moved over it with a rename, so a running `langspan` is not overwritten in place and a failed copy leaves the old one. | A same-user process can change `~/.local/bin` meanwhile; same-user races are not an isolation boundary. |
+| **Spoofing**: an older `langspan` runs instead of the new one | After the install, the script finds the `langspan` the shell would run first on PATH, compares its folder with `~/.local/bin` after resolving symlinks, and when they differ names that file and prints the line that puts `~/.local/bin` first. It changes no shell startup file. | The user must run the printed line; a shell that has already looked up `langspan` may need `hash -r`. |
+| **Information disclosure** | The script sends only the download requests; it reads no credential and sends no telemetry. | GitHub sees the requests, as for any download. |
+| **Elevation of privilege** | No root: it writes only under `~/.local/bin` and the temporary folder, and doesn't run `langspan setup`. | Anyone who can write `~/.local/bin` can already replace the binary. |
+
 ## Mixed versions and `doctor`'s version check
 
 Roadmap I5 ([ADR 0025](../adr/0025-distribution-lifecycle-and-store-beyond-the-first-release.md#i5-mixed-versions-as-built))

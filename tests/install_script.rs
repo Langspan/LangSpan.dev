@@ -138,21 +138,28 @@ cat "$file" > "$out"
     }
 
     fn run(&self, os: &str, arch: &str, args: &[&str], path_has_bin: bool) -> Output {
-        let home = self.base.join("home");
         let stubs = self.base.join("stubs").display().to_string();
         let path = if path_has_bin {
             format!(
                 "{}:{stubs}:/usr/bin:/bin",
-                home.join(".local/bin").display()
+                self.base.join("home/.local/bin").display()
             )
         } else {
             format!("{stubs}:/usr/bin:/bin")
         };
+        self.run_args_path(os, arch, args, &path)
+    }
+
+    fn run_with_path(&self, os: &str, arch: &str, path: &str) -> Output {
+        self.run_args_path(os, arch, &[], path)
+    }
+
+    fn run_args_path(&self, os: &str, arch: &str, args: &[&str], path: &str) -> Output {
         Command::new("/bin/sh")
             .arg(repo("scripts/install.sh"))
             .args(args)
             .env_clear()
-            .env("HOME", &home)
+            .env("HOME", self.base.join("home"))
             .env("SHELL", "/bin/zsh")
             .env("PATH", path)
             .env("TMPDIR", self.base.join("tmp"))
@@ -427,4 +434,100 @@ fn the_docs_lead_with_the_one_line_install_and_the_release_attaches_it() {
         workflow.contains("dist/install.sh"),
         "the release workflow must attach install.sh"
     );
+}
+
+/// An earlier `langspan` in its own folder, for PATH to find first.
+fn shadow(fixture: &Fixture) -> PathBuf {
+    let earlier = fixture.base.join("earlier-bin");
+    fs::create_dir_all(&earlier).unwrap();
+    write_executable(&earlier.join("langspan"), "#!/bin/sh\necho older\n");
+    earlier
+}
+
+#[test]
+fn an_earlier_langspan_first_on_path_is_named_and_put_behind() {
+    // ~/.local/bin after the other folder, absent, or after it with a
+    // trailing slash: each time the printed steps must reach this install.
+    for (name, order) in [
+        ("shadow-after", ["earlier", "bin"].as_slice()),
+        ("shadow-absent", &["earlier"]),
+        ("shadow-slash", &["earlier", "bin/"]),
+    ] {
+        let fixture = Fixture::new(name);
+        let earlier = shadow(&fixture);
+        let bin = fixture.base.join("home/.local/bin");
+        let mut parts: Vec<String> = order
+            .iter()
+            .map(|part| match *part {
+                "earlier" => earlier.display().to_string(),
+                "bin" => bin.display().to_string(),
+                _ => format!("{}/", bin.display()),
+            })
+            .collect();
+        parts.push(format!(
+            "{}:/usr/bin:/bin",
+            fixture.base.join("stubs").display()
+        ));
+        let output = fixture.run_with_path("Linux", "x86_64", &parts.join(":"));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{name}");
+        assert!(
+            stdout.contains(&format!("{}/langspan runs first", earlier.display())),
+            "{name}: the earlier binary is named: {stdout}"
+        );
+        assert!(
+            stdout.contains("export PATH=\"$HOME/.local/bin:$PATH\""),
+            "{name}: {stdout}"
+        );
+        assert!(stdout.contains("2. Close Claude Code"), "{name}: {stdout}");
+    }
+}
+
+#[test]
+fn this_install_first_on_path_needs_no_path_step() {
+    for name in ["first-plain", "first-slash", "first-link"] {
+        let fixture = Fixture::new(name);
+        let earlier = shadow(&fixture);
+        let bin = fixture.base.join("home/.local/bin").display().to_string();
+        let entry = match name {
+            "first-plain" => bin,
+            "first-slash" => format!("{bin}/"),
+            _ => {
+                let link = fixture.base.join("linked-bin");
+                std::os::unix::fs::symlink(&bin, &link).unwrap();
+                link.display().to_string()
+            }
+        };
+        let path = format!(
+            "{entry}:{}:{}:/usr/bin:/bin",
+            earlier.display(),
+            fixture.base.join("stubs").display()
+        );
+        let output = fixture.run_with_path("Linux", "x86_64", &path);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{name}");
+        assert!(!stdout.contains("export PATH"), "{name}: {stdout}");
+        assert!(!stdout.contains("runs first"), "{name}: {stdout}");
+        assert!(stdout.contains("1. Close Claude Code"), "{name}: {stdout}");
+    }
+}
+
+#[test]
+fn the_threat_model_covers_the_install_script() {
+    let text = fs::read_to_string(repo("docs/security/threat-model.md")).unwrap();
+    let start = text
+        .find("\n## The install script\n")
+        .expect("the threat model has an install script section");
+    let rest = &text[start + 1..];
+    let section = &rest[..rest[3..].find("\n## ").map_or(rest.len(), |end| end + 3)];
+    for needed in [
+        "scripts/install.sh",
+        "SHA256SUMS",
+        "gh attestation verify",
+        "--proto",
+        "rename",
+        "PATH",
+    ] {
+        assert!(section.contains(needed), "the section lacks {needed:?}");
+    }
 }
