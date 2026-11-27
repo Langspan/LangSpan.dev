@@ -759,7 +759,8 @@ fn coverage_runs_nightly_reports_a_drop_and_is_not_a_required_check() {
     let script = read("scripts/coverage.sh");
     for line in [
         "export LLVM_PROFILE_FILE_NAME='langspan-%c%16m.profraw'",
-        "cargo llvm-cov nextest --workspace --locked --no-report",
+        "eval \"$(cargo llvm-cov show-env --sh)\"",
+        "cargo nextest run --workspace --locked || status=$?",
         "export_lcov production.lcov test\n",
         "export_lcov all.lcov test lib bin proc-macro\n",
     ] {

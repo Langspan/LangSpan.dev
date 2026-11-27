@@ -43,23 +43,33 @@ export RUSTFLAGS
 export LANGSPAN_BENCH_DRY_RUNS=skip
 export NEXTEST_USER_CONFIG_FILE=none
 
+# One instrumented environment for the build, the run and the listing, in a
+# target directory of its own: show-env puts the profiles in
+# CARGO_LLVM_COV_TARGET_DIR, which follows CARGO_TARGET_DIR.
+export CARGO_TARGET_DIR=$PWD/target/llvm-cov-target
+eval "$(cargo llvm-cov show-env --sh)"
+target=$CARGO_LLVM_COV_TARGET_DIR
 cargo llvm-cov clean --workspace
 status=0
-cargo llvm-cov nextest --workspace --locked --no-report || status=$?
+cargo nextest run --workspace --locked || status=$?
 
-# The same build environment, so nextest lists the binaries just built.
-eval "$(cargo llvm-cov show-env --export-prefix)"
-target=${CARGO_LLVM_COV_TARGET_DIR:-$PWD/target/llvm-cov-target}
 mkdir -p "$out"
-"$LLVM_PROFDATA" merge -sparse "$target"/*.profraw -o "$out/langspan.profdata"
-CARGO_TARGET_DIR=$target cargo nextest list --workspace --locked \
+shopt -s nullglob
+profiles=("$target"/*.profraw)
+if [ "${#profiles[@]}" -eq 0 ]; then
+  echo "coverage.sh: the tests wrote no profiles to $target; check LLVM_PROFILE_FILE (${LLVM_PROFILE_FILE:-unset})" >&2
+  exit 1
+fi
+"$LLVM_PROFDATA" merge -sparse "${profiles[@]}" -o "$out/langspan.profdata"
+# The binaries just built; nextest rebuilds nothing in the same environment.
+cargo nextest list --workspace --locked \
   --list-type binaries-only --message-format json >"$out/binaries.json"
 
 # export FILE KIND...: the lcov export over the binaries of those kinds.
 export_lcov() {
   local file=$1
   shift
-  local objects=(-object "$target/debug/langspan")
+  local objects=(-object "$CARGO_TARGET_DIR/debug/langspan")
   while IFS= read -r binary; do
     objects+=(-object "$binary")
   done < <(python3 -I -c '
