@@ -38,7 +38,23 @@ pub fn state_json(state: &State) -> String {
     if let Value::Object(fields) = &mut value {
         fields.retain(|_, field| !is_empty(field));
     }
-    serde_json::to_string_pretty(&value).expect("a state serializes") + "\n"
+    serde_json::to_string_pretty(&sorted(value)).expect("a state serializes") + "\n"
+}
+
+/// `value` with every object's keys in sorted order. The workspace build
+/// enables serde_json's `preserve_order` (the root crate needs it) and
+/// `langspan-core` alone does not, so without this the same replay prints
+/// struct fields in declaration order in one build and sorted in the other.
+fn sorted(value: Value) -> Value {
+    match value {
+        Value::Object(fields) => {
+            let mut fields: Vec<(String, Value)> = fields.into_iter().collect();
+            fields.sort_by(|(a, _), (b, _)| a.cmp(b));
+            Value::Object(fields.into_iter().map(|(k, v)| (k, sorted(v))).collect())
+        }
+        Value::Array(items) => Value::Array(items.into_iter().map(sorted).collect()),
+        other => other,
+    }
 }
 
 fn is_empty(value: &Value) -> bool {
@@ -114,4 +130,19 @@ fn difference(expected: &str, actual: &str) -> String {
         shown.push(format!("... {more} more lines"));
     }
     shown.join("\n")
+}
+
+#[test]
+fn a_snapshot_sorts_keys_whatever_the_serde_json_features() {
+    // `preserve_order` keeps this insertion order; `sorted` must not.
+    let mut inner = serde_json::Map::new();
+    inner.insert("b".into(), json!(1));
+    inner.insert("a".into(), json!([{"d": 1, "c": 2}]));
+    let mut outer = serde_json::Map::new();
+    outer.insert("z".into(), Value::Object(inner));
+    outer.insert("y".into(), json!(0));
+    assert_eq!(
+        serde_json::to_string(&sorted(Value::Object(outer))).expect("a value serializes"),
+        r#"{"y":0,"z":{"a":[{"c":2,"d":1}],"b":1}}"#
+    );
 }
