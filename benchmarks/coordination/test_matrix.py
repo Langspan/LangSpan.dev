@@ -190,6 +190,17 @@ class MatrixTests(unittest.TestCase):
                 self.assertFalse((out / "discovered_change-n2-s1-worktrees.driver.log").exists())
 
 
+def live_processes(pids):
+    """Those of PIDS that can still run, from one `ps` listing. A zombie
+    can't; where PID 1 does not reap orphans it stays listed, so
+    `kill(pid, 0)` alone would report it running."""
+    listing = subprocess.run(["ps", "-A", "-o", "pid=,stat="], capture_output=True, text=True, check=True,
+                             timeout=10).stdout
+    running = {int(fields[0]) for fields in (line.split() for line in listing.splitlines())
+               if len(fields) >= 2 and fields[0].isdigit() and not fields[1].startswith("Z")}
+    return [pid for pid in pids if pid in running]
+
+
 class StopTests(unittest.TestCase):
     """Child processes: what is verified is that stopping a trial stops the
     driver and the sessions it started in process groups of their own."""
@@ -228,16 +239,33 @@ class StopTests(unittest.TestCase):
 
     def assert_gone(self, pids):
         deadline = time.monotonic() + 15
-        for pid in pids:
-            while True:
-                try:
-                    os.kill(pid, 0)
-                except ProcessLookupError:
-                    break
-                self.assertLess(time.monotonic(), deadline, "process %d is still running" % pid)
-                time.sleep(.05)
+        while True:
+            running = live_processes(pids)
+            if not running:
+                break
+            self.assertLess(time.monotonic(), deadline, "process %d is still running" % running[0])
+            time.sleep(.05)
         # Gone: tearDown must not signal these PIDs, which may be reused.
         self.pids.unlink()
+
+    def test_a_zombie_counts_as_stopped_and_a_running_process_does_not(self):
+        # Where PID 1 does not reap orphans, a stopped session stays a zombie
+        # and `kill(pid, 0)` still succeeds. An unreaped child of this test
+        # is the same zombie on every platform.
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+        try:
+            self.assertEqual(live_processes([child.pid]), [child.pid])
+            child.kill()
+            deadline = time.monotonic() + 15
+            while live_processes([child.pid]):
+                self.assertLess(time.monotonic(), deadline, "process %d did not exit" % child.pid)
+                time.sleep(.05)
+            os.kill(child.pid, 0)  # Still a zombie: not yet reaped.
+            self.pids.write_text(str(child.pid))
+            self.assert_gone([child.pid])
+        finally:
+            child.kill()
+            child.wait()
 
     def test_a_timed_out_trial_stops_the_sessions_in_their_own_groups(self):
         self.assertIsNone(matrix.run_trial(self.argv, self.root / "log", timeout=2))
