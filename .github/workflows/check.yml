@@ -40,6 +40,10 @@ env:
   # the demonstration. The merge queue is the gate, so nothing reaches main
   # without the full lane.
   LANGSPAN_CHECK_LANE: ${{ github.event_name == 'pull_request' && 'fast' || 'full' }}
+  # tests/auto_checks.rs runs real cargo, go and pytest checks. Without a
+  # runner a test skips locally and says so; here it fails instead, so a
+  # green run means they ran (the steps below install Go and pytest).
+  LANGSPAN_REQUIRE_TOOLS: "1"
   # cargo-nextest (.config/nextest.toml) writes
   # target/nextest/<profile>/junit.xml. No retry on a pull request, so a
   # flaky test shows there; two in the merge queue and on main, so one
@@ -54,6 +58,10 @@ env:
   # (docs/security/threat-model.md#ci-build-cache). The key names the
   # runner's OS and architecture, the job, the toolchain, the lockfile and
   # the tool versions; bump `v1` in it to drop every entry.
+  # actions/cache versions an entry by this path list, so changing the list
+  # empties the build cache for every branch until the change reaches main:
+  # do it in a pull request of its own. Another tool gets its own cache
+  # step, as cargo-audit does.
   CACHE_PATHS: |
     ~/.cargo/registry/index
     ~/.cargo/registry/cache
@@ -76,8 +84,8 @@ concurrency:
 # Time limits by lane: the full lane in the merge queue gets 15 minutes;
 # main and the nightly run also build the release binary, so 30. The fast
 # lane gets 10, not the 6 its 3-minute target suggests, because building
-# cargo-nextest when the job's cache misses takes minutes on a standard
-# runner (scripts/install-ci-tools.sh).
+# cargo-nextest or cargo-audit when its cache misses takes minutes on a
+# standard runner (scripts/install-ci-tools.sh).
 jobs:
   linux:
     name: Linux
@@ -128,11 +136,40 @@ jobs:
           path: ${{ env.CACHE_PATHS }}
           key: rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock', 'scripts/install-ci-tools.sh') }}
           restore-keys: ${{ github.ref != 'refs/heads/main' && format('rust-v1-{0}-{1}-{2}-{3}-', runner.os, runner.arch, github.job, hashFiles('rust-toolchain.toml')) || '' }}
-      - name: Install the dependency policy and unused-dependency checkers and the test runner
+      # cargo-audit is built, not downloaded, so it is cached too, in an
+      # entry of its own that leaves CACHE_PATHS alone. The same rules: only
+      # main saves, and main restores only its exact key.
+      - name: Restore cargo-audit
+        id: audit-cache
+        if: steps.changes.outputs.code == 'true'
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ~/.cache/langspan-ci-tools/cargo-audit
+          key: cargo-audit-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('scripts/install-ci-tools.sh') }}
+          restore-keys: ${{ github.ref != 'refs/heads/main' && format('cargo-audit-v1-{0}-{1}-{2}-', runner.os, runner.arch, github.job) || '' }}
+      - name: Install the dependency policy, advisory and unused-dependency checkers and the test runner
         if: steps.changes.outputs.code == 'true'
         run: |
           bash scripts/install-ci-tools.sh "$HOME/.cache/langspan-ci-tools"
           echo "$HOME/.cache/langspan-ci-tools" >> "$GITHUB_PATH"
+      # Go and pytest for the tests in tests/auto_checks.rs that run a real
+      # `go test` and pytest; LANGSPAN_REQUIRE_TOOLS fails them without
+      # these. Only the full lane runs those tests. pytest goes into a
+      # virtual environment whose python3 comes first on PATH.
+      - name: Install Go for the real go test check
+        if: steps.changes.outputs.code == 'true' && github.event_name != 'pull_request'
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.24"
+          cache: false
+      - name: Install pytest for the real pytest check
+        if: steps.changes.outputs.code == 'true' && github.event_name != 'pull_request'
+        run: |
+          python3 -m venv "$RUNNER_TEMP/pytest"
+          "$RUNNER_TEMP/pytest/bin/python3" -m pip install --disable-pip-version-check pytest==8.4.2
+          echo "$RUNNER_TEMP/pytest/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/pytest/bin/python3" -m pytest --version
+          go version
       - name: Check formatting, dependencies, lint, real integration tests and the demonstration
         if: steps.changes.outputs.code == 'true'
         env:
@@ -168,6 +205,12 @@ jobs:
         with:
           path: ${{ env.CACHE_PATHS }}
           key: ${{ steps.cache.outputs.cache-primary-key }}
+      - name: Save cargo-audit
+        if: github.ref == 'refs/heads/main' && steps.changes.outputs.code == 'true' && steps.audit-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ~/.cache/langspan-ci-tools/cargo-audit
+          key: ${{ steps.audit-cache.outputs.cache-primary-key }}
   # The same check on Apple silicon, in the full lane only. `macos-26` is
   # GitHub's current arm64 image (`macos-latest` points at it); a pinned
   # label, so an image change is a deliberate edit here. It starts with
@@ -223,11 +266,40 @@ jobs:
           path: ${{ env.CACHE_PATHS }}
           key: rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock', 'scripts/install-ci-tools.sh') }}
           restore-keys: ${{ github.ref != 'refs/heads/main' && format('rust-v1-{0}-{1}-{2}-{3}-', runner.os, runner.arch, github.job, hashFiles('rust-toolchain.toml')) || '' }}
-      - name: Install the dependency policy and unused-dependency checkers and the test runner
+      # cargo-audit is built, not downloaded, so it is cached too, in an
+      # entry of its own that leaves CACHE_PATHS alone. The same rules: only
+      # main saves, and main restores only its exact key.
+      - name: Restore cargo-audit
+        id: audit-cache
+        if: steps.changes.outputs.code == 'true'
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ~/.cache/langspan-ci-tools/cargo-audit
+          key: cargo-audit-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('scripts/install-ci-tools.sh') }}
+          restore-keys: ${{ github.ref != 'refs/heads/main' && format('cargo-audit-v1-{0}-{1}-{2}-', runner.os, runner.arch, github.job) || '' }}
+      - name: Install the dependency policy, advisory and unused-dependency checkers and the test runner
         if: steps.changes.outputs.code == 'true'
         run: |
           bash scripts/install-ci-tools.sh "$HOME/.cache/langspan-ci-tools"
           echo "$HOME/.cache/langspan-ci-tools" >> "$GITHUB_PATH"
+      # Go and pytest for the tests in tests/auto_checks.rs that run a real
+      # `go test` and pytest; LANGSPAN_REQUIRE_TOOLS fails them without
+      # these. Only the full lane runs those tests. pytest goes into a
+      # virtual environment whose python3 comes first on PATH.
+      - name: Install Go for the real go test check
+        if: steps.changes.outputs.code == 'true' && github.event_name != 'pull_request'
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.24"
+          cache: false
+      - name: Install pytest for the real pytest check
+        if: steps.changes.outputs.code == 'true' && github.event_name != 'pull_request'
+        run: |
+          python3 -m venv "$RUNNER_TEMP/pytest"
+          "$RUNNER_TEMP/pytest/bin/python3" -m pip install --disable-pip-version-check pytest==8.4.2
+          echo "$RUNNER_TEMP/pytest/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/pytest/bin/python3" -m pytest --version
+          go version
       - name: Check formatting, dependencies, lint, real integration tests and the demonstration
         if: steps.changes.outputs.code == 'true'
         env:
@@ -259,6 +331,12 @@ jobs:
         with:
           path: ${{ env.CACHE_PATHS }}
           key: ${{ steps.cache.outputs.cache-primary-key }}
+      - name: Save cargo-audit
+        if: github.ref == 'refs/heads/main' && steps.changes.outputs.code == 'true' && steps.audit-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ~/.cache/langspan-ci-tools/cargo-audit
+          key: ${{ steps.audit-cache.outputs.cache-primary-key }}
   # A test that passed only on retry on main opens one issue, or comments
   # on it while it is open, naming the tests. Only this job can write, and
   # only issues; it checks out nothing and runs no repository code. The
@@ -318,7 +396,7 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           SHA: ${{ github.sha }}
         run: |
-          body=$(printf 'The nightly Rust checks failed on main at %s.\n\nRun: %s\n\nThe nightly run includes the benchmark harness dry runs, which pull requests skip when they touch no benchmark, briefing, hook or daemon code. Fix the failure the same day (docs/development-process.md).' "$SHA" "$RUN_URL")
+          body=$(printf 'The nightly Rust checks failed on main at %s.\n\nRun: %s\n\nThe nightly run includes the benchmark harness dry runs, which pull requests skip when they touch no benchmark, briefing, hook or daemon code, and checks the unchanged lockfile against the latest RustSec advisories with cargo-deny and cargo-audit; the job log names any new advisory. Fix the failure the same day (docs/development-process.md).' "$SHA" "$RUN_URL")
           number=$(gh issue list --state open --search "\"$TITLE\" in:title" --json number,title \
             --jq 'map(select(.title == env.TITLE)) | .[0].number // empty')
           if [ -n "$number" ]; then

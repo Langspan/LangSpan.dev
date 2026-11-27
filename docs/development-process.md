@@ -105,7 +105,8 @@ child process holding its output. The checks run in two lanes, chosen by
 the event (`LANGSPAN_CHECK_LANE`):
 
 - **The fast lane: a pull request.** On Linux only: format, dependency
-  policy, unused dependencies, lint, and the tests nextest's `ci-fast`
+  policy and advisories (cargo-deny and cargo-audit, with the one ignore
+  list in `deny.toml`), unused dependencies, lint, and the tests nextest's `ci-fast`
   profile selects: every unit test, every test of `langspan-core` and
   `langspan-graph`, and the integration tests of the protocol, the store,
   Git output, MCP framing, the workflows and the docs. None of those
@@ -177,6 +178,34 @@ decision fails with a diff of each step that changed. To accept an intended
 change, run `cargo nextest run -p langspan-core --test decision_golden
 --run-ignored only -E 'test(bless)'` and review the golden diff in the pull
 request.
+
+### Coverage
+
+The `Coverage` workflow ([`coverage.yml`](../.github/workflows/coverage.yml))
+runs `bash scripts/coverage.sh` every night on `main` (04:41 UTC), and on a
+pull request that changes the measurement. It isn't a required check. The
+script runs the suite once under cargo-llvm-cov and cargo-nextest, with the
+profile written continuously, so coordinators that tests stop with SIGKILL
+still count. It counts production lines only (`src/` and `crates/*/src/`,
+without `#[cfg(test)]` code, even where an integration test includes a
+source with `#[path]`); in-file unit tests still cover them. The exports
+name sources relative to the checkout, so a downloaded artifact reads the
+same in yours. The run summary has the per-file table.
+
+The floor: production lines 90% covered or more, and none of the ten files
+with the most production lines more than 2 points under its row in
+[`scripts/coverage-baseline.tsv`](../scripts/coverage-baseline.tsv), one
+row per file. A file among those ten without a row is named in the summary.
+A nightly run under the floor, or with a failing test, opens or comments on
+the issue "Nightly Rust checks on main failed".
+
+To raise the baseline, run `bash scripts/coverage.sh` (or download the
+`coverage` artifact of a nightly run into `target/coverage`), then
+`python3 -I -B scripts/coverage-report.py --write-baseline . target/coverage`,
+which rewrites one row per measured file. Commit only the rows of files your
+change raised or added. A pull request that splits or moves a file replaces
+its rows with the new files' rows. Lowering a row needs the reason in the
+pull request.
 
 ### Ratchets
 

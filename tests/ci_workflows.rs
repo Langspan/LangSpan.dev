@@ -371,6 +371,49 @@ fn pull_requests_read_the_build_cache_and_only_main_writes_it() {
     }
 }
 
+#[test]
+fn cargo_audit_has_its_own_cache_and_the_build_cache_paths_stay_put() {
+    let text = workflow("check.yml");
+    // actions/cache versions an entry by its path list: a change here
+    // matches no entry main saved, and every pull request builds cold.
+    assert!(
+        text.contains(
+            "  CACHE_PATHS: |\n    ~/.cargo/registry/index\n    ~/.cargo/registry/cache\n    \
+             ~/.cargo/git/db\n    target\n    ~/.cache/langspan-ci-tools/cargo-nextest\n  CACHE_LIMIT_MB:"
+        ),
+        "CACHE_PATHS changed; change it in a pull request of its own"
+    );
+    for id in ["linux", "macos"] {
+        let job = job(&text, id);
+        let restore = job
+            .split("- name: Restore cargo-audit\n")
+            .nth(1)
+            .unwrap_or_else(|| panic!("{id} doesn't restore cargo-audit"));
+        for part in [
+            "path: ~/.cache/langspan-ci-tools/cargo-audit\n",
+            "key: cargo-audit-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('scripts/install-ci-tools.sh') }}",
+            "restore-keys: ${{ github.ref != 'refs/heads/main' && ",
+        ] {
+            assert!(
+                restore.contains(part),
+                "{id}'s cargo-audit restore lacks {part}"
+            );
+        }
+        assert!(
+            restore.contains("- name: Install the dependency policy"),
+            "{id} restores cargo-audit after installing it"
+        );
+        let save = job
+            .split("- name: Save cargo-audit\n")
+            .nth(1)
+            .unwrap_or_else(|| panic!("{id} doesn't save cargo-audit"));
+        assert!(save.starts_with(
+            "        if: github.ref == 'refs/heads/main' && steps.changes.outputs.code == 'true' && steps.audit-cache.outputs.cache-hit != 'true'\n"
+        ), "{id} could save cargo-audit off main");
+        assert!(save.contains("key: ${{ steps.audit-cache.outputs.cache-primary-key }}"));
+    }
+}
+
 /// Runs scripts/ci-cache-size.sh over `paths` with `limit_mb`, and returns
 /// (GITHUB_OUTPUT, stdout).
 fn cache_size(paths: &str, limit_mb: &str) -> (String, String) {
@@ -510,4 +553,611 @@ fn the_flaky_report_says_so_when_no_test_or_no_report_is_there() {
     let _ = fs::remove_dir_all(&dir);
     assert_eq!(stdout, "");
     assert!(summary.contains("No JUnit report"), "{summary}");
+}
+
+/// Runs scripts/advisory-ignores.py over `dir` with `args`; returns
+/// (success, stdout, stderr).
+fn advisory_ignores(dir: &Path, args: &[&str]) -> (bool, String, String) {
+    let out = Command::new("python3")
+        .args(["-I", "-B"])
+        .arg(root().join("scripts/advisory-ignores.py"))
+        .args(args)
+        .arg(dir)
+        .output()
+        .expect("python3 runs scripts/advisory-ignores.py");
+    (
+        out.status.success(),
+        String::from_utf8(out.stdout).unwrap(),
+        String::from_utf8(out.stderr).unwrap(),
+    )
+}
+
+/// A new directory holding a deny.toml whose advisory ignores are `entries`.
+fn deny_toml(entries: &str) -> PathBuf {
+    let dir = temp_dir("advisories");
+    let text = format!(
+        "[advisories]\nyanked = \"deny\"\nignore = [\n{entries}]\n\n[licenses]\nallow = []\n"
+    );
+    fs::write(dir.join("deny.toml"), text).unwrap();
+    dir
+}
+
+#[test]
+fn cargo_audit_takes_its_ignores_from_deny_toml() {
+    let (ok, stdout, stderr) = advisory_ignores(root(), &["--audit-flags"]);
+    assert!(ok, "{stderr}");
+    let deny = read("deny.toml");
+    let mut flags = 0;
+    for line in stdout.lines() {
+        let id = line
+            .strip_prefix("--ignore ")
+            .unwrap_or_else(|| panic!("not a cargo-audit flag: {line}"));
+        assert!(
+            deny.contains(&format!("id = \"{id}\"")),
+            "{id} is not in deny.toml"
+        );
+        flags += 1;
+    }
+    assert_eq!(flags, deny.matches("{ id = \"RUSTSEC-").count(), "{stdout}");
+    let check = read("scripts/check.sh");
+    for line in [
+        "cargo deny --locked check\n",
+        "audit_flags=$(python3 -I -B scripts/advisory-ignores.py --audit-flags)\n",
+        "cargo audit --deny warnings $audit_flags\n",
+    ] {
+        assert!(check.contains(line), "check.sh lacks {line}");
+    }
+    assert!(
+        !root().join(".cargo/audit.toml").exists(),
+        "cargo-audit's ignores come from deny.toml alone"
+    );
+}
+
+#[test]
+fn an_advisory_ignore_needs_a_reason_and_a_review_date_still_ahead() {
+    let good = concat!(
+        "  { id = \"RUSTSEC-2026-0001\", reason = \"No fix upstream. Review by 2999-01-31.\" },\n",
+        "  # A comment between entries.\n",
+        "  { id = \"RUSTSEC-2026-0002\", reason = \"Only in a build tool. Review by 2999-06-30.\" },\n",
+    );
+    let dir = deny_toml(good);
+    let (ok, stdout, stderr) = advisory_ignores(&dir, &["--audit-flags"]);
+    assert!(ok, "{stderr}");
+    assert_eq!(
+        stdout,
+        "--ignore RUSTSEC-2026-0001\n--ignore RUSTSEC-2026-0002\n"
+    );
+    let (ok, stdout, stderr) = advisory_ignores(&dir, &[]);
+    assert!(ok, "{stderr}");
+    assert!(
+        stdout.contains("2 advisory ignores in deny.toml"),
+        "{stdout}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+
+    for (entry, expected) in [
+        (
+            "  { id = \"RUSTSEC-2026-0003\", reason = \"No fix upstream.\" },",
+            "RUSTSEC-2026-0003 has no review date",
+        ),
+        (
+            "  { id = \"RUSTSEC-2026-0004\", reason = \"Review by 2001-02-03.\" },",
+            "RUSTSEC-2026-0004 was due for review on 2001-02-03",
+        ),
+        (
+            "  { id = \"RUSTSEC-2026-0005\", reason = \"\" },",
+            "RUSTSEC-2026-0005 has no reason",
+        ),
+        (
+            "  { id = \"RUSTSEC-2026-0006\" },",
+            "can't read this ignore",
+        ),
+        ("  \"RUSTSEC-2026-0008\",", "can't read this ignore"),
+        (
+            concat!(
+                "  { id = \"RUSTSEC-2026-0007\", reason = \"Review by 2999-01-01.\" },\n",
+                "  { id = \"RUSTSEC-2026-0007\", reason = \"Review by 2999-01-01.\" },",
+            ),
+            "RUSTSEC-2026-0007 is listed twice",
+        ),
+    ] {
+        let dir = deny_toml(&format!("{entry}\n"));
+        for args in [&[][..], &["--audit-flags"][..]] {
+            let (ok, stdout, stderr) = advisory_ignores(&dir, args);
+            assert!(!ok, "{entry} passed: {stdout}");
+            assert_eq!(stdout, "", "a failed check prints no flags");
+            assert!(stderr.contains(expected), "{entry}: {stderr}");
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[test]
+fn cargo_audit_may_not_keep_an_ignore_list_of_its_own() {
+    let dir = deny_toml("  { id = \"RUSTSEC-2026-0001\", reason = \"Review by 2999-01-31.\" },\n");
+    fs::create_dir_all(dir.join(".cargo")).unwrap();
+    fs::write(
+        dir.join(".cargo/audit.toml"),
+        "[advisories]\nignore = [\"RUSTSEC-2026-0009\"]\n",
+    )
+    .unwrap();
+    let (ok, _, stderr) = advisory_ignores(&dir, &[]);
+    let _ = fs::remove_dir_all(&dir);
+    assert!(!ok);
+    assert!(
+        stderr.contains(".cargo/audit.toml lists advisories to ignore"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn check_sh_denies_doc_warnings_and_ends_each_lane_with_no_process_left() {
+    let check = read("scripts/check.sh");
+    assert!(
+        check.contains("RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --locked\n"),
+        "{check}"
+    );
+    // Both lanes end by looking for leftovers: the fast lane before it
+    // exits, the full lane on its last line.
+    assert!(check.contains("  leftovers\n  echo \"check.sh: fast lane done"));
+    assert!(check.trim_end().ends_with("\nleftovers"), "{check}");
+}
+
+/// Runs check.sh's `leftovers` function in `dir`, whose target directory
+/// is `dir/target`; returns (success, stderr).
+fn leftovers(dir: &Path) -> (bool, String) {
+    let check = read("scripts/check.sh");
+    let start = check
+        .find("\nleftovers() {\n")
+        .expect("check.sh defines leftovers");
+    let body = &check[start..];
+    let function = &body[..body.find("\n}\n").expect("leftovers ends") + 3];
+    let out = Command::new("sh")
+        .arg("-c")
+        .arg(format!("{function}leftovers"))
+        .current_dir(dir)
+        // As a shell started there would have it, so `pwd` gives the path
+        // as written (macOS's temporary directory is behind a symlink).
+        .env("PWD", dir)
+        .env_remove("CARGO_TARGET_DIR")
+        .output()
+        .unwrap();
+    (out.status.success(), String::from_utf8(out.stderr).unwrap())
+}
+
+#[test]
+fn check_sh_fails_while_a_process_started_from_the_target_directory_runs() {
+    let dir = temp_dir("leftovers");
+    fs::create_dir_all(dir.join("target/debug")).unwrap();
+    assert_eq!(leftovers(&dir), (true, String::new()));
+
+    // A stand-in for a coordinator a test left running: its arguments name
+    // the target directory, by the path the test used, not the resolved one.
+    // It waits in the shell's own `read`, so killing it leaves no child.
+    let fake = dir.join("target/debug/langspan");
+    let mut child = Command::new("sh")
+        .args(["-c", "read line"])
+        .arg(&fake)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let (ok, stderr) = leftovers(&dir);
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(!ok, "a leftover process passed: {stderr}");
+    assert!(stderr.contains(&child.id().to_string()), "{stderr}");
+    assert!(stderr.contains("stop them with kill PID"), "{stderr}");
+    assert_eq!(leftovers(&dir), (true, String::new()));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ci_installs_the_runners_the_real_tool_tests_need_and_requires_them() {
+    let text = workflow("check.yml");
+    assert!(
+        text.contains("\n  LANGSPAN_REQUIRE_TOOLS: \"1\"\n"),
+        "check.yml lets tests/auto_checks.rs skip a missing runner"
+    );
+    for id in ["linux", "macos"] {
+        let job = job(&text, id);
+        for line in [
+            "uses: actions/setup-go@",
+            "cache: false",
+            "python3 -m venv \"$RUNNER_TEMP/pytest\"",
+            "-m pip install --disable-pip-version-check pytest==",
+            "-m pytest --version",
+        ] {
+            assert!(job.contains(line), "the {id} job lacks {line}");
+        }
+    }
+}
+
+#[test]
+fn coverage_runs_nightly_reports_a_drop_and_is_not_a_required_check() {
+    let text = workflow("coverage.yml");
+    assert!(text.contains("\n  schedule:\n"), "{text}");
+    assert!(
+        !text.contains("merge_group"),
+        "coverage is no merge-queue gate"
+    );
+    let coverage = job(&text, "coverage");
+    for line in [
+        "install-ci-tools.sh \"$HOME/.cache/langspan-ci-tools\" cargo-nextest cargo-llvm-cov",
+        "rustup component add llvm-tools",
+        "run: bash scripts/coverage.sh target/coverage",
+        "cat target/coverage/report.md >> \"$GITHUB_STEP_SUMMARY\"",
+    ] {
+        assert!(coverage.contains(line), "the coverage job lacks {line}");
+    }
+    // A drop opens or comments on the issue a failed nightly check opens.
+    let report = job(&text, "nightly-report");
+    assert!(report.contains("if: github.event_name == 'schedule' && failure()"));
+    assert!(report.contains("TITLE: Nightly Rust checks on main failed"));
+    assert!(
+        job(&workflow("check.yml"), "nightly-report")
+            .contains("TITLE: Nightly Rust checks on main failed")
+    );
+    let script = read("scripts/coverage.sh");
+    for line in [
+        "export LLVM_PROFILE_FILE_NAME='langspan-%c%16m.profraw'",
+        "eval \"$(cargo llvm-cov show-env --sh)\"",
+        "cargo nextest run --workspace --locked || status=$?",
+        "export_lcov production.lcov test\n",
+        "export_lcov all.lcov test lib bin proc-macro\n",
+        "python3 -I -B scripts/coverage-report.py --prepare . \"$out\"\n",
+    ] {
+        assert!(script.contains(line), "coverage.sh lacks {line}");
+    }
+}
+
+/// One measured file: its production lines, how many of them integration
+/// tests cover, and how many more only in-file unit tests cover.
+struct Measured(&'static str, usize, usize, usize);
+
+/// A checkout under `dir` with a coverage baseline of `baseline` rows, and
+/// the two exports scripts/coverage.sh writes, for `files`.
+fn coverage_fixture(dir: &Path, files: &[Measured], baseline: &str) -> PathBuf {
+    fs::create_dir_all(dir.join("scripts")).unwrap();
+    fs::write(
+        dir.join("scripts/coverage-baseline.tsv"),
+        format!("# A comment.\n{baseline}"),
+    )
+    .unwrap();
+    let out = dir.join("target/coverage");
+    fs::create_dir_all(&out).unwrap();
+    let (mut production, mut all) = (String::new(), String::new());
+    for Measured(path, lines, covered, unit_only) in files {
+        let source = dir.join(path);
+        production += &format!("SF:{}\n", source.display());
+        all += &format!("SF:{}\n", source.display());
+        for line in 1..=*lines {
+            let integration = usize::from(line <= *covered);
+            let unit = usize::from(line <= covered + unit_only);
+            production += &format!("DA:{line},{integration}\n");
+            all += &format!("DA:{line},{}\n", integration.max(unit));
+        }
+        // A line of an in-file test module: measured only with the unit
+        // tests, so it is not production code.
+        all += &format!("DA:{},1\n", lines + 1);
+        production += &format!("LF:{lines}\nLH:{covered}\nend_of_record\n");
+        all += "end_of_record\n";
+    }
+    // Neither the tests nor the toolchain's sources count.
+    let extra = format!(
+        "SF:{}\nDA:1,0\nend_of_record\nSF:/rustc/abc/library/core/src/lib.rs\nDA:1,0\nend_of_record\n",
+        dir.join("tests/support/mod.rs").display()
+    );
+    fs::write(out.join("production.lcov"), format!("{production}{extra}")).unwrap();
+    fs::write(out.join("all.lcov"), format!("{all}{extra}")).unwrap();
+    // As scripts/coverage.sh does in the checkout it built.
+    let (ok, stdout, stderr) = coverage_report(dir, &out, &["--prepare"]);
+    assert!(ok, "{stdout}{stderr}");
+    out
+}
+
+/// Runs scripts/coverage-report.py; returns (success, stdout, stderr).
+fn coverage_report(dir: &Path, out: &Path, args: &[&str]) -> (bool, String, String) {
+    let run = Command::new("python3")
+        .args(["-I", "-B"])
+        .arg(root().join("scripts/coverage-report.py"))
+        .args(args)
+        .arg(dir)
+        .arg(out)
+        .output()
+        .expect("python3 runs scripts/coverage-report.py");
+    (
+        run.status.success(),
+        String::from_utf8(run.stdout).unwrap(),
+        String::from_utf8(run.stderr).unwrap(),
+    )
+}
+
+/// Eleven files, src/f00.rs the largest; each 95% covered.
+fn eleven(first: Measured, eleventh: Measured) -> Vec<Measured> {
+    const NAMES: [&str; 9] = [
+        "src/f01.rs",
+        "src/f02.rs",
+        "src/f03.rs",
+        "src/f04.rs",
+        "crates/langspan-core/src/f05.rs",
+        "src/f06.rs",
+        "src/f07.rs",
+        "src/f08.rs",
+        "src/daemon/f09.rs",
+    ];
+    let mut files = vec![first];
+    files.extend(NAMES.iter().map(|name| Measured(name, 200, 190, 0)));
+    files.push(eleventh);
+    files
+}
+
+const BASELINE: &str = "src/f00.rs\t95.0\nsrc/f10.rs\t95.0\n";
+
+#[test]
+fn coverage_holds_when_the_total_and_the_largest_files_hold() {
+    let dir = temp_dir("coverage-holds");
+    // Integration tests cover 372 of 400 lines, 2 points under the 95.0
+    // baseline; in-file unit tests cover 8 more, so 95.0 again.
+    let files = eleven(
+        Measured("src/f00.rs", 400, 372, 8),
+        Measured("src/f10.rs", 100, 80, 0),
+    );
+    let out = coverage_fixture(&dir, &files, BASELINE);
+    let (ok, stdout, stderr) = coverage_report(&dir, &out, &[]);
+    assert!(ok, "{stdout}{stderr}");
+    // 2,170 of 2,300 production lines; the test-module lines aren't counted.
+    assert!(
+        stdout.contains("Production lines covered: 94.3% (2170 of 2300); the floor is 90%."),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("| File | Lines | Covered | % | Baseline |"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("| `src/f00.rs` | 400 | 380 | 95.0 | 95.0 |"),
+        "{stdout}"
+    );
+    // The eleventh largest may fall further: only the ten largest are held.
+    assert!(
+        stdout.contains("| `src/f10.rs` | 100 | 80 | 80.0 | 95.0 |"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("tests/support"), "{stdout}");
+    assert!(!stdout.contains("/rustc/"), "{stdout}");
+    // A file among the largest with no row is named, not failed.
+    assert!(
+        stdout.contains("`src/f01.rs` has no baseline row"),
+        "{stdout}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn coverage_fails_under_the_total_floor_or_two_points_under_a_largest_file() {
+    let dir = temp_dir("coverage-drops");
+    // 2.1 points under its baseline.
+    let files = eleven(
+        Measured("src/f00.rs", 1000, 929, 0),
+        Measured("src/f10.rs", 100, 95, 0),
+    );
+    let out = coverage_fixture(&dir, &files, BASELINE);
+    let (ok, stdout, stderr) = coverage_report(&dir, &out, &[]);
+    assert!(!ok, "{stdout}");
+    let message = "`src/f00.rs` covers 92.9% of its production lines, more than 2 points under its baseline of 95.0%";
+    assert!(stdout.contains(message), "{stdout}");
+    assert!(stderr.contains(message), "{stderr}");
+    let _ = fs::remove_dir_all(&dir);
+
+    // Exactly 2 points under holds.
+    let dir = temp_dir("coverage-two-points");
+    let files = eleven(
+        Measured("src/f00.rs", 1000, 930, 0),
+        Measured("src/f10.rs", 100, 95, 0),
+    );
+    let out = coverage_fixture(&dir, &files, BASELINE);
+    let (ok, stdout, _) = coverage_report(&dir, &out, &[]);
+    assert!(ok, "{stdout}");
+    let _ = fs::remove_dir_all(&dir);
+
+    let dir = temp_dir("coverage-total");
+    let files = eleven(
+        Measured("src/f00.rs", 4000, 3200, 0),
+        Measured("src/f10.rs", 100, 95, 0),
+    );
+    let out = coverage_fixture(&dir, &files, "src/f00.rs\t80.0\n");
+    let (ok, stdout, stderr) = coverage_report(&dir, &out, &[]);
+    assert!(!ok, "{stdout}");
+    let message = "the total, 84.8% of production lines, is under the 90% floor";
+    assert!(stderr.contains(message), "{stderr}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn writing_the_coverage_baseline_records_one_row_per_file() {
+    let dir = temp_dir("coverage-write");
+    let files = eleven(
+        Measured("src/f00.rs", 400, 390, 0),
+        Measured("src/f10.rs", 100, 95, 0),
+    );
+    let out = coverage_fixture(&dir, &files, "src/gone.rs\t99.0\n");
+    let (ok, stdout, stderr) = coverage_report(&dir, &out, &["--write-baseline"]);
+    assert!(ok, "{stdout}{stderr}");
+    let written = fs::read_to_string(dir.join("scripts/coverage-baseline.tsv")).unwrap();
+    let rows: Vec<&str> = written.lines().filter(|l| !l.starts_with('#')).collect();
+    assert_eq!(rows.len(), 11, "{written}");
+    assert_eq!(rows[0], "crates/langspan-core/src/f05.rs\t95.0");
+    assert!(rows.contains(&"src/f00.rs\t97.5"), "{written}");
+    assert!(!written.contains("gone.rs"), "{written}");
+    // The written baseline holds at once.
+    let (ok, stdout, _) = coverage_report(&dir, &out, &[]);
+    assert!(ok, "{stdout}");
+    assert!(!stdout.contains("no baseline row"), "{stdout}");
+
+    // A nightly artifact measured in another checkout updates this one's
+    // baseline: the prepared exports name repository-relative sources.
+    let elsewhere = temp_dir("coverage-elsewhere");
+    let artifact = elsewhere.join("target/coverage");
+    fs::create_dir_all(&artifact).unwrap();
+    fs::create_dir_all(elsewhere.join("scripts")).unwrap();
+    fs::write(
+        elsewhere.join("scripts/coverage-baseline.tsv"),
+        "# A comment.\n",
+    )
+    .unwrap();
+    for name in ["production.lcov", "all.lcov"] {
+        let text = fs::read_to_string(out.join(name)).unwrap();
+        assert!(!text.contains(&*dir.to_string_lossy()), "{text}");
+        fs::write(artifact.join(name), text).unwrap();
+    }
+    let (ok, stdout, stderr) = coverage_report(&elsewhere, &artifact, &["--write-baseline"]);
+    assert!(ok, "{stdout}{stderr}");
+    let moved = fs::read_to_string(elsewhere.join("scripts/coverage-baseline.tsv")).unwrap();
+    assert_eq!(moved, written, "the same rows in either checkout");
+    let _ = fs::remove_dir_all(&dir);
+
+    // Exports never prepared, from another checkout, fail and say why.
+    let dir = temp_dir("coverage-unprepared");
+    let raw = format!(
+        "SF:{}\nDA:1,1\nend_of_record\n",
+        dir.join("src/f00.rs").display()
+    );
+    fs::write(artifact.join("production.lcov"), &raw).unwrap();
+    fs::write(artifact.join("all.lcov"), &raw).unwrap();
+    let (ok, _, stderr) = coverage_report(&elsewhere, &artifact, &[]);
+    assert!(!ok);
+    assert!(
+        stderr.contains("no production lines")
+            && stderr.contains("1 source outside the checkout")
+            && stderr.contains("coverage-report.py --prepare"),
+        "{stderr}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&elsewhere);
+
+    // The repository's own baseline is one sorted row per file.
+    let baseline = read("scripts/coverage-baseline.tsv");
+    let rows: Vec<&str> = baseline.lines().filter(|l| !l.starts_with('#')).collect();
+    let mut sorted = rows.clone();
+    sorted.sort_unstable();
+    sorted.dedup_by(|a, b| a.split('\t').next() == b.split('\t').next());
+    assert_eq!(rows, sorted, "rows are sorted, one per file");
+}
+
+#[test]
+fn coverage_drops_test_only_items_that_integration_tests_compile() {
+    // A source an integration test includes with #[path], so its #[cfg(test)]
+    // items are measured with the production lines. Each line is production
+    // code (P) or test-only (T).
+    let source = [
+        "pub fn a() {}",                           // P
+        "#[cfg(test)]",                            // T: a module
+        "mod tests {",                             // T
+        "    fn t() { let _ = \"}\"; }",           // T: a brace in a string
+        "}",                                       // T
+        "#[cfg(test)]",                            // T: stacked attributes
+        "#[path = \"../tests/support/shape.rs\"]", // T
+        "mod shape;",                              // T
+        "pub fn b() {",                            // P
+        "    #[cfg(test)]",                        // T: a statement
+        "    COUNT.with(|c| c.set(1));",           // T
+        "    let x = 1;",                          // P
+        "    #[cfg(all(test, unix))]",             // T: an indented module
+        "    mod inner {",                         // T
+        "        fn u() {}",                       // T
+        "    }",                                   // T
+        "    #[cfg(test)]",                        // T: a multi-line call
+        "    record(",                             // T
+        "        x,",                              // T
+        "    );",                                  // T
+        "}",                                       // P
+        "#[cfg(test)]",                            // T: a multi-line signature
+        "pub(crate) fn helper(",                   // T
+        "    a: u8,",                              // T
+        ") -> u8 {",                               // T
+        "    a",                                   // T
+        "}",                                       // T
+        "#[cfg(any(test, feature = \"x\"))]",      // P: also built without tests
+        "pub fn c() {}",                           // P
+        "#[cfg(not(test))]",                       // P
+        "pub fn d() {}",                           // P
+        "#[cfg(test)]",                            // T: literals at column 0
+        "mod literals {",                          // T
+        "    const RAW: &str = r#\"",              // T
+        "}",                                       // T: in a raw string
+        "#[cfg(test)]",                            // T: not an attribute
+        "\"#;",                                    // T
+        "    const TEXT: &str = \"",               // T
+        "} \\\" {",                                // T: in a string
+        "\";",                                     // T
+        "    const OPEN: char = '{';",             // T: a char
+        "    fn f<'a>(x: &'a str) -> &'a str {",   // T: lifetimes
+        "        x // }",                          // T: in a comment
+        "    }",                                   // T
+        "    /* } */",                             // T
+        "}",                                       // T
+        "pub const S: &str = \"#[cfg(test)]\";",   // P: in a string
+        "pub fn e() -> u8 {",                      // P
+        "    #[cfg(test)]",                        // T: a final expression
+        "    { 1 }",                               // T
+        "}",                                       // P
+    ];
+    let test_only = |n| matches!(n, 2..=8 | 10..=11 | 13..=20 | 22..=27 | 32..=46 | 49..=50);
+    let production: Vec<usize> = (1..=source.len()).filter(|&n| !test_only(n)).collect();
+    let dir = temp_dir("coverage-test-only");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("src/m.rs"), source.join("\n") + "\n").unwrap();
+    let measured = [Measured("src/m.rs", source.len(), source.len(), 0)];
+    let out = coverage_fixture(&dir, &measured, "");
+    let prepared = fs::read_to_string(out.join("production.lcov")).unwrap();
+    assert_eq!(kept_lines(&prepared, "src/m.rs"), production, "{prepared}");
+    // The record's totals count what it keeps.
+    let totals = format!("LF:{0}\nLH:{0}\nend_of_record\n", production.len());
+    assert!(prepared.contains(&totals), "{prepared}");
+    let (_, stdout, _) = coverage_report(&dir, &out, &[]);
+    let row = format!(
+        "| `src/m.rs` | {0} | {0} | 100.0 | none |",
+        production.len()
+    );
+    assert!(stdout.contains(&row), "{stdout}");
+    // A second preparation changes nothing.
+    let (ok, _, stderr) = coverage_report(&dir, &out, &["--prepare"]);
+    assert!(ok, "{stderr}");
+    let again = fs::read_to_string(out.join("production.lcov")).unwrap();
+    assert_eq!(again, prepared);
+    let _ = fs::remove_dir_all(&dir);
+
+    // tests/parser_properties.rs includes src/hook/redact.rs: from its first
+    // #[cfg(test)] to the end, only the blank lines between test items stay.
+    let dir = temp_dir("coverage-redact");
+    let text = read("src/hook/redact.rs");
+    let source: Vec<&str> = text.lines().collect();
+    let first = 1 + source.iter().position(|l| *l == "#[cfg(test)]").unwrap();
+    fs::create_dir_all(dir.join("src/hook")).unwrap();
+    fs::write(dir.join("src/hook/redact.rs"), &text).unwrap();
+    let measured = [Measured("src/hook/redact.rs", source.len(), 0, 0)];
+    let out = coverage_fixture(&dir, &measured, "");
+    let prepared = fs::read_to_string(out.join("production.lcov")).unwrap();
+    let kept = kept_lines(&prepared, "src/hook/redact.rs");
+    let (before, after): (Vec<usize>, Vec<usize>) = kept.iter().partition(|&&n| n < first);
+    assert_eq!(before, (1..first).collect::<Vec<_>>());
+    assert!(
+        after.len() == 1 && source[after[0] - 1].is_empty(),
+        "{after:?}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// The line numbers the record of `file` in a prepared export keeps.
+fn kept_lines(export: &str, file: &str) -> Vec<usize> {
+    export
+        .split("end_of_record\n")
+        .find(|record| record.starts_with(&format!("SF:{file}\n")))
+        .unwrap_or_else(|| panic!("no record of {file} in {export}"))
+        .lines()
+        .filter_map(|line| line.strip_prefix("DA:"))
+        .map(|da| da.split(',').next().unwrap().parse().unwrap())
+        .collect()
 }

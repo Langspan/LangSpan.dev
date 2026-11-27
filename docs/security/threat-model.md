@@ -995,7 +995,8 @@ user who wants more downloads it first and runs
 ## CI build cache
 
 The Rust checks (`check.yml`) restore a build cache: the crates registry,
-compiled dependencies in `target/` and the cargo-nextest binary. What a job
+compiled dependencies in `target/` and the cargo-nextest binary, and in an
+entry of its own under the same controls, the cargo-audit binary. What a job
 restores is code it then runs, so the cache is a boundary between runs. The
 threat to rule out is a pull request writing an entry that a later run on
 `main`, or a release, restores. The release workflow uses no cache.

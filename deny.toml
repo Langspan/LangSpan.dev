@@ -15,13 +15,18 @@ all-features = true
 [advisories]
 # RustSec advisories. Vulnerabilities always fail, and so do unmaintained or
 # unsound crates anywhere in the tree (not only direct dependencies, the
-# default) and yanked versions. Each ignore needs an id and a reason, and is
-# listed in docs/dependencies.md.
+# default) and yanked versions.
+#
+# This is LangSpan's one list of ignored advisories: scripts/check.sh gives
+# cargo-audit the same ids, through scripts/advisory-ignores.py. Write each
+# ignore on one line with an id and a reason that ends "Review by
+# YYYY-MM-DD."; the check fails without them, and from that date on. Each is
+# also listed in docs/dependencies.md.
 unmaintained = "all"
 unsound = "all"
 yanked = "deny"
 ignore = [
-  { id = "RUSTSEC-2026-0543", reason = "chrono 0.4.45 is unmaintained with no fixed release; it comes in only through rmcp and schemars. Follow the upstream SDK migration (docs/dependencies.md)." },
+  { id = "RUSTSEC-2026-0543", reason = "chrono 0.4.45 is unmaintained with no fixed release; it comes in only through rmcp and schemars. Follow the upstream SDK migration (docs/dependencies.md). Review by 2027-05-27." },
 ]
 
 [licenses]

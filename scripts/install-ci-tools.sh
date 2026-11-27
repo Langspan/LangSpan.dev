@@ -2,11 +2,14 @@
 # Installs the prebuilt cargo-deny and cargo-machete that CI runs, from their
 # upstream GitHub releases, each checked against a pinned SHA-256 before it
 # is unpacked. Compiling them with `cargo install` took four to six minutes
-# per job; a download takes seconds. Then cargo-nextest, pinned by version
-# (see below).
+# per job; a download takes seconds. Then cargo-audit, cargo-nextest and,
+# for the coverage job, cargo-llvm-cov, pinned by version (see below).
 #
-# Usage: bash scripts/install-ci-tools.sh DIR
+# Usage: bash scripts/install-ci-tools.sh DIR [TOOL...]
 # Puts the binaries in DIR (created if missing); add DIR to PATH after.
+# With no TOOL, installs what scripts/check.sh runs: cargo-deny,
+# cargo-machete, cargo-audit and cargo-nextest. cargo-llvm-cov is for
+# scripts/coverage.sh.
 #
 # The digests were taken from the downloaded assets and agree with the
 # digest GitHub records for each asset and with the .sha256 file published
@@ -14,10 +17,25 @@
 # then replace each digest the same way.
 set -euo pipefail
 
-dir=${1:?usage: install-ci-tools.sh DIR}
+dir=${1:?usage: install-ci-tools.sh DIR [TOOL...]}
+shift
 deny=0.22.1
 machete=0.10.1
+audit=0.23.0
 nextest=0.9.152
+llvm_cov=0.9.2
+
+tools=" ${*:-cargo-deny cargo-machete cargo-audit cargo-nextest} "
+for tool in $tools; do
+  case $tool in
+    cargo-deny | cargo-machete | cargo-audit | cargo-nextest | cargo-llvm-cov) ;;
+    *)
+      echo "install-ci-tools.sh: no tool $tool; choose from cargo-deny cargo-machete cargo-audit cargo-nextest cargo-llvm-cov" >&2
+      exit 2
+      ;;
+  esac
+done
+wanted() { [[ $tools == *" $1 "* ]]; }
 
 case "$(uname -s)-$(uname -m)" in
   Linux-x86_64)
@@ -54,26 +72,41 @@ fetch() {
   install -m 0755 "$work/${asset%.tar.gz}/$name" "$dir/$name"
 }
 
-fetch cargo-deny "https://github.com/EmbarkStudios/cargo-deny/releases/download/$deny" \
-  "cargo-deny-$deny-$target.tar.gz" "$deny_sha"
-fetch cargo-machete "https://github.com/bnjbvr/cargo-machete/releases/download/v$machete" \
-  "cargo-machete-v$machete-$target.tar.gz" "$machete_sha"
+if wanted cargo-deny; then
+  fetch cargo-deny "https://github.com/EmbarkStudios/cargo-deny/releases/download/$deny" \
+    "cargo-deny-$deny-$target.tar.gz" "$deny_sha"
+  "$dir/cargo-deny" --version
+fi
+if wanted cargo-machete; then
+  fetch cargo-machete "https://github.com/bnjbvr/cargo-machete/releases/download/v$machete" \
+    "cargo-machete-v$machete-$target.tar.gz" "$machete_sha"
+  "$dir/cargo-machete" --version
+fi
 
-"$dir/cargo-deny" --version
-"$dir/cargo-machete" --version
+# cargo-audit, the second advisory check, cargo-nextest, the test runner,
+# and cargo-llvm-cov are built from their crates.io releases with `cargo install
+# --locked`: cargo checks each downloaded crate against the checksum in the
+# registry index and builds the dependency versions the release's own
+# lockfile pins. Compiling takes minutes, so a copy of the same version
+# already in DIR (restored from the job's cache) is kept.
+#
+# build NAME VERSION: NAME is the crate and binary, `cargo-X`, and
+# `cargo-X X --version` prints a line ending in VERSION, or holding it
+# before a space.
+build() {
+  local name=$1 version=$2
+  case "$("$dir/$name" "${name#cargo-}" --version 2>/dev/null | head -n 1 || true)" in
+    *" $version" | *" $version "*)
+      echo "$name $version is already in $dir"
+      ;;
+    *)
+      cargo install --locked --root "$work/$name" --version "$version" "$name"
+      install -m 0755 "$work/$name/bin/$name" "$dir/$name"
+      ;;
+  esac
+  "$dir/$name" "${name#cargo-}" --version
+}
 
-# cargo-nextest, the test runner, is built from its crates.io release with
-# `cargo install --locked`: cargo checks each downloaded crate against the
-# checksum in the registry index and builds the dependency versions the
-# release's own lockfile pins. Compiling takes minutes, so a copy of the
-# same version already in DIR (restored from the job's cache) is kept.
-case "$("$dir/cargo-nextest" nextest --version 2>/dev/null || true)" in
-  "cargo-nextest $nextest "*)
-    echo "cargo-nextest $nextest is already in $dir"
-    ;;
-  *)
-    cargo install --locked --root "$work/nextest" --version "$nextest" cargo-nextest
-    install -m 0755 "$work/nextest/bin/cargo-nextest" "$dir/cargo-nextest"
-    ;;
-esac
-"$dir/cargo-nextest" nextest --version
+if wanted cargo-audit; then build cargo-audit "$audit"; fi
+if wanted cargo-nextest; then build cargo-nextest "$nextest"; fi
+if wanted cargo-llvm-cov; then build cargo-llvm-cov "$llvm_cov"; fi
