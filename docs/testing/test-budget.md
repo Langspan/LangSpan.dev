@@ -149,6 +149,45 @@ sleeps. `driver_planning_oracle_and_refusals` runs about 50 tests one after
 another (35.1 / 43.6). `standin_hooks` and
 `a_real_refusal_reaches_the_run_record` take 16 to 19 s each.
 
+#460 found that 20 s of `driver_planning_oracle_and_refusals` came after
+its Python tests had finished: the tool-guard test's agent was a shell
+running `sleep 20`, the guard stopped the shell, and the orphaned `sleep`
+kept the suite's stderr open, so `Command::output` waited for it. The agent
+now `exec`s one process that waits and then writes, so stopping it leaves
+nothing behind. #460 also:
+
+- waits for the hook-log test's hooks to have no process left (each names
+  its `late` file in its arguments) instead of sleeping 3 s;
+- sets the stand-in's bound to 0.5 s (was 2 s) in the bound test, and a
+  0.6 s hook against a 0.3 s host timeout (was 2 s against 1 s);
+- cuts the late-hook test's copied host timeout from 5 s to 1 s, with its
+  hooks starting 1.5 s and 0.5 s late (were 6 s and 4 s);
+- splits the driver tests into `DriverUnitTests`, `HookLogWrapper` and
+  `RepairAndSummary`, each its own Rust test, and runs the two
+  `RefusalCollection` tests as two. `every_driver_test_is_run_by_a_test_here`
+  fails if a Python test has no Rust test that selects it.
+
+Each changed test still fails when the code it guards is broken: the
+hook-log wrapper that leaves its hook's group running on a signal, a tool
+guard that never stops the session, a stand-in that gives up on a hook at
+its host timeout (#200), and a stand-in that never ends a hook's group (the
+bound test then hangs until nextest's 480 s timeout).
+
+On an Apple M-series laptop (debug, default profile, the non-dry-run harness
+tests run together, other builds running on the machine), in seconds:
+
+| Rust test | Before (`fc0c8fcf`) | After |
+| --- | --- | --- |
+| `driver_planning_oracle_and_refusals` | 34.1 | 3.3 |
+| `the_hook_log_wrapper` | (in the above) | 7.0 |
+| `repair_records_and_summary` | (in the above) | 1.4 |
+| `a_real_refusal_reaches_the_run_record` | 16.8 | 2.1 |
+| `a_pre_tool_hook_that_starts_late_refuses_nothing` | (in the above) | 4.3 |
+| `standin_hooks` | 16.1 | 8.7 |
+| `runner_mechanics` | 5.9 | 5.9 |
+| `holder_wait_comparison` | 4.2 | 4.1 |
+| All of them, wall clock | 34.1 | 8.7 |
+
 ### Slow for a stated reason (keep)
 
 These tests' subject is the time or the size, and they are already named
