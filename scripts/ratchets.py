@@ -500,6 +500,7 @@ _ALIAS = re.compile(r"^[ \t]*(?:pub(?:\([^)]*\))?\s+)?use\s+(\w+(?:::\w+)+)(?:\s
 _CHILD = re.compile(r"^[ \t]*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;", re.M)
 _PATH_HEAD = re.compile(r"(?<![\w:])\$?(\w+)\s*::\s*")
 _WORD = re.compile(r"(\w+)\s*")
+_RENAME = re.compile(r"as\s+\w+\s*")
 _SPACE = re.compile(r"\s*")
 _SEPARATOR = re.compile(r"[\s,]*")
 
@@ -520,7 +521,8 @@ def _use_tree(text, i):
     if text.startswith("::", m.end()):
         subs, i = _use_tree(text, m.end() + 2)
         return [[m.group(1)] + s for s in subs], i
-    return [[m.group(1)]], m.end()
+    rename = _RENAME.match(text, m.end())  # `b as c` names b; c is a new local name
+    return [[m.group(1)]], rename.end() if rename else m.end()
 
 
 def named_paths(text, module_path, children, prefixes=("crate",)):

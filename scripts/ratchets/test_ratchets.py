@@ -465,6 +465,30 @@ class Namespaces(unittest.TestCase):
              ("m", "n"), ("o",), ("o", "p")},
         )
 
+    def test_a_rename_in_a_use_tree_names_only_its_source(self):
+        cases = [
+            ("use crate::{b as c};", None, set(), {("b",)}),
+            ("use crate::{b::x as c, d};", None, set(), {("b", "x"), ("d",)}),
+            ("use crate::{b as _};", None, set(), {("b",)}),
+            ("use crate::b::{self as c, y};", None, set(), {("b",), ("b", "y")}),
+            ("use crate::{b::{x as c}, d as e};", None, set(), {("b", "x"), ("d",)}),
+            ("use crate::{b as k};", ["hook"], {"k"}, {("b",)}),
+            ("use self::{k as c};", ["hook"], {"k"}, {("hook", "k")}),
+            ("use super::{b as c};", ["hook", "x"], set(), {("hook", "b")}),
+            ("use crate::b as c;", None, set(), {("b",)}),
+        ]
+        for text, module, children, want in cases:
+            with self.subTest(text=text):
+                self.assertEqual(set(ratchets.named_paths(text, module, children)), want)
+
+    def test_a_rename_to_an_outer_namespace_is_not_an_edge(self):
+        self.namespaces("namespace\ta\tutility", "namespace\tb\tutility",
+                        "namespace\tc\tinterface", "allow\ta\tb")
+        self.ws.write("src/lib.rs", "mod a;\nmod b;\nmod c;\n")
+        self.ws.write("src/c.rs", "")
+        self.ws.write("src/a.rs", "use crate::{b as c};\n")
+        self.assertEqual(self.ws.check(), ([], []))
+
     def test_a_layer_comes_from_namespaces_and_an_outward_edge_fails(self):
         self.namespaces("namespace\ta\tutility", "namespace\tb\tinterface")
         self.ws.write("src/a.rs", "use crate::b::Thing;\n")
