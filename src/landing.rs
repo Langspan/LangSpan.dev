@@ -486,7 +486,7 @@ fn root_in(state: &State, workspace: &str) -> Result<PathBuf, crate::Error> {
 fn step_id(request_id: &str, step: &str, fields: &[&str]) -> String {
     let mut all = vec![request_id];
     all.extend_from_slice(fields);
-    crate::hook::wire_id(step, &all)
+    crate::ids::wire_id(step, &all)
 }
 
 /// A request ID for a step that must reach the daemon afresh every time,

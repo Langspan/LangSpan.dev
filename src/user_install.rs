@@ -10,7 +10,7 @@
 //! entry named `langspan` belongs to the user: install refuses rather than
 //! replace it, and uninstall leaves it alone.
 
-use crate::install::Vendor;
+use crate::vendor::Vendor;
 use serde_json::{Map, Value, json};
 use std::path::{Path, PathBuf};
 
@@ -129,7 +129,7 @@ impl McpServer {
                     && tools == "--tools"
                     && hooked == "hooked"
                     && host_option == "--host"
-                    && crate::mcp::HOOKED_HOSTS.contains(&host.as_str()) =>
+                    && crate::tool_names::HOOKED_HOSTS.contains(&host.as_str()) =>
             {
                 (state_dir, Some(host.clone()))
             }
@@ -539,7 +539,7 @@ impl Leftover {
         executable: &Path,
         apply: bool,
     ) -> Result<(usize, Vec<String>), crate::Error> {
-        use crate::install::quote;
+        use crate::vendor::quote;
         let mut left = self.state_dir.as_deref();
         let removing = usize::from(self.purge && left.is_some());
         let mut lines = Vec::new();
@@ -589,8 +589,8 @@ pub enum StatusLineChoice {
 pub fn status_line_command(executable: &Path, state_dir: &Path) -> String {
     format!(
         "{} --state-dir {} statusline{STATUS_LINE_MARKER}",
-        crate::install::quote(&executable.to_string_lossy()),
-        crate::install::quote(&state_dir.to_string_lossy())
+        crate::vendor::quote(&executable.to_string_lossy()),
+        crate::vendor::quote(&state_dir.to_string_lossy())
     )
 }
 

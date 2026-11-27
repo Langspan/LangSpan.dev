@@ -66,7 +66,7 @@ pub fn directory(root: Option<PathBuf>, deadline: Instant) -> Option<PathBuf> {
     }
     let stdin = std::io::stdin();
     if !stdin.is_terminal()
-        && let Ok(bytes) = crate::hook::read_stdin_until(deadline)
+        && let Ok(bytes) = crate::input::read_stdin_until(deadline)
         && bytes.len() <= MAX_INPUT_BYTES
         && let Some(cwd) = input_directory(&bytes)
     {

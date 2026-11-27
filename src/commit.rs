@@ -1575,7 +1575,7 @@ pub fn guard_hook(config: &Config, me: &str, call: &ShellCall, deadline: Instant
             file,
             &claims,
             &entries,
-            &crate::hook::file_state,
+            &crate::file_state::file_state,
             Reading {
                 deadline: until,
                 made: None,
@@ -1605,7 +1605,7 @@ pub fn guard_hook(config: &Config, me: &str, call: &ShellCall, deadline: Instant
     }
     let mut fields = vec![me, call.command.as_str()];
     fields.extend(evidence.iter().map(String::as_str));
-    let fingerprint = crate::hook::wire_id("commit-held", &fields);
+    let fingerprint = crate::ids::wire_id("commit-held", &fields);
     if journal::told(&config.state_dir, me, &fingerprint) {
         return passed(
             "it takes another live session's lines, and this session was told so once; not held again".into(),
@@ -1633,7 +1633,7 @@ fn record_held(
         .flat_map(|paths| paths.keys().cloned())
         .collect();
     let request = crate::protocol::Request::new(
-        crate::hook::wire_id("refusal", &[me, fingerprint]),
+        crate::ids::wire_id("refusal", &[me, fingerprint]),
         Command::RecordRefusal {
             session_id: me.into(),
             kind: langspan_core::RefusalKind::CommitHeld,
@@ -1882,7 +1882,7 @@ fn plan(
             &mut file,
             &claims,
             entries,
-            &crate::hook::file_state,
+            &crate::file_state::file_state,
             reading,
         );
         let owners = attributed.owners;
@@ -2375,7 +2375,7 @@ pub fn running_session(state_dir: &Path, root: &Path) -> Result<String, crate::E
 /// LangSpan project hook in this checkout names one, it is suggested. Only
 /// suggested, never used: it is text read from the repository.
 fn no_running_session(state_dir: &Path, root: &Path) -> String {
-    let looked = crate::install::quote(&state_dir.to_string_lossy());
+    let looked = crate::vendor::quote(&state_dir.to_string_lossy());
     let session = "or pass --session ID (a briefing says \"Your session ID is ...\")";
     let canonical = |dir: &Path| fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
     let same = |other: &Path| canonical(other) == canonical(state_dir);
@@ -2389,7 +2389,7 @@ fn no_running_session(state_dir: &Path, root: &Path) -> String {
             })
         })
         .flat_map(|dir| {
-            crate::install::Vendor::ALL
+            crate::vendor::Vendor::ALL
                 .into_iter()
                 .flat_map(move |vendor| {
                     crate::install::project_registrations(vendor, dir).unwrap_or_default()
@@ -2400,8 +2400,8 @@ fn no_running_session(state_dir: &Path, root: &Path) -> String {
     match installed {
         Some(other) => format!(
             "no session is running this command through its shell tool in the state directory {looked}; the LangSpan hook installed in this checkout uses the state directory {}: run `langspan --state-dir {} commit --mine ...` instead, {session}",
-            crate::install::quote(&other.to_string_lossy()),
-            crate::install::quote(&other.to_string_lossy()),
+            crate::vendor::quote(&other.to_string_lossy()),
+            crate::vendor::quote(&other.to_string_lossy()),
         ),
         None => format!(
             "no session is running this command through its shell tool in the state directory {looked}; if LangSpan's hooks were installed with --state-dir, pass the same --state-dir, {session}"
@@ -2827,7 +2827,7 @@ pub fn status_mine(
             file,
             &claims,
             &entries,
-            &crate::hook::file_state,
+            &crate::file_state::file_state,
             reading,
         );
         let (listed, theirs) = mine_file(file, &owners, staged.contains(&file.path));
@@ -3464,7 +3464,7 @@ mod tests {
             presence: false,
             presence_window_ms: langspan_core::PRESENCE_WINDOW_MS,
             outline_reads: false,
-            vendor: crate::install::Vendor::ClaudeCode,
+            vendor: crate::vendor::Vendor::ClaudeCode,
             user_level: false,
         };
         let call = |command: &str| ShellCall {

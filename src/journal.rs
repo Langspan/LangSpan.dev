@@ -223,8 +223,8 @@ fn blobs(state_dir: &Path) -> PathBuf {
 fn workspace_dir(state_dir: &Path, root_dir: &Path) -> PathBuf {
     let workspace = crate::shell::workspace_identity(root_dir);
     let workspace = workspace.to_string_lossy();
-    let directory = root(state_dir).join(crate::hook::wire_id("journal-by-path", &[&workspace]));
-    let legacy = root(state_dir).join(crate::hook::wire_id("journal-workspace", &[&workspace]));
+    let directory = root(state_dir).join(crate::ids::wire_id("journal-by-path", &[&workspace]));
+    let legacy = root(state_dir).join(crate::ids::wire_id("journal-workspace", &[&workspace]));
     if fs::symlink_metadata(&legacy).is_ok_and(|m| m.is_dir()) {
         migrate(&legacy, &directory);
     }
@@ -233,7 +233,7 @@ fn workspace_dir(state_dir: &Path, root_dir: &Path) -> PathBuf {
 
 /// The directory of one file's entries within a workspace's.
 fn path_dir(directory: &Path, path: &str) -> PathBuf {
-    directory.join(crate::hook::wire_id("journal-path", &[path]))
+    directory.join(crate::ids::wire_id("journal-path", &[path]))
 }
 
 /// Move flat entries into per-path directories, under the same name and with
@@ -530,7 +530,7 @@ pub fn record(
         let Some(after) = read_file(root, path) else {
             // Over the bound: attributed whole, by its version. A file that
             // cannot be versioned at all is not recorded.
-            let Some(after) = crate::hook::file_state(root, path) else {
+            let Some(after) = crate::file_state::file_state(root, path) else {
                 continue;
             };
             let entry = Entry {
@@ -813,7 +813,7 @@ pub fn record_partial(
     let kept = since(entries_for(state_dir, root, &paths), started_ms);
     let mut recorded = 0;
     for (path, session_id, lines) in parts {
-        let Some(after) = crate::hook::file_state(root, path) else {
+        let Some(after) = crate::file_state::file_state(root, path) else {
             continue;
         };
         let entry = Entry {
@@ -910,7 +910,7 @@ fn head_blob(
 fn write_entry(directory: &Path, operation: &str, entry: &Entry) -> Result<(), String> {
     // Named by the call and the path, so a repeated hook rewrites the same
     // entry; a shell entry is named by its content's time.
-    let name = crate::hook::wire_id(
+    let name = crate::ids::wire_id(
         "journal-entry",
         &[
             &entry.session_id,
@@ -1150,7 +1150,7 @@ fn rewrite_private(_: &Path, _: &str, _: &[u8], _: std::time::SystemTime) -> Res
 fn held_path(state_dir: &Path, session_id: &str) -> (PathBuf, String) {
     (
         root(state_dir).join("held"),
-        crate::hook::wire_id("journal-held", &[session_id]),
+        crate::ids::wire_id("journal-held", &[session_id]),
     )
 }
 
@@ -1377,7 +1377,7 @@ mod tests {
     fn entries_an_earlier_version_kept_flat_are_moved_and_still_read() {
         let dirs = Dirs::new("legacy");
         let workspace = crate::shell::workspace_identity(&dirs.root);
-        let legacy = root(&dirs.state).join(crate::hook::wire_id(
+        let legacy = root(&dirs.state).join(crate::ids::wire_id(
             "journal-workspace",
             &[&workspace.to_string_lossy()],
         ));
