@@ -54,7 +54,9 @@ connection whose effective user isn't its own, or whose user it can't read,
 logging `peer_refused`. The owner-only directory already keeps other users out;
 this holds if that directory is ever opened.
 
-**An owner grant needs the owner's setting** (issue #335). The coordinator
+**An owner grant needs the owner's setting** (proposed, not yet in force:
+[issue #427](https://github.com/Langspan/LangSpan.dev/issues/427) waits on the
+owner's decision; until then no command's behavior changes). The coordinator
 carries one out only while `"owner_grants": true` is in `config.json` in the
 state directory, read again for each owner-grant request, so the owner turns it
 on and off without a restart. Otherwise it refuses with an error that names the
