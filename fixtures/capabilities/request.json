@@ -1,0 +1,1 @@
+{"version":10,"request_id":"version-1","command":{"op":"version"},"capabilities":["anchored_notes","briefing_memory","from_a_later_build","inflight_partial","interface_notices","landing_rewrites","outline_reads","refusal_outcomes","renames","symbol_findings","trails"]}

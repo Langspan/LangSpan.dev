@@ -22,6 +22,11 @@ priority and size:
 If a decision is costly to reverse, record it in an ADR in
 [`docs/adr/`](adr/0001-local-coordination.md) before or with the change.
 
+A new wire field adds a named capability, one line in `CAPABILITIES` in
+`src/protocol.rs` with vectors in `fixtures/capabilities/<name>/`, never a
+protocol version. The version changes only for a breaking change
+([ADR 0037](adr/0037-protocol-capabilities.md)).
+
 ## Work in progress
 
 Limit open work so that each pull request merges quickly:
@@ -104,7 +109,9 @@ the event (`LANGSPAN_CHECK_LANE`):
   profile selects: every unit test, every test of `langspan-core` and
   `langspan-graph`, and the integration tests of the protocol, the store,
   Git output, MCP framing, the workflows and the docs. None of those
-  starts a coordinator. The `macOS` check passes at once and says that the
+  starts a coordinator, except the CLI's golden transcripts
+  (`tests/cli_transcript.rs`, `tests/cli_golden.rs`), so that output that
+  differs on Linux shows on the pull request. The `macOS` check passes at once and says that the
   full run happens in the merge queue. Target: a result **under 3
   minutes** from push. The job stops at 10 minutes.
 - **The full lane: a merge-queue commit, a push to `main`, the nightly run
@@ -169,6 +176,36 @@ decision fails with a diff of each step that changed. To accept an intended
 change, run `cargo nextest run -p langspan-core --test decision_golden
 --run-ignored only -E 'test(bless)'` and review the golden diff in the pull
 request.
+
+### Ratchets
+
+`tests/ratchets.rs` runs `python3 -I -B scripts/ratchets.py --check .` in
+the full lane. It measures production code only: `#[cfg(test)]` items and
+files outside `src/` and `crates/*/src/` don't count. It checks four
+numbers, each against `scripts/ratchets/baseline/<source path>.tsv`:
+
+- **File size.** A file may not grow past its `lines` row. A file without a
+  row may have up to 1,500 lines.
+- **Function length.** A function may not grow past its `fn` row. A
+  function without a row may have up to 150 lines.
+- **Public surface.** A crate may not have more declared `pub` items than
+  the sum of its files' `pub` rows. `pub use` and `pub(crate)` don't count,
+  so moving an item between files of a crate passes.
+- **Module dependencies** in the `langspan` crate. An edge from one
+  top-level module to another may not join a cycle, or point outward,
+  unless the module's root file lists it as an `edge` row. A module states
+  its layer with a `// layer: utility|infrastructure|application|interface`
+  comment in that file; edges between modules without one are checked for
+  cycles only.
+
+A failure says what grew, by how much, and what to do: split the code, or
+justify the growth in the pull request and run
+`python3 -I -B scripts/ratchets.py --record FILE`. A number that improves
+passes, and the check names the file; run
+`python3 -I -B scripts/ratchets.py --tighten FILE` for that file only, in
+the pull request that moved the code. `--tighten` never raises a number,
+and it deletes a baseline that has nothing left to record. The checker's
+own tests are in `scripts/ratchets/test_*.py`.
 
 ## Releases
 

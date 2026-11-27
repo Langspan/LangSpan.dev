@@ -44,10 +44,10 @@ exit 0
 ## graph export
 $ langspan graph export w --out $TMP/index.jsonl
 exit 0
-Exported 1 files (0 partial, 583 bytes) from workspace w.
+Exported 1 files (0 partial, <bytes> bytes) from workspace w.
 $ langspan graph export w --out $TMP/index-json.jsonl --json
 exit 0
-{"version":10,"request_id":"read","replayed":false,"generation":1,"lease_valid":null,"outcome":{"type":"graph_exported","workspace_id":"w","files":1,"partial_files":0,"bytes":583}}
+{"version":10,"request_id":"read","replayed":false,"generation":1,"lease_valid":null,"outcome":{"type":"graph_exported","workspace_id":"w","files":1,"partial_files":0,"bytes":"<bytes>"}}
 
 ## graph import
 $ langspan graph import w --in $TMP/index.jsonl
