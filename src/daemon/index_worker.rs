@@ -312,7 +312,7 @@ pub(super) fn index_worker(
                     ask_as(
                         &sender,
                         Some(of.clone()),
-                        crate::hook::wire_id(
+                        crate::ids::wire_id(
                             "interface",
                             &[
                                 &of.workspace_id,
@@ -340,7 +340,7 @@ pub(super) fn index_worker(
                 ask_as(
                     &sender,
                     Some(of.clone()),
-                    crate::hook::wire_id(
+                    crate::ids::wire_id(
                         "anchors",
                         &[
                             &of.workspace_id,

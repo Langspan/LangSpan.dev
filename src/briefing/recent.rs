@@ -9,7 +9,8 @@
 //! value from another session or the repository cleaned and quoted, with
 //! what does not fit counted.
 
-use crate::hook::{age, clean, interface_change_text, quoted, truncate};
+use super::render::interface_change_text;
+use crate::text::{age, clean, quoted, truncate};
 use langspan_core::{BRIEF_PATHS, RECENT_LEFT, RecentChanges};
 use std::{
     collections::{BTreeMap, BTreeSet},

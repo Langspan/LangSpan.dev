@@ -9,8 +9,7 @@
 #
 # Today's top-level modules carry the layer of the namespace they move into. The edges that
 # layering exposes and the target layout forbids are debt rows in their modules' baselines:
-# auto_check, definitions, integrate, landing, report, test_output, today, install and store
-# -> hook, store -> wait, and graph -> definitions and reformat. Each allow row below is an
+# report and today -> briefing, store -> wait, and graph -> definitions and reformat. Each allow row below is an
 # edge inside one target namespace, or one the target layout allows (regions -> ids,
 # shell -> fs, ipc -> fs, cli -> mcp and so on).
 
@@ -116,7 +115,9 @@ allow	cli	mcp
 allow	cli	skill
 
 # Not yet, for the same reason: `only store daemon` (dashboard, main, mcp and status_line
-# name store) and `only hook cli main` (13 modules name hook).
+# name store). Only the host adapters and the modules that use the hook contract itself
+# (Config, Operation, the deny texts, execute) may name hook, so a new importer fails (#363).
+only	hook	antigravity	between_steps	claude_code	cli	codex	cursor	formatter	skill
 only	graph	daemon
 only	daemon	cli	main
 only	mcp	cli	main

@@ -1,4 +1,5 @@
 use super::*;
+pub use crate::install::install_at;
 
 /// A linked worktree has a distinct physical identity, even when it inherits hooks.
 /// A user-level hook takes its workspace from the event's working directory.
@@ -97,35 +98,6 @@ fn worktree_install(
         return None;
     }
     install_at(config.vendor, &config.state_dir, worktree)
-}
-
-/// The project file in `dir` (canonical) holding a LangSpan hook for
-/// `vendor` that names `dir` as its root and `state_dir`, with that hook's
-/// registration, its root canonical. Also used by `doctor`.
-pub fn install_at(
-    vendor: crate::install::Vendor,
-    state_dir: &Path,
-    dir: &Path,
-) -> Option<(PathBuf, crate::install::Registration)> {
-    let canonical = |dir: &Path| fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
-    vendor.project_hook_files().iter().find_map(|file| {
-        let path = dir.join(file);
-        let Ok(Some(settings)) = crate::install::read(&path) else {
-            return None;
-        };
-        crate::install::managed_hooks(&settings, |_| true)
-            .iter()
-            .filter_map(|hook| crate::install::parse_project_hook(vendor, hook))
-            .map(|mut registration| {
-                registration.root = canonical(&registration.root);
-                registration
-            })
-            .find(|registration| {
-                registration.root == dir
-                    && crate::install::same_directory(&registration.state_dir, state_dir)
-            })
-            .map(|registration| (path, registration))
-    })
 }
 
 fn resolve_user_workspace(
