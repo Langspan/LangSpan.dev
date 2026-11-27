@@ -42,6 +42,10 @@ src/auto_check.rs	86.1
 src/autostart.rs	88.0
 src/between_steps.rs	100.0
 src/breaks.rs	92.6
+src/briefing/recent.rs	98.5
+src/briefing/render.rs	96.6
+src/briefing/since.rs	92.5
+src/briefing/trail.rs	93.6
 src/claude_code.rs	79.6
 src/cli/check.rs	93.6
 src/cli/doctor.rs	88.3
@@ -87,7 +91,6 @@ src/hook/lifecycle.rs	88.2
 src/hook/prompt.rs	98.5
 src/hook/reads.rs	90.8
 src/hook/rename_hold.rs	92.8
-src/hook/render.rs	96.6
 src/hook/shell_hooks.rs	91.7
 src/hook/tool_call.rs	97.2
 src/hook/workspace.rs	90.9
@@ -104,7 +107,6 @@ src/notify.rs	88.4
 src/observer.rs	92.1
 src/process.rs	91.5
 src/protocol.rs	99.4
-src/recent.rs	98.5
 src/reformat.rs	96.3
 src/regions.rs	95.8
 src/remote.rs	94.1
@@ -114,7 +116,6 @@ src/service.rs	84.6
 src/shell.rs	94.1
 src/shell/formatters.rs	96.3
 src/shell/git_commands.rs	85.4
-src/since.rs	92.5
 src/skill.rs	94.5
 src/spool.rs	87.3
 src/store.rs	95.2
@@ -122,6 +123,5 @@ src/store/retention.rs	89.5
 src/test_output.rs	98.3
 src/text/redact.rs	99.2
 src/today.rs	86.8
-src/trail.rs	93.6
 src/user_install.rs	97.1
 src/zone.rs	94.5

@@ -375,6 +375,8 @@ Commit only the rows of files your change raised or added. A pull request
 that splits or moves a file moves its rows with it: the old row goes, and
 each new file of 100 lines or more gets a row. Lowering a row needs the
 reason in the pull request.
+A refactor that moves or renames files moves their rows in the same pull
+request; `tests/coverage_report.rs` fails on a row whose file is gone.
 
 ### Ratchets
 
