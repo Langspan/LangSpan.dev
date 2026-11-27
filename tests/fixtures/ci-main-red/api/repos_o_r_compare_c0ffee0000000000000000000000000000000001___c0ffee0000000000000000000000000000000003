@@ -1,0 +1,4 @@
+{"commits": [
+  {"sha": "c0ffee0000000000000000000000000000000002", "commit": {"message": "feat: a thing (#501)\n\nThe body."}},
+  {"sha": "c0ffee0000000000000000000000000000000003", "commit": {"message": "fix: ping @someone about `x` (#298) (#502)"}}
+]}

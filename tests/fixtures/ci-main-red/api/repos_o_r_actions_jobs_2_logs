@@ -1,0 +1,22 @@
+2026-11-27T10:01:00.0000000Z Starting the tests
+2026-11-27T10:01:01.0000000Z         FAIL [   2.001s] cli_golden every_option_against_every_command
+2026-11-27T10:01:02.0000000Z thread 'every_option_against_every_command' panicked at tests/cli_golden.rs:40:5:
+2026-11-27T10:01:03.0000000Z error: ~~~~ a fence in the log closes nothing
+2026-11-27T10:01:04.0000000Z error: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+2026-11-27T10:01:05.0000000Z a line that is not an error
+2026-11-27T10:01:10.0000000Z error: repeated failure 0
+2026-11-27T10:01:11.0000000Z error: repeated failure 1
+2026-11-27T10:01:12.0000000Z error: repeated failure 2
+2026-11-27T10:01:13.0000000Z error: repeated failure 3
+2026-11-27T10:01:14.0000000Z error: repeated failure 4
+2026-11-27T10:01:15.0000000Z error: repeated failure 5
+2026-11-27T10:01:16.0000000Z error: repeated failure 6
+2026-11-27T10:01:17.0000000Z error: repeated failure 7
+2026-11-27T10:01:18.0000000Z error: repeated failure 8
+2026-11-27T10:01:19.0000000Z error: repeated failure 9
+2026-11-27T10:01:20.0000000Z error: repeated failure 10
+2026-11-27T10:01:21.0000000Z error: repeated failure 11
+2026-11-27T10:01:22.0000000Z error: repeated failure 12
+2026-11-27T10:01:23.0000000Z error: repeated failure 13
+2026-11-27T10:01:24.0000000Z error: repeated failure 14
+2026-11-27T10:01:59.0000000Z ##[error]Process completed with exit code 100.

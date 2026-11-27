@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# A stand-in for gh, for the scripts/ci-main-red.py tests in
+# tests/ci_workflows.rs, which copies it onto PATH. Every call is appended
+# to $GH_STUB_LOG, and what a write reads on stdin to $GH_STUB_LOG.body.
+# `gh api PATH` prints the file api/<PATH up to "?", with / . = turned into
+# _>; `gh issue list` prints issue-list.json; `gh run download --pattern P
+# --dir D` copies each fixture directory matching P into D, or fails with
+# the text of $GH_STUB_OVERRIDE/download-error when that exists. The fixtures
+# are in $GH_STUB_FIXTURES; a file in $GH_STUB_OVERRIDE wins over the one
+# there, and with neither the call fails as an HTTP 404 does. When
+# $GH_STUB_OVERRIDE holds FILE.flood (a byte count N), serving FILE then
+# writes N more bytes to stdout and, once it has written them all, appends
+# FILE to $GH_STUB_LOG.finished; with FILE.flood-stderr it writes N bytes to
+# stderr instead and fails.
+set -euo pipefail
+here=$GH_STUB_FIXTURES
+printf '%s\n' "$*" >>"$GH_STUB_LOG"
+
+flood() {
+  local over=${GH_STUB_OVERRIDE:-/nonexistent}
+  if [ -f "$over/$1.flood" ]; then
+    { yes "filler line" || true; } | head -c "$(cat "$over/$1.flood")"
+    printf '%s\n' "$1" >>"$GH_STUB_LOG.finished"
+  fi
+  if [ -f "$over/$1.flood-stderr" ]; then
+    { yes "noise line" || true; } | head -c "$(cat "$over/$1.flood-stderr")" >&2
+    exit 1
+  fi
+}
+
+serve() {
+  for dir in "${GH_STUB_OVERRIDE:-}" "$here"; do
+    if [ -n "$dir" ] && [ -f "$dir/$1" ]; then
+      cat "$dir/$1"
+      flood "$1"
+      return 0
+    fi
+  done
+  echo "gh stub: HTTP 404: no fixture $1" >&2
+  exit 1
+}
+
+case "$1 ${2:-}" in
+  "api "*)
+    path=${2%%\?*}
+    serve "api/$(printf '%s' "$path" | tr '/.=' '___')"
+    ;;
+  "issue list") serve issue-list.json ;;
+  "run download")
+    if [ -f "${GH_STUB_OVERRIDE:-}/download-error" ]; then
+      cat "$GH_STUB_OVERRIDE/download-error" >&2
+      exit 1
+    fi
+    pattern="" dest=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --pattern) pattern=$2; shift ;;
+        --dir) dest=$2; shift ;;
+      esac
+      shift
+    done
+    found=0
+    for dir in "$here"/$pattern; do
+      if [ -d "$dir" ]; then cp -R "$dir" "$dest/"; found=1; fi
+    done
+    if [ "$found" = 0 ]; then
+      echo "no valid artifacts found to download" >&2
+      exit 1
+    fi
+    ;;
+  "issue create" | "issue comment")
+    cat >>"$GH_STUB_LOG.body"
+    echo "https://github.com/o/r/issues/7"
+    ;;
+  "issue close" | "label create") ;;
+  *)
+    echo "gh stub: unexpected call: $*" >&2
+    exit 2
+    ;;
+esac
