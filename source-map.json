@@ -1,0 +1,111 @@
+{
+  "Home": {
+    "sourceFiles": [
+      {"path": "README.md", "hash": "wc:13932"},
+      {"path": "docs/usage.md", "hash": "wc:5080"},
+      {"path": "Cargo.toml", "hash": "wc:1443"}
+    ],
+    "templateHash": "wc:5033:Home",
+    "generatedAt": "2026-11-27T16:36:27Z"
+  },
+  "Architecture": {
+    "sourceFiles": [
+      {"path": "docs/architecture.md", "hash": "wc:5517"},
+      {"path": "docs/security/threat-model.md", "hash": "partial"},
+      {"path": "src/main.rs", "hash": "wc:2154"}
+    ],
+    "templateHash": "wc:5033:Architecture",
+    "generatedAt": "2026-11-27T16:36:27Z"
+  },
+  "Coordination-Flow": {
+    "sourceFiles": [
+      {"path": "crates/langspan-core/src/admission.rs", "hash": "partial"},
+      {"path": "crates/langspan-core/src/lib.rs", "hash": "partial"},
+      {"path": "docs/usage/coordination-policies.md", "hash": "not-read-direct"}
+    ],
+    "templateHash": "wc:5033:Coordination-Flow",
+    "generatedAt": "2026-11-27T16:36:27Z"
+  },
+  "Storage-and-Events": {
+    "sourceFiles": [
+      {"path": "crates/langspan-core/src/lib.rs", "hash": "partial"},
+      {"path": "docs/architecture.md", "hash": "wc:5517"},
+      {"path": "docs/security/threat-model.md", "hash": "partial"}
+    ],
+    "templateHash": "wc:5033:Storage-and-Events",
+    "generatedAt": "2026-11-27T16:36:27Z"
+  },
+  "CLI-and-Integration": {
+    "sourceFiles": [
+      {"path": "src/main.rs", "hash": "wc:2154"},
+      {"path": "src/cli/run.rs", "hash": "wc:5957"},
+      {"path": "docs/usage.md", "hash": "wc:5080"}
+    ],
+    "templateHash": "wc:5033:CLI-and-Integration",
+    "generatedAt": "2026-11-27T16:36:27Z"
+  },
+  "CLI-Reference": {
+    "sourceFiles": [
+      {"path": "src/cli/run.rs", "hash": "wc:5957"},
+      {"path": "docs/usage.md", "hash": "wc:5080"},
+      {"path": "docs/install.md", "hash": "wc:7142"}
+    ],
+    "templateHash": "wc:5033:CLI-Reference",
+    "generatedAt": "2026-11-27T16:36:27Z"
+  },
+  "MCP-Server": {
+    "sourceFiles": [
+      {"path": "src/mcp.rs", "hash": "partial"},
+      {"path": "src/tool_names.rs", "hash": "wc:1712"},
+      {"path": "docs/usage/mcp.md", "hash": "wc:7581"}
+    ],
+    "templateHash": "wc:5033:MCP-Server",
+    "generatedAt": "2026-11-27T16:36:27Z"
+  },
+  "Setup-and-Development": {
+    "sourceFiles": [
+      {"path": "docs/install.md", "hash": "wc:7142"},
+      {"path": "docs/engineering.md", "hash": "partial"},
+      {"path": "docs/engineering-standard.md", "hash": "wc:4548"}
+    ],
+    "templateHash": "wc:5033:Setup-and-Development",
+    "generatedAt": "2026-11-27T16:36:27Z"
+  },
+  "Installation": {
+    "sourceFiles": [
+      {"path": "docs/install.md", "hash": "wc:7142"},
+      {"path": "README.md", "hash": "wc:13932"}
+    ],
+    "templateHash": "wc:5033:Installation",
+    "generatedAt": "2026-11-27T16:36:27Z"
+  },
+  "Engineering-Workflow": {
+    "sourceFiles": [
+      {"path": "docs/engineering.md", "hash": "partial"},
+      {"path": "docs/engineering-standard.md", "hash": "wc:4548"}
+    ],
+    "templateHash": "wc:5033:Engineering-Workflow",
+    "generatedAt": "2026-11-27T16:36:27Z"
+  },
+  "For-Agents": {
+    "sourceFiles": [
+      {"path": ".github/agentic-wiki/PAGES.md", "hash": "wc:5033"}
+    ],
+    "templateHash": "wc:5033:For-Agents",
+    "generatedAt": "2026-11-27T16:36:27Z"
+  },
+  "AGENTSmd": {
+    "sourceFiles": [
+      {"path": ".github/agentic-wiki/PAGES.md", "hash": "wc:5033"}
+    ],
+    "templateHash": "wc:5033:AGENTSmd",
+    "generatedAt": "2026-11-27T16:36:27Z"
+  },
+  "llmstxt": {
+    "sourceFiles": [
+      {"path": ".github/agentic-wiki/PAGES.md", "hash": "wc:5033"}
+    ],
+    "templateHash": "wc:5033:llmstxt",
+    "generatedAt": "2026-11-27T16:36:27Z"
+  }
+}
