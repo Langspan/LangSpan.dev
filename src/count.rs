@@ -16,11 +16,7 @@ use std::path::Path;
 use langspan_core::{COUNT_KINDS, Command, Outcome, RefusalCount};
 use serde::Serialize;
 
-use crate::{
-    client, local_day,
-    protocol::{PROTOCOL_VERSION, Request},
-    today,
-};
+use crate::{client, local_day, protocol::Request, today};
 
 /// The line every count carries until refusals are tied to outcomes (H9)
 /// and a measurement.
@@ -337,11 +333,7 @@ pub fn day_starts(month: Month) -> Result<Vec<u64>, String> {
 /// Ask the daemon for one month's count. An unreachable daemon is an
 /// error; no earlier figure is kept to show instead.
 pub fn ask(state_dir: &Path, month: Month, days: Vec<u64>) -> Result<MonthCount, crate::Error> {
-    let request = Request {
-        version: PROTOCOL_VERSION,
-        request_id: "read".into(),
-        command: Command::Count { days },
-    };
+    let request = Request::new("read", Command::Count { days });
     match client::call(state_dir, &request)?.outcome {
         Outcome::Count { count } => Ok(MonthCount {
             month: month.key(),

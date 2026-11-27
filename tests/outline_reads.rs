@@ -373,11 +373,7 @@ fn a_version_7_client_reads_status_and_events_after_an_outline() {
     let socket = world.base.join("state/daemon.sock");
     // The daemon's own bytes, as a client of `version` receives them.
     let ask = |version: u16, id: &str, command: Command| -> String {
-        let request = Request {
-            version,
-            request_id: format!("{id}-{version}"),
-            command,
-        };
+        let request = Request::new(format!("{id}-{version}"), command).with_version(version);
         let mut stream = std::os::unix::net::UnixStream::connect(&socket).unwrap();
         stream.set_read_timeout(Some(WAIT)).unwrap();
         stream

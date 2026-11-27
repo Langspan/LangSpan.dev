@@ -3,10 +3,7 @@
 //! edits of different functions of one file proceed together; edits of one
 //! function are serialized, and the denial names it.
 
-use langspan::{
-    client,
-    protocol::{PROTOCOL_VERSION, Request},
-};
+use langspan::{client, protocol::Request};
 use langspan_core::{Command, Event, Outcome, Region};
 use serde_json::{Value, json};
 use std::{
@@ -165,11 +162,7 @@ impl Drop for Fixture {
 }
 
 fn request(command: Command) -> Request {
-    Request {
-        version: PROTOCOL_VERSION,
-        request_id: "read".into(),
-        command,
-    }
+    Request::new("read", command)
 }
 
 fn keys(lease: &langspan_core::Lease) -> Vec<String> {

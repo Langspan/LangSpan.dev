@@ -404,6 +404,26 @@ pub struct Request {
     pub command: Command,
 }
 
+impl Request {
+    /// A request at the current protocol version. Build every request
+    /// through this, so a new field is added here and not at each call site.
+    pub fn new(request_id: impl Into<String>, command: Command) -> Self {
+        Self {
+            version: PROTOCOL_VERSION,
+            request_id: request_id.into(),
+            command,
+        }
+    }
+
+    /// The same request at another protocol version, as an older or newer
+    /// client would send it.
+    #[must_use]
+    pub fn with_version(mut self, version: u16) -> Self {
+        self.version = version;
+        self
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Response {
@@ -448,4 +468,29 @@ pub fn read_frame(reader: impl Read) -> io::Result<Vec<u8>> {
         ));
     }
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_new_request_is_at_the_current_version_and_keeps_its_wire_shape() {
+        let request = Request::new("r-1", Command::Status);
+        assert_eq!(request.version, PROTOCOL_VERSION);
+        assert_eq!(request.request_id, "r-1");
+        assert_eq!(request.command, Command::Status);
+        let wire: serde_json::Value = serde_json::from_slice(&encode(&request).unwrap()).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({
+                "version": PROTOCOL_VERSION,
+                "request_id": "r-1",
+                "command": serde_json::to_value(Command::Status).unwrap(),
+            })
+        );
+        let older = request.with_version(3);
+        assert_eq!(older.version, 3);
+        assert_eq!(older.request_id, "r-1");
+    }
 }

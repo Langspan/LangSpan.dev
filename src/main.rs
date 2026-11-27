@@ -5014,11 +5014,7 @@ async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
                 .ok_or("mutation requires --request-id ID; reuse it only for an identical retry")?
         };
         no_unused_options(&options)?;
-        Request {
-            version: PROTOCOL_VERSION,
-            request_id,
-            command,
-        }
+        Request::new(request_id, command)
     };
     // `remote enable --root DIR` registers the workspace first, so a machine
     // where no hook has run yet can join in one step.

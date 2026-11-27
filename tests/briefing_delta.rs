@@ -253,11 +253,7 @@ impl Drop for Fixture {
 }
 
 fn status() -> Request {
-    Request {
-        version: PROTOCOL_VERSION,
-        request_id: "read".into(),
-        command: Command::Status,
-    }
+    Request::new("read", Command::Status)
 }
 
 /// Two peers at work before Alice starts: Bob holds `a.txt`, Carol edited
@@ -548,14 +544,14 @@ fn joined_parts(f: &Fixture, version: u16) -> Vec<Value> {
     let mut part = String::new();
     let mut after = None;
     for page in 0..10_000 {
-        let request = Request {
-            version,
-            request_id: format!("parts-{version}-{page}"),
-            command: Command::StatusRecords {
+        let request = Request::new(
+            format!("parts-{version}-{page}"),
+            Command::StatusRecords {
                 after: after.clone(),
                 page_bytes: Some(langspan::store::MIN_PAGE_BYTES as u32),
             },
-        };
+        )
+        .with_version(version);
         let response = client::call(&f.state_dir(), &request).unwrap();
         assert_eq!(response.version, version);
         let Outcome::StatusRecords { records, next } = response.outcome else {

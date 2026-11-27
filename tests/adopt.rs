@@ -293,11 +293,7 @@ impl Fixture {
         host.wait().unwrap();
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
-            let request = langspan::protocol::Request {
-                version: langspan::protocol::PROTOCOL_VERSION,
-                request_id: "read".into(),
-                command: langspan_core::Command::Status,
-            };
+            let request = langspan::protocol::Request::new("read", langspan_core::Command::Status);
             let state = match langspan::client::call(&self.state(), &request)
                 .unwrap()
                 .outcome
@@ -615,14 +611,13 @@ fn adopting_an_adopter_that_ended_mid_transfer_credits_the_original_sessions_lin
     f.lifecycle(ALICE, "SessionEnd", None);
     f.lifecycle(BOB, "SessionStart", None);
     // Bob's adoption is recorded, then Bob ends before crediting the lines.
-    let request = langspan::protocol::Request {
-        version: langspan::protocol::PROTOCOL_VERSION,
-        request_id: "bob-adopts".into(),
-        command: langspan_core::Command::Adopt {
+    let request = langspan::protocol::Request::new(
+        "bob-adopts",
+        langspan_core::Command::Adopt {
             session_id: id(BOB),
             from: id(ALICE),
         },
-    };
+    );
     let recorded = langspan::client::call(&f.state(), &request)
         .unwrap()
         .outcome;
@@ -675,14 +670,13 @@ fn adopting_a_parent_leaves_a_subagent_another_live_session_adopted_with_that_se
     f.lifecycle(ALICE, "SessionEnd", None);
     f.lifecycle(BOB, "SessionStart", None);
     let helper = format!("{ALICE}.agent-one");
-    let request = langspan::protocol::Request {
-        version: langspan::protocol::PROTOCOL_VERSION,
-        request_id: "bob-adopts-helper".into(),
-        command: langspan_core::Command::Adopt {
+    let request = langspan::protocol::Request::new(
+        "bob-adopts-helper",
+        langspan_core::Command::Adopt {
             session_id: id(BOB),
             from: id(&helper),
         },
-    };
+    );
     let recorded = langspan::client::call(&f.state(), &request)
         .unwrap()
         .outcome;

@@ -4,10 +4,7 @@
 //! bounds, a merge stopped on a conflict, and a checkout that changes under
 //! the sessions working in it.
 
-use langspan::{
-    client,
-    protocol::{PROTOCOL_VERSION, Request},
-};
+use langspan::{client, protocol::Request};
 use langspan_core::{Command, Event, Outcome, ScanSummary, State};
 use serde_json::{Value, json};
 use std::{
@@ -275,11 +272,7 @@ impl Drop for World {
 }
 
 fn request(command: Command) -> Request {
-    Request {
-        version: PROTOCOL_VERSION,
-        request_id: "read".into(),
-        command,
-    }
+    Request::new("read", command)
 }
 
 fn disk_paths(events: &[Event]) -> Vec<String> {
@@ -699,18 +692,19 @@ fn a_redelivered_merge_report_keeps_the_merges_own_window() {
     );
     // A report the daemon recorded but whose reply was lost is sent again
     // with a larger age: answered from its receipt, not refused.
-    let report = |ago| Request {
-        version: PROTOCOL_VERSION,
-        request_id: "checkout-run-retried".into(),
-        command: Command::ObserveCheckoutRun {
-            session_id: run.session_id.clone(),
-            command: run.command.clone(),
-            to_branch: run.to_branch.clone(),
-            to_head: run.to_head.clone(),
-            ran_ms: 10,
-            finished_ago_ms: ago,
-            files_unchanged: run.files_unchanged,
-        },
+    let report = |ago| {
+        Request::new(
+            "checkout-run-retried",
+            Command::ObserveCheckoutRun {
+                session_id: run.session_id.clone(),
+                command: run.command.clone(),
+                to_branch: run.to_branch.clone(),
+                to_head: run.to_head.clone(),
+                ran_ms: 10,
+                finished_ago_ms: ago,
+                files_unchanged: run.files_unchanged,
+            },
+        )
     };
     let first = client::call(&w.state_dir(), &report(0)).unwrap();
     let again = client::call(&w.state_dir(), &report(5_000)).unwrap();

@@ -16,7 +16,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use langspan::protocol::{PROTOCOL_VERSION, Request};
+use langspan::protocol::Request;
 use langspan_core::{Command, Outcome, ToolResult};
 use rmcp::model::CallToolRequestParams;
 use rmcp::transport::TokioChildProcess;
@@ -390,11 +390,7 @@ fn today_requests_match_the_committed_golden_vectors() {
 }
 
 fn call(state: &std::path::Path, id: &str, command: Command) -> Outcome {
-    let request = Request {
-        version: PROTOCOL_VERSION,
-        request_id: id.into(),
-        command,
-    };
+    let request = Request::new(id, command);
     langspan::client::call(state, &request).unwrap().outcome
 }
 

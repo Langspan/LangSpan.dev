@@ -5,10 +5,7 @@
 //! captured from Claude Code 2.1.330 (`fixtures/claude-code-2.1.330`);
 //! Codex's Stop is in its documented shape only.
 
-use langspan::{
-    client,
-    protocol::{PROTOCOL_VERSION, Request},
-};
+use langspan::{client, protocol::Request};
 use langspan_core::{
     CheckRecord, CheckResult, Command, DiskObservation, Event, Outcome, RecordedEvent, ScanSummary,
     State,
@@ -419,15 +416,14 @@ impl Fixture {
     }
     /// As `changes`, with the summary of the observer's last completed scan.
     fn changes_and_scan(&self, after: u64) -> (Vec<RecordedEvent>, Option<ScanSummary>) {
-        let request = Request {
-            version: PROTOCOL_VERSION,
-            request_id: "changes".into(),
-            command: Command::Changes {
+        let request = Request::new(
+            "changes",
+            Command::Changes {
                 workspace_id: "work".into(),
                 after,
                 limit: 1000,
             },
-        };
+        );
         match client::call(&self.state_dir(), &request).unwrap().outcome {
             Outcome::Changes { events, scan } => (events, scan),
             other => panic!("{other:?}"),
@@ -526,11 +522,7 @@ impl Drop for Fixture {
 }
 
 fn status() -> Request {
-    Request {
-        version: PROTOCOL_VERSION,
-        request_id: "read".into(),
-        command: Command::Status,
-    }
+    Request::new("read", Command::Status)
 }
 
 /// Gone, or a zombie its new parent has not reaped yet: either way not
@@ -937,15 +929,14 @@ fn learned(f: &Fixture, test: &str) -> Option<(usize, usize)> {
 /// What `land` asks before it pushes: whether a passing check of `tests`
 /// is recorded for exactly `tree`.
 fn ready_to_land(f: &Fixture, tree: &str) -> bool {
-    let request = Request {
-        version: PROTOCOL_VERSION,
-        request_id: "read".into(),
-        command: Command::LandingReadiness {
+    let request = Request::new(
+        "read",
+        Command::LandingReadiness {
             workspace_id: "work".into(),
             name: "tests".into(),
             tree_oid: tree.into(),
         },
-    };
+    );
     match client::call(&f.state_dir(), &request).unwrap().outcome {
         Outcome::Readiness { ready, .. } => ready,
         other => panic!("{other:?}"),
@@ -1155,15 +1146,14 @@ fn forgetting_a_secret_looking_test_name_is_refused_and_never_stored() {
     ] {
         let reply = client::call(
             &f.state_dir(),
-            &Request {
-                version: PROTOCOL_VERSION,
-                request_id: id.into(),
-                command: Command::ForgetFlakyTest {
+            &Request::new(
+                id,
+                Command::ForgetFlakyTest {
                     workspace_id: "work".into(),
                     name,
                     test,
                 },
-            },
+            ),
         )
         .unwrap();
         let Outcome::Error { code, message } = &reply.outcome else {

@@ -396,14 +396,13 @@ mod tests {
 
     /// A session end carrying `facts`, as the end hook frames it.
     fn end_frame(facts: &TrailFacts) -> Result<Vec<u8>, crate::Error> {
-        crate::protocol::encode(&crate::protocol::Request {
-            version: crate::protocol::PROTOCOL_VERSION,
-            request_id: "r".repeat(128),
-            command: langspan_core::Command::SessionEnd {
+        crate::protocol::encode(&crate::protocol::Request::new(
+            "r".repeat(128),
+            langspan_core::Command::SessionEnd {
                 session_id: format!("claude-code.{}", "s".repeat(116)),
                 trail: Some(facts.clone()),
             },
-        })
+        ))
     }
 
     /// The most files of the longest paths, each edited and uncommitted,

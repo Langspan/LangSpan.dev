@@ -8,7 +8,7 @@
 //! time it prints the unavailable line and exits 0. Nothing it prints reaches
 //! the model, and it shows counts, never paths.
 
-use crate::protocol::{PROTOCOL_VERSION, Request};
+use crate::protocol::Request;
 use langspan_core::{Command, Outcome, StatusLine};
 use serde_json::{Value, json};
 use std::io::IsTerminal;
@@ -94,14 +94,13 @@ pub fn ask(state_dir: &Path, dir: &Path, from_ms: u64, deadline: Instant) -> Ans
     let root = std::fs::canonicalize(dir)
         .or_else(|_| std::path::absolute(dir))
         .unwrap_or_else(|_| dir.to_path_buf());
-    let request = Request {
-        version: PROTOCOL_VERSION,
-        request_id: "read".into(),
-        command: Command::StatusLine {
+    let request = Request::new(
+        "read",
+        Command::StatusLine {
             root: root.to_string_lossy().into_owned(),
             from_ms,
         },
-    };
+    );
     match crate::client::call_until(state_dir, &request, deadline) {
         Ok(response) => match response.outcome {
             Outcome::StatusLine { line } => Answer::Line(line),

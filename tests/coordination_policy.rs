@@ -288,11 +288,7 @@ impl Fixture {
     }
     /// The conflicts the dashboard lists as refusals.
     fn dashboard_conflicts(&self) -> usize {
-        let request = langspan::protocol::Request {
-            version: langspan::protocol::PROTOCOL_VERSION,
-            request_id: "read".into(),
-            command: langspan_core::Command::Dashboard,
-        };
+        let request = langspan::protocol::Request::new("read", langspan_core::Command::Dashboard);
         match langspan::client::call(&self.base.join("state"), &request)
             .unwrap()
             .outcome

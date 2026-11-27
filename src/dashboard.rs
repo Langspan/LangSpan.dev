@@ -8,10 +8,7 @@
 //! requests without a body are read, each within a deadline; and at most
 //! `MAX_CONNECTIONS` are served at once. See ADR 0013.
 
-use crate::{
-    client, count,
-    protocol::{PROTOCOL_VERSION, Request},
-};
+use crate::{client, count, protocol::Request};
 use langspan_core::{Command, Outcome};
 use std::{
     fs,
@@ -456,11 +453,7 @@ fn route(request: &Parsed, arrived: SocketAddr, context: &Context) -> Reply {
 /// read as HTML whatever a client does with it.
 fn state(context: &Context) -> Reply {
     let state_dir = context.state_dir.as_path();
-    let request = Request {
-        version: PROTOCOL_VERSION,
-        request_id: "read".into(),
-        command: Command::Dashboard,
-    };
+    let request = Request::new("read", Command::Dashboard);
     let (status, body) = match client::call(state_dir, &request) {
         Ok(response) => match response.outcome {
             Outcome::Dashboard { dashboard } => {

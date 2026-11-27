@@ -18,7 +18,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::client;
-use crate::protocol::{MAX_FRAME_BYTES, PROTOCOL_VERSION, Request, Response};
+use crate::protocol::{MAX_FRAME_BYTES, Request, Response};
 
 /// Every tool the server lists, in alphabetical order, one per line. This is
 /// the only place the set of tools is written down: adding a tool means adding
@@ -838,11 +838,7 @@ impl McpAdapter {
         command: Command,
     ) -> Result<Response, serde_json::Value> {
         let state_dir = self.state_dir.clone();
-        let request = Request {
-            version: PROTOCOL_VERSION,
-            request_id: request_id.clone(),
-            command,
-        };
+        let request = Request::new(request_id.clone(), command);
         // IPC has bounded read/write deadlines. Keep its synchronous work off
         // the async protocol loop; the daemon alone serializes state changes.
         match tokio::task::spawn_blocking(move || client::call(&state_dir, &request)).await {

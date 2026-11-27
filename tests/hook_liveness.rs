@@ -5,7 +5,7 @@
 
 use langspan::{
     client,
-    protocol::{PROTOCOL_VERSION, Request, Response},
+    protocol::{Request, Response},
 };
 use langspan_core::{
     Briefing, Command, Event, LivenessStatus, Outcome, ProcessIdentity, SESSION_SEEN_INTERVAL_MS,
@@ -182,11 +182,7 @@ impl Drop for Fixture {
 }
 
 fn request(id: &str, command: Command) -> Request {
-    Request {
-        version: PROTOCOL_VERSION,
-        request_id: id.into(),
-        command,
-    }
+    Request::new(id, command)
 }
 
 fn lists(briefing: &Briefing, session: &str) -> bool {

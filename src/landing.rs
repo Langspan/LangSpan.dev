@@ -11,7 +11,7 @@
 use crate::{
     client,
     integrate::{self, Combination, ConflictFile, Merged, Ran, Rename},
-    protocol::{PROTOCOL_VERSION, Request, Response},
+    protocol::{Request, Response},
     rewrite::Notes,
 };
 use langspan_core::{
@@ -452,14 +452,7 @@ pub fn ask(
     request_id: String,
     command: Command,
 ) -> Result<Response, crate::Error> {
-    let response = client::call(
-        state_dir,
-        &Request {
-            version: PROTOCOL_VERSION,
-            request_id,
-            command,
-        },
-    )?;
+    let response = client::call(state_dir, &Request::new(request_id, command))?;
     if let Outcome::Error { code, message } = &response.outcome {
         return Err(format!("{code}: {message}").into());
     }
@@ -1050,10 +1043,9 @@ fn wait_for_turn(
     let take = |queue: Option<TurnQueueing>, id: String| {
         client::call(
             state_dir,
-            &Request {
-                version: PROTOCOL_VERSION,
-                request_id: id,
-                command: Command::TakeTurn {
+            &Request::new(
+                id,
+                Command::TakeTurn {
                     workspace_id: target.workspace_id.clone(),
                     onto: target.onto.clone(),
                     session_id: session_id.map(Into::into),
@@ -1061,7 +1053,7 @@ fn wait_for_turn(
                     turn_id: None,
                     queue,
                 },
-            },
+            ),
         )
         .map(|response| response.outcome)
     };

@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use langspan::mcp::{CUT_NOTE, ENVELOPE_ROOM_BYTES};
-use langspan::protocol::{MAX_FRAME_BYTES, PROTOCOL_VERSION, Request};
+use langspan::protocol::{MAX_FRAME_BYTES, Request};
 use langspan_core::{Command, FileKind, FileState, Outcome};
 use rmcp::ServiceExt;
 use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock};
@@ -79,11 +79,10 @@ impl World {
     }
 
     fn call(&self, command: Command) -> Outcome {
-        let request = Request {
-            version: PROTOCOL_VERSION,
-            request_id: format!("r{}", NEXT.fetch_add(1, Ordering::Relaxed)),
+        let request = Request::new(
+            format!("r{}", NEXT.fetch_add(1, Ordering::Relaxed)),
             command,
-        };
+        );
         let outcome = langspan::client::call(&self.state(), &request)
             .unwrap()
             .outcome;
