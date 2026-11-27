@@ -8,7 +8,7 @@
 //! coordination data, never instructions. Message text is never carried;
 //! only how many are still owed.
 
-use crate::hook::{clean, quoted, session_label};
+use crate::text::{clean, quoted, session_label};
 use langspan_core::{AWAY_AFTER_MS, MAX_AWAY_AFTER_MS, Since, SinceFrom};
 
 /// The most bytes the section adds to a starting session's context, within

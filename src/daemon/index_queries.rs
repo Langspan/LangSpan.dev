@@ -721,7 +721,7 @@ pub(super) fn observe_elsewhere(
         };
         let mut parts = vec![notice_id.as_str(), workspace_id];
         parts.extend(paths.iter().map(String::as_str));
-        let id = crate::hook::wire_id("interface-elsewhere", &parts);
+        let id = crate::ids::wire_id("interface-elsewhere", &parts);
         let failure = match store.execute(&id, &command, &command, now) {
             Ok(Execution {
                 outcome: Outcome::Error { message, .. },
@@ -1532,7 +1532,7 @@ fn check_calls(
             session_id: session_id.to_owned(),
             notice_ids,
         };
-        let id = crate::hook::wire_id("interface-alert", &[&request_id]);
+        let id = crate::ids::wire_id("interface-alert", &[&request_id]);
         match store.execute(&id, &record, &record, now) {
             Ok(Execution {
                 outcome: Outcome::Error { code, message },
