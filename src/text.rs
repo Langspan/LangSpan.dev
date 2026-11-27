@@ -31,6 +31,14 @@ pub(crate) fn clean(text: &str, limit: usize) -> String {
     format!("{}…", &text[..end])
 }
 
+/// `session_id` as a reason names it: `claude-code session <id>`.
+pub(crate) fn session_label(session_id: &str) -> String {
+    match session_id.split_once('.') {
+        Some((host, id)) => format!("{} session {}", clean(host, 32), clean(id, 64)),
+        None => format!("session {}", clean(session_id, 64)),
+    }
+}
+
 /// An age for a person: seconds up to 89, then minutes.
 pub fn age(ms: u64) -> String {
     match ms / 1000 {

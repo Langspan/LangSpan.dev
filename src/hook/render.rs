@@ -1,6 +1,7 @@
 //! Briefing text: the core's `Briefing` and source-index answers rendered
 //! as the words a hook places in the model's context, within byte budgets.
 use super::BRIEFING_LIMIT;
+pub(crate) use crate::text::session_label;
 use crate::text::{age, clean, kept_bytes, quoted, truncate};
 use serde_json::Value;
 
@@ -1609,14 +1610,6 @@ pub fn unplaced_keys(
 
 pub(crate) const CODE_SKIPPED: &str =
     "(LangSpan source index context for this prompt was left out: no room after messages.)";
-
-/// `session_id` as a reason names it: `claude-code session <id>`.
-pub(crate) fn session_label(session_id: &str) -> String {
-    match session_id.split_once('.') {
-        Some((host, id)) => format!("{} session {}", clean(host, 32), clean(id, 64)),
-        None => format!("session {}", clean(session_id, 64)),
-    }
-}
 
 /// What a note is about, as a briefing line and the recap show it: its
 /// files, or its definition and whether that is still the code the note
