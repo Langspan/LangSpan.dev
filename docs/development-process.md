@@ -22,6 +22,11 @@ priority and size:
 If a decision is costly to reverse, record it in an ADR in
 [`docs/adr/`](adr/0001-local-coordination.md) before or with the change.
 
+A new wire field adds a named capability, one line in `CAPABILITIES` in
+`src/protocol.rs` with vectors in `fixtures/capabilities/<name>/`, never a
+protocol version. The version changes only for a breaking change
+([ADR 0037](adr/0037-protocol-capabilities.md)).
+
 ## Work in progress
 
 Limit open work so that each pull request merges quickly:
@@ -121,9 +126,10 @@ the event (`LANGSPAN_CHECK_LANE`):
 In the full lane, the benchmark harness's dry runs (the `dry_run_*` tests
 in `tests/benchmark_harness.rs`) run only when the change touches one of
 the following paths: `benchmarks/`, `tests/benchmark_harness.rs`, the
-daemon, hook and briefing code they drive (`src/daemon.rs`, `src/hook.rs`,
-`src/hook/`, `src/claude_code.rs`, `src/recent.rs`,
-`crates/langspan-core/src/lib.rs`), or what builds and runs the suite
+daemon, hook and briefing code they drive (`src/daemon.rs`, `src/daemon/`,
+`src/hook.rs`, `src/hook/`, `src/claude_code.rs`, `src/recent.rs` and all
+of `crates/langspan-core/src/`, so code moved into a new module there
+still counts), or what builds and runs the suite
 (`Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `.config/nextest.toml`,
 `check.yml`, `scripts/check.sh`, `scripts/test-foreign-home.sh`,
 `scripts/ci-changes.sh`). The dry runs took about 11 minutes of an

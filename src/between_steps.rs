@@ -226,37 +226,13 @@ mod tests {
         assert!(START_GRACE < WATCH_LIMIT);
     }
 
-    /// Review follow-up #266: the coordinator may record what an ask told
-    /// and then lose the answer, so the watcher asks again under the same
-    /// request ID and its receipt answers.
-    #[test]
-    fn an_ask_whose_answer_was_lost_is_asked_again_under_its_id() {
-        let dir = std::env::temp_dir().join(format!("ls-between-{}", std::process::id()));
+    /// An owner-only directory of its own for one test, and a hook
+    /// configuration whose state and root are that directory.
+    fn scratch(name: &str) -> (std::path::PathBuf, Config) {
+        let dir = std::env::temp_dir().join(format!("ls-between-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir(&dir).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let socket = dir.join("daemon.sock");
-        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
-        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let peer = std::thread::spawn(move || {
-            let mut ids = Vec::new();
-            for answer in [false, true] {
-                let (stream, _) = listener.accept().unwrap();
-                let mut line = String::new();
-                BufReader::new(&stream).read_line(&mut line).unwrap();
-                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
-                ids.push(request["request_id"].as_str().unwrap().to_owned());
-                // The first connection closes before its answer.
-                if answer {
-                    let reply = serde_json::json!({"version": request["version"],
-                        "request_id": request["request_id"], "replayed": true, "generation": 1,
-                        "lease_valid": null, "outcome": {"type": "between_steps",
-                        "session_id": "claude-code.alice", "open": false, "stops": 0}});
-                    writeln!(&stream, "{reply}").unwrap();
-                }
-            }
-            ids
-        });
         let config = Config {
             state_dir: dir.clone(),
             workspace_id: "work".into(),
@@ -271,6 +247,47 @@ mod tests {
             vendor: crate::install::Vendor::ClaudeCode,
             user_level: false,
         };
+        (dir, config)
+    }
+
+    /// A coordinator on `dir`'s socket that takes one connection per entry
+    /// of `outcomes`: it answers with that outcome, or closes before an
+    /// answer for `None`. It returns the request IDs it was sent.
+    fn coordinator(
+        dir: &std::path::Path,
+        outcomes: Vec<Option<serde_json::Value>>,
+    ) -> std::thread::JoinHandle<Vec<String>> {
+        let socket = dir.join("daemon.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::thread::spawn(move || {
+            let mut ids = Vec::new();
+            for outcome in outcomes {
+                let (stream, _) = listener.accept().unwrap();
+                let mut line = String::new();
+                BufReader::new(&stream).read_line(&mut line).unwrap();
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                ids.push(request["request_id"].as_str().unwrap().to_owned());
+                if let Some(outcome) = outcome {
+                    let reply = serde_json::json!({"version": request["version"],
+                        "request_id": request["request_id"], "replayed": true, "generation": 1,
+                        "lease_valid": null, "outcome": outcome});
+                    writeln!(&stream, "{reply}").unwrap();
+                }
+            }
+            ids
+        })
+    }
+
+    /// Review follow-up #266: the coordinator may record what an ask told
+    /// and then lose the answer, so the watcher asks again under the same
+    /// request ID and its receipt answers.
+    #[test]
+    fn an_ask_whose_answer_was_lost_is_asked_again_under_its_id() {
+        let (dir, config) = scratch("lost");
+        let closed = serde_json::json!({"type": "between_steps",
+            "session_id": "claude-code.alice", "open": false, "stops": 0});
+        let peer = coordinator(&dir, vec![None, Some(closed)]);
         let watched = watch_within(
             br#"{"hook_event_name":"UserPromptSubmit","session_id":"alice"}"#,
             &config,
@@ -280,5 +297,80 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(watched.detail, "the turn is over", "{watched:?}");
         assert_eq!(ids[0], ids[1]);
+    }
+
+    /// Issue #288: exit 2 wakes the model, so the watcher uses it only to
+    /// tell a notice. Every event it does not serve ends it at once with
+    /// exit 0 and nothing on stderr, before it asks any coordinator (none
+    /// listens here), and says why in its detail. These run with the unit
+    /// tests on every pull request; `tests/between_steps.rs` covers the
+    /// paths that need a real coordinator.
+    #[test]
+    fn every_event_the_watcher_does_not_serve_ends_it_with_exit_0() {
+        let (dir, config) = scratch("events");
+        let missing = dir.join("missing");
+        let missing = missing.to_str().unwrap();
+        for (event, why) in [
+            (serde_json::json!("not an object"), "malformed host event"),
+            (
+                serde_json::json!({"hook_event_name": "UserPromptSubmit", "session_id": "alice",
+                    "cursor_version": "1.7.2"}),
+                "Cursor",
+            ),
+            (
+                serde_json::json!({"hook_event_name": "Stop", "session_id": "alice"}),
+                "own prompt only",
+            ),
+            (
+                serde_json::json!({"hook_event_name": "UserPromptSubmit", "session_id": "alice",
+                    "agent_id": "sub-1"}),
+                "own prompt only",
+            ),
+            (
+                serde_json::json!({"hook_event_name": "UserPromptSubmit"}),
+                "usable session identity",
+            ),
+            (
+                serde_json::json!({"hook_event_name": "UserPromptSubmit", "session_id": "../alice"}),
+                "usable session identity",
+            ),
+            (
+                serde_json::json!({"hook_event_name": "UserPromptSubmit", "session_id": "alice",
+                    "cwd": missing}),
+                "cannot resolve host cwd",
+            ),
+        ] {
+            let started = Instant::now();
+            let watched = watch_within(event.to_string().as_bytes(), &config, WATCH_LIMIT);
+            assert_eq!(watched.exit, 0, "{event}: {watched:?}");
+            assert!(watched.stderr.is_empty(), "{event}: {watched:?}");
+            assert!(watched.detail.contains(why), "{event}: {watched:?}");
+            assert!(started.elapsed() < POLL, "{event}: asked no coordinator");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// An answer the watcher does not expect ends it with exit 0, not a wake.
+    #[test]
+    fn an_unexpected_coordinator_answer_ends_the_watcher_with_exit_0() {
+        let (dir, config) = scratch("unexpected");
+        let ended = serde_json::json!({"type": "session_ended", "session_id": "claude-code.alice"});
+        let peer = coordinator(&dir, vec![Some(ended)]);
+        let watched = watch_within(
+            br#"{"hook_event_name":"UserPromptSubmit","session_id":"alice"}"#,
+            &config,
+            Duration::from_secs(5),
+        );
+        peer.join().unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(
+            (
+                watched.exit,
+                watched.stderr.as_str(),
+                watched.detail.as_str()
+            ),
+            (0, "", "unexpected coordinator answer"),
+            "{watched:?}"
+        );
     }
 }

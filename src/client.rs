@@ -2,7 +2,7 @@
 
 #[cfg(unix)]
 mod unix {
-    use crate::protocol::{PROTOCOL_VERSION, Request, Response, encode, read_frame};
+    use crate::protocol::{Capabilities, PROTOCOL_VERSION, Request, Response, encode, read_frame};
     use langspan_core::Outcome;
     use rustix::{
         event::{PollFd, PollFlags, Timespec, poll},
@@ -32,26 +32,37 @@ mod unix {
         // Owner and agent text is redacted here, before it leaves the client.
         let mut request = request.clone();
         crate::hook::redact_command(&mut request.command);
-        let mut response = exchange(state_dir, &request, deadline)?;
-        // A daemon of an earlier build refuses this version before it reads
-        // the command, and answers in its own (version 9, 8, 7, 6, 5, 4 or
-        // 3), so the same request in the version it names cannot take effect
-        // twice. Requests are the same in every version it answers, except
-        // those versions 6 and 9 changed (`protocol::fits`), which are not
-        // sent at all to a daemon that cannot read them, and a briefing of
-        // changes only, asked of a daemon before version 7 as the full view
-        // (`protocol::for_version`).
-        if request.version == PROTOCOL_VERSION
-            && response.version < PROTOCOL_VERSION
-            && crate::protocol::answers(response.version)
-            && matches!(&response.outcome, Outcome::Error { code, .. } if code == "unsupported_version")
+        let (mut response, granted) = exchange(state_dir, &request, deadline)?;
+        // A daemon refuses a request it cannot read before it reads the
+        // command (ADR 0037), so the same request asked again cannot take
+        // effect twice. A daemon of an earlier build refuses this version,
+        // or the `capabilities` it does not know, in its own version: it is
+        // asked again in that version, naming none. One of this version
+        // that cannot read the request names the capabilities it granted:
+        // it is asked again with those. Either way the command is reshaped
+        // to what that daemon reads (`protocol::for_capabilities`), and one
+        // that would lose its meaning is not sent at all (`protocol::fits_with`).
+        let refused = matches!(&response.outcome, Outcome::Error { code, .. }
+            if code == "unsupported_version" || code == "invalid_request");
+        let again = if !refused || request.version != PROTOCOL_VERSION {
+            None
+        } else if response.version < PROTOCOL_VERSION && crate::protocol::answers(response.version)
         {
-            if !crate::protocol::fits(response.version, &request.command) {
-                return Err(crate::protocol::older_daemon(response.version).into());
+            Some((response.version, None))
+        } else if response.version == PROTOCOL_VERSION && granted.is_some() {
+            Some((response.version, granted))
+        } else {
+            None
+        };
+        if let Some((version, named)) = again {
+            let capabilities = Capabilities::negotiate(version, named.as_deref());
+            if !crate::protocol::fits_with(capabilities, &request.command) {
+                return Err(crate::protocol::older_daemon(version).into());
             }
-            request.version = response.version;
-            crate::protocol::for_version(response.version, &mut request.command);
-            response = exchange(state_dir, &request, deadline)?;
+            request.version = version;
+            request.capabilities = named;
+            crate::protocol::for_capabilities(capabilities, &mut request.command);
+            response = exchange(state_dir, &request, deadline)?.0;
         }
         if response.version != request.version {
             return Err(
@@ -61,12 +72,14 @@ mod unix {
         Ok(response)
     }
 
-    /// One request and its answer, in the request's version.
+    /// One request and its answer, in the request's version, with the
+    /// capabilities the answer names when the daemon granted fewer than the
+    /// request named.
     fn exchange(
         state_dir: &Path,
         request: &Request,
         deadline: Instant,
-    ) -> Result<Response, crate::Error> {
+    ) -> Result<(Response, Option<Vec<String>>), crate::Error> {
         let bytes = encode(request)?;
         crate::local::check_endpoint(state_dir).map_err(|error| {
             format!("coordination unavailable: {error}; start `langspan daemon --state-dir <dir>`")
@@ -93,14 +106,27 @@ mod unix {
                     socket.display()
                 )
             })?;
-        let response: Response = serde_json::from_slice(&frame)?;
-        if response.request_id != request.request_id {
+        let mut value: serde_json::Value = serde_json::from_slice(&frame)?;
+        let granted = match value
+            .as_object_mut()
+            .and_then(|f| f.shift_remove("capabilities"))
+        {
+            Some(names) => Some(serde_json::from_value::<Vec<String>>(names)?),
+            None => None,
+        };
+        let response: Response = serde_json::from_value(value)?;
+        // A daemon answers a request it could not read (or a frame it did
+        // not take) without the request ID, as an error: it never reached
+        // the command, so nothing took effect and the error is the answer.
+        let unread =
+            response.request_id.is_empty() && matches!(response.outcome, Outcome::Error { .. });
+        if response.request_id != request.request_id && !unread {
             return Err(
                 "daemon response does not match the request identity or protocol version".into(),
             );
         }
         remaining(deadline)?;
-        Ok(response)
+        Ok((response, granted))
     }
 
     fn timed_out() -> io::Error {
@@ -446,6 +472,164 @@ mod unix {
             );
         }
 
+        /// ADR 0037: a daemon of this version that cannot read a request
+        /// names the capabilities it granted, and is asked again once with
+        /// those, the command reshaped to them: here a check recorded
+        /// without the findings of a capability it lacks (issue #265).
+        #[test]
+        fn a_daemon_granting_fewer_capabilities_is_asked_again_with_those() {
+            use std::io::{BufRead, BufReader};
+            use std::os::unix::fs::PermissionsExt;
+            let version = PROTOCOL_VERSION;
+            let dir = std::env::temp_dir().join(format!("ls-granted-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let listener = std::os::unix::net::UnixListener::bind(dir.join("daemon.sock")).unwrap();
+            std::fs::set_permissions(
+                dir.join("daemon.sock"),
+                std::fs::Permissions::from_mode(0o600),
+            )
+            .unwrap();
+            let granted: Vec<String> = Capabilities::ALL
+                .names()
+                .into_iter()
+                .filter(|name| name != "symbol_findings")
+                .collect();
+            let known = granted.clone();
+            let peer = std::thread::spawn(move || {
+                let mut asked = Vec::new();
+                for _ in 0..2 {
+                    let (stream, _) = listener.accept().unwrap();
+                    let mut line = String::new();
+                    BufReader::new(&stream).read_line(&mut line).unwrap();
+                    let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                    let mut reply = serde_json::json!({"version": version, "request_id": request["request_id"],
+                        "replayed": false, "generation": 1, "lease_valid": null,
+                        "outcome": {"type": "error", "code": "answered", "message": "read"}});
+                    if request["command"].get("symbol_findings").is_some() {
+                        // As the daemon answers a request it cannot read:
+                        // without its request ID (review comment 4715859499).
+                        reply["request_id"] = serde_json::json!("");
+                        reply["generation"] = serde_json::json!(0);
+                        reply["outcome"] = serde_json::json!({"type": "error", "code": "invalid_request",
+                            "message": "expected a typed version 1 request; unknown fields are rejected"});
+                        reply["capabilities"] = serde_json::json!(known);
+                    }
+                    writeln!(&stream, "{reply}").unwrap();
+                    asked.push(request);
+                }
+                asked
+            });
+            let mut wire: serde_json::Value =
+                serde_json::from_slice(include_bytes!("../fixtures/record-check-command-v10.json"))
+                    .unwrap();
+            wire["command"]["symbol_findings"] = serde_json::json!({"findings": [], "more": 0,
+                "files_indexed": 1, "files_skipped": 0});
+            let command = serde_json::from_value(wire["command"].clone()).unwrap();
+            let request = Request::new("record", command);
+            let response = call(&dir, &request).unwrap();
+            let asked = peer.join().unwrap();
+            std::fs::remove_dir_all(&dir).unwrap();
+            assert_eq!(
+                asked[0]["capabilities"],
+                serde_json::json!(Capabilities::ALL.names())
+            );
+            assert_eq!(asked[1]["capabilities"], serde_json::json!(granted));
+            assert_eq!(asked[1]["version"], version);
+            let mut without = asked[0]["command"].clone();
+            without
+                .as_object_mut()
+                .unwrap()
+                .shift_remove("symbol_findings");
+            assert_eq!(asked[1]["command"], without);
+            assert!(
+                matches!(&response.outcome, Outcome::Error { code, .. } if code == "answered"),
+                "{response:?}"
+            );
+        }
+
+        /// Answers one connection with `reply`, then reports whether a
+        /// second came within 200 ms.
+        fn answer_once(name: &str, reply: serde_json::Value) -> (Result<Response, String>, bool) {
+            use std::io::{BufRead, BufReader};
+            use std::os::unix::fs::PermissionsExt;
+            let dir = std::env::temp_dir().join(format!("ls-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let listener = std::os::unix::net::UnixListener::bind(dir.join("daemon.sock")).unwrap();
+            std::fs::set_permissions(
+                dir.join("daemon.sock"),
+                std::fs::Permissions::from_mode(0o600),
+            )
+            .unwrap();
+            let peer = std::thread::spawn(move || {
+                let (stream, _) = listener.accept().unwrap();
+                let mut line = String::new();
+                BufReader::new(&stream).read_line(&mut line).unwrap();
+                writeln!(&stream, "{reply}").unwrap();
+                listener.set_nonblocking(true).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                listener.accept().is_ok()
+            });
+            let request = Request::new("read", langspan_core::Command::Dashboard);
+            let result = call(&dir, &request).map_err(|error| error.to_string());
+            let asked_again = peer.join().unwrap();
+            std::fs::remove_dir_all(&dir).unwrap();
+            (result, asked_again)
+        }
+
+        /// Review comment 4715859499: a daemon answers a request it cannot
+        /// read, a frame it cannot take, or one that came too late, without
+        /// the request ID, as `src/daemon.rs` does. Such an error is the
+        /// answer, read before the identity check, and only a refusal of
+        /// the version or the request asks again.
+        #[test]
+        fn an_error_without_the_request_id_is_the_answer() {
+            for code in ["invalid_frame", "read_timeout"] {
+                let reply = serde_json::json!({"version": PROTOCOL_VERSION, "request_id": "",
+                    "replayed": false, "generation": 0, "lease_valid": null,
+                    "outcome": {"type": "error", "code": code, "message": "not read"}});
+                let (result, asked_again) = answer_once(code, reply);
+                assert!(!asked_again, "{code} asked again");
+                let response = result.unwrap();
+                assert!(
+                    matches!(&response.outcome, Outcome::Error { code: c, .. } if c == code),
+                    "{response:?}"
+                );
+            }
+        }
+
+        /// Review comment 4715859499: only an error may come without the
+        /// request ID; any other answer, or one naming another request,
+        /// does not match the request.
+        #[test]
+        fn an_answer_for_another_request_is_refused() {
+            for (name, id, outcome) in [
+                (
+                    "idless",
+                    "",
+                    serde_json::json!({"type": "version", "version": "x", "pid": 1}),
+                ),
+                (
+                    "other",
+                    "other",
+                    serde_json::json!({"type": "error", "code": "invalid_request", "message": "m"}),
+                ),
+            ] {
+                let reply = serde_json::json!({"version": PROTOCOL_VERSION, "request_id": id,
+                    "replayed": false, "generation": 0, "lease_valid": null, "outcome": outcome});
+                let (result, asked_again) = answer_once(name, reply);
+                assert!(!asked_again, "{name} asked again");
+                let error = result.unwrap_err();
+                assert!(
+                    error.contains("does not match the request identity"),
+                    "{error}"
+                );
+            }
+        }
+
         fn ask_an_earlier_daemon(version: u16) {
             use std::io::{BufRead, BufReader};
             use std::os::unix::fs::PermissionsExt;
@@ -467,13 +651,26 @@ mod unix {
                     let mut line = String::new();
                     BufReader::new(&stream).read_line(&mut line).unwrap();
                     let request: serde_json::Value = serde_json::from_str(&line).unwrap();
-                    let outcome = if request["version"] == version {
+                    // It reads requests with `deny_unknown_fields`, as
+                    // every earlier build does, and answers one it cannot
+                    // read without its request ID (review comment
+                    // 4715859499).
+                    let unread = request.get("capabilities").is_some();
+                    let outcome = if unread {
+                        serde_json::json!({"type": "error", "code": "invalid_request",
+                            "message": "expected a typed version 1 request; unknown fields are rejected"})
+                    } else if request["version"] == version {
                         serde_json::json!({"type": "error", "code": "answered", "message": "in its version"})
                     } else {
                         serde_json::json!({"type": "error", "code": "unsupported_version",
                             "message": "expected another protocol version; restart the daemon after upgrading LangSpan"})
                     };
-                    let reply = serde_json::json!({"version": version, "request_id": request["request_id"],
+                    let id = if unread {
+                        serde_json::json!("")
+                    } else {
+                        request["request_id"].clone()
+                    };
+                    let reply = serde_json::json!({"version": version, "request_id": id,
                         "replayed": false, "generation": 1, "lease_valid": null, "outcome": outcome});
                     writeln!(&stream, "{reply}").unwrap();
                     asked.push(request);
@@ -512,6 +709,8 @@ mod unix {
             // as the full view (review follow-up #259). A daemon of version
             // 7 or later, which gives changes only, is asked for them still.
             assert_eq!(asked[0]["command"]["changes_only"], true);
+            assert!(asked[0].get("capabilities").is_some());
+            assert!(asked[1].get("capabilities").is_none(), "{}", asked[1]);
             if version >= crate::protocol::PROTOCOL_VERSION_7 {
                 assert_eq!(asked[0]["command"], asked[1]["command"]);
             } else {

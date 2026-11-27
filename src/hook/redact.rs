@@ -146,7 +146,7 @@ fn redact_bounded(text: &str, limit: usize) -> String {
 /// redacted text, so it shows nothing redaction hid. The result is a fixed
 /// point: applying this again changes nothing, so a retry redacted by its
 /// client and again by the daemon still equals its recorded request.
-fn bounded(text: &str, limit: usize, home: Option<&str>) -> String {
+pub(crate) fn bounded(text: &str, limit: usize, home: Option<&str>) -> String {
     let fit = |text: String| {
         if text.len() <= limit {
             return text;
