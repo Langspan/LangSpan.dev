@@ -39,8 +39,7 @@ Limit open work so that each pull request merges quickly:
   [module map](architecture.md#module-map), with the files that hold them
   today:
   - `protocol`, the wire protocol: `src/protocol.rs` and its clients;
-  - `briefing`: `src/hook/render.rs`, `src/since.rs`, `src/recent.rs` and
-    `src/trail.rs`;
+  - `briefing`: `src/briefing.rs` and `src/briefing/`;
   - `install`: `src/install.rs`, `src/user_install.rs` and `src/install/detect.rs`;
   - `cli`, its argument list and flags table: `src/main.rs` and `src/cli/`;
   - `graph`, the source graph: `src/graph.rs`, `src/graph/`,
@@ -258,9 +257,10 @@ In the full lane, the benchmark harness's dry runs (the `dry_run_*` tests
 in `tests/benchmark_harness.rs`) run only when the change touches one of
 the following paths: `benchmarks/`, `tests/benchmark_harness.rs`, the
 daemon, hook and briefing code they drive (`src/daemon.rs`, `src/daemon/`,
-`src/hook.rs`, `src/hook/`, `src/claude_code.rs`, `src/recent.rs` and all
-of `crates/langspan-core/src/`, so code moved into a new module there
-still counts), or what builds and runs the suite
+`src/hook.rs`, `src/hook/`, `src/briefing.rs`, `src/briefing/`,
+`src/text.rs`, `src/text/`, `src/claude_code.rs` and all of
+`crates/langspan-core/src/`, so code moved into a new module there still
+counts), or what builds and runs the suite
 (`Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `.config/nextest.toml`,
 `check.yml`, `scripts/check.sh`, `scripts/test-foreign-home.sh`,
 `scripts/ci-changes.sh`). The dry runs took about 11 minutes of an
@@ -443,13 +443,16 @@ release. While its checks run, hold other merges so they don't restart the
 checks. The project's release app opens the release pull request, so its
 checks run like any other pull request's.
 
-After a release, add its golden stores (ADR 0015): build `langspan` from
-the new tag with `--locked`, run `bash scripts/golden-stores.sh VERSION BINARY`,
-write the stores' state snapshots with `LANGSPAN_UPDATE_GOLDEN=1` on
+After a release, add its golden stores (ADR 0015): run
+`bash scripts/golden-stores.sh VERSION`, which builds `langspan` from the new
+tag with `--locked` and runs that tag's demonstration with it, then write
+the stores' state snapshots with `LANGSPAN_UPDATE_GOLDEN=1` on
 `tests/golden_stores.rs`, and say in the pull request how the stores were
 made. `every_release_has_a_golden_store_directory` fails for a changelog
 version with no `tests/fixtures/store-VERSION/`, whether or not the release
-changed the event set or the schema.
+changed the event set or the schema. As for the frozen list below, the
+version being released counts only once its `v` tag exists, since its stores
+are built from the tag.
 
 Add its frozen event-type list in the first pull request after the tag,
 since the release pull request can't hold it: copy the sorted `type` of each

@@ -82,9 +82,7 @@ pub mod rewrite;
 pub mod test_output;
 
 // briefing
-pub mod recent;
-pub mod since;
-pub mod trail;
+mod briefing;
 
 // person
 pub mod count;
@@ -119,6 +117,9 @@ pub mod demo;
 pub mod skill;
 
 // Compatibility aliases: old paths kept until importers are repointed.
+pub use briefing::recent;
+pub use briefing::since;
+pub use briefing::trail;
 use fs::file_state;
 use fs::input;
 use fs::local;

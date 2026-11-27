@@ -120,6 +120,6 @@ mostly test time: a 472 s Linux check step (305 s of tests) and a 714 s
 macOS check step (541 s of tests) in the warm run above, against 180 s
 and 300 s for the whole job. Closing that needs the
 slow tests shortened or sharded, or larger runners, which other tasks of
-epic #304 work on. The cargo-nextest and cargo-audit builds remain until
-both install as prebuilt binaries with pinned digests; this change didn't
-do that (see the pull request).
+epic #304 work on. cargo-nextest has since been installed as a prebuilt
+binary checked against a pinned digest (#305); the cargo-audit build
+remains.

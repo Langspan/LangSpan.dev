@@ -1,6 +1,5 @@
 use super::*;
 
-pub const BRIEFING_LIMIT: usize = 2400;
 /// The context the hooks may add to a typical session per turn, on average
 /// over its turns (issue #222): about 64 tokens. `langspan status` reports
 /// what a session actually received; a test holds a typical session to it.

@@ -117,7 +117,7 @@ concurrency:
 # request build took 4.5 minutes, the slowest merge-queue build 6.8 and the
 # slowest shard 11.2, retries included (docs/evidence/ci/lanes.md). A build
 # that restores nothing took 9 to 15 minutes (docs/evidence/ci/shards.md),
-# and compiling a new cargo-nextest or cargo-audit adds minutes. A pull
+# and compiling a new cargo-audit adds minutes. A pull
 # request that changes rust-toolchain.toml, or a tool version in
 # scripts/install-ci-tools.sh, therefore raises these two limits, and the
 # next one lowers them once main has saved the new cache. A job's limit
