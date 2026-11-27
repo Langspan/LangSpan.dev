@@ -1173,7 +1173,9 @@ fn cargo_audit_has_its_own_cache_and_the_build_cache_paths_stay_put() {
 fn ci_downloads_cargo_nextest_checked_against_a_pinned_digest_for_each_platform() {
     let script = read("scripts/install-ci-tools.sh");
     assert!(
-        script.contains("https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$nextest"),
+        script.contains(
+            "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$nextest"
+        ),
         "the installer doesn't download cargo-nextest's upstream release"
     );
     for platform in ["  Linux-x86_64)\n", "  Darwin-arm64)\n"] {
