@@ -9,7 +9,7 @@
 #
 # Today's top-level modules carry the layer of the namespace they move into. The edges that
 # layering exposes and the target layout forbids are debt rows in their modules' baselines:
-# auto_check, definitions, integrate, landing, report, test_output, today, hosts and store
+# auto_check, definitions, integrate, landing, report, test_output, today, install and store
 # -> hook, store -> wait, and graph -> definitions and reformat. Each allow row below is an
 # edge inside one target namespace, or one the target layout allows (regions -> ids,
 # shell -> fs, ipc -> fs, cli -> mcp and so on).
@@ -23,8 +23,7 @@ namespace	zone	utility
 namespace	protocol	utility
 namespace	regions	utility
 namespace	breaks	utility
-namespace	vendor	utility
-namespace	tool_names	utility
+namespace	hosts	utility
 allow	breaks	regions
 allow	breaks	text
 allow	regions	ids
@@ -43,7 +42,6 @@ namespace	graph	infrastructure
 namespace	index_file	infrastructure
 namespace	shell	infrastructure
 namespace	install	infrastructure
-namespace	hosts	infrastructure
 namespace	user_install	infrastructure
 namespace	guidance	infrastructure
 namespace	service	infrastructure
@@ -61,11 +59,8 @@ allow	store	observer
 allow	graph	git
 allow	graph	index_file
 allow	graph	observer
-allow	hosts	install
-allow	hosts	user_install
 allow	user_install	install
 allow	guidance	install
-allow	service	hosts
 allow	service	install
 
 # application

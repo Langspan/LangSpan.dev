@@ -1,10 +1,4 @@
-lines	3382
-pub	45
-index	7
-slice	2
-fn	execute	273
-fn	lifecycle	290
-fn	pre	187
+pub	27
 edge	adopt
 edge	antigravity
 edge	claude_code

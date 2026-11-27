@@ -18,6 +18,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod support;
+
 static NEXT: AtomicU64 = AtomicU64::new(0);
 const ALICE: &str = "00000000-0000-4000-8000-00000000000a";
 const BOB: &str = "00000000-0000-4000-8000-00000000000b";
@@ -264,7 +266,12 @@ fn a_result_reported_after_expiry_is_a_late_observation_that_revives_nothing() {
         "admitted"
     );
     // Stands in for a permission prompt held open past the admission.
-    std::thread::sleep(Duration::from_millis(400));
+    let slow = identities(ALICE, "toolu_slow");
+    support::wait_until(
+        "alice's admission to expire",
+        Duration::from_secs(10),
+        || f.lease_status(&slow.admit) == LeaseStatus::Expired,
+    );
     f.ttl_ms = 30_000;
     assert_eq!(
         f.hook(&f.event("PreToolUse", BOB, "toolu_next", "a.txt"))

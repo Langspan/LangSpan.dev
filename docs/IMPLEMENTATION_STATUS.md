@@ -253,7 +253,9 @@ acceptance evidence above. No Homebrew tap has been published.
   real host.
 - Comparative evidence of reduced rework or manual relay is still open: no
   comparison arm of the [coordination benchmark](../benchmarks/coordination/README.md)
-  has been run on current `main`.
+  has been run on current `main`. `matrix.py` runs a whole comparison and
+  writes its results document; only its stand-in dry runs have run, and no
+  live matrix result is kept.
 - Windows transport is not available.
 
 For the current implementation and limits, start with the

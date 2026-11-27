@@ -33,12 +33,7 @@ pub const MODE: &str = "between-steps";
 /// How often the watcher asks. Each ask with nothing to tell writes
 /// nothing to the store.
 pub const POLL: Duration = Duration::from_secs(1);
-/// How long one watcher runs at most. A longer turn falls back to the next
-/// hook's briefing for what changes after this.
-pub const WATCH_LIMIT: Duration = Duration::from_secs(20 * 60);
-/// The hook entry's `timeout`, in seconds: past `WATCH_LIMIT`, so the host
-/// never stops a watcher that is about to stop itself.
-pub const HOST_TIMEOUT_SECONDS: u64 = WATCH_LIMIT.as_secs() + 60;
+pub use crate::hosts::{WATCH_LIMIT, WATCHER_TIMEOUT_SECONDS};
 /// How long the watcher keeps asking a coordinator it cannot reach, or one
 /// that does not know the session yet: the prompt hook that starts the
 /// coordinator and registers the session runs at the same time.
@@ -244,7 +239,7 @@ mod tests {
     #[test]
     fn the_watcher_ends_itself_well_before_its_host_timeout() {
         let overrun = Duration::from_secs(4) + CALL_BUDGET * 2 + POLL;
-        assert!(WATCH_LIMIT + overrun < Duration::from_secs(HOST_TIMEOUT_SECONDS));
+        assert!(WATCH_LIMIT + overrun < Duration::from_secs(WATCHER_TIMEOUT_SECONDS));
         assert!(START_GRACE < WATCH_LIMIT);
     }
 

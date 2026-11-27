@@ -45,6 +45,10 @@ class Workspace:
         marked = f"{BEGIN} -->\nstale\n{END}\n"
         self.write("docs/usage/mcp.md", f"# MCP\n\nBefore.\n\n{marked}\nAfter.\n")
         self.write(gen_docs.CAPABILITY_DOC, f"# ADR\n\n{marked}\nAfter.\n")
+        # 0.10.0 sorts after 0.2.0 by version, before it by name.
+        self.write("fixtures/event-types/0.2.0.txt", "booted\nlanded\n")
+        self.write("fixtures/event-types/0.10.0.txt", "booted\nscan_failed\n")
+        self.write(gen_docs.RELEASES_DOC, f"# Retries\n\n{marked}\nAfter.\n")
 
     def path(self, relative):
         return os.path.join(self.root, relative)
@@ -136,6 +140,48 @@ class Tables(unittest.TestCase):
             code, report = ws.run()
             self.assertEqual(code, 2, text)
             self.assertIn("langspan_admit.txt", report)
+
+    def test_releases_in_version_order_with_what_each_changed(self):
+        ws = Workspace(self)
+        code, report = ws.run()
+        self.assertEqual(code, 0, report)
+        self.assertIn(
+            f"{BEGIN} from fixtures/event-types/; edit those files, not this table -->\n\n"
+            "| Release | Event types it reads | Change from the release before |\n"
+            "| --- | --- | --- |\n"
+            "| 0.2.0 | 2 | the earliest list |\n"
+            "| 0.10.0 | 2 | adds `scan_failed`; drops `landed` |\n",
+            ws.read(gen_docs.RELEASES_DOC),
+        )
+
+    def test_an_unchanged_release_says_so(self):
+        ws = Workspace(self)
+        ws.write("fixtures/event-types/0.10.1.txt", "booted\nscan_failed\n")
+        ws.run()
+        self.assertIn("| 0.10.1 | 2 | none |\n", ws.read(gen_docs.RELEASES_DOC))
+
+    def test_a_changed_list_makes_the_release_table_stale(self):
+        ws = Workspace(self)
+        ws.run()
+        ws.write("fixtures/event-types/0.10.0.txt", "booted\n")
+        code, report = ws.run("--check")
+        self.assertEqual(code, 1)
+        self.assertIn(gen_docs.RELEASES_DOC, report)
+        self.assertNotIn("docs/usage/mcp.md", report)
+
+    def test_a_list_must_be_one_event_type_per_line(self):
+        for name, text in [
+            ("0.3.0.txt", ""),
+            ("0.3.0.txt", "booted\n\nlanded\n"),
+            ("0.3.0.txt", "Booted landed\n"),
+            ("latest.txt", "booted\n"),
+        ]:
+            ws = Workspace(self)
+            ws.write(f"fixtures/event-types/{name}", text)
+            code, report = ws.run()
+            self.assertEqual(code, 2, (name, text))
+            self.assertIn(name, report)
+            self.assertIn("stale", ws.read(gen_docs.RELEASES_DOC))
 
     def test_a_page_without_markers_fails(self):
         ws = Workspace(self)
