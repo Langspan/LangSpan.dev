@@ -60,7 +60,7 @@ The integration suite uses temporary files, real SQLite, Unix sockets and child 
 - Use real things: temporary git repositories, a real database file, real sockets, real child processes. Don't mock code we own. Don't mock a model: replay a session recorded from a real CLI run, and gate live tests that call real CLIs behind an environment variable.
 - The fast suite is deterministic and hermetic: no network, safe to run in parallel, and it removes every temporary file it makes.
 - Use property or fuzz tests for parsers, wire formats and state machines.
-- Output people read (the CLI's help, usage errors and which options each command accepts) is pinned byte for byte in `tests/golden/`. To change it on purpose, run the failing test with `LANGSPAN_UPDATE_GOLDEN=1`, which rewrites the file, or copy the whole output a failing run leaves in `target/golden-actual/`; then review `git diff tests/golden` as the change users will see.
+- Output people read (the CLI's help, usage errors, which options each command accepts, and the human and `--json` output of every `Outcome`, in `tests/cli_transcript.rs`) is pinned byte for byte in `tests/golden/`. A new `Outcome` variant does not compile until that test's `cases!` gives it a transcript case. To change it on purpose, run the failing test with `LANGSPAN_UPDATE_GOLDEN=1`, which rewrites the file, or copy the whole output a failing run leaves in `target/golden-actual/`; then review `git diff tests/golden` as the change users will see.
 - A timing test bounds only what load cannot shorten, with its limit far from the wrong value.
 - Benchmarks keep one row per item per run before aggregating, and keep failed and timed-out runs.
 

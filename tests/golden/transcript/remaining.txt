@@ -1,0 +1,390 @@
+## graph symbol
+$ langspan graph symbol w parse
+exit 0
+src/lib.rs:1 function parse (exported) — pub fn parse(input: &str) -> usize
+Matches are by name, not resolved uses. Index: 1 of 1 supported files at their current content.
+$ langspan graph symbol w parse --json
+exit 0
+{"version":10,"request_id":"read","replayed":false,"generation":1,"lease_valid":null,"outcome":{"type":"graph","symbols":[{"path":"src/lib.rs","name":"parse","kind":"function","line":1,"end_line":3,"signature":"pub fn parse(input: &str) -> usize","exported":true,"digest":"575559c10c24271808ede734922ae8bbcaa7ae1a1f2f201cad5e762da37ac26b"}],"references":[],"coverage":{"indexable_files":1,"current_files":1,"partial_files":0,"scanned":true},"truncated":false}}
+
+## graph path
+$ langspan graph path w parse parse
+exit 0
+1. "src/lib.rs":1 parse (defined)
+Found by name (1 step); not type-checked.
+$ langspan graph path w parse parse --json
+exit 0
+{"version":10,"request_id":"read","replayed":false,"generation":1,"lease_valid":null,"outcome":{"type":"graph_path","from":"parse","to":"parse","max_hops":4,"paths":[{"steps":[{"path":"src/lib.rs","line":1,"name":"parse","edge":"defines","resolution":"name","ambiguous":false}],"ambiguous":false}],"edges_visited":0,"coverage":{"indexable_files":1,"current_files":1,"partial_files":0,"scanned":true},"truncated":false}}
+
+## graph map
+$ langspan graph map w
+exit 0
+"src": 1 files, 1 exported, rust
+Areas at depth 1. Imports are resolved by path; calls are counted by name, only for a name with one definition; not type-checked.
+$ langspan graph map w --json
+exit 0
+{"version":10,"request_id":"read","replayed":false,"generation":1,"lease_valid":null,"outcome":{"type":"graph_map","depth":1,"areas":[{"path":"src","files":1,"exported":1,"languages":["rust"]}],"edges":[],"coverage":{"indexable_files":1,"current_files":1,"partial_files":0,"scanned":true},"truncated":false}}
+
+## graph blind-spots
+$ langspan graph blind-spots w
+exit 0
+The index reads every supported file at its current content.
+$ langspan graph blind-spots w --json
+exit 0
+{"version":10,"request_id":"read","replayed":false,"generation":1,"lease_valid":null,"outcome":{"type":"graph_blind_spots","blind_spots":{"partial":[],"never_clean":[],"waiting":[],"too_large":[],"unscanned":[],"unsupported_languages":[],"totals":{"partial":0,"never_clean":0,"waiting":0,"too_large":0,"unscanned":0}},"coverage":{"indexable_files":1,"current_files":1,"partial_files":0,"scanned":true},"truncated":false}}
+
+## graph inflight
+$ langspan graph inflight w
+exit 0
+No other worktree of this repository has an uncommitted signature that this workspace mentions.
+$ langspan graph inflight w --json
+exit 0
+{"version":10,"request_id":"read","replayed":false,"generation":1,"lease_valid":null,"outcome":{"type":"graph_inflight","inflight":[],"coverage":{"indexable_files":1,"current_files":1,"partial_files":0,"scanned":true},"truncated":false}}
+
+## graph export
+$ langspan graph export w --out $TMP/index.jsonl
+exit 0
+Exported 1 files (0 partial, 583 bytes) from workspace w.
+$ langspan graph export w --out $TMP/index-json.jsonl --json
+exit 0
+{"version":10,"request_id":"read","replayed":false,"generation":1,"lease_valid":null,"outcome":{"type":"graph_exported","workspace_id":"w","files":1,"partial_files":0,"bytes":583}}
+
+## graph import
+$ langspan graph import w --in $TMP/index.jsonl
+exit 0
+Dry run: 0 files have the same content here and can be loaded into workspace w; 0 differ or are missing here and are left to the indexer; 1 are already indexed here and are kept. Add --apply.
+$ langspan graph import w --in $TMP/index.jsonl --json
+exit 0
+{"version":10,"request_id":"read","replayed":false,"generation":1,"lease_valid":null,"outcome":{"type":"graph_imported","workspace_id":"w","applied":false,"loaded":0,"different":0,"kept":1,"over_limits":0,"malformed":0}}
+
+## graph context
+$ langspan request {"version":10,"request_id":"read","command":{"op":"graph_context","workspace_id":"w","names":["parse"],"limit":3}}
+exit 0
+src/lib.rs:1 function parse — pub fn parse(input: &str) -> usize
+parse is mentioned in: $
+Matches are by name, not resolved. Index: 1 of 1 supported files at their current content.
+$ langspan request {"version":10,"request_id":"read","command":{"op":"graph_context","workspace_id":"w","names":["parse"],"limit":3}} --json
+exit 0
+{"version":10,"request_id":"read","replayed":false,"generation":1,"lease_valid":null,"outcome":{"type":"graph_context","matches":[{"name":"parse","definitions":[{"path":"src/lib.rs","name":"parse","kind":"function","line":1,"end_line":3,"signature":"pub fn parse(input: &str) -> usize","exported":true,"digest":"575559c10c24271808ede734922ae8bbcaa7ae1a1f2f201cad5e762da37ac26b"}],"mentioned_in":[],"truncated":false}],"coverage":{"indexable_files":1,"current_files":1,"partial_files":0,"scanned":true}}}
+
+## check calls
+$ langspan request {"version":10,"request_id":"read","command":{"op":"check_calls","session_id":"s1","calls":[{"path":"src/lib.rs","line":2,"name":"parse","args":1,"member":false}]}}
+exit 0
+0 call(s) that may not fit; matched by name, not resolved.
+$ langspan request {"version":10,"request_id":"read","command":{"op":"check_calls","session_id":"s1","calls":[{"path":"src/lib.rs","line":2,"name":"parse","args":1,"member":false}]}} --json
+exit 0
+{"version":10,"request_id":"read","replayed":false,"generation":1,"lease_valid":null,"outcome":{"type":"call_breaks","breaks":[],"coverage":{"indexable_files":1,"current_files":1,"partial_files":0,"scanned":true},"ready":true}}
+
+## outline read
+$ langspan request {"version":10,"request_id":"r-g1","command":{"op":"outline_read","session_id":"s1","path":"src/lib.rs","digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","lines":3,"bytes":60}}
+exit 0
+Not outlined (small).
+$ langspan request {"version":10,"request_id":"r-g1","command":{"op":"outline_read","session_id":"s1","path":"src/lib.rs","digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","lines":3,"bytes":60}} --json
+exit 0
+{"version":10,"request_id":"r-g1","replayed":false,"generation":1,"lease_valid":null,"outcome":{"type":"read_outline","skipped":"small"}}
+
+## record check
+$ langspan request {"version":10,"request_id":"r-k1","command":{"op":"record_check","workspace_id":"w","name":"unit","command":"cargo test","tree_oid":"e2dd98466274a2f79e9aaf75ddcb0a996b15fe76","head_oid":"3151388a147d1a4c8b1a5a46910ac04c7cceb909","inputs":[],"result":{"type":"passed"},"duration_ms":1200}}
+exit 0
+Check unit recorded for tree e2dd98466274a2f79e9aaf75ddcb0a996b15fe76.
+$ langspan request {"version":10,"request_id":"r-k1","command":{"op":"record_check","workspace_id":"w","name":"unit","command":"cargo test","tree_oid":"e2dd98466274a2f79e9aaf75ddcb0a996b15fe76","head_oid":"3151388a147d1a4c8b1a5a46910ac04c7cceb909","inputs":[],"result":{"type":"passed"},"duration_ms":1200}} --json
+exit 0
+{"version":10,"request_id":"r-k1","replayed":true,"generation":1,"lease_valid":null,"outcome":{"type":"check_recorded","check":{"check_id":"r-k1","workspace_id":"w","name":"unit","command":"cargo test","tree_oid":"e2dd98466274a2f79e9aaf75ddcb0a996b15fe76","head_oid":"3151388a147d1a4c8b1a5a46910ac04c7cceb909","inputs":[],"result":{"type":"passed"},"duration_ms":"<ms>","recorded_ms":"<ms>","generation":1}}}
+
+## check status
+$ langspan request {"version":10,"request_id":"read","command":{"op":"check_status","workspace_id":"w","tree_oid":"e2dd98466274a2f79e9aaf75ddcb0a996b15fe76"}}
+exit 0
+1 check record(s).
+$ langspan request {"version":10,"request_id":"read","command":{"op":"check_status","workspace_id":"w","tree_oid":"e2dd98466274a2f79e9aaf75ddcb0a996b15fe76"}} --json
+exit 0
+{"version":10,"request_id":"read","replayed":false,"generation":1,"lease_valid":null,"outcome":{"type":"checks","checks":[{"record":{"check_id":"r-k1","workspace_id":"w","name":"unit","command":"cargo test","tree_oid":"e2dd98466274a2f79e9aaf75ddcb0a996b15fe76","head_oid":"3151388a147d1a4c8b1a5a46910ac04c7cceb909","inputs":[],"result":{"type":"passed"},"duration_ms":"<ms>","recorded_ms":"<ms>","generation":1},"applicability":"current"}]}}
+
+## landing readiness
+$ langspan request {"version":10,"request_id":"read","command":{"op":"landing_readiness","workspace_id":"w","name":"unit","tree_oid":"e2dd98466274a2f79e9aaf75ddcb0a996b15fe76"}}
+exit 0
+Ready: true. a passing check exists for exactly this tree.
+$ langspan request {"version":10,"request_id":"read","command":{"op":"landing_readiness","workspace_id":"w","name":"unit","tree_oid":"e2dd98466274a2f79e9aaf75ddcb0a996b15fe76"}} --json
+exit 0
+{"version":10,"request_id":"read","replayed":false,"generation":1,"lease_valid":null,"outcome":{"type":"readiness","ready":true,"reason":"a passing check exists for exactly this tree","check":{"check_id":"r-k1","workspace_id":"w","name":"unit","command":"cargo test","tree_oid":"e2dd98466274a2f79e9aaf75ddcb0a996b15fe76","head_oid":"3151388a147d1a4c8b1a5a46910ac04c7cceb909","inputs":[],"result":{"type":"passed"},"duration_ms":"<ms>","recorded_ms":"<ms>","generation":1}}}
+
+## flaky tests
+$ langspan request {"version":10,"request_id":"read","command":{"op":"flaky_tests","workspace_id":"w"}}
+exit 0
+0 test(s) known to flip on unchanged code.
+$ langspan request {"version":10,"request_id":"read","command":{"op":"flaky_tests","workspace_id":"w"}} --json
+exit 0
+{"version":10,"request_id":"read","replayed":false,"generation":1,"lease_valid":null,"outcome":{"type":"flaky_tests","workspace_id":"w","tests":[]}}
+
+## forget flaky test
+$ langspan request {"version":10,"request_id":"r-k2","command":{"op":"forget_flaky_test","workspace_id":"w","test":"parses"}}
+exit 0
+Forgot "parses": false.
+$ langspan request {"version":10,"request_id":"r-k2","command":{"op":"forget_flaky_test","workspace_id":"w","test":"parses"}} --json
+exit 0
+{"version":10,"request_id":"r-k2","replayed":true,"generation":1,"lease_valid":null,"outcome":{"type":"flaky_test_forgotten","workspace_id":"w","test":"parses","forgotten":false}}
+
+## auto check enable
+$ langspan request {"version":10,"request_id":"r-k3","command":{"op":"auto_check_enable","workspace_id":"w","name":"auto","argv":["true"],"timeout_s":30}}
+exit 0
+Automatic check auto is on for workspace w: after a session's writes, "true" runs on the exact working tree (time limit 30 s).
+$ langspan request {"version":10,"request_id":"r-k3","command":{"op":"auto_check_enable","workspace_id":"w","name":"auto","argv":["true"],"timeout_s":30}} --json
+exit 0
+{"version":10,"request_id":"r-k3","replayed":true,"generation":1,"lease_valid":null,"outcome":{"type":"auto_check","check":{"workspace_id":"w","name":"auto","argv":["true"],"timeout_s":30}}}
+
+## auto check disable
+$ langspan request {"version":10,"request_id":"r-k4","command":{"op":"auto_check_disable","workspace_id":"w"}}
+exit 0
+Automatic check is off for workspace w.
+$ langspan request {"version":10,"request_id":"r-k4","command":{"op":"auto_check_disable","workspace_id":"w"}} --json
+exit 0
+{"version":10,"request_id":"r-k4","replayed":true,"generation":1,"lease_valid":null,"outcome":{"type":"auto_check_disabled","workspace_id":"w"}}
+
+## record landing
+$ langspan request {"version":10,"request_id":"r-k5","command":{"op":"record_landing","workspace_id":"w","onto":"main","commit_oid":"3151388a147d1a4c8b1a5a46910ac04c7cceb909","tree_oid":"e2dd98466274a2f79e9aaf75ddcb0a996b15fe76","inputs":[],"check_id":"r-k1"}}
+exit 0
+Landing 3151388a147d1a4c8b1a5a46910ac04c7cceb909 on main recorded.
+$ langspan request {"version":10,"request_id":"r-k5","command":{"op":"record_landing","workspace_id":"w","onto":"main","commit_oid":"3151388a147d1a4c8b1a5a46910ac04c7cceb909","tree_oid":"e2dd98466274a2f79e9aaf75ddcb0a996b15fe76","inputs":[],"check_id":"r-k1"}} --json
+exit 0
+{"version":10,"request_id":"r-k5","replayed":true,"generation":1,"lease_valid":null,"outcome":{"type":"landed","landing":{"landing_id":"r-k5","workspace_id":"w","onto":"main","commit_oid":"3151388a147d1a4c8b1a5a46910ac04c7cceb909","tree_oid":"e2dd98466274a2f79e9aaf75ddcb0a996b15fe76","inputs":[],"check_id":"r-k1"}}}
+
+## take turn
+$ langspan request {"version":10,"request_id":"r-t1","command":{"op":"take_turn","workspace_id":"w","onto":"main","session_id":"s1","ttl_ms":60000}}
+exit 0
+Push turn r-t1 for main held until <ms> ms.
+$ langspan request {"version":10,"request_id":"r-t1","command":{"op":"take_turn","workspace_id":"w","onto":"main","session_id":"s1","ttl_ms":60000}} --json
+exit 0
+{"version":10,"request_id":"r-t1","replayed":true,"generation":1,"lease_valid":null,"outcome":{"type":"turn","turn":{"turn_id":"r-t1","workspace_id":"w","onto":"main","session_id":"s1","taken_ms":"<ms>","expires_at_ms":"<ms>","generation":1}}}
+
+## take turn, busy
+$ langspan request {"version":10,"request_id":"r-t2","command":{"op":"take_turn","workspace_id":"w","onto":"main","session_id":"s2","ttl_ms":60000}}
+exit 0
+Another landing holds the push turn for main: turn r-t1, for <ms> ms.
+$ langspan request {"version":10,"request_id":"r-t2","command":{"op":"take_turn","workspace_id":"w","onto":"main","session_id":"s2","ttl_ms":60000}} --json
+exit 0
+{"version":10,"request_id":"r-t2","replayed":true,"generation":1,"lease_valid":null,"outcome":{"type":"turn_busy","holder":{"turn_id":"r-t1","workspace_id":"w","onto":"main","session_id":"s1","taken_ms":"<ms>","expires_at_ms":"<ms>","generation":1},"held_ms":"<ms>"}}
+
+## take turn, waiting
+$ langspan request {"version":10,"request_id":"r-t3","command":{"op":"take_turn","workspace_id":"w","onto":"main","session_id":"s2","ttl_ms":60000,"queue":{"ticket":"r-t3","wait_ms":60000,"joined":false}}}
+exit 0
+Waiting for the push turn: number 1 of 1 in line.
+$ langspan request {"version":10,"request_id":"r-t3","command":{"op":"take_turn","workspace_id":"w","onto":"main","session_id":"s2","ttl_ms":60000,"queue":{"ticket":"r-t3","wait_ms":60000,"joined":false}}} --json
+exit 0
+{"version":10,"request_id":"r-t3","replayed":true,"generation":1,"lease_valid":null,"outcome":{"type":"turn_waiting","position":1,"holder":{"turn_id":"r-t1","workspace_id":"w","onto":"main","session_id":"s1","taken_ms":"<ms>","expires_at_ms":"<ms>","generation":1},"held_ms":"<ms>","waiting":[{"ticket":"r-t3","session_id":"s2","position":1,"waited_ms":"<ms>","wait_left_ms":"<ms>"}]}}
+
+## turn queue
+$ langspan request {"version":10,"request_id":"read","command":{"op":"turn_queue","workspace_id":"w","onto":"main"}}
+exit 0
+Push turn held by r-t1; 1 landing(s) in line.
+$ langspan request {"version":10,"request_id":"read","command":{"op":"turn_queue","workspace_id":"w","onto":"main"}} --json
+exit 0
+{"version":10,"request_id":"read","replayed":false,"generation":1,"lease_valid":null,"outcome":{"type":"turn_queue","holder":{"turn_id":"r-t1","workspace_id":"w","onto":"main","session_id":"s1","taken_ms":"<ms>","expires_at_ms":"<ms>","generation":1},"held_ms":"<ms>","waiting":[{"ticket":"r-t3","session_id":"s2","position":1,"waited_ms":"<ms>","wait_left_ms":"<ms>"}]}}
+
+## release turn
+$ langspan request {"version":10,"request_id":"r-t6","command":{"op":"release_turn","workspace_id":"w","onto":"main","turn_id":"r-t1","attempts":[]}}
+exit 0
+Push turn r-t1 released.
+$ langspan request {"version":10,"request_id":"r-t6","command":{"op":"release_turn","workspace_id":"w","onto":"main","turn_id":"r-t1","attempts":[]}} --json
+exit 0
+{"version":10,"request_id":"r-t6","replayed":true,"generation":1,"lease_valid":null,"outcome":{"type":"turn_released","turn_id":"r-t1","released":true}}
+
+## take turn, unavailable
+$ langspan request {"version":10,"request_id":"r-t4","command":{"op":"take_turn","workspace_id":"w","onto":"main","session_id":"s1","ttl_ms":60000}}
+exit 0
+The push turn is not available: 1 landing(s) in line.
+$ langspan request {"version":10,"request_id":"r-t4","command":{"op":"take_turn","workspace_id":"w","onto":"main","session_id":"s1","ttl_ms":60000}} --json
+exit 0
+{"version":10,"request_id":"r-t4","replayed":true,"generation":1,"lease_valid":null,"outcome":{"type":"turn_unavailable","holder":null,"held_ms":null,"waiting":[{"ticket":"r-t3","session_id":"s2","position":1,"waited_ms":"<ms>","wait_left_ms":"<ms>"}],"queue_full":false}}
+
+## leave turn queue
+$ langspan request {"version":10,"request_id":"r-t5","command":{"op":"leave_turn_queue","workspace_id":"w","onto":"main","ticket":"r-t3","reason":"cancelled"}}
+exit 0
+Landing r-t3 stopped waiting for the push turn.
+$ langspan request {"version":10,"request_id":"r-t5","command":{"op":"leave_turn_queue","workspace_id":"w","onto":"main","ticket":"r-t3","reason":"cancelled"}} --json
+exit 0
+{"version":10,"request_id":"r-t5","replayed":true,"generation":1,"lease_valid":null,"outcome":{"type":"turn_queue_left","ticket":"r-t3","left":true}}
+
+## observe interface
+$ langspan request {"version":10,"request_id":"r-f1","command":{"op":"observe_interface","workspace_id":"w","path":"src/lib.rs","changes":[{"name":"parse","kind":"function","change":"signature_changed","before":"fn parse(input: &str) -> usize","after":"fn parse(input: &[u8]) -> usize"}],"dependents":[]}}
+exit 0
+Interface change in "src/lib.rs": 1 symbol(s), 0 file(s) mention them.
+$ langspan request {"version":10,"request_id":"r-f1","command":{"op":"observe_interface","workspace_id":"w","path":"src/lib.rs","changes":[{"name":"parse","kind":"function","change":"signature_changed","before":"fn parse(input: &str) -> usize","after":"fn parse(input: &[u8]) -> usize"}],"dependents":[]}} --json
+exit 0
+{"version":10,"request_id":"r-f1","replayed":true,"generation":1,"lease_valid":null,"outcome":{"type":"interface_observed","notice":{"notice_id":"r-f1","workspace_id":"w","path":"src/lib.rs","changes":[{"name":"parse","kind":"function","change":"signature_changed","before":"fn parse(input: &str) -> usize","after":"fn parse(input: &[u8]) -> usize"}],"dependents":[],"by_session":null,"at_ms":"<ms>","generation":1}}}
+
+## observe interface dependents
+$ langspan request {"version":10,"request_id":"r-f2","command":{"op":"observe_interface_dependents","notice_workspace_id":"w","notice_id":"r-f1","workspace_id":"w2","paths":["src/lib.rs"]}}
+exit 0
+Interface notice r-f1: 1 file(s) of another worktree added.
+$ langspan request {"version":10,"request_id":"r-f2","command":{"op":"observe_interface_dependents","notice_workspace_id":"w","notice_id":"r-f1","workspace_id":"w2","paths":["src/lib.rs"]}} --json
+exit 0
+{"version":10,"request_id":"r-f2","replayed":true,"generation":1,"lease_valid":null,"outcome":{"type":"interface_dependents_observed","notice_id":"r-f1","added":1}}
+
+## acknowledge interface
+$ langspan request {"version":10,"request_id":"r-f3","command":{"op":"acknowledge_interface","session_id":"s2","notice_ids":["r-f1"]}}
+exit 0
+Session s2 will not be alerted again to 1 notice(s).
+$ langspan request {"version":10,"request_id":"r-f3","command":{"op":"acknowledge_interface","session_id":"s2","notice_ids":["r-f1"]}} --json
+exit 0
+{"version":10,"request_id":"r-f3","replayed":true,"generation":1,"lease_valid":null,"outcome":{"type":"interface_acknowledged","session_id":"s2","notice_ids":["r-f1"]}}
+
+## between steps
+$ langspan request {"version":10,"request_id":"r-f4","command":{"op":"between_steps","session_id":"s2","stops":0}}
+exit 0
+Session s2: 0 interface notice(s) told between steps; turn open.
+$ langspan request {"version":10,"request_id":"r-f4","command":{"op":"between_steps","session_id":"s2","stops":0}} --json
+exit 0
+{"version":10,"request_id":"r-f4","replayed":false,"generation":1,"lease_valid":null,"outcome":{"type":"between_steps","session_id":"s2","open":true,"stops":0}}
+
+## observe note anchors
+$ langspan request {"version":10,"request_id":"r-f5","command":{"op":"observe_note_anchors","workspace_id":"w"}}
+exit 0
+0 anchored note(s) changed state.
+$ langspan request {"version":10,"request_id":"r-f5","command":{"op":"observe_note_anchors","workspace_id":"w"}} --json
+exit 0
+{"version":10,"request_id":"r-f5","replayed":false,"generation":1,"lease_valid":null,"outcome":{"type":"note_anchors_observed","changed":0}}
+
+## observe source
+$ langspan request {"version":10,"request_id":"r-v1","command":{"op":"observe_source","session_id":"s2","origin":"read","files":[{"path":"src/lib.rs","state":{"type":"present","digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}]}}
+exit 0
+Recorded 1 file version(s) for s2.
+$ langspan request {"version":10,"request_id":"r-v1","command":{"op":"observe_source","session_id":"s2","origin":"read","files":[{"path":"src/lib.rs","state":{"type":"present","digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}]}} --json
+exit 0
+{"version":10,"request_id":"r-v1","replayed":true,"generation":1,"lease_valid":null,"outcome":{"type":"source_observed","session_id":"s2","files":1}}
+
+## admit tool, stale base
+$ langspan request {"version":10,"request_id":"r-v2","command":{"op":"admit_tool","session_id":"s2","paths":["src/lib.rs"],"ttl_ms":30000,"operation":{"operation_id":"op-2","source":"cli","tool":"Write","input_digest":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},"base":[{"path":"src/lib.rs","state":{"type":"present","digest":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}],"overwrites":[]}}
+exit 4
+Stale source; no files admitted. Read these again first:
+  "src/lib.rs" changed since this session read it.
+$ langspan request {"version":10,"request_id":"r-v2","command":{"op":"admit_tool","session_id":"s2","paths":["src/lib.rs"],"ttl_ms":30000,"operation":{"operation_id":"op-2","source":"cli","tool":"Write","input_digest":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},"base":[{"path":"src/lib.rs","state":{"type":"present","digest":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}],"overwrites":[]}} --json
+exit 4
+{"version":10,"request_id":"r-v2","replayed":true,"generation":1,"lease_valid":null,"outcome":{"type":"stale_base","stale":[{"path":"src/lib.rs","read":{"type":"present","digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"current":{"type":"present","digest":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"changed_by":null}]}}
+
+## admit tool, unread lines
+$ langspan request {"version":10,"request_id":"r-v3","command":{"op":"admit_tool","session_id":"s3","paths":["src/lib.rs"],"ttl_ms":30000,"operation":{"operation_id":"op-3","source":"cli","tool":"Write","input_digest":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},"base":[{"path":"src/lib.rs","state":{"type":"present","digest":"575559c10c24271808ede734922ae8bbcaa7ae1a1f2f201cad5e762da37ac26b"}}],"overwrites":[{"path":"src/lib.rs","session_id":"s1","lines":[{"start_line":2,"end_line":2}],"age_ms":2000}]}}
+exit 4
+Unread lines; no files admitted. Read these first:
+  "src/lib.rs": lines 2-2 written by s1 and not read since.
+$ langspan request {"version":10,"request_id":"r-v3","command":{"op":"admit_tool","session_id":"s3","paths":["src/lib.rs"],"ttl_ms":30000,"operation":{"operation_id":"op-3","source":"cli","tool":"Write","input_digest":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},"base":[{"path":"src/lib.rs","state":{"type":"present","digest":"575559c10c24271808ede734922ae8bbcaa7ae1a1f2f201cad5e762da37ac26b"}}],"overwrites":[{"path":"src/lib.rs","session_id":"s1","lines":[{"start_line":2,"end_line":2}],"age_ms":2000}]}} --json
+exit 4
+{"version":10,"request_id":"r-v3","replayed":true,"generation":1,"lease_valid":null,"outcome":{"type":"unread_lines","lines":[{"path":"src/lib.rs","session_id":"s1","lines":[{"start_line":2,"end_line":2}],"age_ms":"<ms>"}]}}
+
+## record wait
+$ langspan request {"version":10,"request_id":"r-v4","command":{"op":"record_wait","session_id":"s2","paths":["src/lib.rs"],"holder_session_id":"s1","waited_ms":100,"result":"refused_conflict"}}
+exit 0
+Wait recorded for session s2.
+$ langspan request {"version":10,"request_id":"r-v4","command":{"op":"record_wait","session_id":"s2","paths":["src/lib.rs"],"holder_session_id":"s1","waited_ms":100,"result":"refused_conflict"}} --json
+exit 0
+{"version":10,"request_id":"r-v4","replayed":true,"generation":1,"lease_valid":null,"outcome":{"type":"wait_recorded","session_id":"s2"}}
+
+## observe scan
+$ langspan request {"version":10,"request_id":"r-v5","command":{"op":"observe_scan","workspace_id":"w","failure":"the disk is unreadable"}}
+exit 0
+Scan of w recorded; failed: true.
+$ langspan request {"version":10,"request_id":"r-v5","command":{"op":"observe_scan","workspace_id":"w","failure":"the disk is unreadable"}} --json
+exit 0
+{"version":10,"request_id":"r-v5","replayed":true,"generation":1,"lease_valid":null,"outcome":{"type":"scan_observed","workspace_id":"w","failed":true}}
+
+## observe hosts
+$ langspan request {"version":10,"request_id":"r-v6","command":{"op":"observe_hosts","not_installed":["codex"]}}
+exit 0
+Hosts not installed: codex.
+$ langspan request {"version":10,"request_id":"r-v6","command":{"op":"observe_hosts","not_installed":["codex"]}} --json
+exit 0
+{"version":10,"request_id":"r-v6","replayed":true,"generation":1,"lease_valid":null,"outcome":{"type":"hosts_observed","not_installed":["codex"]}}
+
+## observe checkout
+$ langspan request {"version":10,"request_id":"r-v7","command":{"op":"observe_checkout","workspace_id":"w","from_branch":"refs/heads/main","to_branch":"refs/heads/topic","from_head":"3151388a147d1a4c8b1a5a46910ac04c7cceb909","to_head":"3151388a147d1a4c8b1a5a46910ac04c7cceb909","files":2}}
+exit 0
+Checkout change recorded for w: branch "main" became branch "topic", 2 files changed with it.
+$ langspan request {"version":10,"request_id":"r-v7","command":{"op":"observe_checkout","workspace_id":"w","from_branch":"refs/heads/main","to_branch":"refs/heads/topic","from_head":"3151388a147d1a4c8b1a5a46910ac04c7cceb909","to_head":"3151388a147d1a4c8b1a5a46910ac04c7cceb909","files":2}} --json
+exit 0
+{"version":10,"request_id":"r-v7","replayed":true,"generation":1,"lease_valid":null,"outcome":{"type":"checkout_observed","change":{"change_id":"r-v7","workspace_id":"w","from_branch":"refs/heads/main","to_branch":"refs/heads/topic","from_head":"3151388a147d1a4c8b1a5a46910ac04c7cceb909","to_head":"3151388a147d1a4c8b1a5a46910ac04c7cceb909","files":2,"at_ms":"<ms>","generation":1}}}
+
+## observe checkout run
+$ langspan request {"version":10,"request_id":"r-v8","command":{"op":"observe_checkout_run","session_id":"s1","command":"git switch topic","to_branch":"refs/heads/topic","to_head":"3151388a147d1a4c8b1a5a46910ac04c7cceb909","ran_ms":50}}
+exit 0
+Checkout change by session s1 recorded for w.
+$ langspan request {"version":10,"request_id":"r-v8","command":{"op":"observe_checkout_run","session_id":"s1","command":"git switch topic","to_branch":"refs/heads/topic","to_head":"3151388a147d1a4c8b1a5a46910ac04c7cceb909","ran_ms":50}} --json
+exit 0
+{"version":10,"request_id":"r-v8","replayed":true,"generation":1,"lease_valid":null,"outcome":{"type":"checkout_run_observed","run":{"run_id":"r-v8","workspace_id":"w","session_id":"s1","command":"git switch topic","to_branch":"refs/heads/topic","to_head":"3151388a147d1a4c8b1a5a46910ac04c7cceb909","started_ms":"<ms>","finished_ms":"<ms>","generation":1}}}
+
+## observe uncoordinated
+$ langspan request {"version":10,"request_id":"r-v9","command":{"op":"observe_uncoordinated","workspace_id":"w","files":[{"path":"src/lib.rs","state":{"type":"present","digest":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}}]}}
+exit 0
+Uncoordinated change recorded: sessions ; files .
+$ langspan request {"version":10,"request_id":"r-v9","command":{"op":"observe_uncoordinated","workspace_id":"w","files":[{"path":"src/lib.rs","state":{"type":"present","digest":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}}]}} --json
+exit 0
+{"version":10,"request_id":"r-v9","replayed":true,"generation":1,"lease_valid":null,"outcome":{"type":"uncoordinated_observed","sessions":[],"paths":[]}}
+
+## remote enable
+$ langspan request {"version":10,"request_id":"r-r1","command":{"op":"remote_enable","workspace_id":"w","remote":"origin","participant":"0123456789abcdef0123456789abcdef","name":"alice","share_task":false}}
+exit 0
+Workspace w publishes to Git remote "origin" as "alice" (participant 0123456789abcdef0123456789abcdef) at refs/langspan/peers/0123456789abcdef0123456789abcdef; task lines not shared; last publication 0.
+$ langspan request {"version":10,"request_id":"r-r1","command":{"op":"remote_enable","workspace_id":"w","remote":"origin","participant":"0123456789abcdef0123456789abcdef","name":"alice","share_task":false}} --json
+exit 0
+{"version":10,"request_id":"r-r1","replayed":true,"generation":1,"lease_valid":null,"outcome":{"type":"remote_link","link":{"workspace_id":"w","remote":"origin","participant":"0123456789abcdef0123456789abcdef","name":"alice","share_task":false,"sequence":0,"signature":"","enabled":true,"withdrawn":false}}}
+
+## remote published
+$ langspan request {"version":10,"request_id":"r-r4","command":{"op":"remote_published","workspace_id":"w","sequence":1,"signature":"signature-one","payload":"{}","published_at_ms":1800000000000}}
+exit 0
+Workspace w publishes to Git remote "origin" as "alice" (participant 0123456789abcdef0123456789abcdef) at refs/langspan/peers/0123456789abcdef0123456789abcdef; task lines not shared; last publication 1.
+$ langspan request {"version":10,"request_id":"r-r4","command":{"op":"remote_published","workspace_id":"w","sequence":1,"signature":"signature-one","payload":"{}","published_at_ms":1800000000000}} --json
+exit 0
+{"version":10,"request_id":"r-r4","replayed":true,"generation":1,"lease_valid":null,"outcome":{"type":"remote_link","link":{"workspace_id":"w","remote":"origin","participant":"0123456789abcdef0123456789abcdef","name":"alice","share_task":false,"sequence":1,"signature":"signature-one","enabled":true,"withdrawn":false}}}
+
+## remote outbox
+$ langspan request {"version":10,"request_id":"read","command":{"op":"remote_outbox","workspace_id":"w"}}
+exit 0
+Not yet published. This is everything that leaves the machine for this workspace:
+{
+  "participant": "0123456789abcdef0123456789abcdef",
+  "name": "alice",
+  "sequence": 2,
+  "work": []
+}
+$ langspan request {"version":10,"request_id":"read","command":{"op":"remote_outbox","workspace_id":"w"}} --json
+exit 0
+{"version":10,"request_id":"read","replayed":false,"generation":1,"lease_valid":null,"outcome":{"type":"remote_outbox","publication":{"participant":"0123456789abcdef0123456789abcdef","name":"alice","sequence":2,"work":[]},"signature":"cbf29ce484222325","changed":true}}
+
+## remote sent
+$ langspan request {"version":10,"request_id":"read","command":{"op":"remote_sent","workspace_id":"w","limit":10}}
+exit 0
+Sequence 1 at <time> (event 41):
+{}
+$ langspan request {"version":10,"request_id":"read","command":{"op":"remote_sent","workspace_id":"w","limit":10}} --json
+exit 0
+{"version":10,"request_id":"read","replayed":false,"generation":1,"lease_valid":null,"outcome":{"type":"remote_sent","sent":[{"seq":41,"sequence":1,"published_at_ms":"<ms>","payload":"{}"}],"more":false}}
+
+## observe remote
+$ langspan request {"version":10,"request_id":"r-r2","command":{"op":"observe_remote","workspace_id":"w","publication":{"participant":"fedcba9876543210fedcba9876543210","name":"bob","sequence":1,"work":[]}}}
+exit 0
+Publication from fedcba9876543210fedcba9876543210: accepted true.
+$ langspan request {"version":10,"request_id":"r-r2","command":{"op":"observe_remote","workspace_id":"w","publication":{"participant":"fedcba9876543210fedcba9876543210","name":"bob","sequence":1,"work":[]}}} --json
+exit 0
+{"version":10,"request_id":"r-r2","replayed":true,"generation":1,"lease_valid":null,"outcome":{"type":"remote_observed","participant":"fedcba9876543210fedcba9876543210","accepted":true}}
+
+## remote disable
+$ langspan request {"version":10,"request_id":"r-r3","command":{"op":"remote_disable","workspace_id":"w"}}
+exit 0
+Workspace w no longer publishes. The daemon removes its ref from the remote on its next pass; `langspan doctor` shows whether the remote has let it.
+$ langspan request {"version":10,"request_id":"r-r3","command":{"op":"remote_disable","workspace_id":"w"}} --json
+exit 0
+{"version":10,"request_id":"r-r3","replayed":true,"generation":1,"lease_valid":null,"outcome":{"type":"remote_disabled","workspace_id":"w"}}
+
+## count request
+$ langspan request {"version":10,"request_id":"read","command":{"op":"count","days":[0,<ms>]}}
+exit 0
+0 refusals from <time> to <time> (UTC).
+$ langspan request {"version":10,"request_id":"read","command":{"op":"count","days":[0,<ms>]}} --json
+exit 0
+{"version":10,"request_id":"read","replayed":false,"generation":1,"lease_valid":null,"outcome":{"type":"count","count":{"from_ms":"<ms>","to_ms":"<ms>","refusals":0,"by_kind":{"commit_held":0,"conflict":0,"stale_base":0,"unread_lines":0},"by_workspace":{},"retried_through":0,"repeats":0,"truncated":false}}}
+
+## dashboard
+$ langspan request {"version":10,"request_id":"read","command":{"op":"dashboard"}}
+exit 0
+{"generation":1,"uptime_ms":"<ms>","active_agents":3,"teammates_heard":0,"teammates_known":0,"agents":[{"id":"local:s3","group":"<group-1>","local":true,"machine":null,"host":"agent","session":"s3","session_id":"s3","workspace_id":"w","branch_ref":"refs/heads/main","task":null,"intent":null,"editing":[],"recent":[],"more_files":0,"state":"active","liveness":null,"active_age_ms":"<ms>","heard_age_ms":null},{"id":"local:s2","group":"<group-1>","local":true,"machine":null,"host":"agent","session":"s2","session_id":"s2","workspace_id":"w","branch_ref":"refs/heads/main","task":null,"intent":null,"editing":[],"recent":[],"more_files":0,"state":"active","liveness":null,"active_age_ms":"<ms>","heard_age_ms":null},{"id":"local:s1","group":"<group-1>","local":true,"machine":null,"host":"agent","session":"s1","session_id":"s1","workspace_id":"w","branch_ref":"refs/heads/main","task":null,"intent":null,"editing":[],"recent":[],"more_files":0,"state":"active","liveness":null,"active_age_ms":"<ms>","heard_age_ms":null}],"more_agents":0,"editing":[],"more_editing":0,"overlaps":[],"more_overlaps":0,"interface_changes":[{"workspace_id":"w","path":"src/lib.rs","by_session":null,"changes":[{"name":"parse","kind":"function","change":"signature_changed"}],"more_changes":0,"dependents":[],"more_dependents":0,"age_ms":"<ms>"}],"more_interface_changes":0,"denials":{"conflicts":[],"more_conflicts":false,"stale_refusals":[{"session_id":"s3","paths":["src/lib.rs"],"more_paths":0,"holders":[],"age_ms":"<ms>"},{"session_id":"s2","paths":["src/lib.rs"],"more_paths":0,"holders":[],"age_ms":"<ms>"}],"more_stale_refusals":false,"window":5000},"checks":[{"workspace_id":"w","name":"unit","result":{"type":"passed"},"tree_oid":"e2dd98466274a2f79e9aaf75ddcb0a996b15fe76","combined":false,"applies":"unknown","duration_ms":"<ms>","age_ms":"<ms>"}],"more_checks":0,"landings":[{"workspace_id":"w","onto":"main","commit_oid":"3151388a147d1a4c8b1a5a46910ac04c7cceb909","tree_oid":"e2dd98466274a2f79e9aaf75ddcb0a996b15fe76","check_id":"r-k1","inputs":0}],"more_landings":0,"push_turns":[],"more_push_turns":0,"messages":[],"more_messages":0,"notes":[],"more_notes":0,"workspaces":[{"workspace_id":"w","group":"<group-1>","root":"$TMP/work","branch_ref":"refs/heads/main","sessions":3,"scan_failure":{"detail":"the disk is unreadable","age_ms":"<ms>"},"publishing":{"remote":"origin","name":"alice","enabled":false,"withdrawn":false,"share_task":false,"sequence":1},"teammates":0,"coverage":{"indexable_files":1,"current_files":1,"partial_files":0,"scanned":true}},{"workspace_id":"w2","group":"<group-1>","root":"$TMP/other","branch_ref":"refs/heads/topic","sessions":0,"scan_failure":null,"publishing":null,"teammates":0,"coverage":{"indexable_files":1,"current_files":1,"partial_files":0,"scanned":true}}],"more_workspaces":0,"uninstalled_hosts":["codex"]}
+$ langspan request {"version":10,"request_id":"read","command":{"op":"dashboard"}} --json
+exit 0
+{"version":10,"request_id":"read","replayed":false,"generation":1,"lease_valid":null,"outcome":{"type":"dashboard","dashboard":{"generation":1,"uptime_ms":"<ms>","active_agents":3,"teammates_heard":0,"teammates_known":0,"agents":[{"id":"local:s3","group":"<group-1>","local":true,"machine":null,"host":"agent","session":"s3","session_id":"s3","workspace_id":"w","branch_ref":"refs/heads/main","task":null,"intent":null,"editing":[],"recent":[],"more_files":0,"state":"active","liveness":null,"active_age_ms":"<ms>","heard_age_ms":null},{"id":"local:s2","group":"<group-1>","local":true,"machine":null,"host":"agent","session":"s2","session_id":"s2","workspace_id":"w","branch_ref":"refs/heads/main","task":null,"intent":null,"editing":[],"recent":[],"more_files":0,"state":"active","liveness":null,"active_age_ms":"<ms>","heard_age_ms":null},{"id":"local:s1","group":"<group-1>","local":true,"machine":null,"host":"agent","session":"s1","session_id":"s1","workspace_id":"w","branch_ref":"refs/heads/main","task":null,"intent":null,"editing":[],"recent":[],"more_files":0,"state":"active","liveness":null,"active_age_ms":"<ms>","heard_age_ms":null}],"more_agents":0,"editing":[],"more_editing":0,"overlaps":[],"more_overlaps":0,"interface_changes":[{"workspace_id":"w","path":"src/lib.rs","by_session":null,"changes":[{"name":"parse","kind":"function","change":"signature_changed"}],"more_changes":0,"dependents":[],"more_dependents":0,"age_ms":"<ms>"}],"more_interface_changes":0,"denials":{"conflicts":[],"more_conflicts":false,"stale_refusals":[{"session_id":"s3","paths":["src/lib.rs"],"more_paths":0,"holders":[],"age_ms":"<ms>"},{"session_id":"s2","paths":["src/lib.rs"],"more_paths":0,"holders":[],"age_ms":"<ms>"}],"more_stale_refusals":false,"window":5000},"checks":[{"workspace_id":"w","name":"unit","result":{"type":"passed"},"tree_oid":"e2dd98466274a2f79e9aaf75ddcb0a996b15fe76","combined":false,"applies":"unknown","duration_ms":"<ms>","age_ms":"<ms>"}],"more_checks":0,"landings":[{"workspace_id":"w","onto":"main","commit_oid":"3151388a147d1a4c8b1a5a46910ac04c7cceb909","tree_oid":"e2dd98466274a2f79e9aaf75ddcb0a996b15fe76","check_id":"r-k1","inputs":0}],"more_landings":0,"push_turns":[],"more_push_turns":0,"messages":[],"more_messages":0,"notes":[],"more_notes":0,"workspaces":[{"workspace_id":"w","group":"<group-1>","root":"$TMP/work","branch_ref":"refs/heads/main","sessions":3,"scan_failure":{"detail":"the disk is unreadable","age_ms":"<ms>"},"publishing":{"remote":"origin","name":"alice","enabled":false,"withdrawn":false,"share_task":false,"sequence":1},"teammates":0,"coverage":{"indexable_files":1,"current_files":1,"partial_files":0,"scanned":true}},{"workspace_id":"w2","group":"<group-1>","root":"$TMP/other","branch_ref":"refs/heads/topic","sessions":0,"scan_failure":null,"publishing":null,"teammates":0,"coverage":{"indexable_files":1,"current_files":1,"partial_files":0,"scanned":true}}],"more_workspaces":0,"uninstalled_hosts":["codex"]}}}
+

@@ -9,6 +9,7 @@
 mod golden;
 mod support;
 
+use langspan_core::Outcome;
 use serde_json::{Value, json};
 use std::{
     path::PathBuf,
@@ -40,11 +41,13 @@ impl Transcript {
             std::os::unix::fs::PermissionsExt::from_mode(0o700),
         )
         .unwrap();
-        std::fs::write(
-            base.join("work/src/lib.rs"),
-            "pub fn parse(input: &str) -> usize {\n    input.len()\n}\n",
-        )
-        .unwrap();
+        std::fs::write(base.join("work/src/lib.rs"), LIB).unwrap();
+        // No remote pass during the script: one would push and record
+        // publications at a time of its own.
+        let config = base.join("state/config.json");
+        std::fs::write(&config, "{\"remote_pass_ms\":600000}\n").unwrap();
+        std::fs::set_permissions(&config, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+            .unwrap();
         let mut daemon = Command::new(env!("CARGO_BIN_EXE_langspan"));
         support::in_home(&mut daemon, &base.join("home"))
             .env("LANGSPAN_AUTOSTART", "off")
@@ -165,6 +168,7 @@ impl Transcript {
                 for (key, value) in map {
                     if let Value::String(text) = value
                         && (key == "id"
+                            || key == "group"
                             || key.ends_with("_id")
                             || key.ends_with("_ids")
                             || key.ends_with("_token"))
@@ -186,8 +190,14 @@ impl Transcript {
     /// One case: `args` for the human output, then with `--json`. Returns
     /// the JSON answer's outcome.
     fn case(&mut self, title: &str, args: &[&str]) -> Value {
+        self.case_twice(title, args, args)
+    }
+
+    /// A case whose `--json` run takes other arguments, for a command that
+    /// cannot run twice the same way (`graph export` makes a new file).
+    fn case_twice(&mut self, title: &str, args: &[&str], json_args: &[&str]) -> Value {
         let (code, stdout, stderr) = self.run(args);
-        let json_args: Vec<&str> = args.iter().copied().chain(["--json"]).collect();
+        let json_args: Vec<&str> = json_args.iter().copied().chain(["--json"]).collect();
         let (json_code, json_stdout, json_stderr) = self.run(&json_args);
         let response: Value = serde_json::from_str(&json_stdout).unwrap_or_else(|error| {
             panic!(
@@ -195,18 +205,45 @@ impl Transcript {
             )
         });
         self.learn(&response);
+        // The case that shows an outcome produces that outcome.
+        if let Some(outcome) = response.get("outcome") {
+            let outcome: Outcome = serde_json::from_value(outcome.clone())
+                .unwrap_or_else(|error| panic!("{title}: not an outcome ({error}): {outcome}"));
+            if CASES.contains(&title) {
+                assert_eq!(
+                    case_of(&outcome),
+                    title,
+                    "the case {title:?} gave {outcome:?}"
+                );
+            }
+        }
         let mut scrubbed = response.clone();
         self.scrub(&mut scrubbed, false);
         let json_stdout = format!("{scrubbed}\n");
         let (code, json_code) = (code.unwrap_or(-1), json_code.unwrap_or(-1));
         let mut text = format!("## {title}\n$ langspan {}\nexit {code}\n", args.join(" "));
-        text.push_str(&stdout);
+        // A line of human output that is a JSON object (`status --all`,
+        // the dashboard) is normalized as the JSON answer is.
+        for line in stdout.lines() {
+            match serde_json::from_str::<Value>(line) {
+                Ok(mut value) if value.is_object() => {
+                    self.learn(&value);
+                    self.scrub(&mut value, false);
+                    text.push_str(&format!("{value}\n"));
+                }
+                // Trailing spaces are shown, as `cat -e` does.
+                _ if line.ends_with(char::is_whitespace) => {
+                    text.push_str(&format!("{line}$\n"));
+                }
+                _ => text.push_str(&format!("{line}\n")),
+            }
+        }
         for line in stderr.lines() {
             text.push_str(&format!("stderr: {line}\n"));
         }
         text.push_str(&format!(
-            "$ langspan {} --json\nexit {json_code}\n{json_stdout}",
-            args.join(" ")
+            "$ langspan {}\nexit {json_code}\n{json_stdout}",
+            json_args.join(" ")
         ));
         for line in json_stderr.lines() {
             text.push_str(&format!("stderr: {line}\n"));
@@ -262,6 +299,168 @@ impl Drop for Transcript {
     }
 }
 
+/// `case_of`, an exhaustive match from each `Outcome` variant to the title
+/// of the transcript case that shows it, and `CASES`, every such title. A
+/// new variant fails to compile until it is given a case here;
+/// `every_outcome_has_a_transcript_case` then fails until a transcript has
+/// a case of that title, and the case itself fails unless it produces the
+/// variant.
+macro_rules! cases {
+    ($($variant:ident => $title:literal,)*) => {
+        fn case_of(outcome: &Outcome) -> &'static str {
+            match outcome {
+                $(Outcome::$variant { .. } => $title,)*
+            }
+        }
+        const CASES: &[&str] = &[$($title,)*];
+    };
+}
+
+cases! {
+    Workspace => "workspace add",
+    Workspaces => "workspace list",
+    WorkspaceMoved => "workspace move",
+    WorkspaceRemoval => "workspace remove",
+    Session => "session start",
+    SessionLiveness => "session attach-pid",
+    SessionSeen => "session seen",
+    ContextRecorded => "record context",
+    ToldForgotten => "forget told",
+    Intent => "intent set",
+    IntentEnded => "intent end",
+    Admitted => "admit",
+    Conflict => "admit, conflict",
+    Completed => "complete",
+    Observed => "observe",
+    DiskObserved => "observe disk",
+    BranchObserved => "observe branch",
+    Status => "status",
+    StatusRecords => "status --all",
+    Events => "events",
+    Changes => "changes",
+    WorkspaceGit => "observe workspace git",
+    SessionPrompted => "session prompt",
+    PromptTargets => "set prompt targets",
+    PresenceObserved => "observe presence",
+    Presence => "set presence",
+    SessionEnded => "session end",
+    Adopted => "adopt",
+    SessionStopped => "session stop",
+    ToolBatchObserved => "observe tool batch",
+    AutoCheck => "auto check enable",
+    AutoCheckDisabled => "auto check disable",
+    Briefing => "brief",
+    StaleBase => "admit tool, stale base",
+    UnreadLines => "admit tool, unread lines",
+    SourceObserved => "observe source",
+    RemoteLink => "remote enable",
+    RemoteDisabled => "remote disable",
+    RemoteOutbox => "remote outbox",
+    RemoteSent => "remote sent",
+    Compaction => "compact",
+    RemoteObserved => "observe remote",
+    CheckRecorded => "record check",
+    Checks => "check status",
+    FlakyTests => "flaky tests",
+    FlakyTestForgotten => "forget flaky test",
+    Readiness => "landing readiness",
+    Landed => "record landing",
+    Turn => "take turn",
+    TurnBusy => "take turn, busy",
+    TurnWaiting => "take turn, waiting",
+    TurnUnavailable => "take turn, unavailable",
+    TurnQueue => "turn queue",
+    TurnQueueLeft => "leave turn queue",
+    TurnReleased => "release turn",
+    InterfaceObserved => "observe interface",
+    InterfaceDependentsObserved => "observe interface dependents",
+    Remembered => "remember",
+    NoteAnchorsObserved => "observe note anchors",
+    Forgotten => "forget",
+    MessageSent => "message",
+    MessageAcknowledged => "ack",
+    MessageShown => "messages show",
+    MessageStatus => "messages status",
+    MessageRetracted => "messages retract",
+    ScanObserved => "observe scan",
+    HostsObserved => "observe hosts",
+    CheckoutObserved => "observe checkout",
+    CheckoutRunObserved => "observe checkout run",
+    UncoordinatedObserved => "observe uncoordinated",
+    Recap => "recap",
+    Trails => "trail",
+    Recall => "recall",
+    History => "graph history",
+    Today => "today",
+    Report => "report",
+    Count => "count request",
+    StatusLine => "status line",
+    RefusalRecorded => "record refusal",
+    Policy => "policy",
+    Holders => "holders",
+    WaitRecorded => "record wait",
+    Dashboard => "dashboard",
+    Version => "version",
+    Graph => "graph symbol",
+    GraphContext => "graph context",
+    GraphInflight => "graph inflight",
+    GraphPath => "graph path",
+    GraphMap => "graph map",
+    GraphExported => "graph export",
+    GraphImported => "graph import",
+    CallBreaks => "check calls",
+    WriteCheck => "check-write",
+    GraphBlindSpots => "graph blind-spots",
+    InterfaceAcknowledged => "acknowledge interface",
+    ReadOutline => "outline read",
+    BetweenSteps => "between steps",
+    Error => "complete, an unknown admission",
+}
+
+/// Every outcome's case is in a golden transcript.
+#[test]
+fn every_outcome_has_a_transcript_case() {
+    let titles: Vec<String> = ["coordination.txt", "remaining.txt"]
+        .iter()
+        .flat_map(|file| {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/golden/transcript")
+                .join(file);
+            std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
+                .lines()
+                .filter_map(|line| line.strip_prefix("## ").map(str::to_owned))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    for title in CASES {
+        assert!(
+            titles.iter().any(|seen| seen == title),
+            "no transcript case {title:?}: add one that produces its outcome"
+        );
+    }
+}
+
+/// The SHA-256 of `file` in hex, from the system's tool (`sha256sum` on
+/// Linux, `shasum` on macOS).
+fn sha256_hex(file: &std::path::Path) -> String {
+    let output = Command::new("sha256sum")
+        .arg(file)
+        .output()
+        .or_else(|_| {
+            Command::new("shasum")
+                .args(["-a", "256"])
+                .arg(file)
+                .output()
+        })
+        .expect("run sha256sum or shasum");
+    assert!(output.status.success(), "{output:?}");
+    String::from_utf8(output.stdout).unwrap()[..64].to_owned()
+}
+
+/// The repository's one source file.
+const LIB: &str = "pub fn parse(input: &str) -> usize {\n    input.len()\n}\n";
+
 /// `_ms` fields the script sets, which do not vary.
 const CHOSEN_MS: &[&str] = &["wait_ms", "ttl_ms"];
 
@@ -315,6 +514,18 @@ fn human_times(text: &str) -> String {
             out.push_str("<hh:mm>");
             at += 5;
             continue;
+        }
+        // How long something has held: "for 4 ms".
+        if text[at..].starts_with("for ") && digits(at + 4, 1) {
+            let mut end = at + 4;
+            while end < bytes.len() && bytes[end].is_ascii_digit() {
+                end += 1;
+            }
+            if text[end..].starts_with(" ms") {
+                out.push_str("for <ms>");
+                at = end;
+                continue;
+            }
         }
         // An age: digits, an optional space, a unit, " ago".
         if bytes[at].is_ascii_digit() && (at == 0 || !bytes[at - 1].is_ascii_alphanumeric()) {
@@ -622,4 +833,284 @@ fn transcript_of_the_coordination_commands() {
     );
     let text = std::mem::take(&mut t.text);
     golden::check("transcript/coordination.txt", &text);
+}
+
+/// Graph queries, checks and landing turns, interface notices, the scan's
+/// and hosts' observations, remote awareness and the dashboard (issue #325).
+#[test]
+fn transcript_of_the_remaining_outcomes() {
+    let mut t = Transcript::new("two");
+    let work = t.work().display().to_string();
+    let tree = "e2dd98466274a2f79e9aaf75ddcb0a996b15fe76";
+    let head = "3151388a147d1a4c8b1a5a46910ac04c7cceb909";
+    t.run(&["workspace", "add", "w", &work, "--request-id", "r-ws"]);
+    t.wait_for_scan("w");
+    t.run(&["session", "start", "s1", "w", "--request-id", "r-s1"]);
+    t.run(&["session", "start", "s2", "w", "--request-id", "r-s2"]);
+
+    t.case("graph symbol", &["graph", "symbol", "w", "parse"]);
+    t.case("graph path", &["graph", "path", "w", "parse", "parse"]);
+    t.case("graph map", &["graph", "map", "w"]);
+    t.case("graph blind-spots", &["graph", "blind-spots", "w"]);
+    t.case("graph inflight", &["graph", "inflight", "w"]);
+    let index = t.base.join("index.jsonl").display().to_string();
+    let index_json = t.base.join("index-json.jsonl").display().to_string();
+    t.case_twice(
+        "graph export",
+        &["graph", "export", "w", "--out", &index],
+        &["graph", "export", "w", "--out", &index_json],
+    );
+    t.case("graph import", &["graph", "import", "w", "--in", &index]);
+    t.request(
+        "graph context",
+        "read",
+        json!({"op": "graph_context", "workspace_id": "w", "names": ["parse"], "limit": 3}),
+    );
+    t.request(
+        "check calls",
+        "read",
+        json!({"op": "check_calls", "session_id": "s1",
+            "calls": [{"path": "src/lib.rs", "line": 2, "name": "parse", "args": 1, "member": false}]}),
+    );
+    t.request(
+        "outline read",
+        "r-g1",
+        json!({"op": "outline_read", "session_id": "s1", "path": "src/lib.rs",
+            "digest": "a".repeat(64), "lines": 3, "bytes": 60}),
+    );
+
+    let check = t.request(
+        "record check",
+        "r-k1",
+        json!({"op": "record_check", "workspace_id": "w", "name": "unit", "command": "cargo test",
+            "tree_oid": tree, "head_oid": head, "inputs": [], "result": {"type": "passed"},
+            "duration_ms": 1200}),
+    );
+    t.request(
+        "check status",
+        "read",
+        json!({"op": "check_status", "workspace_id": "w", "tree_oid": tree}),
+    );
+    t.request(
+        "landing readiness",
+        "read",
+        json!({"op": "landing_readiness", "workspace_id": "w", "name": "unit", "tree_oid": tree}),
+    );
+    t.request(
+        "flaky tests",
+        "read",
+        json!({"op": "flaky_tests", "workspace_id": "w"}),
+    );
+    t.request(
+        "forget flaky test",
+        "r-k2",
+        json!({"op": "forget_flaky_test", "workspace_id": "w", "test": "parses"}),
+    );
+    t.request(
+        "auto check enable",
+        "r-k3",
+        json!({"op": "auto_check_enable", "workspace_id": "w", "name": "auto", "argv": ["true"],
+            "timeout_s": 30}),
+    );
+    t.request(
+        "auto check disable",
+        "r-k4",
+        json!({"op": "auto_check_disable", "workspace_id": "w"}),
+    );
+    let check_id = check["check"]["check_id"]
+        .as_str()
+        .unwrap_or("check")
+        .to_owned();
+    t.request(
+        "record landing",
+        "r-k5",
+        json!({"op": "record_landing", "workspace_id": "w", "onto": "main", "commit_oid": head,
+            "tree_oid": tree, "inputs": [], "check_id": check_id}),
+    );
+
+    let take = |session: &str, queue: Value| {
+        let mut command = json!({"op": "take_turn", "workspace_id": "w", "onto": "main",
+            "session_id": session, "ttl_ms": 60000});
+        if !queue.is_null() {
+            command["queue"] = queue;
+        }
+        command
+    };
+    t.request("take turn", "r-t1", take("s1", Value::Null));
+    t.request("take turn, busy", "r-t2", take("s2", Value::Null));
+    t.request(
+        "take turn, waiting",
+        "r-t3",
+        take(
+            "s2",
+            json!({"ticket": "r-t3", "wait_ms": 60000, "joined": false}),
+        ),
+    );
+    t.request(
+        "turn queue",
+        "read",
+        json!({"op": "turn_queue", "workspace_id": "w", "onto": "main"}),
+    );
+    t.request(
+        "release turn",
+        "r-t6",
+        json!({"op": "release_turn", "workspace_id": "w", "onto": "main", "turn_id": "r-t1",
+            "attempts": []}),
+    );
+    // Free, but r-t3 is next in line.
+    t.request("take turn, unavailable", "r-t4", take("s1", Value::Null));
+    t.request(
+        "leave turn queue",
+        "r-t5",
+        json!({"op": "leave_turn_queue", "workspace_id": "w", "onto": "main", "ticket": "r-t3",
+            "reason": "cancelled"}),
+    );
+
+    let notice = t.request(
+        "observe interface",
+        "r-f1",
+        json!({"op": "observe_interface", "workspace_id": "w", "path": "src/lib.rs",
+            "changes": [{"name": "parse", "kind": "function", "change": "signature_changed",
+                "before": "fn parse(input: &str) -> usize", "after": "fn parse(input: &[u8]) -> usize"}],
+            "dependents": []}),
+    );
+    let notice_id = notice["notice"]["notice_id"]
+        .as_str()
+        .unwrap_or("notice")
+        .to_owned();
+    // Another worktree of the same repository.
+    let other = t.base.join("other").display().to_string();
+    t.git(&["worktree", "add", "-q", "-b", "topic", &other]);
+    t.run(&["workspace", "add", "w2", &other, "--request-id", "r-ws2"]);
+    t.wait_for_scan("w2");
+    t.request(
+        "observe interface dependents",
+        "r-f2",
+        json!({"op": "observe_interface_dependents", "notice_workspace_id": "w",
+            "notice_id": notice_id, "workspace_id": "w2", "paths": ["src/lib.rs"]}),
+    );
+    t.request(
+        "acknowledge interface",
+        "r-f3",
+        json!({"op": "acknowledge_interface", "session_id": "s2", "notice_ids": [notice_id]}),
+    );
+    t.request(
+        "between steps",
+        "r-f4",
+        json!({"op": "between_steps", "session_id": "s2", "stops": 0}),
+    );
+    t.request(
+        "observe note anchors",
+        "r-f5",
+        json!({"op": "observe_note_anchors", "workspace_id": "w"}),
+    );
+
+    let digest = |c: &str| c.repeat(64);
+    t.request(
+        "observe source",
+        "r-v1",
+        json!({"op": "observe_source", "session_id": "s2", "origin": "read",
+            "files": [{"path": "src/lib.rs", "state": {"type": "present", "digest": digest("a")}}]}),
+    );
+    let admit = |id: &str, base: &str, overwrites: Value| {
+        json!({"op": "admit_tool", "session_id": "s2", "paths": ["src/lib.rs"], "ttl_ms": 30000,
+            "operation": {"operation_id": id, "source": "cli", "tool": "Write",
+                "input_digest": digest("c")},
+            "base": [{"path": "src/lib.rs", "state": {"type": "present", "digest": digest(base)}}],
+            "overwrites": overwrites})
+    };
+    t.request(
+        "admit tool, stale base",
+        "r-v2",
+        admit("op-2", "b", json!([])),
+    );
+    // A session with no recorded version of the file, at its real content.
+    t.run(&["session", "start", "s3", "w", "--request-id", "r-s3"]);
+    let real = sha256_hex(&t.work().join("src/lib.rs"));
+    let mut unread = admit(
+        "op-3",
+        "a",
+        json!([{"path": "src/lib.rs", "session_id": "s1",
+            "lines": [{"start_line": 2, "end_line": 2}], "age_ms": 2000}]),
+    );
+    unread["session_id"] = json!("s3");
+    unread["base"][0]["state"]["digest"] = json!(real);
+    t.request("admit tool, unread lines", "r-v3", unread);
+    t.request(
+        "record wait",
+        "r-v4",
+        json!({"op": "record_wait", "session_id": "s2", "paths": ["src/lib.rs"],
+            "holder_session_id": "s1", "waited_ms": 100, "result": "refused_conflict"}),
+    );
+    t.request(
+        "observe scan",
+        "r-v5",
+        json!({"op": "observe_scan", "workspace_id": "w", "failure": "the disk is unreadable"}),
+    );
+    t.request(
+        "observe hosts",
+        "r-v6",
+        json!({"op": "observe_hosts", "not_installed": ["codex"]}),
+    );
+    t.request(
+        "observe checkout",
+        "r-v7",
+        json!({"op": "observe_checkout", "workspace_id": "w", "from_branch": "refs/heads/main",
+            "to_branch": "refs/heads/topic", "from_head": head, "to_head": head, "files": 2}),
+    );
+    t.request(
+        "observe checkout run",
+        "r-v8",
+        json!({"op": "observe_checkout_run", "session_id": "s1", "command": "git switch topic",
+            "to_branch": "refs/heads/topic", "to_head": head, "ran_ms": 50}),
+    );
+    t.request(
+        "observe uncoordinated",
+        "r-v9",
+        json!({"op": "observe_uncoordinated", "workspace_id": "w",
+            "files": [{"path": "src/lib.rs", "state": {"type": "present", "digest": digest("d")}}]}),
+    );
+
+    t.request(
+        "remote enable",
+        "r-r1",
+        json!({"op": "remote_enable", "workspace_id": "w", "remote": "origin",
+            "participant": "0123456789abcdef0123456789abcdef", "name": "alice", "share_task": false}),
+    );
+    t.request(
+        "remote published",
+        "r-r4",
+        json!({"op": "remote_published", "workspace_id": "w", "sequence": 1,
+            "signature": "signature-one", "payload": "{}", "published_at_ms": 1_800_000_000_000_u64}),
+    );
+    t.request(
+        "remote outbox",
+        "read",
+        json!({"op": "remote_outbox", "workspace_id": "w"}),
+    );
+    t.request(
+        "remote sent",
+        "read",
+        json!({"op": "remote_sent", "workspace_id": "w", "limit": 10}),
+    );
+    t.request(
+        "observe remote",
+        "r-r2",
+        json!({"op": "observe_remote", "workspace_id": "w",
+            "publication": {"participant": "fedcba9876543210fedcba9876543210", "name": "bob",
+                "sequence": 1, "work": []}}),
+    );
+    t.request(
+        "remote disable",
+        "r-r3",
+        json!({"op": "remote_disable", "workspace_id": "w"}),
+    );
+    t.request(
+        "count request",
+        "read",
+        json!({"op": "count", "days": [0, 86_400_000]}),
+    );
+    t.request("dashboard", "read", json!({"op": "dashboard"}));
+    let text = std::mem::take(&mut t.text);
+    golden::check("transcript/remaining.txt", &text);
 }
