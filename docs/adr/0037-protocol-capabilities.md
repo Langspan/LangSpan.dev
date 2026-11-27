@@ -43,7 +43,9 @@ order:
 | `refusal_outcomes` | a report's `refusal_outcomes` (roadmap H9) | 5 |
 | `renames` | the rename fields of interface changes, history entries and in-flight symbols, and private interface changes (roadmap D7) | 4 |
 | `symbol_findings` | a check record's `symbol_findings`, and `record_check`'s (issue #265) | 6 |
+| `tolerant_responses` | none: says the client ignores fields it does not know in a response's objects that are not stored ([ADR 0015](0015-version-tolerance.md), issue #332) | none |
 | `trails` | a briefing's `trail` and a recap's `trails` (roadmap C9) | 4 |
+| `withheld_events` | an event page's `withheld`, the count of events left out (issue #331) | none |
 
 The last column is the table that maps versions 3 to 10 to capability sets:
 a client of version V that names no capabilities has every capability whose
@@ -88,6 +90,28 @@ a recap by tag, and a recap asked for `since` (`protocol::fits_with`). A version
 this change rejects `capabilities`; restart it after upgrading. No release
 shipped version 10 before the handshake.
 
+**Event pages (issue #331).** A client reads events with
+`deny_unknown_fields`, so one event type it has no variant for fails its
+whole `events` or `changes` page. `protocol::event_needs` is the "since"
+table: an exhaustive match giving each event type the first version whose
+every build has it, or the capability that added it (`context_added` and
+`told_forgotten`: `briefing_memory`; `note_anchor_changed`:
+`anchored_notes`, issue #281; `read_outlined`: `outline_reads`). A type
+added at a version without a new version gets the next one, as
+`symbol_findings` did: the 15 types 0.2.0 added while it still spoke
+version 3 get 4, the B28 and C9 types 5, `interface_notices_told` 6. A new
+type does not compile without an entry, and one no release reads must name
+a capability no frozen version has. `encode_with` leaves out of a page each
+event the client cannot read. A client with `withheld_events` is told how
+many in the frame's `withheld`; a frozen version cannot read the count.
+`fixtures/event-types/<release>.txt` holds the types each release reads,
+taken from its tag, and a test encodes a page of every current type for
+each release's version and checks it holds only those. A page can come back
+with fewer events than its limit, or none while later ones remain; the
+older client is told nothing, which is still better than a page it cannot
+read at all. Fields added to an existing event type are gated only where a
+capability names them.
+
 **Golden vectors.** The existing `fixtures/*-vN.json` vectors stay
 unchanged as the frozen shapes of versions 3 to 10, and every one of them
 must keep passing. A capability's vectors live in
@@ -111,5 +135,6 @@ handshake itself.
 - Every request is larger by the list of names, about 200 bytes. The
   64 KiB frame bound is unchanged.
 - A capability can be added but not withdrawn without a version bump.
-- Event pages for an older client and tolerant readers in new clients are
-  separate items of the same milestone; this decision does not change them.
+- An older client's event page is filtered by type, so 0.1.0 and 0.2.0
+  (both version 3) no longer fail on the types added after them; 0.2.0
+  loses the 15 types it added, which version 3 cannot tell apart.

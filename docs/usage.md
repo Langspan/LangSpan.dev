@@ -3086,6 +3086,20 @@ version 6 or later; an earlier daemon records the check without them. A
 version 10 daemon built before capabilities refuses the field: restart it
 after upgrading.
 
+An event page (`langspan events`, `langspan_events`, `changes`) leaves out
+the events whose type the client's release cannot read: releases 0.1.0 to
+0.5.1 are served, each with the types in `fixtures/event-types/` for that
+release. 0.1.0 and 0.2.0 both speak version 3 and get the 53 types 0.1.0
+reads. A client of this build is told how many were left out, in the
+frame's `withheld`; an earlier release cannot read that count and is not
+told. Such a page may hold fewer events than asked for, or none while later
+events remain: upgrade the client to read them all.
+
+A client of this build ignores a field it does not know in a response and in
+the objects only responses carry, so a later daemon can add one there without
+a new version ([ADR 0015](adr/0015-version-tolerance.md)). Requests and
+events stay strict.
+
 ### Mixed versions after an upgrade
 
 LangSpan never downloads or replaces its own binary and makes no update

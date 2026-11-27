@@ -61,6 +61,45 @@ and the event store keep rejecting unknown fields. Test:
 received and briefed; one over 16 KiB and one with a 33-byte host name are
 not. It failed before the change.
 
+**Clients read responses tolerantly (issue #332, 27 November 2026).** This
+changes the rule above that the internal protocol rejects unknown fields,
+for responses only. From this build on, a client ignores the fields it does
+not know in a response, in its outcome and in the 43 objects of the core's
+`lib.rs` that only responses carry (a briefing, a recap, the graph and
+impact reads, and the like), and names `tolerant_responses` to say so
+([ADR 0037](0037-protocol-capabilities.md)). The response objects of the
+core's other modules (a report, `today`, a recall, a definition's history,
+and the like) are still strict; they follow in a later change.
+No wire-only mirror type is added: those core types simply no longer carry
+`deny_unknown_fields`. What stays strict:
+
+- requests, which the daemon reads, and every object a request carries;
+- events, which the store replays (above), and every object an event or the
+  derived state carries, including in a response, since the same types are
+  stored. A response holding one of them with a field this build lacks still
+  fails to read.
+
+When an addition needs what:
+
+- A field added to a response-only object needs no version and no capability
+  of its own. A client without `tolerant_responses` (every release up to
+  0.5.1) is strict, so the daemon leaves the field out for it, in the one
+  place `encode_with` shapes such clients' answers.
+- A field added to an object that is stored or sent in a request, a new event
+  type, and a request a daemon must understand each still add a capability.
+- The version changes only when a field is removed or changes meaning, or a
+  capability is withdrawn. A request that needs something an older daemon
+  cannot do is a capability checked before it is sent (`fits_with`), not a
+  version.
+- Versions 3 to 10 stay frozen: their shapes come from the capability table,
+  and no function per version (`protocol_N_shape`) is added again. A test
+  checks for one.
+
+An unknown event type in a page is not yet kept as an opaque record: the
+core's `Event` has no variant to hold one, and adding it needs a JSON value
+type in the core. Until then a new event type gets a capability, and a
+client without it is not sent the event (ADR 0037).
+
 ## Consequences
 
 - A coordinator restarted on another build starts whatever its receipts hold;
@@ -69,5 +108,8 @@ not. It failed before the change.
 - On the internal protocol, a client and daemon of different builds agree
   on named capabilities, not one version per feature
   ([ADR 0037](0037-protocol-capabilities.md)).
+- A field a later daemon adds to a response-only object is invisible to this
+  client, not an error. One it adds to a stored type still needs a
+  capability, until those readers are tolerant too.
 - The golden stores are binary SQLite files in the repository, 188 KiB in
   all; they hold temporary demo paths and no personal data.
