@@ -2556,3 +2556,144 @@ fn two_new_capabilities_are_added_on_lines_of_their_own() {
         "{text}"
     );
 }
+
+/// Each release, the protocol version it speaks, and the event types it
+/// reads, frozen from that release's tag (issue #331).
+const RELEASES: [(&str, u16, &str); 6] = [
+    (
+        "0.1.0",
+        3,
+        include_str!("../fixtures/event-types/0.1.0.txt"),
+    ),
+    (
+        "0.2.0",
+        3,
+        include_str!("../fixtures/event-types/0.2.0.txt"),
+    ),
+    (
+        "0.3.0",
+        8,
+        include_str!("../fixtures/event-types/0.3.0.txt"),
+    ),
+    (
+        "0.4.0",
+        9,
+        include_str!("../fixtures/event-types/0.4.0.txt"),
+    ),
+    (
+        "0.5.0",
+        10,
+        include_str!("../fixtures/event-types/0.5.0.txt"),
+    ),
+    (
+        "0.5.1",
+        10,
+        include_str!("../fixtures/event-types/0.5.1.txt"),
+    ),
+];
+
+/// One event of each type this build has: the event vectors, one per type
+/// (`tests/event_vectors.rs`).
+fn every_event_type() -> Vec<langspan_core::RecordedEvent> {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+    let mut paths: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.to_string_lossy().ends_with("-event-v10.json"))
+        .collect();
+    paths.sort();
+    (1..)
+        .zip(paths)
+        .map(|(seq, path)| langspan_core::RecordedEvent {
+            seq,
+            event: serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap(),
+        })
+        .collect()
+}
+
+fn event_types(page: &serde_json::Value) -> std::collections::BTreeSet<String> {
+    page["outcome"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|recorded| recorded["event"]["type"].as_str().unwrap().to_string())
+        .collect()
+}
+
+fn answer(outcome: langspan_core::Outcome) -> Response {
+    Response {
+        version: PROTOCOL_VERSION,
+        request_id: "r".into(),
+        replayed: false,
+        generation: 1,
+        lease_valid: None,
+        outcome,
+    }
+}
+
+/// Issue #331: a page holding every current event type, encoded for the
+/// version a release speaks, holds only types of that release's frozen
+/// list, and every current type all releases of that version read. 0.1.0
+/// and 0.2.0 both speak version 3, which gets what 0.1.0 reads.
+#[test]
+fn each_release_is_sent_only_the_event_types_it_reads() {
+    use langspan_core::Outcome;
+    let events = every_event_type();
+    let current = event_types(
+        &serde_json::to_value(answer(Outcome::Events {
+            events: events.clone(),
+        }))
+        .unwrap(),
+    );
+    let reads = |version: u16| {
+        RELEASES
+            .iter()
+            .filter(|(_, speaks, _)| *speaks == version)
+            .map(|(_, _, list)| list.lines().map(str::to_string).collect())
+            .reduce(|both: std::collections::BTreeSet<String>, next| &both & &next)
+            .unwrap()
+    };
+    for (release, version, _) in RELEASES {
+        let expected = &reads(version) & &current;
+        for outcome in [
+            Outcome::Events {
+                events: events.clone(),
+            },
+            Outcome::Changes {
+                events: events.clone(),
+                scan: None,
+            },
+        ] {
+            let wire = encode_for(version, &answer(outcome)).unwrap();
+            let page: serde_json::Value = serde_json::from_slice(&wire).unwrap();
+            assert_eq!(event_types(&page), expected, "{release}");
+            assert!(page.get("withheld").is_none(), "{release} cannot read it");
+        }
+    }
+}
+
+/// Issue #331: the reply says how many events it left out, to a client
+/// that reads that count (`withheld_events`). A frozen version cannot read
+/// it and is not told.
+#[test]
+fn the_reply_says_how_many_events_it_left_out() {
+    let events = every_event_type();
+    let response = answer(langspan_core::Outcome::Events {
+        events: events.clone(),
+    });
+    let named: Vec<String> = Capabilities::ALL
+        .names()
+        .into_iter()
+        .filter(|name| name != "outline_reads" && name != "anchored_notes")
+        .collect();
+    let granted = Capabilities::negotiate(PROTOCOL_VERSION, Some(&named));
+    let page: serde_json::Value =
+        serde_json::from_slice(&encode_with(granted, Some(&named), &response).unwrap()).unwrap();
+    assert_eq!(page["withheld"], 2, "read_outlined and note_anchor_changed");
+    assert_eq!(event_types(&page).len(), events.len() - 2);
+    let all = Capabilities::ALL.names();
+    let page: serde_json::Value =
+        serde_json::from_slice(&encode_with(Capabilities::ALL, Some(&all), &response).unwrap())
+            .unwrap();
+    assert!(page.get("withheld").is_none(), "nothing left out");
+}
