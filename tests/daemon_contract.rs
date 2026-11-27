@@ -179,6 +179,37 @@ fn pin(name: &str, reply: &str) {
     golden::check(&format!("frames/{name}.json"), &pinned);
 }
 
+/// The length of `frame` with each number that differs between machines
+/// counted as the one digit `0`: the generation (see `pin`) and a partial
+/// file's `since_ms`, which is on the coordinator's boot-relative clock, so
+/// it has fewer digits on a machine that started more recently.
+fn steady_len(frame: &str) -> usize {
+    let mut len = frame.len();
+    for key in ["\"generation\":", "\"since_ms\":"] {
+        for (at, _) in frame.match_indices(key) {
+            let digits = frame[at + key.len()..]
+                .bytes()
+                .take_while(u8::is_ascii_digit)
+                .count();
+            assert!(digits > 0, "{key} without a number in {frame}");
+            len -= digits - 1;
+        }
+    }
+    len
+}
+
+#[test]
+fn steady_len_counts_each_varying_number_as_one_digit() {
+    let at = |generation: &str, since: &str| {
+        format!(
+            r#"{{"generation":{generation},"outcome":{{"partial":[{{"path":"a","since_ms":{since}}}]}}}}"#
+        )
+    };
+    let short = at("1", "123456");
+    assert_eq!(steady_len(&short), short.len() - 5);
+    assert_eq!(steady_len(&at("12", "1795521906123")), steady_len(&short));
+}
+
 fn error_code(outcome: &Outcome) -> &str {
     match outcome {
         Outcome::Error { code, .. } => code,
@@ -444,9 +475,10 @@ fn answers_longer_than_one_frame_are_cut_to_fit_and_say_so() {
     let (frame, reply) = daemon.indexed(&symbol("target", 200), 410);
     assert!(frame.len() <= MAX_FRAME_BYTES, "{}", frame.len());
     let kept = reply["outcome"]["symbols"].as_array().unwrap().len();
+    // Sizes count each number that varies by machine as one digit.
     let summary = format!(
         "graph symbol --detail: {} bytes, {kept} of 210 definitions, truncated {}\n",
-        frame.len(),
+        steady_len(&frame),
         reply["outcome"]["truncated"]
     );
     let spots = Command::GraphBlindSpots {
@@ -461,7 +493,7 @@ fn answers_longer_than_one_frame_are_cut_to_fit_and_say_so() {
         .len();
     let summary = format!(
         "{summary}graph blind-spots: {} bytes, {partial} of 200 partial files, truncated {}\n",
-        frame.len(),
+        steady_len(&frame),
         reply["outcome"]["truncated"]
     );
     golden::check("frames/cut-to-one-frame.txt", &summary);
