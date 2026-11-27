@@ -1187,3 +1187,71 @@ pub fn dashboard_denials(
         window: DENIAL_WINDOW,
     }
 }
+
+/// The version of the `/api/events` page; a breaking change bumps it.
+const DASHBOARD_EVENTS_VERSION: u32 = 1;
+
+/// One page of the dashboard's event feed (issue #500, ADR 0013).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DashboardEvents {
+    pub version: u32,
+    /// The seq to ask after next: the last row's, or the one asked after
+    /// when the page is empty.
+    pub next: u64,
+    pub events: Vec<DashboardEvent>,
+}
+
+/// One recorded event, reduced to an allowlist: its seq and type, the first
+/// session, workspace and time it names, and the file paths it carries.
+/// Every other field, and any added later, is left out, so prompt
+/// summaries, message and note text, task lines and payloads never are.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DashboardEvent {
+    pub seq: u64,
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at_ms: Option<u64>,
+    /// At most `DASHBOARD_PATHS`, each clipped.
+    pub paths: Vec<String>,
+    pub more_paths: u32,
+}
+
+impl DashboardEvents {
+    /// The page read after `after`, its rows in seq order.
+    pub fn new(after: u64, events: Vec<DashboardEvent>) -> Self {
+        Self {
+            version: DASHBOARD_EVENTS_VERSION,
+            next: events.last().map_or(after, |event| event.seq),
+            events,
+        }
+    }
+}
+
+impl DashboardEvent {
+    /// A row bounded as the rest of the view is: every string clipped to
+    /// `DASHBOARD_TEXT`, at most `DASHBOARD_PATHS` paths.
+    pub fn new(
+        seq: u64,
+        kind: &str,
+        session_id: Option<&str>,
+        workspace_id: Option<&str>,
+        at_ms: Option<u64>,
+        found: Vec<String>,
+    ) -> Self {
+        let (paths, more) = paths(found, DASHBOARD_PATHS);
+        Self {
+            seq,
+            kind: clip(kind),
+            session_id: session_id.map(clip),
+            workspace_id: workspace_id.map(clip),
+            at_ms,
+            paths,
+            more_paths: count(more),
+        }
+    }
+}
