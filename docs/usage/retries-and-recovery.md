@@ -1,0 +1,127 @@
+# Retries and recovery
+
+Local coordination mutations and remote enable/disable require `--request-id`.
+An identical retry returns its original outcome; changing the command under that
+ID returns `request_id_conflict`. Path/transport validation failures occur before
+a receipt is recorded. A lost reply or timeout is an unknown outcome: retry
+the original ID and arguments.
+
+The CLI generates IDs for check and landing records unless `--request-id` is
+given. Running a check command again under a new ID runs the command again; a
+retry under the same ID on the same combined tree returns the recorded result.
+
+Use `--json` to inspect `replayed`, `generation`, `lease_valid`, and the full
+outcome. A historical `admitted` response can have `lease_valid: false` after
+completion, expiry, or restart. It is not a fresh admission. Validity is observed
+when the response is produced and cannot fence a later write.
+
+The current wire protocol is version 10 and the SQLite schema marker version 4
+(retention). The daemon also answers version 9 clients, without the outline
+reads (`outlined` in session activity and the `read_outlined` event) version
+10 added; version 8 clients, also without the note fields `symbol`, `tags`,
+`anchor_state` and `tag` that version 9 added (see
+[Notes about a definition](recap-notes-and-messages.md#notes-about-a-definition) for how an anchored note
+reaches them); version 7 clients, also without the `inflight_partial` that
+version 8 added to a briefing; version 6 clients, also without the briefing
+memory and context counts version 7 added; version 5 clients, also without
+the `rebased` and `adapted` that version 6 added to a landing; version 4
+clients, also without the `refusal_outcomes` that version 5 added to a
+report's counts and the `interface_notice_ids` it added to a briefing; and
+version 3 clients, also without the rename fields version 4 added. A client
+asks a daemon of an earlier build again in the version that daemon names. A
+hook's briefing of changes only is asked of a daemon of version 6 or
+earlier as the full view, which is all that daemon gives; a daemon of
+version 7 or later still gives changes only. A
+`--rebase` or `--adapt-renames` landing that a daemon of version 5 or
+earlier could not record stops before it pushes, with nothing pushed:
+restart the daemon after upgrading. Upgrade the daemon and clients
+together. Earlier persisted records remain readable; a build older than the
+marker refuses the file.
+
+Each request of this build also names, in `capabilities`, the named
+protocol capabilities it reads
+([ADR 0037](../adr/0037-protocol-capabilities.md)). A client that names none gets
+its version's set, so versions 3 to 10 keep their shapes. A daemon that
+knows fewer names answers with the ones it granted, and the client asks
+again once with those. A check's `symbol_findings` reach only clients of
+version 6 or later; an earlier daemon records the check without them. A
+version 10 daemon built before capabilities refuses the field: restart it
+after upgrading.
+
+An event page (`langspan events`, `langspan_events`, `changes`) leaves out
+the events whose type the client's release cannot read: releases 0.1.0 to
+0.5.1 are served, each with the types in `fixtures/event-types/` for that
+release. 0.1.0 and 0.2.0 both speak version 3 and get the 53 types 0.1.0
+reads. A client of this build is told how many were left out, in the
+frame's `withheld`; an earlier release cannot read that count and is not
+told. Such a page may hold fewer events than asked for, or none while later
+events remain: upgrade the client to read them all.
+
+A client of this build ignores a field it does not know in a response and in
+the objects only responses carry, so a later daemon can add one there without
+a new version ([ADR 0015](../adr/0015-version-tolerance.md)). Requests and
+events stay strict.
+
+## Mixed versions after an upgrade
+
+LangSpan never downloads or replaces its own binary and makes no update
+check. Upgrade with a new release archive, checked as in
+[Verify the binary](../install.md#verify-a-download), or by rebuilding from
+source; roll back by keeping the previous archive. `brew upgrade langspan`
+applies once the Homebrew tap is published. The earlier build reads the
+store only until the later one records an event kind or field it doesn't
+know, which can happen within minutes. From then on an earlier build that
+has [ADR 0038](../adr/0038-store-rollback.md) refuses with one line naming the
+build to start instead; releases up to 0.5.1 stop with
+`invalid persisted event at sequence N`. Either start the later build again,
+or stop the coordinator and move the state directory aside, which starts an
+empty store and keeps the old history in the moved directory. A
+`config.json` key the earlier build doesn't know also stops it; remove the
+key. [ADR 0038](../adr/0038-store-rollback.md) is the compatibility policy.
+
+After an upgrade, a coordinator started before it keeps running the old
+binary while hooks start the new one. `langspan doctor` asks the coordinator
+for its version and reads the version recorded in each executable that an
+installed hook or MCP entry names, without running it:
+
+```text
+$ langspan doctor --root /work/app
+ok Coordinator version 0.4.0, process 4242.
+FIX Hooks (claude-code) in /work/app, MCP server (claude-code) in /work/app/.mcp.json: /opt/homebrew/opt/langspan/bin/langspan, version 0.5.0; the coordinator, version 0.4.0, is older than this binary; restart it: `launchctl kickstart -k gui/501/dev.langspan.coordinator` (do it between agents' turns: a restart ends the leases they hold, and each session is coordinated again when it next acts).
+```
+
+A version difference, or an executable that records no version (a build from
+before this check, or not LangSpan), needs attention and makes `doctor` exit 1.
+Without a login service the fix names `kill PID` and `langspan daemon`;
+`doctor` restarts nothing itself. A coordinator that does not answer the
+`version` request runs a build older than the one asking.
+
+Receipts are kept until [retention](configuration-and-limits.md#retention) removes them, at the
+earliest 7 days after they were recorded; a retry after that is a new
+request.
+
+A daemon restart advances the generation and invalidates outstanding grants.
+Sessions and intents remain visible as stale. Reattach with a new registration
+request ID, then explicitly refresh intent. Process liveness observations never
+renew an admission or replace this recovery step.
+
+A session counts as current for peers' briefings, the status line and the
+dashboard while it is in this generation, not ended, not known to have exited,
+and its newest edit, prompt or hook run is at most 30 minutes old. Any hook run
+that reaches the daemon counts, reads, failed tool calls, tool batches, stops
+and shell commands included; the daemon records one `session_seen` event per
+session at most every 30 seconds. `langspan status` prints each session's last
+hook run and process observation, and its `--json` form and `langspan_status`
+give them as `summary.last_hook_age_ms` and `state.session_liveness`. Process
+observations are made on Linux and macOS for Claude Code and Codex hosts; a
+probe that fails, or of another user's process, records `unknown`, which does
+not drop a session.
+
+CLI exit codes: `0` successful result, `1` error/unavailable coordination or a
+failed check, `2` conflict or refused push, `3` an inactive historical admission,
+`4` stale source or unread lines, `5` inconclusive check, `6` not ready to
+land, `7` the landing did not get the push turn (nothing was done), `8`
+pushed but not recorded, and `9` whether a push happened is not known. The stale
+result applies to versioned hook requests, including those sent through
+`request JSON`; the plain `admit` command does not compare versions. Hook
+processes exit `0` and convey denials through their JSON reply.
