@@ -13,7 +13,10 @@
 //! empty reply from a hook without `failClosed` as a failed hook and lets the
 //! action proceed under its own permission flow.
 
-use crate::hook::{self, Config, LifecycleKind, Operation, Phase, Reply};
+use crate::hook::{self, Operation};
+use crate::hosts::port::{Config, LifecycleKind, Phase, Reply};
+use crate::ids::{file_key, valid_host_id};
+use crate::input::MAX_EVENT_BYTES;
 use langspan_core::ToolResult;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -83,7 +86,7 @@ impl HostEvent {
 /// format of its IDs, so one outside the grammar is replaced by a digest
 /// rather than dropped; distinct IDs keep distinct digests.
 pub fn host_id(id: &str) -> Option<String> {
-    if hook::valid_host_id(id) {
+    if valid_host_id(id) {
         return Some(id.to_owned());
     }
     if id.is_empty() || id.len() > 4096 {
@@ -105,13 +108,10 @@ pub fn run(input: impl Read, config: &Config) -> Reply {
 pub fn run_until(input: impl Read, config: &Config, deadline: Instant) -> Reply {
     let started = Instant::now();
     let mut bytes = Vec::new();
-    if let Err(error) = input
-        .take(hook::MAX_EVENT_BYTES + 1)
-        .read_to_end(&mut bytes)
-    {
+    if let Err(error) = input.take(MAX_EVENT_BYTES + 1).read_to_end(&mut bytes) {
         return Reply::none("unknown", format!("could not read Cursor event: {error}"));
     }
-    if bytes.len() as u64 > hook::MAX_EVENT_BYTES {
+    if bytes.len() as u64 > MAX_EVENT_BYTES {
         return Reply::none("unsupported", "Cursor event exceeds 8 MiB");
     }
     let event: HostEvent = match serde_json::from_slice(&bytes) {
@@ -239,7 +239,7 @@ fn dispatch(event: HostEvent, config: &Config, deadline: Instant) -> Reply {
             let Some(file_path) = input.get("file_path").and_then(Value::as_str) else {
                 return Reply::none("unsupported", "Cursor tool input names no file");
             };
-            return match hook::file_key(&config.root, event.directory(), file_path) {
+            return match file_key(&config.root, event.directory(), file_path) {
                 Ok(key) => hook::outline_read(
                     SOURCE,
                     &host_session,
@@ -267,7 +267,7 @@ fn dispatch(event: HostEvent, config: &Config, deadline: Instant) -> Reply {
     let Some(file_path) = input.get("file_path").and_then(Value::as_str) else {
         return Reply::none("unsupported", "Cursor tool input names no file");
     };
-    let key = match hook::file_key(&config.root, event.directory(), file_path) {
+    let key = match file_key(&config.root, event.directory(), file_path) {
         Ok(key) => key,
         Err(error) => return Reply::none("unsupported", error),
     };
@@ -478,7 +478,7 @@ mod tests {
         let b = host_id("call_abc|fc_deg").unwrap();
         let long = host_id(&"x".repeat(300)).unwrap();
         for id in [&a, &b, &long] {
-            assert!(hook::valid_host_id(id), "{id}");
+            assert!(valid_host_id(id), "{id}");
             langspan_core::validate_request_id(&format!("{SOURCE}.{id}")).unwrap();
         }
         assert_ne!(a, b);
