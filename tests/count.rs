@@ -18,7 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use langspan::protocol::{PROTOCOL_VERSION, Request};
+use langspan::protocol::Request;
 use langspan_core::{ClockAnchor, Command, Event, Outcome, RefusalKind};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -305,16 +305,15 @@ fn refusals_are_counted_once_a_day_in_their_own_local_month() {
     assert!(!w.write("bob", "hold-2", "src/other.rs", "PreToolUse"));
     assert!(w.write("alice", "try-5", "src/other.rs", "PreToolUse"));
     // A held commit, as the commit guard reports it.
-    let request = Request {
-        version: PROTOCOL_VERSION,
-        request_id: "held-commit-1".into(),
-        command: Command::RecordRefusal {
+    let request = Request::new(
+        "held-commit-1",
+        Command::RecordRefusal {
             session_id: "claude-code.alice".into(),
             kind: RefusalKind::CommitHeld,
             paths: vec!["src/other.rs".into()],
             peer_session_id: Some("claude-code.bob".into()),
         },
-    };
+    );
     let outcome = langspan::client::call(&w.state(), &request)
         .unwrap()
         .outcome;

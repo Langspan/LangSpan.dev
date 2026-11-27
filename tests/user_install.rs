@@ -5,11 +5,7 @@
 #[allow(dead_code)] // Only `output_once_not_busy` and `in_home` are used here.
 mod support;
 
-use langspan::{
-    client,
-    hook::user_workspace_id,
-    protocol::{PROTOCOL_VERSION, Request},
-};
+use langspan::{client, hook::user_workspace_id, protocol::Request};
 use langspan_core::{Command, Outcome};
 use serde_json::{Value, json};
 use std::{
@@ -229,11 +225,7 @@ impl Drop for Home {
 }
 
 fn status() -> Request {
-    Request {
-        version: PROTOCOL_VERSION,
-        request_id: "read".into(),
-        command: Command::Status,
-    }
+    Request::new("read", Command::Status)
 }
 
 fn edit(cwd: &Path, file: &Path, tool_use_id: &str) -> Value {
@@ -1488,14 +1480,13 @@ fn the_daemon_notes_an_uninstalled_host_once_until_it_is_installed() {
     let events = |kind: &str| {
         let Outcome::Events { events } = client::call(
             &state_dir,
-            &Request {
-                version: PROTOCOL_VERSION,
-                request_id: "read".into(),
-                command: Command::Events {
+            &Request::new(
+                "read",
+                Command::Events {
                     after: 0,
                     limit: 1000,
                 },
-            },
+            ),
         )
         .unwrap()
         .outcome
@@ -1556,15 +1547,7 @@ fn the_daemon_notes_an_uninstalled_host_once_until_it_is_installed() {
             },
         ),
     ] {
-        client::call(
-            &state_dir,
-            &Request {
-                version: PROTOCOL_VERSION,
-                request_id: id.into(),
-                command,
-            },
-        )
-        .unwrap();
+        client::call(&state_dir, &Request::new(id, command)).unwrap();
     }
     let report = doctor();
     assert!(
@@ -1624,14 +1607,13 @@ impl Home {
     fn count(&self, kind: &str) -> usize {
         let Outcome::Events { events } = client::call(
             &self.state_dir(),
-            &Request {
-                version: PROTOCOL_VERSION,
-                request_id: "read".into(),
-                command: Command::Events {
+            &Request::new(
+                "read",
+                Command::Events {
                     after: 0,
                     limit: 1000,
                 },
-            },
+            ),
         )
         .unwrap()
         .outcome

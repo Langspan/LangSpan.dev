@@ -4,7 +4,7 @@
 use langspan::{
     claude_code::identities,
     client,
-    protocol::{PROTOCOL_VERSION, Request, Response},
+    protocol::{Request, Response},
 };
 use langspan_core::{Command, Event, LeaseStatus, Outcome};
 use serde_json::{Value, json};
@@ -173,11 +173,7 @@ impl Drop for Fixture {
 }
 
 fn request(id: &str, command: Command) -> Request {
-    Request {
-        version: PROTOCOL_VERSION,
-        request_id: id.into(),
-        command,
-    }
+    Request::new(id, command)
 }
 
 fn denial(run: &HookRun) -> Value {

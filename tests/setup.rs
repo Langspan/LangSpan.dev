@@ -588,7 +588,7 @@ fn mcp_with_a_tool_list_starts_a_coordinator_and_a_refused_one_does_not() {
 /// coordinator it starts checks hosts in `DIR`, not in `HOME`.
 #[test]
 fn setup_with_an_explicit_home_starts_a_coordinator_that_checks_that_home() {
-    use langspan::protocol::{PROTOCOL_VERSION, Request};
+    use langspan::protocol::Request;
     use langspan_core::{Command, Outcome};
     let base = Base::new();
     let other = base.0.join("other");
@@ -618,14 +618,7 @@ fn setup_with_an_explicit_home_starts_a_coordinator_that_checks_that_home() {
     fs::create_dir(home.join(".cursor")).unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let response = client::call(
-            &state_dir,
-            &Request {
-                version: PROTOCOL_VERSION,
-                request_id: "read".into(),
-                command: Command::Status,
-            },
-        );
+        let response = client::call(&state_dir, &Request::new("read", Command::Status));
         if let Ok(response) = response
             && let Outcome::Status { state, .. } = response.outcome
             && state.uninstalled_hosts.contains_key("cursor")

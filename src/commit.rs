@@ -1499,14 +1499,13 @@ pub(crate) fn live_sessions(
     config: &Config,
     deadline: Instant,
 ) -> Result<BTreeSet<String>, String> {
-    let request = crate::protocol::Request {
-        version: crate::protocol::PROTOCOL_VERSION,
-        request_id: "read".into(),
-        command: Command::Recap {
+    let request = crate::protocol::Request::new(
+        "read",
+        Command::Recap {
             workspace_id: config.workspace_id.clone(),
             tag: None,
         },
-    };
+    );
     let response = crate::client::call_until(&config.state_dir, &request, deadline)
         .map_err(|e| format!("coordinator: {e}"))?;
     match response.outcome {
@@ -1632,10 +1631,9 @@ fn record_held(
         .values()
         .flat_map(|paths| paths.keys().cloned())
         .collect();
-    let request = crate::protocol::Request {
-        version: crate::protocol::PROTOCOL_VERSION,
-        request_id: crate::hook::wire_id("refusal", &[me, fingerprint]),
-        command: Command::RecordRefusal {
+    let request = crate::protocol::Request::new(
+        crate::hook::wire_id("refusal", &[me, fingerprint]),
+        Command::RecordRefusal {
             session_id: me.into(),
             kind: langspan_core::RefusalKind::CommitHeld,
             paths: paths
@@ -1644,7 +1642,7 @@ fn record_held(
                 .collect(),
             peer_session_id: found.keys().next().cloned(),
         },
-    };
+    );
     let response = crate::client::call_until(&config.state_dir, &request, deadline)
         .map_err(|e| format!("coordinator: {e}"))?;
     match response.outcome {

@@ -1,7 +1,7 @@
 //! Shared native-hook lifecycle. Vendor adapters only parse host envelopes.
 use crate::{
     client,
-    protocol::{PROTOCOL_VERSION, Request, Response},
+    protocol::{Request, Response},
     sha256,
 };
 use langspan_core::{Command, Conflict, Outcome, ToolResult};
@@ -3676,14 +3676,13 @@ fn adopted_workspace_id(config: &Config, root: &Path, deadline: Instant) -> Opti
     let root_text = root.to_string_lossy().into_owned();
     let response = client::call_until(
         &config.state_dir,
-        &Request {
-            version: PROTOCOL_VERSION,
-            request_id: wire_id("workspace", &[&derived, &root_text]),
-            command: Command::WorkspaceRegister {
+        &Request::new(
+            wire_id("workspace", &[&derived, &root_text]),
+            Command::WorkspaceRegister {
                 workspace_id: derived,
                 root: root_text,
             },
-        },
+        ),
         deadline,
     )
     .ok()?;
@@ -3841,11 +3840,7 @@ enum WaitEnd {
 
 impl Session<'_> {
     fn call(&self, request_id: String, command: Command) -> Result<Response, Failure> {
-        let request = Request {
-            version: PROTOCOL_VERSION,
-            request_id,
-            command,
-        };
+        let request = Request::new(request_id, command);
         let response = client::call_until(&self.config.state_dir, &request, self.deadline)
             .map_err(|error| {
                 let text = error.to_string();

@@ -13,7 +13,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use langspan::protocol::{MAX_FRAME_BYTES, PROTOCOL_VERSION, Request};
+use langspan::protocol::{MAX_FRAME_BYTES, Request};
 use langspan_core::{Command, Outcome};
 use rmcp::ServiceExt;
 use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock};
@@ -180,11 +180,7 @@ impl Drop for World {
 }
 
 fn call(state: &Path, id: &str, command: Command) -> Outcome {
-    let request = Request {
-        version: PROTOCOL_VERSION,
-        request_id: id.into(),
-        command,
-    };
+    let request = Request::new(id, command);
     langspan::client::call(state, &request).unwrap().outcome
 }
 

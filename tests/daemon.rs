@@ -1,9 +1,6 @@
 #![cfg(unix)]
 
-use langspan::{
-    client,
-    protocol::{PROTOCOL_VERSION, Request},
-};
+use langspan::{client, protocol::Request};
 use langspan_core::{Command, Outcome};
 use std::{
     fs,
@@ -48,16 +45,7 @@ impl Fixture {
         );
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            if client::call(
-                &self.state_dir(),
-                &Request {
-                    version: PROTOCOL_VERSION,
-                    request_id: "ready".into(),
-                    command: Command::Status,
-                },
-            )
-            .is_ok()
-            {
+            if client::call(&self.state_dir(), &Request::new("ready", Command::Status)).is_ok() {
                 break;
             }
             if let Some(status) = self.child.as_mut().unwrap().try_wait().unwrap() {
@@ -72,15 +60,7 @@ impl Fixture {
         }
     }
     fn call(&self, id: &str, command: Command) -> langspan::protocol::Response {
-        client::call(
-            &self.state_dir(),
-            &Request {
-                version: PROTOCOL_VERSION,
-                request_id: id.into(),
-                command,
-            },
-        )
-        .unwrap()
+        client::call(&self.state_dir(), &Request::new(id, command)).unwrap()
     }
     fn stop(&mut self) {
         if let Some(mut child) = self.child.take() {
@@ -278,14 +258,7 @@ fn a_client_that_connects_as_soon_as_the_socket_appears_is_answered() {
                 }
             }
         };
-        let answer = client::call(
-            &f.state_dir(),
-            &Request {
-                version: PROTOCOL_VERSION,
-                request_id: "first".into(),
-                command: Command::Status,
-            },
-        );
+        let answer = client::call(&f.state_dir(), &Request::new("first", Command::Status));
         f.stop();
         assert_eq!(mode & 0o077, 0, "socket first seen with mode {mode:o}");
         assert!(answer.is_ok(), "{:?}", answer.err());
@@ -383,10 +356,9 @@ fn parallel_clients_get_one_grant_for_the_same_file() {
             std::thread::spawn(move || {
                 client::call(
                     &directory,
-                    &Request {
-                        version: PROTOCOL_VERSION,
-                        request_id: format!("parallel-{n}"),
-                        command: Command::Admit {
+                    &Request::new(
+                        format!("parallel-{n}"),
+                        Command::Admit {
                             session_id: if n % 2 == 0 {
                                 "alice".into()
                             } else {
@@ -395,7 +367,7 @@ fn parallel_clients_get_one_grant_for_the_same_file() {
                             paths: vec!["shared.rs".into()],
                             ttl_ms: 60_000,
                         },
-                    },
+                    ),
                 )
                 .unwrap()
                 .outcome
