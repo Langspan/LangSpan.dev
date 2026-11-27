@@ -1,0 +1,51 @@
+## hosts-missing-codex
+{
+  "events": [
+    {
+      "type": "host_not_installed",
+      "host": {
+        "host": "codex",
+        "at_ms": 1000,
+        "generation": 1
+      }
+    }
+  ],
+  "outcome": {
+    "type": "hosts_observed",
+    "not_installed": [
+      "codex"
+    ]
+  }
+}
+## hosts-unchanged
+{
+  "events": [],
+  "outcome": {
+    "type": "hosts_observed",
+    "not_installed": [
+      "codex"
+    ]
+  }
+}
+## hosts-all-installed
+{
+  "events": [
+    {
+      "type": "host_cleared",
+      "host": "codex"
+    }
+  ],
+  "outcome": {
+    "type": "hosts_observed",
+    "not_installed": []
+  }
+}
+## hosts-unknown-host
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "invalid_hosts",
+    "message": "a host name is 1 to 32 lower-case letters and hyphens"
+  }
+}

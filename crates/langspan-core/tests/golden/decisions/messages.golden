@@ -1,0 +1,596 @@
+## register-app
+{
+  "events": [
+    {
+      "type": "workspace_registered",
+      "workspace": {
+        "workspace_id": "app",
+        "root": "/work/app"
+      }
+    }
+  ],
+  "outcome": {
+    "type": "workspace",
+    "workspace": {
+      "workspace_id": "app",
+      "root": "/work/app"
+    }
+  }
+}
+## session-alice
+{
+  "events": [
+    {
+      "type": "session_registered",
+      "session": {
+        "session_id": "claude-code.alice",
+        "workspace_id": "app",
+        "generation": 1
+      }
+    }
+  ],
+  "outcome": {
+    "type": "session",
+    "session": {
+      "session_id": "claude-code.alice",
+      "workspace_id": "app",
+      "generation": 1
+    }
+  }
+}
+## session-bob
+{
+  "events": [
+    {
+      "type": "session_registered",
+      "session": {
+        "session_id": "codex.bob",
+        "workspace_id": "app",
+        "generation": 1
+      }
+    }
+  ],
+  "outcome": {
+    "type": "session",
+    "session": {
+      "session_id": "codex.bob",
+      "workspace_id": "app",
+      "generation": 1
+    }
+  }
+}
+## send-bob-to-alice
+{
+  "events": [
+    {
+      "type": "message_sent",
+      "message": {
+        "message_id": "send-bob-to-alice",
+        "workspace_id": "app",
+        "from": "codex.bob",
+        "to": {
+          "kind": "session",
+          "session_id": "claude-code.alice"
+        },
+        "text": "The session handler now returns a Result",
+        "paths": [
+          "src/api.rs"
+        ]
+      },
+      "at_ms": 2000,
+      "generation": 1
+    }
+  ],
+  "outcome": {
+    "type": "message_sent",
+    "message": {
+      "message_id": "send-bob-to-alice",
+      "workspace_id": "app",
+      "from": "codex.bob",
+      "to": {
+        "kind": "session",
+        "session_id": "claude-code.alice"
+      },
+      "text": "The session handler now returns a Result",
+      "paths": [
+        "src/api.rs"
+      ]
+    }
+  }
+}
+## send-to-unknown-session
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "recipient_not_found",
+    "message": "The recipient is not a session of this workspace; `langspan recap WORKSPACE` lists them"
+  }
+}
+## send-empty-text
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "invalid_message",
+    "message": "A message is one line of 1 to 400 bytes about at most 8 files"
+  }
+}
+## send-unknown-workspace
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "workspace_not_found",
+    "message": "Workspace is not registered; register it first"
+  }
+}
+## ack-alice
+{
+  "events": [
+    {
+      "type": "message_acknowledged",
+      "workspace_id": "app",
+      "message_id": "send-bob-to-alice",
+      "session_id": "claude-code.alice",
+      "via": "ack",
+      "at_ms": 3000,
+      "generation": 1
+    }
+  ],
+  "outcome": {
+    "type": "message_acknowledged",
+    "message_id": "send-bob-to-alice",
+    "acknowledged": true
+  }
+}
+## ack-unknown-message
+{
+  "events": [],
+  "outcome": {
+    "type": "message_acknowledged",
+    "message_id": "no-such-message",
+    "acknowledged": false
+  }
+}
+## ack-not-the-recipient
+{
+  "events": [],
+  "outcome": {
+    "type": "message_acknowledged",
+    "message_id": "send-bob-to-alice",
+    "acknowledged": false
+  }
+}
+## handoff-alice
+{
+  "events": [
+    {
+      "type": "message_sent",
+      "message": {
+        "message_id": "handoff-alice",
+        "workspace_id": "app",
+        "from": "claude-code.alice",
+        "to": {
+          "kind": "next_session"
+        },
+        "text": "Finish the login form tests",
+        "paths": [
+          "tests/login.rs"
+        ]
+      },
+      "at_ms": 4000,
+      "generation": 1
+    }
+  ],
+  "outcome": {
+    "type": "message_sent",
+    "message": {
+      "message_id": "handoff-alice",
+      "workspace_id": "app",
+      "from": "claude-code.alice",
+      "to": {
+        "kind": "next_session"
+      },
+      "text": "Finish the login form tests",
+      "paths": [
+        "tests/login.rs"
+      ]
+    }
+  }
+}
+## handoff-unknown-session
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "session_not_found",
+    "message": "Session is not registered; attach it to a workspace first"
+  }
+}
+## send-to-retract
+{
+  "events": [
+    {
+      "type": "message_sent",
+      "message": {
+        "message_id": "send-to-retract",
+        "workspace_id": "app",
+        "from": "codex.bob",
+        "to": {
+          "kind": "session",
+          "session_id": "claude-code.alice"
+        },
+        "text": "Ignore the earlier note",
+        "paths": []
+      },
+      "at_ms": 4200,
+      "generation": 1
+    }
+  ],
+  "outcome": {
+    "type": "message_sent",
+    "message": {
+      "message_id": "send-to-retract",
+      "workspace_id": "app",
+      "from": "codex.bob",
+      "to": {
+        "kind": "session",
+        "session_id": "claude-code.alice"
+      },
+      "text": "Ignore the earlier note",
+      "paths": []
+    }
+  }
+}
+## retract-bob
+{
+  "events": [
+    {
+      "type": "message_retracted",
+      "workspace_id": "app",
+      "message_id": "send-to-retract",
+      "by": "codex.bob"
+    }
+  ],
+  "outcome": {
+    "type": "message_retracted",
+    "message_id": "send-to-retract",
+    "withdrawn_unread": [
+      "claude-code.alice"
+    ],
+    "told_to_disregard": []
+  }
+}
+## retract-not-the-sender
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "not_sender",
+    "message": "Only the session that sent a message, or the owner (without a session), may withdraw it"
+  }
+}
+## retract-unknown-message
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "unknown_message",
+    "message": "No such message in this workspace: unknown, or dropped as the oldest of more than 64; `langspan recap WORKSPACE` lists those held"
+  }
+}
+## show-message
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "storage_operation",
+    "message": "Event history, status pages, change projections, sent messages and index queries are answered by the daemon's stores"
+  }
+}
+## message-status
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "storage_operation",
+    "message": "Event history, status pages, change projections, sent messages and index queries are answered by the daemon's stores"
+  }
+}
+## remember-bob
+{
+  "events": [
+    {
+      "type": "remembered",
+      "note": {
+        "note_id": "remember-bob",
+        "workspace_id": "app",
+        "author": "codex.bob",
+        "text": "Sessions refresh before they expire",
+        "paths": [
+          "src/api.rs"
+        ]
+      },
+      "at": {
+        "at_ms": 6000,
+        "generation": 1
+      }
+    }
+  ],
+  "outcome": {
+    "type": "remembered",
+    "note": {
+      "note_id": "remember-bob",
+      "workspace_id": "app",
+      "author": "codex.bob",
+      "text": "Sessions refresh before they expire",
+      "paths": [
+        "src/api.rs"
+      ]
+    }
+  }
+}
+## remember-unknown-workspace
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "workspace_not_found",
+    "message": "Workspace is not registered; register it first"
+  }
+}
+## remember-prepared-anchored
+{
+  "events": [
+    {
+      "type": "remembered",
+      "note": {
+        "note_id": "remember-prepared-anchored",
+        "workspace_id": "app",
+        "author": "claude-code.alice",
+        "text": "refresh must stay idempotent",
+        "paths": [
+          "src/api.rs"
+        ],
+        "anchor": {
+          "name": "refresh"
+        },
+        "anchor_state": "unknown",
+        "tags": [
+          "auth"
+        ]
+      },
+      "at": {
+        "at_ms": 6200,
+        "generation": 1
+      }
+    }
+  ],
+  "outcome": {
+    "type": "remembered",
+    "note": {
+      "note_id": "remember-prepared-anchored",
+      "workspace_id": "app",
+      "author": "claude-code.alice",
+      "text": "refresh must stay idempotent",
+      "paths": [
+        "src/api.rs"
+      ],
+      "anchor": {
+        "name": "refresh"
+      },
+      "anchor_state": "unknown",
+      "tags": [
+        "auth"
+      ]
+    }
+  }
+}
+## remember-prepared-unknown-symbol
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "symbol_not_found",
+    "message": "No indexed definition of \"logout\" in [\"src/api.rs\"]; check the name, or wait for the index to read the file"
+  }
+}
+## note-anchors-without-index
+{
+  "events": [],
+  "outcome": {
+    "type": "note_anchors_observed",
+    "changed": 0
+  }
+}
+## note-anchors-prepared-changed
+{
+  "events": [],
+  "outcome": {
+    "type": "note_anchors_observed",
+    "changed": 0
+  }
+}
+## note-anchors-prepared-unknown-workspace
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "workspace_not_found",
+    "message": "Workspace is not registered; register it first"
+  }
+}
+## recall-refresh
+{
+  "events": [],
+  "outcome": {
+    "type": "recall",
+    "recall": {
+      "workspace_id": "app",
+      "query": "refresh",
+      "notes": [
+        {
+          "note_id": "remember-prepared-anchored",
+          "author": "claude-code.alice",
+          "text": "refresh must stay idempotent",
+          "paths": [
+            "src/api.rs"
+          ],
+          "anchor": {
+            "name": "refresh"
+          },
+          "anchor_state": "unknown",
+          "tags": [
+            "auth"
+          ]
+        },
+        {
+          "note_id": "remember-bob",
+          "author": "codex.bob",
+          "text": "Sessions refresh before they expire",
+          "paths": [
+            "src/api.rs"
+          ]
+        }
+      ],
+      "truncated": false
+    }
+  }
+}
+## recall-unknown-workspace
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "workspace_not_found",
+    "message": "Workspace is not registered; register it first"
+  }
+}
+## recap-app
+{
+  "events": [],
+  "outcome": {
+    "type": "recap",
+    "recap": {
+      "workspace_id": "app",
+      "root": "/work/app",
+      "branch_ref": null,
+      "sessions": [
+        {
+          "session_id": "claude-code.alice",
+          "current": true,
+          "ended": false,
+          "liveness": null,
+          "summary": null,
+          "intent": null,
+          "editing": [],
+          "recent": []
+        },
+        {
+          "session_id": "codex.bob",
+          "current": true,
+          "ended": false,
+          "liveness": null,
+          "summary": null,
+          "intent": null,
+          "editing": [],
+          "recent": []
+        }
+      ],
+      "omitted_sessions": 0,
+      "interface_changes": [],
+      "checks": [],
+      "landings": [],
+      "notes": [
+        {
+          "note_id": "remember-prepared-anchored",
+          "workspace_id": "app",
+          "author": "claude-code.alice",
+          "text": "refresh must stay idempotent",
+          "paths": [
+            "src/api.rs"
+          ],
+          "anchor": {
+            "name": "refresh"
+          },
+          "anchor_state": "unknown",
+          "tags": [
+            "auth"
+          ]
+        },
+        {
+          "note_id": "remember-bob",
+          "workspace_id": "app",
+          "author": "codex.bob",
+          "text": "Sessions refresh before they expire",
+          "paths": [
+            "src/api.rs"
+          ]
+        }
+      ],
+      "messages": [
+        {
+          "message_id": "handoff-alice",
+          "workspace_id": "app",
+          "from": "claude-code.alice",
+          "to": {
+            "kind": "next_session"
+          },
+          "text": "Finish the login form tests",
+          "paths": [
+            "tests/login.rs"
+          ]
+        },
+        {
+          "message_id": "send-to-retract",
+          "workspace_id": "app",
+          "from": "codex.bob",
+          "to": {
+            "kind": "session",
+            "session_id": "claude-code.alice"
+          },
+          "text": "Ignore the earlier note",
+          "paths": [],
+          "retracted": true
+        }
+      ],
+      "teammates": [],
+      "publishing": null,
+      "scan_failure": null
+    }
+  }
+}
+## recap-unknown-workspace
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "workspace_not_found",
+    "message": "Workspace is not registered; register it first"
+  }
+}
+## forget-bob-note
+{
+  "events": [
+    {
+      "type": "forgotten",
+      "workspace_id": "app",
+      "note_id": "remember-bob"
+    }
+  ],
+  "outcome": {
+    "type": "forgotten",
+    "note_id": "remember-bob",
+    "removed": true
+  }
+}
+## forget-unknown-note
+{
+  "events": [],
+  "outcome": {
+    "type": "forgotten",
+    "note_id": "no-such-note",
+    "removed": false
+  }
+}

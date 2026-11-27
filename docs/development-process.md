@@ -22,6 +22,11 @@ priority and size:
 If a decision is costly to reverse, record it in an ADR in
 [`docs/adr/`](adr/0001-local-coordination.md) before or with the change.
 
+A new wire field adds a named capability, one line in `CAPABILITIES` in
+`src/protocol.rs` with vectors in `fixtures/capabilities/<name>/`, never a
+protocol version. The version changes only for a breaking change
+([ADR 0037](adr/0037-protocol-capabilities.md)).
+
 ## Work in progress
 
 Limit open work so that each pull request merges quickly:
@@ -69,6 +74,12 @@ by priority:
   titled "Review follow-ups from #N" instead of starting more rounds.
 - Work follow-up issues in the debt slot.
 
+A pull request that changes a committed state snapshot (the `state.json`
+files the replay tests compare, ADR 0015) says in its body which snapshot
+changed and why. Rewrite one with `LANGSPAN_UPDATE_GOLDEN=1` on the test
+that compares it, then read `git diff` before committing: an unexplained
+refresh hides the regression the snapshot exists to catch.
+
 ## Integration
 
 Pull requests merge through GitHub's merge queue. The queue tests each pull
@@ -98,7 +109,9 @@ the event (`LANGSPAN_CHECK_LANE`):
   profile selects: every unit test, every test of `langspan-core` and
   `langspan-graph`, and the integration tests of the protocol, the store,
   Git output, MCP framing, the workflows and the docs. None of those
-  starts a coordinator. The `macOS` check passes at once and says that the
+  starts a coordinator, except the CLI's golden transcripts
+  (`tests/cli_transcript.rs`, `tests/cli_golden.rs`), so that output that
+  differs on Linux shows on the pull request. The `macOS` check passes at once and says that the
   full run happens in the merge queue. Target: a result **under 3
   minutes** from push. The job stops at 10 minutes.
 - **The full lane: a merge-queue commit, a push to `main`, the nightly run
@@ -113,9 +126,10 @@ the event (`LANGSPAN_CHECK_LANE`):
 In the full lane, the benchmark harness's dry runs (the `dry_run_*` tests
 in `tests/benchmark_harness.rs`) run only when the change touches one of
 the following paths: `benchmarks/`, `tests/benchmark_harness.rs`, the
-daemon, hook and briefing code they drive (`src/daemon.rs`, `src/hook.rs`,
-`src/hook/`, `src/claude_code.rs`, `src/recent.rs`,
-`crates/langspan-core/src/lib.rs`), or what builds and runs the suite
+daemon, hook and briefing code they drive (`src/daemon.rs`, `src/daemon/`,
+`src/hook.rs`, `src/hook/`, `src/claude_code.rs`, `src/recent.rs` and all
+of `crates/langspan-core/src/`, so code moved into a new module there
+still counts), or what builds and runs the suite
 (`Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `.config/nextest.toml`,
 `check.yml`, `scripts/check.sh`, `scripts/test-foreign-home.sh`,
 `scripts/ci-changes.sh`). The dry runs took about 11 minutes of an
@@ -155,6 +169,45 @@ A test seen flaky, in that issue, a summary or anywhere else, gets an issue
 and a deterministic fix the same day. Never rerun the job and move on, and
 never weaken an assertion to make it pass.
 
+The core's golden decision test
+(`crates/langspan-core/tests/decision_golden.rs`) records the events and
+outcome `decide` returns for every command. A new command doesn't compile
+there until it has a case, and fails the test until it has a step. A changed
+decision fails with a diff of each step that changed. To accept an intended
+change, run `cargo nextest run -p langspan-core --test decision_golden
+--run-ignored only -E 'test(bless)'` and review the golden diff in the pull
+request.
+
+### Ratchets
+
+`tests/ratchets.rs` runs `python3 -I -B scripts/ratchets.py --check .` in
+the full lane. It measures production code only: `#[cfg(test)]` items and
+files outside `src/` and `crates/*/src/` don't count. It checks four
+numbers, each against `scripts/ratchets/baseline/<source path>.tsv`:
+
+- **File size.** A file may not grow past its `lines` row. A file without a
+  row may have up to 1,500 lines.
+- **Function length.** A function may not grow past its `fn` row. A
+  function without a row may have up to 150 lines.
+- **Public surface.** A crate may not have more declared `pub` items than
+  the sum of its files' `pub` rows. `pub use` and `pub(crate)` don't count,
+  so moving an item between files of a crate passes.
+- **Module dependencies** in the `langspan` crate. An edge from one
+  top-level module to another may not join a cycle, or point outward,
+  unless the module's root file lists it as an `edge` row. A module states
+  its layer with a `// layer: utility|infrastructure|application|interface`
+  comment in that file; edges between modules without one are checked for
+  cycles only.
+
+A failure says what grew, by how much, and what to do: split the code, or
+justify the growth in the pull request and run
+`python3 -I -B scripts/ratchets.py --record FILE`. A number that improves
+passes, and the check names the file; run
+`python3 -I -B scripts/ratchets.py --tighten FILE` for that file only, in
+the pull request that moved the code. `--tighten` never raises a number,
+and it deletes a baseline that has nothing left to record. The checker's
+own tests are in `scripts/ratchets/test_*.py`.
+
 ## Releases
 
 release-please keeps a release pull request open on `main`, built from the
@@ -164,6 +217,14 @@ request as soon as its checks pass; merging it tags and publishes the
 release. While its checks run, hold other merges so they don't restart the
 checks. The project's release app opens the release pull request, so its
 checks run like any other pull request's.
+
+After a release, add its golden stores (ADR 0015): build `langspan` from
+the new tag with `--locked`, run `bash scripts/golden-stores.sh VERSION BINARY`,
+write the stores' state snapshots with `LANGSPAN_UPDATE_GOLDEN=1` on
+`tests/golden_stores.rs`, and say in the pull request how the stores were
+made. `every_release_has_a_golden_store_directory` fails for a changelog
+version with no `tests/fixtures/store-VERSION/`, whether or not the release
+changed the event set or the schema.
 
 Before 1.0, a breaking change (`feat!:`) raises the minor version.
 [CONTRIBUTING.md](../CONTRIBUTING.md) lists how each title type affects the

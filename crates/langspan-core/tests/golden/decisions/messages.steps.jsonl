@@ -1,0 +1,31 @@
+{"name":"register-app","now_ms":1000,"command":{"op":"workspace_register","workspace_id":"app","root":"/work/app"}}
+{"name":"session-alice","now_ms":1100,"command":{"op":"session_register","session_id":"claude-code.alice","workspace_id":"app"}}
+{"name":"session-bob","now_ms":1200,"command":{"op":"session_register","session_id":"codex.bob","workspace_id":"app"}}
+{"name":"send-bob-to-alice","now_ms":2000,"command":{"op":"send_message","workspace_id":"app","from":"codex.bob","to":"claude-code.alice","text":"The session handler now returns a Result","paths":["src/api.rs"]}}
+{"name":"send-to-unknown-session","now_ms":2100,"command":{"op":"send_message","workspace_id":"app","from":"codex.bob","to":"codex.nobody","text":"Anyone there?","paths":[]}}
+{"name":"send-empty-text","now_ms":2200,"command":{"op":"send_message","workspace_id":"app","from":"codex.bob","to":"claude-code.alice","text":"","paths":[]}}
+{"name":"send-unknown-workspace","now_ms":2300,"command":{"op":"send_message","workspace_id":"nowhere","from":"codex.bob","to":"claude-code.alice","text":"Hello","paths":[]}}
+{"name":"ack-alice","now_ms":3000,"command":{"op":"ack_message","session_id":"claude-code.alice","message_id":"send-bob-to-alice"}}
+{"name":"ack-unknown-message","now_ms":3100,"command":{"op":"ack_message","session_id":"claude-code.alice","message_id":"no-such-message"}}
+{"name":"ack-not-the-recipient","now_ms":3200,"command":{"op":"ack_message","session_id":"codex.bob","message_id":"send-bob-to-alice"}}
+{"name":"handoff-alice","now_ms":4000,"command":{"op":"handoff","session_id":"claude-code.alice","text":"Finish the login form tests","paths":["tests/login.rs"]}}
+{"name":"handoff-unknown-session","now_ms":4100,"command":{"op":"handoff","session_id":"codex.nobody","text":"Anything","paths":[]}}
+{"name":"send-to-retract","now_ms":4200,"command":{"op":"send_message","workspace_id":"app","from":"codex.bob","to":"claude-code.alice","text":"Ignore the earlier note","paths":[]}}
+{"name":"retract-bob","now_ms":4300,"command":{"op":"retract_message","workspace_id":"app","from":"codex.bob","message_id":"send-to-retract"}}
+{"name":"retract-not-the-sender","now_ms":4400,"command":{"op":"retract_message","workspace_id":"app","from":"claude-code.alice","message_id":"send-bob-to-alice"}}
+{"name":"retract-unknown-message","now_ms":4500,"command":{"op":"retract_message","workspace_id":"app","from":"codex.bob","message_id":"no-such-message"}}
+{"name":"show-message","now_ms":5000,"command":{"op":"show_message","workspace_id":"app","message_id":"send-bob-to-alice"}}
+{"name":"message-status","now_ms":5100,"command":{"op":"message_status","workspace_id":"app"}}
+{"name":"remember-bob","now_ms":6000,"command":{"op":"remember","workspace_id":"app","author":"codex.bob","text":"Sessions refresh before they expire","paths":["src/api.rs"]}}
+{"name":"remember-unknown-workspace","now_ms":6100,"command":{"op":"remember","workspace_id":"nowhere","text":"Anything","paths":[]}}
+{"name":"remember-prepared-anchored","now_ms":6200,"prepared":{"op":"remember_prepared","workspace_id":"app","author":"claude-code.alice","text":"refresh must stay idempotent","paths":["src/api.rs"],"symbol":"refresh","tags":["auth"],"index":{"definitions":[{"path":"src/api.rs","name":"refresh","kind":"function","line":10,"end_line":20,"signature":"fn refresh(session: &Session) -> Result<()>","exported":true,"digest":"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"}],"fresh":["src/api.rs"],"complete":true}}}
+{"name":"remember-prepared-unknown-symbol","now_ms":6300,"prepared":{"op":"remember_prepared","workspace_id":"app","text":"logout clears the cookie","paths":["src/api.rs"],"symbol":"logout","index":{"fresh":["src/api.rs"],"complete":true}}}
+{"name":"note-anchors-without-index","now_ms":7000,"command":{"op":"observe_note_anchors","workspace_id":"app"}}
+{"name":"note-anchors-prepared-changed","now_ms":7100,"prepared":{"op":"note_anchors_prepared","workspace_id":"app","index":{"definitions":[{"path":"src/api.rs","name":"refresh","kind":"function","line":12,"end_line":30,"signature":"fn refresh(session: &mut Session) -> Result<()>","exported":true,"digest":"60303ae22b998861bce3b28f33eec1be758a213c86c93c076dbe9f558c11c752"}],"fresh":["src/api.rs"],"complete":true}}}
+{"name":"note-anchors-prepared-unknown-workspace","now_ms":7200,"prepared":{"op":"note_anchors_prepared","workspace_id":"nowhere","index":{"complete":true}}}
+{"name":"recall-refresh","now_ms":8000,"command":{"op":"recall","workspace_id":"app","query":"refresh","limit":5}}
+{"name":"recall-unknown-workspace","now_ms":8100,"command":{"op":"recall","workspace_id":"nowhere","query":"refresh","limit":5}}
+{"name":"recap-app","now_ms":8200,"command":{"op":"recap","workspace_id":"app"}}
+{"name":"recap-unknown-workspace","now_ms":8300,"command":{"op":"recap","workspace_id":"nowhere"}}
+{"name":"forget-bob-note","now_ms":9000,"command":{"op":"forget","workspace_id":"app","note_id":"remember-bob"}}
+{"name":"forget-unknown-note","now_ms":9100,"command":{"op":"forget","workspace_id":"app","note_id":"no-such-note"}}

@@ -1,0 +1,907 @@
+## register-app
+{
+  "events": [
+    {
+      "type": "workspace_registered",
+      "workspace": {
+        "workspace_id": "app",
+        "root": "/work/app"
+      }
+    }
+  ],
+  "outcome": {
+    "type": "workspace",
+    "workspace": {
+      "workspace_id": "app",
+      "root": "/work/app"
+    }
+  }
+}
+## session-alice
+{
+  "events": [
+    {
+      "type": "session_registered",
+      "session": {
+        "session_id": "claude-code.alice",
+        "workspace_id": "app",
+        "generation": 1
+      }
+    }
+  ],
+  "outcome": {
+    "type": "session",
+    "session": {
+      "session_id": "claude-code.alice",
+      "workspace_id": "app",
+      "generation": 1
+    }
+  }
+}
+## session-bob
+{
+  "events": [
+    {
+      "type": "session_registered",
+      "session": {
+        "session_id": "codex.bob",
+        "workspace_id": "app",
+        "generation": 1
+      }
+    }
+  ],
+  "outcome": {
+    "type": "session",
+    "session": {
+      "session_id": "codex.bob",
+      "workspace_id": "app",
+      "generation": 1
+    }
+  }
+}
+## intent-alice
+{
+  "events": [
+    {
+      "type": "intent_set",
+      "intent": {
+        "session_id": "claude-code.alice",
+        "workspace_id": "app",
+        "paths": [
+          "src/api.rs"
+        ],
+        "summary": "Rework the session handler",
+        "generation": 1
+      }
+    }
+  ],
+  "outcome": {
+    "type": "intent",
+    "intent": {
+      "session_id": "claude-code.alice",
+      "workspace_id": "app",
+      "paths": [
+        "src/api.rs"
+      ],
+      "summary": "Rework the session handler",
+      "generation": 1
+    }
+  }
+}
+## intent-unknown-session
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "session_not_found",
+    "message": "Session is not registered; attach it to a workspace first"
+  }
+}
+## intent-bob-overlapping
+{
+  "events": [
+    {
+      "type": "intent_set",
+      "intent": {
+        "session_id": "codex.bob",
+        "workspace_id": "app",
+        "paths": [
+          "src/api.rs",
+          "src/ui.rs"
+        ],
+        "summary": "Rename the login form",
+        "generation": 1
+      }
+    }
+  ],
+  "outcome": {
+    "type": "intent",
+    "intent": {
+      "session_id": "codex.bob",
+      "workspace_id": "app",
+      "paths": [
+        "src/api.rs",
+        "src/ui.rs"
+      ],
+      "summary": "Rename the login form",
+      "generation": 1
+    }
+  }
+}
+## admit-alice
+{
+  "events": [
+    {
+      "type": "lease_granted",
+      "lease": {
+        "lease_id": "admit-alice",
+        "session_id": "claude-code.alice",
+        "workspace_id": "app",
+        "paths": [
+          "src/api.rs"
+        ],
+        "generation": 1,
+        "expires_at_ms": 63000,
+        "status": "active"
+      }
+    }
+  ],
+  "outcome": {
+    "type": "admitted",
+    "lease": {
+      "lease_id": "admit-alice",
+      "session_id": "claude-code.alice",
+      "workspace_id": "app",
+      "paths": [
+        "src/api.rs"
+      ],
+      "generation": 1,
+      "expires_at_ms": 63000,
+      "status": "active"
+    }
+  }
+}
+## admit-bob-conflict
+{
+  "events": [],
+  "outcome": {
+    "type": "conflict",
+    "holders": [
+      {
+        "lease_id": "admit-alice",
+        "session_id": "claude-code.alice",
+        "paths": [
+          "src/api.rs"
+        ]
+      }
+    ]
+  }
+}
+## admit-bob-other
+{
+  "events": [
+    {
+      "type": "lease_granted",
+      "lease": {
+        "lease_id": "admit-bob-other",
+        "session_id": "codex.bob",
+        "workspace_id": "app",
+        "paths": [
+          "src/ui.rs"
+        ],
+        "generation": 1,
+        "expires_at_ms": 63200,
+        "status": "active"
+      }
+    }
+  ],
+  "outcome": {
+    "type": "admitted",
+    "lease": {
+      "lease_id": "admit-bob-other",
+      "session_id": "codex.bob",
+      "workspace_id": "app",
+      "paths": [
+        "src/ui.rs"
+      ],
+      "generation": 1,
+      "expires_at_ms": 63200,
+      "status": "active"
+    }
+  }
+}
+## admit-escaping-path
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "invalid_path",
+    "message": "Each file key must be a relative path of at most 512 bytes without empty, dot or parent components, backslashes or NUL"
+  }
+}
+## admit-unknown-session
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "session_not_found",
+    "message": "Session is not registered; attach it to a workspace first"
+  }
+}
+## admit-tool-bob
+{
+  "events": [
+    {
+      "type": "lease_granted",
+      "lease": {
+        "lease_id": "admit-tool-bob",
+        "session_id": "codex.bob",
+        "workspace_id": "app",
+        "paths": [
+          "src/lib.rs"
+        ],
+        "generation": 1,
+        "expires_at_ms": 63500,
+        "status": "active",
+        "operation": {
+          "operation_id": "operation-bob-1",
+          "source": "codex",
+          "tool": "Edit",
+          "input_digest": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+        },
+        "base_unknown": [
+          "src/lib.rs"
+        ]
+      }
+    }
+  ],
+  "outcome": {
+    "type": "admitted",
+    "lease": {
+      "lease_id": "admit-tool-bob",
+      "session_id": "codex.bob",
+      "workspace_id": "app",
+      "paths": [
+        "src/lib.rs"
+      ],
+      "generation": 1,
+      "expires_at_ms": 63500,
+      "status": "active",
+      "operation": {
+        "operation_id": "operation-bob-1",
+        "source": "codex",
+        "tool": "Edit",
+        "input_digest": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+      },
+      "base_unknown": [
+        "src/lib.rs"
+      ]
+    }
+  }
+}
+## admit-tool-bob-conflict
+{
+  "events": [
+    {
+      "type": "write_refused",
+      "session_id": "codex.bob",
+      "workspace_id": "app",
+      "kind": "conflict",
+      "paths": [
+        "src/api.rs"
+      ],
+      "peer_session_id": "claude-code.alice",
+      "input_digest": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+      "at_ms": 3600,
+      "generation": 1
+    }
+  ],
+  "outcome": {
+    "type": "conflict",
+    "holders": [
+      {
+        "lease_id": "admit-alice",
+        "session_id": "claude-code.alice",
+        "paths": [
+          "src/api.rs"
+        ]
+      }
+    ]
+  }
+}
+## holders-bob
+{
+  "events": [],
+  "outcome": {
+    "type": "holders",
+    "holders": [
+      {
+        "lease_id": "admit-alice",
+        "session_id": "claude-code.alice",
+        "paths": [
+          "src/api.rs"
+        ]
+      }
+    ]
+  }
+}
+## holders-unknown-session
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "session_not_found",
+    "message": "Session is not registered; attach it to a workspace first"
+  }
+}
+## wait-bob
+{
+  "events": [
+    {
+      "type": "write_waited",
+      "session_id": "codex.bob",
+      "workspace_id": "app",
+      "paths": [
+        "src/api.rs"
+      ],
+      "waited_ms": 5000,
+      "result": "refused_conflict",
+      "at_ms": 4200,
+      "generation": 1
+    },
+    {
+      "type": "write_refused",
+      "session_id": "codex.bob",
+      "workspace_id": "app",
+      "kind": "conflict",
+      "paths": [
+        "src/api.rs"
+      ],
+      "at_ms": 4200,
+      "generation": 1
+    }
+  ],
+  "outcome": {
+    "type": "wait_recorded",
+    "session_id": "codex.bob"
+  }
+}
+## wait-unknown-session
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "session_not_found",
+    "message": "Session is not registered; attach it to a workspace first"
+  }
+}
+## refusal-bob-commit
+{
+  "events": [
+    {
+      "type": "write_refused",
+      "session_id": "codex.bob",
+      "workspace_id": "app",
+      "kind": "commit_held",
+      "paths": [
+        "src/api.rs"
+      ],
+      "at_ms": 4400,
+      "generation": 1
+    }
+  ],
+  "outcome": {
+    "type": "refusal_recorded",
+    "session_id": "codex.bob"
+  }
+}
+## refusal-not-reported-by-hooks
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "invalid_refusal",
+    "message": "Only a held commit is reported; the coordinator records the other refusals itself"
+  }
+}
+## refusal-unknown-session
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "session_not_found",
+    "message": "Session is not registered; attach it to a workspace first"
+  }
+}
+## policy-app
+{
+  "events": [],
+  "outcome": {
+    "type": "policy",
+    "workspace_id": "app",
+    "rows": [
+      {
+        "case": "advisory",
+        "policy": "advisory",
+        "configurable": false
+      },
+      {
+        "case": "conflict",
+        "policy": "refuse",
+        "configurable": true
+      },
+      {
+        "case": "stale_base",
+        "policy": "refuse",
+        "configurable": false
+      },
+      {
+        "case": "unread_lines",
+        "policy": "refuse",
+        "configurable": false
+      },
+      {
+        "case": "commit_held",
+        "policy": "refuse",
+        "configurable": false
+      },
+      {
+        "case": "landing_not_ready",
+        "policy": "refuse",
+        "configurable": false
+      }
+    ]
+  }
+}
+## policy-unknown-workspace
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "workspace_not_found",
+    "message": "Workspace is not registered; register it first"
+  }
+}
+## set-policy-app
+{
+  "events": [
+    {
+      "type": "policy_set",
+      "workspace_id": "app",
+      "case": "conflict",
+      "policy": "wait",
+      "wait_ms": 1500
+    }
+  ],
+  "outcome": {
+    "type": "policy",
+    "workspace_id": "app",
+    "rows": [
+      {
+        "case": "advisory",
+        "policy": "advisory",
+        "configurable": false
+      },
+      {
+        "case": "conflict",
+        "policy": "wait",
+        "configurable": true,
+        "wait_ms": 1500
+      },
+      {
+        "case": "stale_base",
+        "policy": "refuse",
+        "configurable": false
+      },
+      {
+        "case": "unread_lines",
+        "policy": "refuse",
+        "configurable": false
+      },
+      {
+        "case": "commit_held",
+        "policy": "refuse",
+        "configurable": false
+      },
+      {
+        "case": "landing_not_ready",
+        "policy": "refuse",
+        "configurable": false
+      }
+    ]
+  }
+}
+## set-policy-wait-too-long
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "invalid_wait",
+    "message": "A wait is 0 to 2000 milliseconds"
+  }
+}
+## set-policy-fixed-case
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "policy_fixed",
+    "message": "The advisory policy is fixed at advisory; only conflict can be set"
+  }
+}
+## set-policy-unknown-workspace
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "workspace_not_found",
+    "message": "Workspace is not registered; register it first"
+  }
+}
+## observe-source-alice
+{
+  "events": [
+    {
+      "type": "source_observed",
+      "session_id": "claude-code.alice",
+      "files": [
+        {
+          "path": "src/api.rs",
+          "state": {
+            "type": "missing"
+          }
+        }
+      ],
+      "origin": "read",
+      "at_ms": 6000,
+      "generation": 1
+    }
+  ],
+  "outcome": {
+    "type": "source_observed",
+    "session_id": "claude-code.alice",
+    "files": 1
+  }
+}
+## observe-source-unknown-session
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "session_not_found",
+    "message": "Session is not registered; attach it to a workspace first"
+  }
+}
+## outline-read-alice
+{
+  "events": [
+    {
+      "type": "read_outlined",
+      "session_id": "claude-code.alice",
+      "path": "src/api.rs",
+      "digest": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+    }
+  ],
+  "outcome": {
+    "type": "read_outline",
+    "outline": []
+  }
+}
+## outline-read-unknown-session
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "session_not_found",
+    "message": "Session is not registered; attach it to a workspace first"
+  }
+}
+## observe-alice
+{
+  "events": [
+    {
+      "type": "operation_observed",
+      "observation": {
+        "observation_id": "observe-alice",
+        "session_id": "claude-code.alice",
+        "workspace_id": "app",
+        "operation_id": "operation-alice-1",
+        "source": "claude-code",
+        "tool": "Edit",
+        "paths": [
+          "src/api.rs"
+        ],
+        "result": "succeeded",
+        "lease_id": "admit-alice",
+        "lease_relation": "current",
+        "concurrent_holders": [],
+        "observed_at_ms": 7000,
+        "generation": 1
+      }
+    }
+  ],
+  "outcome": {
+    "type": "observed",
+    "observation": {
+      "observation_id": "observe-alice",
+      "session_id": "claude-code.alice",
+      "workspace_id": "app",
+      "operation_id": "operation-alice-1",
+      "source": "claude-code",
+      "tool": "Edit",
+      "paths": [
+        "src/api.rs"
+      ],
+      "result": "succeeded",
+      "lease_id": "admit-alice",
+      "lease_relation": "current",
+      "concurrent_holders": [],
+      "observed_at_ms": 7000,
+      "generation": 1
+    }
+  }
+}
+## observe-unknown-lease
+{
+  "events": [
+    {
+      "type": "operation_observed",
+      "observation": {
+        "observation_id": "observe-unknown-lease",
+        "session_id": "claude-code.alice",
+        "workspace_id": "app",
+        "operation_id": "operation-alice-2",
+        "source": "claude-code",
+        "tool": "Edit",
+        "paths": [
+          "src/api.rs"
+        ],
+        "result": "succeeded",
+        "lease_id": "no-such-lease",
+        "lease_relation": "not_admitted",
+        "concurrent_holders": [
+          {
+            "lease_id": "admit-alice",
+            "session_id": "claude-code.alice",
+            "paths": [
+              "src/api.rs"
+            ]
+          }
+        ],
+        "observed_at_ms": 7100,
+        "generation": 1
+      }
+    }
+  ],
+  "outcome": {
+    "type": "observed",
+    "observation": {
+      "observation_id": "observe-unknown-lease",
+      "session_id": "claude-code.alice",
+      "workspace_id": "app",
+      "operation_id": "operation-alice-2",
+      "source": "claude-code",
+      "tool": "Edit",
+      "paths": [
+        "src/api.rs"
+      ],
+      "result": "succeeded",
+      "lease_id": "no-such-lease",
+      "lease_relation": "not_admitted",
+      "concurrent_holders": [
+        {
+          "lease_id": "admit-alice",
+          "session_id": "claude-code.alice",
+          "paths": [
+            "src/api.rs"
+          ]
+        }
+      ],
+      "observed_at_ms": 7100,
+      "generation": 1
+    }
+  }
+}
+## observe-tool-bob
+{
+  "events": [
+    {
+      "type": "operation_observed",
+      "observation": {
+        "observation_id": "observe-tool-bob",
+        "session_id": "codex.bob",
+        "workspace_id": "app",
+        "operation_id": "operation-bob-1",
+        "source": "codex",
+        "tool": "Edit",
+        "paths": [
+          "src/lib.rs"
+        ],
+        "result": "succeeded",
+        "lease_id": "admit-tool-bob",
+        "lease_relation": "current",
+        "concurrent_holders": [],
+        "observed_at_ms": 7200,
+        "generation": 1
+      }
+    }
+  ],
+  "outcome": {
+    "type": "observed",
+    "observation": {
+      "observation_id": "observe-tool-bob",
+      "session_id": "codex.bob",
+      "workspace_id": "app",
+      "operation_id": "operation-bob-1",
+      "source": "codex",
+      "tool": "Edit",
+      "paths": [
+        "src/lib.rs"
+      ],
+      "result": "succeeded",
+      "lease_id": "admit-tool-bob",
+      "lease_relation": "current",
+      "concurrent_holders": [],
+      "observed_at_ms": 7200,
+      "generation": 1
+    }
+  }
+}
+## observe-tool-wrong-session
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "not_holder",
+    "message": "An observation can name only its own session's admission"
+  }
+}
+## tool-batch-bob
+{
+  "events": [
+    {
+      "type": "tool_batch_observed",
+      "session_id": "codex.bob",
+      "operation_ids": [
+        "operation-bob-1"
+      ],
+      "calls": 1,
+      "at_ms": 7400,
+      "generation": 1
+    }
+  ],
+  "outcome": {
+    "type": "tool_batch_observed",
+    "session_id": "codex.bob",
+    "calls": 1,
+    "wrote": true
+  }
+}
+## tool-batch-unknown-session
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "session_not_found",
+    "message": "Session is not registered; attach it to a workspace first"
+  }
+}
+## complete-alice
+{
+  "events": [
+    {
+      "type": "lease_completed",
+      "lease_id": "admit-alice"
+    }
+  ],
+  "outcome": {
+    "type": "completed",
+    "lease_id": "admit-alice"
+  }
+}
+## complete-unknown-lease
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "lease_not_found",
+    "message": "Lease does not exist; inspect status for the active lease ID"
+  }
+}
+## complete-others-lease
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "not_holder",
+    "message": "Only the session holding this lease can complete it"
+  }
+}
+## admit-bob-after-release
+{
+  "events": [
+    {
+      "type": "lease_granted",
+      "lease": {
+        "lease_id": "admit-bob-after-release",
+        "session_id": "codex.bob",
+        "workspace_id": "app",
+        "paths": [
+          "src/api.rs"
+        ],
+        "generation": 1,
+        "expires_at_ms": 68300,
+        "status": "active"
+      }
+    }
+  ],
+  "outcome": {
+    "type": "admitted",
+    "lease": {
+      "lease_id": "admit-bob-after-release",
+      "session_id": "codex.bob",
+      "workspace_id": "app",
+      "paths": [
+        "src/api.rs"
+      ],
+      "generation": 1,
+      "expires_at_ms": 68300,
+      "status": "active"
+    }
+  }
+}
+## admit-bob-after-expiry
+{
+  "events": [
+    {
+      "type": "lease_granted",
+      "lease": {
+        "lease_id": "admit-bob-after-expiry",
+        "session_id": "codex.bob",
+        "workspace_id": "app",
+        "paths": [
+          "src/ui.rs"
+        ],
+        "generation": 1,
+        "expires_at_ms": 260000,
+        "status": "active"
+      }
+    }
+  ],
+  "outcome": {
+    "type": "admitted",
+    "lease": {
+      "lease_id": "admit-bob-after-expiry",
+      "session_id": "codex.bob",
+      "workspace_id": "app",
+      "paths": [
+        "src/ui.rs"
+      ],
+      "generation": 1,
+      "expires_at_ms": 260000,
+      "status": "active"
+    }
+  }
+}
+## intent-end-alice
+{
+  "events": [
+    {
+      "type": "intent_ended",
+      "session_id": "claude-code.alice"
+    }
+  ],
+  "outcome": {
+    "type": "intent_ended",
+    "session_id": "claude-code.alice"
+  }
+}
+## intent-end-unknown-session
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "session_not_found",
+    "message": "Session is not registered; attach it to a workspace first"
+  }
+}
