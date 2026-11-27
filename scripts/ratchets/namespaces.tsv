@@ -17,8 +17,6 @@
 # utility
 namespace	text	utility
 namespace	ids	utility
-namespace	sha256	utility
-namespace	registration	utility
 namespace	clock	utility
 namespace	local_day	utility
 namespace	zone	utility
@@ -27,10 +25,9 @@ namespace	regions	utility
 namespace	breaks	utility
 namespace	vendor	utility
 namespace	tool_names	utility
-allow	ids	sha256
 allow	breaks	regions
 allow	breaks	text
-allow	regions	sha256
+allow	regions	ids
 
 # infrastructure
 namespace	local	infrastructure

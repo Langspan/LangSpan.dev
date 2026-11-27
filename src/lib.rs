@@ -12,8 +12,6 @@ mod text;
 
 // ids
 mod ids;
-mod registration;
-mod sha256;
 
 // time
 pub mod clock;
@@ -125,4 +123,6 @@ pub mod demo;
 pub mod skill;
 
 // Compatibility aliases: old paths kept until importers are repointed.
+use ids::registration;
+use ids::sha256;
 use text::redact;
