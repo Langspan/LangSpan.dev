@@ -1,0 +1,1 @@
+Read the coordination policy table in effect for a workspace: each case, advisory, wait or refuse, whether it can be set, and a wait's bound
