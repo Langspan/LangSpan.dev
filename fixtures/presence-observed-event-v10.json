@@ -1,0 +1,1 @@
+{"type":"presence_observed","session_id":"claude-code.alice","kind":"read","paths":["src/api.rs"],"at_ms":5000,"generation":2}

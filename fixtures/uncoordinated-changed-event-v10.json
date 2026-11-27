@@ -1,0 +1,1 @@
+{"type":"uncoordinated_changed","change":{"change_id":"change-1","workspace_id":"app","sessions":["claude-code.alice"],"files":[{"path":"src/api.rs","state":{"type":"missing"}}],"at_ms":5000,"generation":2}}

@@ -1,0 +1,1 @@
+{"type":"write_waited","session_id":"claude-code.alice","workspace_id":"app","paths":["src/api.rs"],"waited_ms":5000,"result":"admitted","at_ms":5000,"generation":2}

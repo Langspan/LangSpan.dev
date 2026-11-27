@@ -1,0 +1,1 @@
+{"type":"check_reported","session_ids":["claude-code.alice"],"notice":{"check_id":"check-1","name":"parse","tree_oid":"4b825dc642cb6eb9a060e54bf8d69288fbee4904","result":{"type":"passed"},"duration_ms":5000,"tail":"example"}}

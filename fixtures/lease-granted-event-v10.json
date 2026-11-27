@@ -1,0 +1,1 @@
+{"type":"lease_granted","lease":{"lease_id":"lease-1","session_id":"claude-code.alice","workspace_id":"app","paths":["src/api.rs"],"generation":2,"expires_at_ms":5000,"status":"active"}}
