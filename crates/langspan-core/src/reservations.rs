@@ -12,11 +12,11 @@ use crate::{CoreError, Decision, Event, Outcome, State, current_session, error};
 /// Keys counted per scope. A new key past this is refused.
 pub const MAX_RESERVATION_KEYS: usize = 256;
 /// Claims kept per key, newest first. The highest number is kept apart.
-pub const MAX_RESERVATION_CLAIMS: usize = 16;
+const MAX_RESERVATION_CLAIMS: usize = 16;
 /// Other sessions' claims a briefing names, newest first.
-pub const BRIEF_RESERVATIONS: usize = 8;
+const BRIEF_RESERVATIONS: usize = 8;
 /// Bytes in a counter's key.
-pub const RESERVATION_KEY_BYTES: usize = 64;
+const RESERVATION_KEY_BYTES: usize = 64;
 
 /// One number a session took.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -43,9 +43,9 @@ pub struct Counter {
 fn validate_key(key: &str) -> Result<(), CoreError> {
     if key.is_empty()
         || key.len() > RESERVATION_KEY_BYTES
-        || !key
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"._-".contains(&byte))
+        || !key.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"._-".contains(&byte)
+        })
     {
         return Err(error(
             "invalid_key",
@@ -94,7 +94,12 @@ pub(crate) fn decide_reserve(
     let number = after
         .max(counter.map_or(0, |counter| counter.highest))
         .checked_add(1)
-        .ok_or_else(|| error("invalid_number", "The number after it is too large to count"))?;
+        .ok_or_else(|| {
+            error(
+                "invalid_number",
+                "The number after it is too large to count",
+            )
+        })?;
     let held = counter
         .map(|counter| {
             counter
@@ -121,7 +126,10 @@ pub(crate) fn decide_reserve(
     })
 }
 
-pub(crate) fn apply_reserved(state: &mut State, reservation: &Reservation) -> Result<(), CoreError> {
+pub(crate) fn apply_reserved(
+    state: &mut State,
+    reservation: &Reservation,
+) -> Result<(), CoreError> {
     let session = current_session(state, &reservation.session_id)?;
     validate_key(&reservation.key)?;
     if session.workspace_id != reservation.workspace_id {
@@ -135,7 +143,10 @@ pub(crate) fn apply_reserved(state: &mut State, reservation: &Reservation) -> Re
         .entry(reservation.scope.clone())
         .or_default();
     if !counters.contains_key(&reservation.key) && counters.len() >= MAX_RESERVATION_KEYS {
-        return Err(error("invalid_event", "A reservation exceeds the key bound"));
+        return Err(error(
+            "invalid_event",
+            "A reservation exceeds the key bound",
+        ));
     }
     let counter = counters.entry(reservation.key.clone()).or_default();
     if reservation.number <= counter.highest {

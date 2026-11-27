@@ -1,0 +1,1 @@
+a briefing's `reserved`, the `reserved` event, and the `reserve` command ([ADR 0040](0040-reserved-numbers.md), issue #299)

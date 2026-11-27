@@ -51,6 +51,8 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
   session attach-pid SESSION PID  Observe an owned process incarnation (Linux, macOS)
   intent set SESSION PATH...     Declare work; optional --summary TEXT
   intent end SESSION             End a work intention
+  reserve SESSION KEY [AFTER]    Take the next number of KEY (adr, migration) for this
+                                 repository: above AFTER and every number given out
   admit SESSION PATH...          Request a whole file set; --ttl-ms defaults to 5000
   complete SESSION LEASE         Complete a current admission
   brief SESSION                  Look at the peer work a session would be told about;

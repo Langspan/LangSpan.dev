@@ -43,6 +43,19 @@ Request an overlapping file, then unrelated work:
 ./target/release/langspan changes demo --after 0 --limit 20 --json
 ```
 
+Reserve a number before writing it, such as the next ADR
+([ADR 0040](../adr/0040-reserved-numbers.md)). `AFTER` is the highest number
+you see in your checkout; each session gets one no other session of the
+repository is given, and bob's briefing names alice's claim:
+
+```sh
+./target/release/langspan reserve alice adr 39 --request-id alice-reserve-1
+# Reserved adr 40 for session alice.
+./target/release/langspan reserve bob adr 39 --request-id bob-reserve-1
+# Reserved adr 41 for session bob. Also held: adr 40 by session alice.
+./target/release/langspan brief bob --request-id bob-brief-demo-2
+```
+
 Run admission and completion within their requested lifetime. Stop the demo
 coordinator with Ctrl+C when finished. These commands coordinate logical
 participants; they do not edit the files or launch agents.

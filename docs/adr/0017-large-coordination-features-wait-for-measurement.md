@@ -22,7 +22,7 @@ often.
 | Row | Capability | LangSpan today | Revisit when |
 | --- | --- | --- | --- |
 | B11 | Standing decisions that hold a write which would reverse them | Notes (`remember`) inform; they never hold a write | A run shows an agent undoing a recorded decision |
-| B16 | `claim`: the next free number in a sequence (migrations, ADRs) | None | A run shows two sessions taking the same number |
+| B16 | `claim`: the next free number in a sequence (migrations, ADRs) | `reserve` takes the next number of a named counter ([ADR 0040](0040-reserved-numbers.md)) | Met on 26 November 2026: five pull requests took protocol versions 6 to 10. Sequences read from files wait on issue #32 |
 | B17 | Typed intents (rename, add a parameter) with conflict prediction | `intent set` on paths with a summary | Path-level intents are shown to miss conflicts that typed ones would predict |
 | B18 | `plan_work`: work units split into independent groups, checked live | None | Measurement shows planning collisions that briefings do not prevent |
 | B19 | A queue of collided work to reconcile | None | Collisions are frequent enough to need a queue |

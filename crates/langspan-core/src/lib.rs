@@ -105,10 +105,7 @@ pub use report::{
     ReportKnown, ReportQuery, ReportSession, host_kind, known_sessions, open_intents, report,
     session_workspaces,
 };
-pub use reservations::{
-    BRIEF_RESERVATIONS, Counter, MAX_RESERVATION_CLAIMS, MAX_RESERVATION_KEYS,
-    RESERVATION_KEY_BYTES, Reservation,
-};
+pub use reservations::{Counter, MAX_RESERVATION_KEYS, Reservation};
 pub use route::Route;
 pub use sessions::*;
 pub(crate) use shared::*;
@@ -250,9 +247,7 @@ pub struct State {
     /// the ended session's ID (issue #161). One adoption per ended session.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub adoptions: BTreeMap<String, Adoption>,
-    /// Reserved numbers per scope (a repository, or a workspace outside
-    /// Git), then key (ADR 0040), at most `MAX_RESERVATION_KEYS` keys each.
-    /// In the snapshot; briefings carry them, never the status reply.
+    /// Reserved numbers per repository, then key (ADR 0040); not in `status`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub reservations: BTreeMap<String, BTreeMap<String, Counter>>,
     /// Recorded renames per workspace, newest first, at most `MAX_RENAMES`

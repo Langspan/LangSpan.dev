@@ -18,13 +18,13 @@ use crate::{
     INFLIGHT_CANDIDATES, INFLIGHT_LINES, INFLIGHT_MENTIONS, InflightNotice, InflightSymbol,
     InterfaceImpact, LeftWork, LivenessStatus, MAX_TOLD, MAX_TRAILS, MESSAGE_BRIEF_BYTES, Message,
     Note, NoticeVia, Outcome, PRESENCE_PATHS, PresencePath, REMOTE_HORIZON_MS, RecentChanges,
-    Recipient, RemotePeerWork, Reservation, RetractedMessage, Session, SessionActivity, StaleRead, State,
-    TRAIL_BYTES, Trail, TrailView, UNCOORDINATED_LINE_LIMIT, UncoordinatedNotice, activity_mut,
-    anchors, concerned_paths, current_session, error, fingerprint, fingerprint_u64, inflight_cost,
-    inflight_key, inflight_notice, inflight_told, interface_impacts, is_false, is_zero,
-    known_session, known_versions, last_peer_edit, left_work, message_cost, owed_to,
-    presence_setting, recent, related_workspace, reservations, retracted_cost, takes_handoff, told_notices,
-    trail, uncoordinated_owed, validate_known_workspace, work_paths,
+    Recipient, RemotePeerWork, Reservation, RetractedMessage, Session, SessionActivity, StaleRead,
+    State, TRAIL_BYTES, Trail, TrailView, UNCOORDINATED_LINE_LIMIT, UncoordinatedNotice,
+    activity_mut, anchors, concerned_paths, current_session, error, fingerprint, fingerprint_u64,
+    inflight_cost, inflight_key, inflight_notice, inflight_told, interface_impacts, is_false,
+    is_zero, known_session, known_versions, last_peer_edit, left_work, message_cost, owed_to,
+    presence_setting, recent, related_workspace, reservations, retracted_cost, takes_handoff,
+    told_notices, trail, uncoordinated_owed, validate_known_workspace, work_paths,
 };
 
 /// The signature of a briefing with nothing in it.

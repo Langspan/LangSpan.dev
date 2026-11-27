@@ -905,3 +905,77 @@
     "message": "Session is not registered; attach it to a workspace first"
   }
 }
+## reserve-alice
+{
+  "events": [
+    {
+      "type": "reserved",
+      "reservation": {
+        "scope": "app",
+        "key": "adr",
+        "number": 40,
+        "session_id": "claude-code.alice",
+        "workspace_id": "app",
+        "at_ms": 200300
+      }
+    }
+  ],
+  "outcome": {
+    "type": "reserved",
+    "reservation": {
+      "scope": "app",
+      "key": "adr",
+      "number": 40,
+      "session_id": "claude-code.alice",
+      "workspace_id": "app",
+      "at_ms": 200300
+    },
+    "held": []
+  }
+}
+## reserve-bob-held
+{
+  "events": [
+    {
+      "type": "reserved",
+      "reservation": {
+        "scope": "app",
+        "key": "adr",
+        "number": 41,
+        "session_id": "codex.bob",
+        "workspace_id": "app",
+        "at_ms": 200400
+      }
+    }
+  ],
+  "outcome": {
+    "type": "reserved",
+    "reservation": {
+      "scope": "app",
+      "key": "adr",
+      "number": 41,
+      "session_id": "codex.bob",
+      "workspace_id": "app",
+      "at_ms": 200400
+    },
+    "held": [
+      {
+        "scope": "app",
+        "key": "adr",
+        "number": 40,
+        "session_id": "claude-code.alice",
+        "workspace_id": "app",
+        "at_ms": 200300
+      }
+    ]
+  }
+}
+## reserve-invalid-key
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "invalid_key",
+    "message": "A reservation key is 1 to 64 lowercase ASCII letters, digits, dots, underscores or hyphens, such as adr or protocol-version"
+  }
+}

@@ -762,6 +762,7 @@ fn none_placed(briefing: &langspan_core::Briefing) -> langspan_core::Briefing {
     placed.interface_changes.clear();
     placed.peers.clear();
     placed.remote.clear();
+    placed.reserved.clear();
     placed
 }
 
@@ -975,6 +976,27 @@ pub(crate) fn render_peers_placed(
             keep_placed(&mut placed.stale_reads, &shown);
         }
     }
+    // Numbers other sessions reserved (ADR 0040). The key is plain by
+    // construction; the session ID is cleaned. Placed when it fits whole.
+    let mut shown = Vec::new();
+    for claim in &briefing.reserved {
+        let line = format!(
+            "Session {} reserved {} {} in workspace {}; take another with `langspan reserve` rather than reusing it.",
+            clean(&claim.session_id, 128),
+            claim.key,
+            claim.number,
+            clean(&claim.workspace_id, 128)
+        );
+        let fits = text.len() + line.len() + 1 + footer.len() + 96 <= limit;
+        if fits {
+            text.push_str(&line);
+            text.push('\n');
+        } else {
+            skipped += 1;
+        }
+        shown.push(fits);
+    }
+    keep_placed(&mut placed.reserved, &shown);
     // A notice line is placed when it fits whole: one cut short may have
     // lost what makes it news, so it is told again.
     let mut shown = Vec::new();
@@ -1695,6 +1717,7 @@ pub(crate) fn has_peer_content(briefing: &langspan_core::Briefing) -> bool {
         || !briefing.messages.is_empty()
         || !briefing.retracted.is_empty()
         || !briefing.checkout_changes.is_empty()
+        || !briefing.reserved.is_empty()
         || briefing
             .recent
             .as_ref()

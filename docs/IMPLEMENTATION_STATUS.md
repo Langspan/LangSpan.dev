@@ -382,6 +382,7 @@ shows it improving an outcome.
 | Recap | `recap WORKSPACE` and MCP `langspan_recap`: a bounded account from projected state, under 48 KiB | One workspace at a time. `status` is bounded the same way and pages full history with `status --all`. |
 | Notes | `remember` / `forget` and MCP tools; one line of at most 400 bytes about the workspace or up to 8 files; told to sessions working there; kept across restarts; 64 per workspace | Local only. Any local session can read and forget any note. |
 | Scan outcome | A failed scan is state (`scan_failed`), recorded once per distinct reason and cleared by a complete scan | The reason is the observer's own bounded message. |
+| Reserved numbers | `reserve SESSION KEY [AFTER]` (capability `reservations`, [ADR 0040](adr/0040-reserved-numbers.md), issue #299) takes the next number of a counter per repository; other running sessions' claims appear in briefings. Two sessions in two worktrees getting different numbers and seeing each other's claim is tested in-process (`crates/langspan-core/tests/reservations.rs`); the CLI reply and briefing line in `tests/golden/transcript/coordination.txt` | No MCP tool. Numbers are not read from files or branches. No host run. |
 | Doctor | `doctor [--root DIR]` checks the coordinator, workspaces, scans, index coverage, publication and installed hooks; exit 1 if anything needs attention; `--json` | It cannot see whether Codex has approved its hooks. |
 
 Sixteen MCP tools. Tests: four pure-core cases and two end-to-end cases,

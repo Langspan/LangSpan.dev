@@ -664,6 +664,10 @@ Asking who was given a message (`langspan messages status`, `langspan_message_st
 
 Withdrawing a message (`langspan messages retract`, `langspan_retract_message`, issue #66) adds no boundary: it uses the same socket and the same session labels.
 
+## Reserved numbers
+
+A reservation ([ADR 0040](../adr/0040-reserved-numbers.md)) is a key and a number one session records and other sessions of the same repository are shown. It adds no boundary: it crosses the same socket, and LangSpan reads no repository file to choose the number. The key is 1 to 64 bytes of `[a-z0-9._-]`, refused otherwise at the core, so a briefing line built from it carries no quoting or instructions; the session and workspace IDs in the line are cleaned. A same-user client can reserve under any registered session, or take numbers to push a counter ahead; the effect is a gap in the numbering, never a held or refused write. At most 256 keys per repository and 16 claims per key are kept, and a briefing names at most 8 claims.
+
 | Concern | Behavior and remaining boundary |
 | --- | --- |
 | Spoofing | Only the session named as sender, or the owner (no session), may withdraw a message, and that name is as unauthenticated as a sender's: a local process that can reach the socket can withdraw any message by naming its sender or none. |

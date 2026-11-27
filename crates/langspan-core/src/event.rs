@@ -10,9 +10,9 @@ use crate::{
     CheckoutRun, ClockAnchor, Delivery, DiskObservation, Intent, InterfaceNotice, KeptTests,
     Landing, LandingAttempt, Lease, LeftQueue, Message, Note, NoteAnchor, NoticeVia, Observation,
     ObservedFile, Policy, PolicyCase, PresenceKind, PresenceSetting, RefusalKind, RemoteLink,
-    RemotePeer, Reservation, ScanCoverage, ScanFailure, Session, SessionLiveness, SettledOutcome, SourceOrigin,
-    Stamp, TestResults, Trail, Turn, TurnWaiter, UncoordinatedChange, UninstalledHost, WaitResult,
-    Workspace, WorkspaceGit, WorktreeFile, is_false,
+    RemotePeer, Reservation, ScanCoverage, ScanFailure, Session, SessionLiveness, SettledOutcome,
+    SourceOrigin, Stamp, TestResults, Trail, Turn, TurnWaiter, UncoordinatedChange,
+    UninstalledHost, WaitResult, Workspace, WorkspaceGit, WorktreeFile, is_false,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

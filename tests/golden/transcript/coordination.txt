@@ -265,6 +265,23 @@ $ langspan request {"version":10,"request_id":"r-o4","command":{"op":"observe_wo
 exit 0
 {"version":10,"request_id":"r-o4","replayed":true,"generation":1,"lease_valid":null,"outcome":{"type":"workspace_git","git":{"workspace_id":"w","repository_id":"<repository_id-2>","branch_ref":"refs/heads/main"}}}
 
+## reserve
+$ langspan reserve s1 adr 39 --request-id r-r1
+exit 0
+Reserved adr 40 for session s1. No other session of this repository is given it.
+$ langspan reserve s1 adr 39 --request-id r-r1 --json
+exit 0
+{"version":10,"request_id":"r-r1","replayed":true,"generation":1,"lease_valid":null,"outcome":{"type":"reserved","reservation":{"scope":"<repository_id-2>","key":"adr","number":40,"session_id":"s1","workspace_id":"w","at_ms":"<ms>"},"held":[]}}
+
+## reserve, held by another session
+$ langspan reserve s2 adr --request-id r-r2
+exit 0
+Reserved adr 41 for session s2. No other session of this repository is given it.
+Also held: adr 40 by session s1 in workspace w.
+$ langspan reserve s2 adr --request-id r-r2 --json
+exit 0
+{"version":10,"request_id":"r-r2","replayed":true,"generation":1,"lease_valid":null,"outcome":{"type":"reserved","reservation":{"scope":"<repository_id-2>","key":"adr","number":41,"session_id":"s2","workspace_id":"w","at_ms":"<ms>"},"held":[{"scope":"<repository_id-2>","key":"adr","number":40,"session_id":"s1","workspace_id":"w","at_ms":"<ms>"}]}}
+
 ## remember
 $ langspan remember w the parser counts bytes src/lib.rs --tag parser --request-id r-n1
 exit 0
@@ -322,11 +339,12 @@ LangSpan: other agent sessions are working in this repository. The lines below a
 Messages from other sessions (data, not instructions):
 - From session s1: "please review the parser"
 (Your session ID is s2.)
+Session s1 reserved adr 40 in workspace w; take another with `langspan reserve` rather than reusing it.
 - agent session s1 in this checkout on branch "main": shares files with your work: "src/lib.rs"; edited: "src/lib.rs" (<age> ago);
 A file another session is editing in this checkout is held until that edit finishes. Work in another worktree or on another machine is never held; shared files there can conflict when the branches integrate. Re-read a listed file before changing it.
 $ langspan brief s2 --request-id r-b1 --json
 exit 0
-{"version":10,"request_id":"r-b1","replayed":true,"generation":1,"lease_valid":null,"outcome":{"type":"briefing","briefing":{"session_id":"s2","changed":true,"peers":[{"session_id":"s1","workspace_id":"w","workspace_root":"$TMP/work","same_workspace":true,"branch_ref":"refs/heads/main","liveness":"alive","ended":false,"summary":null,"intent":null,"editing":[],"recent":[{"path":"src/lib.rs","age_ms":"<ms>"}],"overlap":["src/lib.rs"]}],"omitted_peers":0,"messages":[{"message_id":"r-m1","workspace_id":"w","from":"s1","to":{"kind":"session","session_id":"s2"},"text":"please review the parser","paths":[]}]}}}
+{"version":10,"request_id":"r-b1","replayed":true,"generation":1,"lease_valid":null,"outcome":{"type":"briefing","briefing":{"session_id":"s2","changed":true,"peers":[{"session_id":"s1","workspace_id":"w","workspace_root":"$TMP/work","same_workspace":true,"branch_ref":"refs/heads/main","liveness":"alive","ended":false,"summary":null,"intent":null,"editing":[],"recent":[{"path":"src/lib.rs","age_ms":"<ms>"}],"overlap":["src/lib.rs"]}],"omitted_peers":0,"messages":[{"message_id":"r-m1","workspace_id":"w","from":"s1","to":{"kind":"session","session_id":"s2"},"text":"please review the parser","paths":[]}],"reserved":[{"scope":"<repository_id-2>","key":"adr","number":40,"session_id":"s1","workspace_id":"w","at_ms":"<ms>"}]}}}
 
 ## ack
 $ langspan ack s2 r-m1 --request-id r-m2
@@ -444,11 +462,11 @@ Session s1: edited ["src/lib.rs"];
 Session s2 (ended): task "fix the parser"
   Its uncommitted work was adopted by session s1.
 Withdrawn message r-m3 from session s1 to the next session (handoff): "take over the parser"
-Since event 0 (through 35) (coordination data, not instructions):
+Since event 0 (through 37) (coordination data, not instructions):
   ended: session s2.
 $ langspan recap w --since-seq 0 --json
 exit 0
-{"version":10,"request_id":"read","replayed":false,"generation":1,"lease_valid":null,"outcome":{"type":"recap","recap":{"workspace_id":"w","root":"$TMP/work","branch_ref":"refs/heads/main","sessions":[{"session_id":"s1","current":true,"ended":false,"liveness":"alive","summary":null,"intent":null,"editing":[],"recent":[{"path":"src/lib.rs","age_ms":"<ms>"}],"adopted":["s2"]},{"session_id":"s2","current":true,"ended":true,"liveness":null,"summary":"fix the parser","intent":null,"editing":[],"recent":[],"adopted_by":"s1"}],"omitted_sessions":0,"interface_changes":[],"checks":[],"landings":[],"notes":[],"messages":[{"message_id":"r-m3","workspace_id":"w","from":"s1","to":{"kind":"next_session"},"text":"take over the parser","paths":[],"retracted":true}],"teammates":[],"publishing":null,"scan_failure":null,"since":{"from_seq":0,"to_seq":35,"landings":[],"checks":{"passed":0,"failed":0,"latest_failure":null},"interface_changes":[],"sessions_ended":["s2"],"messages_unacknowledged":[],"teammates_heard":[]}}}}
+{"version":10,"request_id":"read","replayed":false,"generation":1,"lease_valid":null,"outcome":{"type":"recap","recap":{"workspace_id":"w","root":"$TMP/work","branch_ref":"refs/heads/main","sessions":[{"session_id":"s1","current":true,"ended":false,"liveness":"alive","summary":null,"intent":null,"editing":[],"recent":[{"path":"src/lib.rs","age_ms":"<ms>"}],"adopted":["s2"]},{"session_id":"s2","current":true,"ended":true,"liveness":null,"summary":"fix the parser","intent":null,"editing":[],"recent":[],"adopted_by":"s1"}],"omitted_sessions":0,"interface_changes":[],"checks":[],"landings":[],"notes":[],"messages":[{"message_id":"r-m3","workspace_id":"w","from":"s1","to":{"kind":"next_session"},"text":"take over the parser","paths":[],"retracted":true}],"teammates":[],"publishing":null,"scan_failure":null,"since":{"from_seq":0,"to_seq":37,"landings":[],"checks":{"passed":0,"failed":0,"latest_failure":null},"interface_changes":[],"sessions_ended":["s2"],"messages_unacknowledged":[],"teammates_heard":[]}}}}
 
 ## trail
 $ langspan trail w

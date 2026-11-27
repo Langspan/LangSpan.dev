@@ -189,7 +189,13 @@ fn a_key_is_short_and_plain_and_the_keys_are_bounded() {
         other => panic!("{other:?}"),
     }
     for index in 0..langspan_core::MAX_RESERVATION_KEYS {
-        let outcome = reserve(&mut state, &format!("k{index}"), "alice", &format!("k{index}"), 0);
+        let outcome = reserve(
+            &mut state,
+            &format!("k{index}"),
+            "alice",
+            &format!("k{index}"),
+            0,
+        );
         reserved(&outcome);
     }
     match reserve(&mut state, "over", "bob", "one-more", 0) {

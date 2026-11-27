@@ -36,6 +36,7 @@ vectors! {
     SessionSeen => "session-seen-event-v10.json",
     IntentSet => "intent-set-event-v10.json",
     IntentEnded => "intent-ended-event-v10.json",
+    Reserved => "reserved-event-v10.json",
     LeaseGranted => "lease-granted-event-v10.json",
     LeaseCompleted => "lease-completed-event-v10.json",
     LeaseExpired => "lease-expired-event-v10.json",
