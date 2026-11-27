@@ -1543,8 +1543,11 @@ fn the_daemon_notes_an_uninstalled_host_once_until_it_is_installed() {
             .count()
     };
     // Several checks later, still one record.
-    std::thread::sleep(Duration::from_millis(1000));
-    assert_eq!(events("host_not_installed"), 1);
+    support::holds_for(
+        "one host_not_installed record over several checks",
+        Duration::from_millis(1000),
+        || events("host_not_installed") == 1,
+    );
 
     let status_text = || {
         let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
@@ -1684,7 +1687,24 @@ fn a_host_notice_is_kept_while_the_host_cannot_be_inspected() {
     // nor a removal is established, so the notice stays, nothing new is
     // recorded, and the inspection error is logged once.
     let hooks = home.write(".cursor/hooks.json", "{ not json");
-    std::thread::sleep(Duration::from_millis(1200));
+    let failures = || {
+        fs::read_to_string(home.base.join("daemon.log"))
+            .unwrap()
+            .lines()
+            .filter(|line| line.contains("host_check_failed"))
+            .count()
+    };
+    support::wait_until(
+        "the inspection error to be logged",
+        Duration::from_secs(10),
+        || failures() > 0,
+    );
+    // Several checks later, still logged once and nothing new recorded.
+    support::holds_for(
+        "the inspection error logged once and the host not cleared",
+        Duration::from_millis(1000),
+        || failures() == 1 && home.count("host_cleared") == 0,
+    );
     let state = home.held("cursor", true);
     assert!(state.uninstalled_hosts.contains_key("cursor"));
     assert_eq!(home.count("host_cleared"), 0);
@@ -1701,7 +1721,11 @@ fn a_host_notice_is_kept_while_the_host_cannot_be_inspected() {
 
     // Readable again and still not installed: the same notice, not a new one.
     fs::remove_file(hooks).unwrap();
-    std::thread::sleep(Duration::from_millis(1000));
+    support::holds_for(
+        "the same notice kept, no new one and no clearing",
+        Duration::from_millis(1000),
+        || home.count("host_cleared") == 0 && home.count("host_not_installed") == 1,
+    );
     home.held("cursor", true);
     assert_eq!(home.count("host_cleared"), 0);
     assert_eq!(home.count("host_not_installed"), 1);
@@ -1986,8 +2010,14 @@ fn uninstall_refuses_to_purge_while_a_silent_coordinator_holds_the_lock() {
 fn uninstall_purges_once_a_silent_coordinator_frees_the_lock() {
     let home = Home::new();
     let (state, lock) = held_lock(&home);
+    // Uninstall leaves no sign that it is waiting, so the lock is freed
+    // 500 ms after it starts. Freed before it looks, it waits for nothing,
+    // and the same assertions hold.
+    let started = Instant::now();
     let release = std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        support::wait_until("500 ms into the uninstall", Duration::from_secs(10), || {
+            started.elapsed() >= Duration::from_millis(500)
+        });
         drop(lock);
     });
     let purged = home.ok(&["uninstall", "--purge", "--apply"]);

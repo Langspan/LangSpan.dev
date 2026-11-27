@@ -84,6 +84,23 @@ impl Client {
     }
 }
 
+/// As `tests/support`'s `holds_for`, but yielding to the runtime between
+/// looks, so the client keeps receiving notifications while it waits.
+async fn holds_for(what: &str, period: Duration, holds: impl Fn() -> bool) {
+    let started = Instant::now();
+    loop {
+        assert!(
+            holds(),
+            "{what}: no longer true {:?} into the {period:?} it must hold for",
+            started.elapsed()
+        );
+        if started.elapsed() >= period {
+            return;
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
+}
+
 fn every_tool() -> Vec<String> {
     TOOL_NAMES.iter().map(|name| (*name).to_owned()).collect()
 }
@@ -254,7 +271,12 @@ async fn every_tool_is_listed_with_tools_all_in_every_state() {
     fixture.claude_edit();
     let all = fixture.connect(&["--tools", "all"], Some(1_000)).await;
     // Long enough for a hooked server to have asked many times.
-    sleep(Duration::from_millis(500)).await;
+    holds_for(
+        "no list-changed notification with --tools all",
+        Duration::from_millis(500),
+        || all.seen() == 0,
+    )
+    .await;
     assert_eq!(all.names().await, every_tool());
     assert_eq!(default.names().await, every_tool());
     assert_eq!(all.seen(), 0);
@@ -311,7 +333,12 @@ async fn measure_the_served_tool_list() {
 async fn with_the_daemon_down_a_hooked_server_lists_every_tool() {
     let fixture = Fixture::new();
     let client = fixture.connect(HOOKED_CLAUDE, Some(30_000)).await;
-    sleep(Duration::from_millis(500)).await;
+    holds_for(
+        "no list-changed notification with the daemon down",
+        Duration::from_millis(500),
+        || client.seen() == 0,
+    )
+    .await;
     assert_eq!(client.names().await, every_tool());
     assert_eq!(client.seen(), 0);
     // A call is answered, with the daemon's unavailability.
@@ -332,7 +359,12 @@ async fn a_claude_code_hook_event_shortens_the_list_and_hidden_tools_still_answe
     for hidden in HIDDEN_WHEN_HOOKED {
         assert!(instructions.contains(hidden), "{instructions}");
     }
-    sleep(Duration::from_millis(500)).await;
+    holds_for(
+        "no list-changed notification before a hook event",
+        Duration::from_millis(500),
+        || client.seen() == 0,
+    )
+    .await;
     assert_eq!(client.names().await, every_tool(), "no hook event yet");
     assert_eq!(client.seen(), 0);
 
@@ -375,7 +407,12 @@ async fn a_codex_hook_event_shortens_only_the_codex_list_for_its_workspace() {
     codex.changed(1).await;
     assert_eq!(codex.names().await, shorter_list());
     // Several of their polls later, the others still list every tool.
-    sleep(Duration::from_millis(1_500)).await;
+    holds_for(
+        "no list-changed notification to the other servers",
+        Duration::from_millis(1_500),
+        || claude.seen() == 0 && elsewhere.seen() == 0,
+    )
+    .await;
     assert_eq!(claude.seen(), 0);
     assert_eq!(claude.names().await, every_tool());
     assert_eq!(elsewhere.seen(), 0);

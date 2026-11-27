@@ -9,6 +9,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(unix)]
+mod support;
+
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 const DAY_MS: u64 = 86_400_000;
@@ -1021,7 +1024,11 @@ mod daemon {
         let before = daemon.events();
         daemon.start(&[]);
         // Several maintenance passes, with no retention configured.
-        std::thread::sleep(Duration::from_millis(1500));
+        support::holds_for(
+            "no event deleted and no snapshot taken without retention",
+            Duration::from_millis(1500),
+            || daemon.events() >= before && count(&daemon.database(), "snapshots") == 0,
+        );
         daemon.stop();
         assert!(daemon.events() >= before, "events were deleted");
         assert_eq!(count(&daemon.database(), "snapshots"), 0);

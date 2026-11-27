@@ -15,6 +15,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod support;
+
 static NEXT: AtomicU64 = AtomicU64::new(0);
 const ALICE: &str = "00000000-0000-4000-8000-00000000000a";
 const BOB: &str = "00000000-0000-4000-8000-00000000000b";
@@ -287,8 +289,19 @@ fn no_write_within_the_window_settles_abandoned() {
     // A write of another file settles nothing.
     assert_eq!(f.claude_writes("b-1", "b.txt", "other\n"), "admitted");
     assert_eq!(outcomes(&f.counts(&alice())), &json!({"pending": 1}));
-    std::thread::sleep(Duration::from_millis(1500));
-    assert_eq!(outcomes(&f.counts(&alice())), &json!({"abandoned": 1}));
+    support::wait_for(
+        "the refusal to settle abandoned",
+        Duration::from_secs(30),
+        || {
+            let counts = f.counts(&alice());
+            let seen = outcomes(&counts);
+            if seen == &json!({"abandoned": 1}) {
+                Ok(())
+            } else {
+                Err(seen.to_string())
+            }
+        },
+    );
     // A later prompt, then a write: it changes nothing, as the refusal was
     // settled once. (An admission has no time of its own; the report places
     // it at the timed event before it, here the prompt.)

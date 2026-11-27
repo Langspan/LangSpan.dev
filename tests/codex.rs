@@ -2,7 +2,7 @@
 //! Synthetic, source-derived Codex hook payloads through real child processes.
 //! These tests do not stand in for the separately required live-host acceptance.
 
-#[allow(dead_code)] // Only `output_once_not_busy` is used here.
+#[allow(dead_code)] // Only `output_once_not_busy` and `wait_until` are used here.
 mod support;
 
 use langspan::{
@@ -310,7 +310,15 @@ fn a_late_codex_post_cannot_complete_another_current_operation() {
         f.hook_at("codex", &pre, &f.root(), 100).0["coverage"],
         "admitted"
     );
-    std::thread::sleep(Duration::from_millis(200));
+    support::wait_until(
+        "the 100 ms Codex admission to expire",
+        Duration::from_secs(10),
+        || {
+            f.events()
+                .iter()
+                .any(|event| matches!(event, Event::LeaseExpired { .. }))
+        },
+    );
     assert_eq!(
         f.hook("claude-code", &f.claude("later", "a.txt")).0["coverage"],
         "admitted"
