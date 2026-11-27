@@ -5,7 +5,7 @@ take now that they run in two lanes with a build cache, how far that is from
 the targets, and a dry run showing that a broken release binary stops the
 release before `publish`.
 
-## Push to result and job times
+## Workflow completion, the merge-queue gate and job times
 
 Measured on 2026-11-27 at 14:36 UTC with
 
@@ -19,15 +19,33 @@ were completed first attempts that passed or failed and are counted; the
 other 40 were cancelled or reruns. One row per run is in
 [rows/runs.tsv](rows/runs.tsv) and one per job in [rows/jobs.tsv](rows/jobs.tsv).
 
-Push to result is run creation to the run's last update, so it includes the
-time spent queued. The three Markdown-only runs, which built nothing, are
-left out.
+Workflow completion is run creation to the run's last update, so it
+includes the time spent queued and waits for every job, macOS included.
+The three Markdown-only runs, which built nothing, are left out.
 
 | Event | n | Median min | p90 min | Max min | Target | Before (#305, n = 28) |
 | --- | --- | --- | --- | --- | --- | --- |
 | pull request (fast lane) | 80 | 4.0 | 8.8 | 17.1 | under 3 | 27.6 median, 31.2 p90 |
 | merge queue (full lane) | 106 | 18.5 | 25.3 | 31.1 | under 8 | none (no merge queue) |
 | push to main (full lane) | 26 | 26.3 | 35.9 | 41.5 | none | 27.6 (same as a pull request) |
+
+The merge queue doesn't wait for macOS: it requires Linux, Workflows and
+Content ([integration](../../development-process.md#integration)). So the
+time a pull request waits in the queue is the merge-queue gate, run
+creation to the end of the last required check, not workflow completion.
+The rows above hold only the Linux and macOS jobs, so from them the gate
+is known only from below: run creation to the end of the Linux job.
+Workflows and Content weren't recorded, so whether either ends later is
+not known.
+
+| Event | n | Median min | p90 min | Max min | Target |
+| --- | --- | --- | --- | --- | --- |
+| merge queue, run created to Linux job end | 106 | 9.6 | 11.5 | 14.8 | under 8 |
+
+`scripts/measure-ci.sh` now reports the whole gate in its "Merge-queue
+gate" table: it also reads the Workflows job and the Content workflow's
+run on the same commit, and counts apart any run missing one of them. It
+hasn't been run on this window yet.
 
 Job time is job start to job end. Cache state comes from the job log, so it
 is known only for the 20 newest pull-request runs and 20 newest
@@ -61,10 +79,11 @@ minutes, run one after the other, on every pull request push (#305).
   crates and running the fast tests. The gap between the 3.7-minute job and
   the 4.0-minute median, and the long p90 tail, is time spent waiting for a
   runner.
-- **The full lane (#308).** The merge-queue median is 18.5 minutes against
-  a target of under 8. macOS sets it: a median job of 18.3 minutes, against
-  9.5 on Linux. The two jobs now start together (#305), so the merge queue
-  waits only for the slower one.
+- **The full lane (#308).** The merge-queue gate is at least 9.6 minutes
+  at the median against a target of under 8: the Linux job alone takes a
+  median of 9.5 minutes. Workflow completion, 18.5 minutes at the median, is set by
+  macOS (median job 18.3 minutes), but the queue doesn't wait for macOS,
+  so that figure is not merge latency.
 - **The cache (#309).** On Linux, 21 of the 26 jobs read with an exact hit
   compiled no dependency crate, including every run created after 11:13 UTC.
   That meets the acceptance criterion. The other 5 were runs created
@@ -86,17 +105,20 @@ minutes, run one after the other, on every pull request push (#305).
     or nightly; `ci-fast` in `.config/nextest.toml` selects them.
 
   Queueing can't be fixed from the workflow.
-- **Full lane, about 10 minutes over.** macOS is the critical path. The
-  options:
+- **Merge-queue gate, at least 1.6 minutes over.** Measure the whole gate
+  with `scripts/measure-ci.sh` first, to find which required check ends
+  last. While that is Linux, only a shorter Linux job shortens the gate:
+  - Cut the full suite's test time (#308 lists `tests/graph.rs` at 266 s).
+  - A larger Linux runner through `LINUX_RUNNER`, which is billed.
+- **Workflow completion on the full lane, about 10 minutes over 8.** macOS
+  sets it, but it doesn't hold up a merge. It does delay the macOS result
+  on `main`. The options:
   - First, make main's macOS job save an entry the merge queue finds under
     its own key. That would remove the 9 recompiled crates and, judging by
     Linux, about 1 minute.
   - A larger macOS runner through `MACOS_RUNNER`, which is billed.
   - Run on macOS only the tests that depend on the platform, and leave the
     rest to Linux.
-
-  Even the Linux job, at 9.5 minutes, is over 8, so the full suite's test
-  time needs cutting as well (#308 lists `tests/graph.rs` at 266 s).
 - **Cache.** Linux meets the criterion. macOS needs the save problem above
   found and fixed. Start with the save step's log on a push to main, and
   check whether `scripts/ci-cache-size.sh` stops the save.

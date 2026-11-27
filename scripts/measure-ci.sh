@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Measure the Rust checks (check.yml) from GitHub's run data: the time from
-# push to result per event, the Linux and macOS job times, whether each job
+# Measure the Rust checks (check.yml) from GitHub's run data: workflow
+# completion per event, the merge-queue gate, the Linux and macOS job times, whether each job
 # found its build cache (cold, a fallback entry, or its exact key), and how
 # many dependency crates it compiled. Read-only: it calls `gh api` and
 # changes nothing on GitHub.
@@ -14,8 +14,11 @@
 #
 # Only completed first attempts that succeeded or failed count; cancelled and
 # rerun attempts are left out, and counted. A run that built nothing (a
-# Markdown-only change) is counted apart from the lane medians. "Push to
-# result" is the run's creation to its last update, so it includes queueing.
+# Markdown-only change) is counted apart from the lane medians. "Workflow
+# completion" is the run's creation to its last update, so it includes
+# queueing and the macOS job. The merge queue doesn't wait for macOS, so the
+# "merge-queue gate" ends instead when the last required check (Linux,
+# Workflows, and Content from its own workflow on the same commit) ends.
 # Needs gh (signed in), jq and cargo (for the workspace's crate names).
 set -euo pipefail
 
@@ -46,11 +49,17 @@ jq '[.[] | select(.status == "completed" and .run_attempt == 1
                   and (.event == "pull_request" or .event == "merge_group" or .event == "push"))]' \
   "$TMP/all.json" > "$TMP/runs.json"
 
+# The Content workflow's merge-queue runs: Content is a required check that
+# runs in its own workflow, matched to a Rust checks run by commit.
+gh api --paginate "repos/$REPO/actions/workflows/content.yml/runs?per_page=100&created=$created" \
+  --jq '.workflow_runs[]' | jq -s '[.[] | select(.status == "completed" and .run_attempt == 1
+                                         and .event == "merge_group")]' > "$TMP/content.json"
+
 # One row per job: the run's facts and the job's own times and steps.
 : > "$TMP/jobs.jsonl"
 for id in $(jq -r '.[].id' "$TMP/runs.json"); do
   gh api "repos/$REPO/actions/runs/$id/attempts/1/jobs?per_page=50" --jq '.jobs[]
-    | select(.name == "Linux" or .name == "macOS")
+    | select(.name == "Linux" or .name == "macOS" or .name == "Workflows")
     | {run: .run_id, job: .id, name, conclusion, started_at, completed_at,
        built: ([.steps[] | select((.name | startswith("Check formatting")) and (.conclusion == "success" or .conclusion == "failure"))] | length > 0),
        check_s: ([.steps[] | select(.name | startswith("Check formatting")) | select(.completed_at != null and .started_at != null)
@@ -104,7 +113,7 @@ if [ "$LOGS" -gt 0 ]; then
   done
 fi
 
-jq -n --slurpfile runs "$TMP/runs.json" --slurpfile all "$TMP/all.json" \
+jq -n --slurpfile runs "$TMP/runs.json" --slurpfile all "$TMP/all.json" --slurpfile content "$TMP/content.json" \
   --slurpfile jobs <(jq -s . "$TMP/jobs.jsonl") --slurpfile facts <(jq -s . "$TMP/facts.jsonl") \
   --arg since "${SINCE:-the first run}" --arg until "${UNTIL:-now}" --arg repo "$REPO" -r '
   def t: fromdateiso8601;
@@ -114,8 +123,15 @@ jq -n --slurpfile runs "$TMP/runs.json" --slurpfile all "$TMP/all.json" \
   def m: if . == null then "–" else (. / 60 * 10 | round / 10 | tostring) end;
   ($jobs[0]) as $J | ($facts[0] | map({key: (.job | tostring), value: .}) | from_entries) as $F
   | ($J | group_by(.run) | map({key: (.[0].run | tostring), value: (any(.[]; .built))}) | from_entries) as $built
+  | ($content[0] | group_by(.head_sha) | map({key: .[0].head_sha, value: ([.[].updated_at | t] | min)}) | from_entries) as $C
+  | ($J | group_by(.run) | map({key: (.[0].run | tostring),
+       value: (. as $j | ["Linux", "Workflows"] | map(. as $n | [$j[] | select(.name == $n and .completed_at) | .completed_at | t] | first))})
+     | from_entries) as $Req
   | ($runs[0] | map(. + {push_s: ((.updated_at | t) - (.created_at | t)),
-                         built: ($built[.id | tostring] // false)})) as $R
+                         built: ($built[.id | tostring] // false),
+                         gate_s: ((.created_at | t) as $c
+                                  | ($Req[.id | tostring] // [null]) + [$C[.head_sha]]
+                                  | if any(.[]; . == null) then null else max - $c end)})) as $R
   | ($J | map(. + {job_s: (if .started_at and .completed_at then (.completed_at | t) - (.started_at | t) else null end),
                    event: (.run as $r | $R[] | select(.id == $r) | .event)}
               + ($F[.job | tostring] // {}))) as $JJ
@@ -123,13 +139,20 @@ jq -n --slurpfile runs "$TMP/runs.json" --slurpfile all "$TMP/all.json" \
     "",
     "Completed first attempts that passed or failed: \($R | length) of \($all[0] | length) runs (the rest were cancelled, reruns or other events).",
     "",
-    "## Push to result (run created to run updated, queueing included), runs that built",
+    "## Workflow completion (run created to run updated, queueing and macOS included), runs that built",
     "",
     "| Event | n | Median min | p90 min | Max min | Markdown-only runs left out |",
     "| --- | --- | --- | --- | --- | --- |",
     ( ["pull_request", "merge_group", "push"][] as $e
       | [$R[] | select(.event == $e and .built) | .push_s] as $s
       | "| \($e) | \($s | length) | \($s | median | m) | \($s | p90 | m) | \($s | max | m) | \([$R[] | select(.event == $e and (.built | not))] | length) |" ),
+    "",
+    "## Merge-queue gate (run created to the last required check: Linux, Workflows, Content), runs that built",
+    "",
+    "| Event | n | Median min | p90 min | Max min | Runs missing a required check result |",
+    "| --- | --- | --- | --- | --- | --- |",
+    ( [$R[] | select(.event == "merge_group" and .built)] as $q | [$q[] | .gate_s | select(. != null)] as $s
+      | "| merge_group | \($s | length) | \($s | median | m) | \($s | p90 | m) | \($s | max | m) | \([$q[] | select(.gate_s == null)] | length) |" ),
     "",
     "## Job time (job started to job completed), jobs that built",
     "",
@@ -150,6 +173,9 @@ if [ -n "$ROWS" ]; then
   jq -r '(["run", "event", "conclusion", "created_at", "run_started_at", "updated_at", "head_sha"] | @tsv),
          (.[] | [.id, .event, .conclusion, .created_at, .run_started_at, .updated_at, .head_sha] | @tsv)' \
     "$TMP/runs.json" > "$ROWS/runs.tsv"
+  jq -r '(["run", "event", "conclusion", "created_at", "updated_at", "head_sha"] | @tsv),
+         (.[] | [.id, .event, .conclusion, .created_at, .updated_at, .head_sha] | @tsv)' \
+    "$TMP/content.json" > "$ROWS/content.tsv"
   jq -rs --slurpfile facts <(jq -s . "$TMP/facts.jsonl") '
     ($facts[0] | map({key: (.job | tostring), value: .}) | from_entries) as $F
     | (["run", "job", "name", "conclusion", "built", "started_at", "completed_at", "check_step_s", "cache", "deps_compiled", "own_compiled"] | @tsv),
