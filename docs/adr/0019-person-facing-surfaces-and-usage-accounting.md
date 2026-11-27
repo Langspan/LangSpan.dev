@@ -369,11 +369,18 @@ or fill in what it left open:
   each generation's `clock_anchored` event, as `today` places them. The
   point is a sequence number, so a daemon restart or a reboot in the gap
   does not move it. A point older than the events read, or events removed
-  by retention, set `truncated`; nothing is guessed.
+  by retention, set `truncated`; nothing is guessed. When retention removed
+  the owner's last work and every later event was read, the gap is measured
+  from the retention cutoff and the account is given as `truncated`, not
+  left out.
 - *Headless work does not end a gap.* A `claude -p` session is an agent left
   running, not the owner at work; what it did is reported. A hook run's own
   `session_seen` and liveness are not work either. Codex gives no headless
-  signal, so `codex exec` counts as interactive.
+  signal, so `codex exec` counts as interactive. Each piece of work has the
+  mode the session was registered with when it was done: a headless session
+  resumed at the terminal does not make its earlier work the owner's, nor
+  the reverse. Work done before a registration that is not among the events
+  read has an unknown mode and neither ends nor starts a gap.
 - *The setting.* The gap is `LANGSPAN_AWAY_AFTER_MS` in the environment of
   the hook, the CLI or the MCP adapter, 1 ms to 30 days, two hours when unset. A value outside
   that range is refused (`invalid_away` from the core, a message naming the

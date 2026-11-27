@@ -10,7 +10,9 @@
 //! are placed on the wall clock through each generation's `ClockAnchored`
 //! event, as `langspan today` places them. Headless sessions (`claude -p`)
 //! are agents left running, not the owner at work, so their work does not
-//! end a gap; what they did is reported.
+//! end a gap; what they did is reported. A session's mode is the one it
+//! was registered with when it did the work, so a session resumed at the
+//! terminal does not make its headless work the owner's.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -18,8 +20,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::today::{Placement, event_facts, event_workspace};
 use crate::{
-    AttemptResult, CheckResult, ClockAnchor, Event, Recipient, RecordedEvent, State, is_false,
-    is_zero,
+    AttemptResult, CheckResult, ClockAnchor, Event, Recipient, RecordedEvent, Session, State,
+    is_false, is_zero,
 };
 
 /// The most events one answer reads, newest first. A point before them is
@@ -136,6 +138,9 @@ pub struct SinceQuery<'a> {
     pub anchor: Option<ClockAnchor>,
     /// The log holds events older than the first one given.
     pub earlier: bool,
+    /// The wall time before which retention removed events, when it removed
+    /// any. Every event after it is kept.
+    pub retained_from_ms: Option<u64>,
     /// Wall-clock milliseconds since the Unix epoch, now.
     pub wall_now_ms: u64,
 }
@@ -146,13 +151,58 @@ pub struct SinceQuery<'a> {
 /// A hook run's `SessionSeen` is not work: the daemon records one for the
 /// starting session's own start, which would end every gap before it was
 /// asked about. Liveness is not work either.
-fn work_time(state: &State, workspace_id: &str, event: &Event) -> Option<(u64, u64)> {
+fn work_time(modes: &Modes<'_>, workspace_id: &str, event: &Event) -> Option<(u64, u64)> {
     let (session_id, time) = event_facts(event);
-    state
-        .sessions
-        .get(session_id?)
+    modes
+        .at(session_id?)
         .filter(|session| session.workspace_id == workspace_id && !session.headless)
         .and(time)
+}
+
+/// Each session's registration as of the event last read: a session
+/// started headless and resumed at the terminal (or the reverse) registers
+/// again, and its earlier work keeps the mode it was done in.
+struct Modes<'a> {
+    state: &'a State,
+    /// Sessions that register among the events read.
+    registered: BTreeSet<&'a str>,
+    /// Their newest registration read so far.
+    current: BTreeMap<&'a str, &'a Session>,
+}
+
+impl<'a> Modes<'a> {
+    fn new(state: &'a State, events: &'a [RecordedEvent]) -> Self {
+        let registered = events
+            .iter()
+            .filter_map(|recorded| match &recorded.event {
+                Event::SessionRegistered { session } => Some(session.session_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        Self {
+            state,
+            registered,
+            current: BTreeMap::new(),
+        }
+    }
+
+    fn read(&mut self, event: &'a Event) {
+        if let Event::SessionRegistered { session } = event {
+            self.current.insert(&session.session_id, session);
+        }
+    }
+
+    /// The registration in force: the newest read, or the current one for
+    /// a session that never registers among the events. `None` before the
+    /// first registration read of a session registered earlier too, whose
+    /// mode then is unknown.
+    fn at(&self, session_id: &str) -> Option<&'a Session> {
+        match self.current.get(session_id) {
+            Some(session) => Some(session),
+            None if !self.registered.contains(session_id) => self.state.sessions.get(session_id),
+            None => None,
+        }
+    }
 }
 
 /// Where the answer starts, how long the gap was and whether it lasts.
@@ -166,14 +216,17 @@ struct Mark {
 
 fn away_mark(state: &State, query: &SinceQuery<'_>, after_ms: u64) -> Option<Mark> {
     let mut placement = Placement::new(query.anchor);
+    let mut modes = Modes::new(state, query.events);
     // Each timed piece of interactive work: its sequence number and wall
     // time. An event without a time of its own inherits an older one, which
-    // would invent a gap, so it neither starts nor ends one.
+    // would invent a gap, so it neither starts nor ends one; nor does work
+    // of an unknown mode.
     let mut work: Vec<(u64, u64)> = Vec::new();
     for recorded in query.events {
         let event = &recorded.event;
         placement.place(event);
-        if let Some(wall) = work_time(state, query.workspace_id, event)
+        modes.read(event);
+        if let Some(wall) = work_time(&modes, query.workspace_id, event)
             .and_then(|(at_ms, generation)| placement.wall_of(at_ms, generation))
         {
             work.push((recorded.seq, wall));
@@ -196,14 +249,26 @@ fn away_mark(state: &State, query: &SinceQuery<'_>, after_ms: u64) -> Option<Mar
             unread: false,
         });
     }
-    // No interactive work among the events read, and the oldest of them
-    // with a time of its own (an anchor included) is from before the gap:
-    // the workspace is away, from a point older than what was read. An
-    // event before that one only inherits an older time, which proves no
-    // gap.
-    let oldest = placement.covered_from(None)?;
+    // No interactive work among the events read, yet some may be older
+    // than them: the workspace is away from a point older than what was
+    // read, when that point is before the gap. With older events unread
+    // (`earlier`), it is before the oldest event read with a time of its
+    // own (an anchor included); an event before that one only inherits an
+    // older time, which proves no gap. With only what retention removed
+    // unread, every event after its cutoff was read, so it is before the
+    // cutoff.
+    if !work.is_empty() {
+        return None;
+    }
+    let oldest = if query.earlier {
+        placement
+            .covered_from(None)
+            .map(|first| first.max(query.retained_from_ms.unwrap_or(0)))
+    } else {
+        query.retained_from_ms
+    }?;
     let gap = now.saturating_sub(oldest);
-    (work.is_empty() && query.earlier && gap >= after_ms).then(|| Mark {
+    (gap >= after_ms).then(|| Mark {
         from_seq: query
             .events
             .first()

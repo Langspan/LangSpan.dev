@@ -1506,6 +1506,7 @@ impl Store {
             events: &events,
             anchor,
             earlier,
+            retained_from_ms: retention::since_ms(&self.connection)?,
             wall_now_ms: wall_now_ms(),
         };
         Ok(langspan_core::since(&self.state, &query))

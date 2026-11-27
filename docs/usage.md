@@ -1316,7 +1316,8 @@ no interactive session has worked since; when the workspace was not away,
 `since` is absent. `truncated` means the point is older than the newest
 10,000 events, or retention removed some after it: the lists hold only what
 was read, and `langspan events --after SEQ` pages the rest. Sessions run
-headless (`claude -p`) do not end a gap; what they did is listed.
+headless (`claude -p`) do not end a gap; what they did is listed. A session
+resumed at the terminal counts as interactive only from its resume on.
 
 `LANGSPAN_AWAY_AFTER_MS` sets the gap in milliseconds, from 1 to 30 days'
 worth; unset, it is two hours. MCP `langspan_recap` takes `since_away`

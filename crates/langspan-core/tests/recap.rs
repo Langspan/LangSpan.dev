@@ -1021,6 +1021,8 @@ mod since_away {
         events: Vec<RecordedEvent>,
         /// The daemon's clock and the wall clock it was anchored to.
         clock: (u64, u64),
+        /// The store's retention cutoff, when retention removed events.
+        retained_from_ms: Option<u64>,
     }
 
     impl Log {
@@ -1062,6 +1064,7 @@ mod since_away {
                 state: State::default(),
                 events: Vec::new(),
                 clock: (0, 0),
+                retained_from_ms: None,
             };
             log.boot(1, START, EVENING);
             log.run(
@@ -1176,6 +1179,20 @@ mod since_away {
             (log, mark)
         }
 
+        fn register(&mut self, session: &str, headless: bool, wall_ms: u64) {
+            let outcome = self.run(
+                &format!("s-{session}-{headless}-{wall_ms}"),
+                Command::SessionRegister {
+                    session_id: session.into(),
+                    workspace_id: "work".into(),
+                    parent: None,
+                    headless,
+                },
+                wall_ms,
+            );
+            assert!(matches!(outcome, Outcome::Session { .. }), "{outcome:?}");
+        }
+
         fn since_from(&self, from: SinceFrom, earlier: bool, wall_now_ms: u64) -> Option<Since> {
             since(
                 &self.state,
@@ -1195,6 +1212,7 @@ mod since_away {
                         wall_ms: EVENING,
                     }),
                     earlier,
+                    retained_from_ms: self.retained_from_ms,
                     wall_now_ms,
                 },
             )
@@ -1385,6 +1403,112 @@ mod since_away {
             after_ms: AWAY_AFTER_MS,
         };
         assert_eq!(log.since_from(away, true, now), None);
+        // An old retention cutoff does not help: the unread events after
+        // it may hold the owner's work.
+        log.retained_from_ms = Some(EVENING);
+        assert_eq!(log.since_from(away, true, now), None);
+    }
+
+    /// A session started headless and resumed at the terminal: its work
+    /// before the resume was nobody's at the terminal, so it does not end
+    /// the gap, while its work after the resume does.
+    #[test]
+    fn a_headless_session_resumed_interactively_keeps_its_earlier_work_headless() {
+        let (mut log, mark) = Log::overnight();
+        log.register("claude-code.carol", true, EVENING + HOUR);
+        log.prompted("claude-code.carol", EVENING + 3 * HOUR);
+        log.register("claude-code.carol", false, EVENING + 3 * HOUR + 20 * 60_000);
+        let since = log.away(EVENING + 3 * HOUR + 30 * 60_000).unwrap();
+        assert_eq!(since.from_seq, mark, "{since:?}");
+        assert!(since.ongoing, "{since:?}");
+        assert_eq!(since.away_ms, Some(3 * HOUR + 30 * 60_000));
+        // Work after the resume is the owner's: the gap has ended.
+        log.prompted("claude-code.carol", EVENING + 3 * HOUR + 25 * 60_000);
+        let since = log.away(EVENING + 3 * HOUR + 30 * 60_000).unwrap();
+        assert_eq!(since.from_seq, mark);
+        assert!(!since.ongoing, "{since:?}");
+    }
+
+    /// The reverse: an interactive session continued headless keeps its
+    /// interactive work, which ended the gap; what it does headless after
+    /// that does not end a later one.
+    #[test]
+    fn an_interactive_session_continued_headless_keeps_its_earlier_work_interactive() {
+        let (mut log, mark) = Log::overnight();
+        log.prompted("claude-code.alice", EVENING + 3 * HOUR);
+        let back = log.events.last().unwrap().seq;
+        log.register("claude-code.alice", true, EVENING + 3 * HOUR + 10 * 60_000);
+        let since = log.away(EVENING + 3 * HOUR + 30 * 60_000).unwrap();
+        assert_eq!(since.from_seq, mark, "{since:?}");
+        assert!(!since.ongoing, "{since:?}");
+        assert_eq!(since.away_ms, Some(3 * HOUR));
+        log.prompted("claude-code.alice", EVENING + 5 * HOUR);
+        let since = log.away(EVENING + 6 * HOUR).unwrap();
+        assert_eq!(since.from_seq, back, "{since:?}");
+        assert!(since.ongoing, "{since:?}");
+    }
+
+    /// A session registered before the events read registers again among
+    /// them in another mode: its work before that is of an unknown mode,
+    /// so it neither ends nor starts a gap.
+    #[test]
+    fn work_of_an_unknown_mode_neither_ends_nor_starts_a_gap() {
+        let (mut log, mark) = Log::overnight();
+        log.register("claude-code.carol", true, EVENING + HOUR);
+        log.prompted("claude-code.carol", EVENING + 3 * HOUR);
+        log.register("claude-code.carol", false, EVENING + 3 * HOUR + 20 * 60_000);
+        // Read from alice's prompt on: carol's first registration is not.
+        let first = log
+            .events
+            .iter()
+            .position(|recorded| recorded.seq == mark)
+            .unwrap();
+        log.events.drain(..first);
+        let away = SinceFrom::Away {
+            after_ms: AWAY_AFTER_MS,
+        };
+        let since = log
+            .since_from(away, true, EVENING + 3 * HOUR + 30 * 60_000)
+            .unwrap();
+        assert_eq!(since.from_seq, mark, "{since:?}");
+        assert!(since.ongoing, "{since:?}");
+    }
+
+    /// Retention removed the owner's last work and every event after the
+    /// cutoff was read (`earlier` is false): the workspace is away from
+    /// before the cutoff, reported as truncated rather than left out.
+    #[test]
+    fn owner_work_removed_by_retention_still_gives_a_truncated_account() {
+        let (mut log, mark) = Log::overnight();
+        let first = log
+            .events
+            .iter()
+            .position(|recorded| recorded.seq == mark)
+            .unwrap();
+        log.events.drain(..=first);
+        let now = EVENING + 5 * HOUR;
+        let away = SinceFrom::Away {
+            after_ms: AWAY_AFTER_MS,
+        };
+        // Nothing removed and no interactive work at all: no gap.
+        assert_eq!(log.since_from(away, false, now), None);
+        let cutoff = EVENING + 30 * 60_000;
+        log.retained_from_ms = Some(cutoff);
+        let since = log.since_from(away, false, now).unwrap();
+        assert!(since.truncated && since.ongoing, "{since:?}");
+        // Measured from the cutoff: the owner's last work is older.
+        assert_eq!(since.away_ms, Some(now - cutoff));
+        assert_eq!(since.landings.len(), 1, "{since:?}");
+        assert_eq!(since.checks.failed, 1);
+        // A cutoff more recent than the gap proves none.
+        log.retained_from_ms = Some(now - HOUR);
+        assert_eq!(log.since_from(away, false, now), None);
+        // Retention and the read limit together: the later of the cutoff
+        // and the oldest timed event read.
+        log.retained_from_ms = Some(cutoff);
+        let both = log.since_from(away, true, now).unwrap();
+        assert_eq!(both.away_ms, Some(now - (EVENING + HOUR)), "{both:?}");
+        assert!(both.truncated);
     }
 
     #[test]

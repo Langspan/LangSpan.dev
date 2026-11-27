@@ -1895,3 +1895,50 @@ fn a_compaction_keeps_the_trails_of_ended_sessions() {
     let store = wall.open(&path);
     assert_eq!(store.state().trails, before.trails, "trails were lost");
 }
+
+/// Recap "since away" after retention removed the owner's last work: a
+/// headless agent kept working, and the account is given, truncated, not
+/// left out because nothing older is still in the log (roadmap C10).
+#[test]
+fn since_away_after_retention_removed_the_owners_last_work_is_truncated_not_omitted() {
+    let directory = Directory::new();
+    let path = directory.file("state.sqlite3");
+    let wall = Wall::at(START_MS);
+    let mut store = wall.open(&path);
+    History::setup(&mut store);
+    let prompt = |session: &str| Command::SessionPrompt {
+        session_id: session.into(),
+        summary: "work on the store".into(),
+        line_digests: Vec::new(),
+    };
+    run(&mut store, "alice-prompt", prompt("alice"), 1000);
+    run(
+        &mut store,
+        "register-agent",
+        Command::SessionRegister {
+            session_id: "agent".into(),
+            workspace_id: "w".into(),
+            parent: None,
+            headless: true,
+        },
+        2000,
+    );
+    wall.set(START_MS + 100 * DAY_MS);
+    let applied = report(store.compact(30, true).unwrap());
+    assert!(applied.events > 0, "{applied:?}");
+    drop(store);
+    let mut store = wall.open(&path);
+    run(&mut store, "agent-prompt", prompt("agent"), 1000);
+    let recap = Command::Recap {
+        workspace_id: "w".into(),
+        tag: None,
+        since: Some(langspan_core::SinceFrom::Away {
+            after_ms: langspan_core::AWAY_AFTER_MS,
+        }),
+    };
+    let Outcome::Recap { recap } = run(&mut store, "recap", recap, 2000).outcome else {
+        panic!("no recap");
+    };
+    let since = recap.since.expect("the account is left out");
+    assert!(since.truncated && since.ongoing, "{since:?}");
+}
