@@ -64,6 +64,11 @@ audit_flags=$(python3 -I -B scripts/advisory-ignores.py --audit-flags)
 cargo audit --deny warnings $audit_flags
 cargo machete
 cargo clippy --workspace --all-targets --locked -- -D warnings
+# Code outside tests returns an error instead of panicking (issue #330);
+# tests may still unwrap, so this pass leaves them out.
+cargo clippy --workspace --lib --bins --locked -- -D warnings \
+  -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic \
+  -D clippy::unreachable -D clippy::unimplemented
 # A broken intra-doc link or any other rustdoc warning fails.
 RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --locked
 # The suite under cargo-nextest, with HOME at a read-only home holding a

@@ -8,7 +8,7 @@ Run from the repository root with the pinned Rust toolchain, a C compiler for bu
 - Build: `cargo build --workspace --release --locked`
 - Whole test suite: `cargo nextest run --workspace --locked`, then the doc tests, which nextest doesn't run: `cargo test --doc --workspace --locked` (install: `cargo install --locked cargo-nextest --version 0.9.152`; profiles in `.config/nextest.toml`)
 - One critical test: `cargo nextest run -p langspan-core all_or_none_admission_does_not_reserve_nonconflicting_subset`
-- Lint: `cargo clippy --workspace --all-targets --locked -- -D warnings`
+- Lint: `cargo clippy --workspace --all-targets --locked -- -D warnings`, then code outside tests, which must return an error instead of panicking: `cargo clippy --workspace --lib --bins --locked -- -D warnings -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic -D clippy::unreachable -D clippy::unimplemented`
 - Docs: `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --locked`
 - Format: `cargo fmt --all` (check: `cargo fmt --all -- --check`)
 - Dependency policy (RustSec advisories, licences, bans, sources; `deny.toml`): `cargo deny --locked check` (install: `cargo install --locked cargo-deny --version 0.22.1`)
