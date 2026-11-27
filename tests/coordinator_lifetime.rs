@@ -264,7 +264,9 @@ fn supervised_hangs_with_a_coordinator_running() {
     let idle = std::env::var(IDLE).ok().and_then(|ms| ms.parse().ok());
     let daemon = start(&root, idle);
     fs::write(root.join("pid"), daemon.id().to_string()).unwrap();
-    std::thread::sleep(Duration::from_secs(600));
+    loop {
+        std::thread::park();
+    }
 }
 
 /// A test killed on a timeout runs no `Drop`; its coordinator, a debug
@@ -302,11 +304,11 @@ fn a_killed_test_leaves_a_coordinator_that_ends_once_idle() {
 fn a_test_coordinator_that_keeps_being_called_does_not_stop_for_idleness() {
     let root = Root::new();
     let mut daemon = start(&root.0, Some(1000));
-    let until = Instant::now() + Duration::from_secs(3);
-    while Instant::now() < until {
-        assert!(answers(&root.0.join("state")), "the coordinator stopped");
-        std::thread::sleep(Duration::from_millis(200));
-    }
+    support::holds_for(
+        "the coordinator answers while it keeps being called",
+        Duration::from_secs(3),
+        || answers(&root.0.join("state")),
+    );
     assert!(daemon.child().try_wait().unwrap().is_none());
     // Then left alone, it stops.
     let log = exits_within(&mut daemon, &root.0, Duration::from_secs(10));
@@ -319,8 +321,11 @@ fn a_test_coordinator_that_keeps_being_called_does_not_stop_for_idleness() {
 fn a_coordinator_with_the_idle_exit_turned_off_keeps_running() {
     let root = Root::new();
     let mut daemon = start(&root.0, Some(0));
-    std::thread::sleep(Duration::from_secs(2));
-    assert!(daemon.child().try_wait().unwrap().is_none());
+    support::holds_for(
+        "the coordinator keeps running with the idle exit off",
+        Duration::from_secs(2),
+        || daemon.child().try_wait().unwrap().is_none(),
+    );
     assert!(answers(&root.0.join("state")));
 }
 
@@ -418,11 +423,12 @@ fn doctor_reports_a_coordinator_whose_listen_backlog_is_full() {
         }
         std::thread::park();
     });
-    let mut last = u64::MAX;
-    while queued.load(Ordering::Relaxed) != last {
-        last = queued.load(Ordering::Relaxed);
-        std::thread::sleep(Duration::from_millis(200));
-    }
+    support::settles(
+        "the count of queued connections",
+        Duration::from_millis(200),
+        Duration::from_secs(30),
+        || queued.load(Ordering::Relaxed),
+    );
     let stdout = doctor_within(&state_dir, &home, Duration::from_secs(60));
     assert!(stdout.contains("Coordinator"), "{stdout}");
 }

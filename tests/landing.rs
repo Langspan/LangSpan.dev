@@ -11,6 +11,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod support;
+
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 fn git(root: &Path, args: &[&str]) -> String {
@@ -512,10 +514,10 @@ fn a_timed_out_check_leaves_nothing_running() {
         &script,
     ]);
     assert_eq!(code, 5, "{text}");
-    std::thread::sleep(Duration::from_secs(3));
-    assert!(
-        !marker.exists(),
-        "a descendant of the check ran after its time limit"
+    support::holds_for(
+        "no descendant of the check runs after its time limit",
+        Duration::from_secs(3),
+        || !marker.exists(),
     );
 }
 

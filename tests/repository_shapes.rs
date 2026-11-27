@@ -671,11 +671,17 @@ fn a_redelivered_merge_report_keeps_the_merges_own_window() {
     fs::rename(&aside, &socket).unwrap();
     assert_eq!(first.coverage, "unavailable", "{first:?}");
     let ran = started.elapsed();
+    let reported = Instant::now();
 
     // Redelivered after longer than the whole run took, so a window placed
     // back from the redelivery's arrival would start after the scan saw
     // the merge.
-    std::thread::sleep(ran + Duration::from_secs(2));
+    let later = ran + Duration::from_secs(2);
+    support::wait_until(
+        "the redelivery to be later than the run's length plus 2 s",
+        later + Duration::from_secs(5),
+        || reported.elapsed() >= later,
+    );
     let post = w.shell_hook(ALICE, "alice-merge", command, "PostToolUse");
     assert!(!post.coverage.starts_with("unavailable"), "{post:?}");
     let own = post.context.unwrap_or_default();

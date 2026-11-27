@@ -276,7 +276,15 @@ fn body(call: &[String]) -> &str {
 fn with_notices_off_no_notifier_is_started() {
     let fixture = Fixture::new(None);
     fixture.refuse(&[ALICE, CAROL]);
-    std::thread::sleep(Duration::from_millis(1500));
+    support::holds_for(
+        "no notifier is started and no notice sent or dropped",
+        Duration::from_millis(1500),
+        || {
+            fixture.calls().is_empty()
+                && fixture.logged("notice_sent").is_empty()
+                && fixture.logged("notice_dropped").is_empty()
+        },
+    );
     assert_eq!(fixture.calls(), Vec::<Vec<String>>::new());
     assert!(fixture.logged("notice_sent").is_empty());
     assert!(fixture.logged("notice_dropped").is_empty());
@@ -316,8 +324,11 @@ fn a_refusal_starts_one_notifier_and_a_second_within_five_minutes_none() {
         dropped[0],
         json!({"level":"info","event":"notice_dropped","kind":"refusal","reason":"kind_limit"})
     );
-    std::thread::sleep(Duration::from_millis(300));
-    assert_eq!(fixture.calls().len(), 1);
+    support::holds_for(
+        "the dropped notice starts no second notifier",
+        Duration::from_millis(300),
+        || fixture.calls().len() == 1,
+    );
 
     // Off again: nothing more, not even a drop.
     assert!(fixture.notify(&["off"]).contains("notices: off"));
@@ -433,8 +444,11 @@ fn a_failed_automatic_check_and_a_waiting_handoff_each_get_a_notice() {
         "{calls:?}"
     );
     // Told once, however long it then waits.
-    std::thread::sleep(Duration::from_millis(2500));
-    assert_eq!(fixture.calls().len(), 1);
+    support::holds_for(
+        "the waiting handoff is told once",
+        Duration::from_millis(2500),
+        || fixture.calls().len() == 1,
+    );
 
     // An automatic check's failure, recorded as the check worker records it.
     let record = |id: &str, result: CheckResult| {
@@ -483,8 +497,11 @@ fn a_failed_automatic_check_and_a_waiting_handoff_each_get_a_notice() {
     assert!(!calls.iter().flatten().any(|arg| arg.contains("assertion")));
     // A retry of the same record is answered from its receipt: no notice.
     record("check-fail", CheckResult::Failed { exit_code: 101 });
-    std::thread::sleep(Duration::from_millis(1500));
-    assert_eq!(fixture.calls().len(), 2);
+    support::holds_for(
+        "a retried check record sends no notice",
+        Duration::from_millis(1500),
+        || fixture.calls().len() == 2,
+    );
 }
 
 #[test]
