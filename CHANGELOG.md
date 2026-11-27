@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.8.0](https://github.com/Langspan/LangSpan.dev/compare/v0.7.0...v0.8.0) (2026-11-27)
+
+
+### Features
+
+* answer which peer worktrees' uncommitted files call a renamed name ([#476](https://github.com/Langspan/LangSpan.dev/issues/476)) ([42972cb](https://github.com/Langspan/LangSpan.dev/commit/42972cbee944b725103d933003140dee9598398a))
+* hold a rename once when other worktrees have uncommitted callers ([#482](https://github.com/Langspan/LangSpan.dev/issues/482)) ([7be1cf2](https://github.com/Langspan/LangSpan.dev/commit/7be1cf2b28c10e2be6d2e2f46bcbf8009086ab20))
+* ratchet the count of index and slice expressions in production code ([#446](https://github.com/Langspan/LangSpan.dev/issues/446)) ([83f253c](https://github.com/Langspan/LangSpan.dev/commit/83f253c1d44b7a51f547ce0f952abda6a1b75cad))
+* report stale-name writes and time to the last stale caller fixed ([#213](https://github.com/Langspan/LangSpan.dev/issues/213)) ([#497](https://github.com/Langspan/LangSpan.dev/issues/497)) ([65b660c](https://github.com/Langspan/LangSpan.dev/commit/65b660c99b5dd4bf4b7a6861ccbfb57a7ada236a))
+
+
+### Bug fixes
+
+* count a between-step notice in notice_before_write ([#194](https://github.com/Langspan/LangSpan.dev/issues/194)) ([#441](https://github.com/Langspan/LangSpan.dev/issues/441)) ([35f1065](https://github.com/Langspan/LangSpan.dev/commit/35f1065944880513233c80f073db9595c23d5ff3)), closes [#262](https://github.com/Langspan/LangSpan.dev/issues/262)
+* count index and slice expressions across a comment ([#454](https://github.com/Langspan/LangSpan.dev/issues/454)) ([824cc1c](https://github.com/Langspan/LangSpan.dev/commit/824cc1c86f757d1f1483c67435461c19e4b51085))
+* keep a workspace's scan request when it was scanned moments ago ([#443](https://github.com/Langspan/LangSpan.dev/issues/443)) ([3bb8a30](https://github.com/Langspan/LangSpan.dev/commit/3bb8a30e7212476e0411bee73fd450af932de05c)), closes [#146](https://github.com/Langspan/LangSpan.dev/issues/146)
+* keep bounded redaction within a limit shorter than the mark ([#442](https://github.com/Langspan/LangSpan.dev/issues/442)) ([bece9dc](https://github.com/Langspan/LangSpan.dev/commit/bece9dc6e08a59b11835650068568f2126e57c68)), closes [#392](https://github.com/Langspan/LangSpan.dev/issues/392)
+* review follow-ups: kill timed-out check groups ([#257](https://github.com/Langspan/LangSpan.dev/issues/257)), page past unread events ([#259](https://github.com/Langspan/LangSpan.dev/issues/259)) ([#480](https://github.com/Langspan/LangSpan.dev/issues/480)) ([92e89a9](https://github.com/Langspan/LangSpan.dev/commit/92e89a9655ac0ae859a6ded3b8829e17a1df5be8))
+
 ## [0.7.0](https://github.com/Langspan/LangSpan.dev/compare/v0.6.0...v0.7.0) (2026-11-27)
 
 
