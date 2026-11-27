@@ -945,6 +945,19 @@ GitHub Actions and downloaded by users. It runs only in
 `Langspan/LangSpan.dev`; no release has been made yet, so none of the controls
 below has been observed in a real run.
 
+Each job of `release.yml` and what its token may write:
+
+| Job | Writes | Runs |
+| --- | --- | --- |
+| `release-please` | Nothing with `GITHUB_TOKEN` (`permissions: {}`); the release GitHub App's token, with `contents: write`, `pull-requests: write` and `issues: write`. | release-please, which opens the release pull request and creates the tag and a draft Release. |
+| `release-pr-checks` | `actions: write`, to start `check.yml` and `content.yml`. | `gh workflow run`, only on the expected release branch name. |
+| `notices` | Nothing (`contents: read`). | `cargo about` from the tag. |
+| `build` | Nothing (`contents: read`). | The `--locked` build from the tag and the two-developer demonstration on each built binary. |
+| `sbom-attestation` | `id-token: write` and `attestations: write`, to sign. | Nothing it compiles. |
+| `publish` | `contents: write`, `id-token: write` and `attestations: write`. | Upload of the built assets, signing, and publication of the draft. |
+| `verify-published` | Nothing (`contents: read`, `attestations: read`). | The published install script and binary, downloaded from the release. |
+| `withdraw` | `contents: write` and `issues: write`, to edit release flags and open an issue. | `gh release` and `gh issue`; no checkout. |
+
 | Threat | Control | Residual risk |
 | --- | --- | --- |
 | **Spoofing**: an archive that did not come from this repository's workflow | A build provenance attestation over every file in `SHA256SUMS`, signed with the run's OIDC identity through Sigstore, and checked with `gh attestation verify -R Langspan/LangSpan.dev`. | A user who skips the check gets no protection. macOS archives are not Developer ID signed. |
@@ -953,6 +966,9 @@ below has been observed in a real run.
 | **Repudiation** | The provenance names the workflow, commit and run; the run log is kept by GitHub. | Log retention is GitHub's. |
 | **Information disclosure**: build paths or tokens in the binary or logs | Paths remapped with `--remap-path-prefix`; checkouts do not persist credentials. The only secret is the release GitHub App's private key, held in Actions secrets and used only in the release-please job to mint a short-lived installation token for this repository, with contents, pull requests and issues write. No other step or job receives the token, and the app's OAuth client secrets are not used. | Anyone who can change `release.yml` on `main` can use the key; that already requires a reviewed merge. A leaked key mints tokens until it is revoked in the app's settings. |
 | **Elevation of privilege**: a pull request or a dependency gains write access | `permissions: {}` at the top of each workflow; each job names its own. Release jobs never run on `pull_request`. Signing permissions are only in jobs that compile nothing. | A maintainer merging the release pull request publishes whatever `main` holds. |
+| **Tampering**: `verify-published` runs a downloaded installer and binary | Before running anything, the job checks the archive and `install.sh` against `SHA256SUMS` and runs `gh attestation verify` on the archive for this repository's `release.yml`, with and without the attached bundle and for the SBOM. The install runs with `HOME` in the runner's temporary folder, and its token is read-only (`contents: read`, `attestations: read`). It takes only the demonstration script from the tag, through a sparse checkout without persisted credentials. | `install.sh` is checked only against `SHA256SUMS` from the same release, so a replaced release could run its own script; on a hosted runner that script holds only the read-only token, and the job's failure then triggers `withdraw`. |
+| **Elevation of privilege**: `withdraw` edits releases and opens issues | It runs only when `verify-published` failed, checks out nothing and runs only `gh` with a token scoped to `contents: write` and `issues: write`. The tag comes from the release-please job's output and reaches the shell through `env`, not through expression interpolation; the issue body holds only the tag, the run URL and fixed text. | The token could edit any release or issue in this repository for the job's 5 minutes; only the fixed `gh` commands in `release.yml` hold it. |
+| **Denial of service**: a false verification failure withdraws a good release | `withdraw` changes only the prerelease and latest flags; it deletes no asset or tag, and the issue links the run. | Until a maintainer restores the flags by hand ([Withdraw a release](../development-process.md#withdraw-a-release)), `releases/latest` points to the previous release. |
 
 ## The install script
 
