@@ -1,0 +1,1 @@
+{"version":10,"request_id":"remote-sent-1","replayed":false,"generation":4,"lease_valid":null,"outcome":{"type":"remote_sent","sent":[{"seq":1,"sequence":1,"published_at_ms":5000,"payload":"example"}],"more":true}}

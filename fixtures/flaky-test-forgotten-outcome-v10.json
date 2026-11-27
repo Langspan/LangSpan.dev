@@ -1,0 +1,1 @@
+{"version":10,"request_id":"flaky-test-forgotten-1","replayed":false,"generation":4,"lease_valid":null,"outcome":{"type":"flaky_test_forgotten","workspace_id":"app","test":"example","forgotten":true}}

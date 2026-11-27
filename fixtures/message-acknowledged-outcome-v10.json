@@ -1,0 +1,1 @@
+{"version":10,"request_id":"message-acknowledged-1","replayed":false,"generation":4,"lease_valid":null,"outcome":{"type":"message_acknowledged","message_id":"message-1","acknowledged":true}}

@@ -1,0 +1,1 @@
+{"version":10,"request_id":"message-retracted-1","replayed":false,"generation":4,"lease_valid":null,"outcome":{"type":"message_retracted","message_id":"message-1","withdrawn_unread":["example"],"told_to_disregard":["example"]}}

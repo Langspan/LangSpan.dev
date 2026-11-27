@@ -1,0 +1,1 @@
+{"version":10,"request_id":"compaction-1","replayed":false,"generation":4,"lease_valid":null,"outcome":{"type":"compaction","report":{"applied":true,"keep_days":1,"cutoff_ms":5000,"snapshot_seq":1,"events":1,"first_seq":1,"last_seq":1,"receipts":1,"bytes":1}}}
