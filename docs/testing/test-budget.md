@@ -84,15 +84,23 @@ The between-steps watcher waits a fixed 10 s start grace
 ### A larger input than the assertion needs (#457, #459)
 
 - `store::tests::a_report_on_a_long_history_folds_at_most_the_budget_and_says_partial`
-  builds 200,000 events where about 61,000 cross the bound: 29.2 in the
+  built 200,000 events where about 61,000 cross the bound: 29.2 in the
   fast lane, 17.2 / 16.2 in the full lane.
 - `breaks::tests::a_replacement_that_would_pass_the_parser_bound_is_not_applied`
-  makes 1,000 replacements on a 1 MiB string: 13.4 in the fast lane.
+  made 1,000 replacements on a 1 MiB string: 13.4 in the fast lane.
+- `store::tests::a_session_registered_again_elsewhere_keeps_its_earlier_read_in_its_old_workspace`
+  committed 50,000 events: 8.2 in the fast lane.
 - `graph::review_regressions::failing_head_blobs_beyond_the_pass_budget_do_not_starve_a_later_file`
-  writes about 100 MiB to Git: 6.3 / 29.4.
+  wrote about 100 MiB to Git: 6.3 / 29.4.
 - `capture_codex`, `status_history`, `hook_replies`, `retention` and
   `binary_versions` each build their state through hundreds or thousands of
   process starts or socket requests: 9 to 24 s each.
+
+#457 shrank the first four: their tests now lower the bound they cross
+(the report's window and fold budget, the indexer's files per pass) or
+size the input from it. On an Apple M-series laptop under the `ci-fast`
+profile they took 5.6, 4.4, 1.6 and 5.9 s before and each under 0.2 s
+after.
 
 ### Process starts where an in-process check would do (#458)
 

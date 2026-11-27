@@ -18,7 +18,7 @@ impl Index {
     /// content, the exported symbols that `HEAD`'s version of the file
     /// lacks or has with another signature. A file the scan found clean,
     /// or no longer lists, has none. A file parsed partially, at either
-    /// version, says nothing. Reads at most `FILES_PER_PASS` blobs from Git
+    /// version, says nothing. Reads at most `files_per_pass` blobs from Git
     /// and stops at `deadline`; the rest wait for the next pass.
     pub(super) fn update_inflight(
         &mut self,
@@ -88,7 +88,7 @@ impl Index {
         }
         let mut reads = 0;
         for (failures, (path, head_object, digest, partial, version)) in retries.order(due) {
-            if Instant::now() >= deadline || reads >= FILES_PER_PASS {
+            if Instant::now() >= deadline || reads >= self.files_per_pass {
                 break;
             }
             let inflight = if partial {
