@@ -19,6 +19,7 @@ mod recall;
 mod recent;
 mod refusal_outcome;
 mod report;
+mod since;
 mod status;
 mod status_line;
 mod today;
@@ -74,6 +75,10 @@ pub use report::{
     OTHER_HOST, REPORT_HISTORY_EVENTS, REPORT_SESSIONS, Report, ReportCounts, ReportHost,
     ReportKnown, ReportQuery, ReportSession, host_kind, known_sessions, open_intents, report,
     session_workspaces,
+};
+pub use since::{
+    AWAY_AFTER_MS, MAX_AWAY_AFTER_MS, SINCE_EVENTS, SINCE_ITEMS, Since, SinceChecks, SinceFailure,
+    SinceFrom, SinceInterface, SinceLanding, SinceMessage, SinceQuery, since,
 };
 pub use status::{
     STATUS_RECENT_MS, StatusPosition, StatusRecord, StatusResume, StatusSummary, restore_status,
@@ -2764,6 +2769,11 @@ pub struct Recap {
     /// Present when the last completed scan left something unversioned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scan_coverage: Option<ScanCoverage>,
+    /// Asked for with `since` (roadmap C10): what happened after that point.
+    /// Absent when asked for "since away" and no such gap was found.
+    /// Capability `recap_since`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<Since>,
 }
 
 pub const MAX_NOTES: usize = 64;
@@ -4271,11 +4281,15 @@ pub enum Command {
         not_installed: Vec<String>,
     },
     /// Read-only: a bounded account of one workspace. With `tag`, only
-    /// notes carrying it are listed (roadmap E1).
+    /// notes carrying it are listed (roadmap E1). With `since`, the answer
+    /// also says what happened after that point of the event log, read by
+    /// the daemon's store (roadmap C10, capability `recap_since`).
     Recap {
         workspace_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tag: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        since: Option<SinceFrom>,
     },
     /// Read-only: the newest trails ended sessions left in one workspace
     /// (roadmap C9), at most `limit` (1 to `MAX_TRAILS`, default 4).
@@ -5204,11 +5218,15 @@ enum CommandWire {
         not_installed: Vec<String>,
     },
     /// Read-only: a bounded account of one workspace. With `tag`, only
-    /// notes carrying it are listed (roadmap E1).
+    /// notes carrying it are listed (roadmap E1). With `since`, the answer
+    /// also says what happened after that point of the event log, read by
+    /// the daemon's store (roadmap C10, capability `recap_since`).
     Recap {
         workspace_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tag: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        since: Option<SinceFrom>,
     },
     /// Read-only: the newest trails ended sessions left in one workspace
     /// (roadmap C9), at most `limit` (1 to `MAX_TRAILS`, default 4).
@@ -8700,11 +8718,17 @@ fn decide_checked(
                 events: vec![Event::UncoordinatedChanged { change }],
             })
         }
-        Command::Recap { workspace_id, tag } => {
+        Command::Recap {
+            workspace_id,
+            tag,
+            since,
+        } => {
             validate_known_workspace(state, workspace_id)?;
             if let Some(tag) = tag {
                 anchors::validate_tag(tag)?;
             }
+            // What happened since is read from the event log by the store.
+            since::validate(since.as_ref())?;
             Ok(Decision {
                 events: Vec::new(),
                 outcome: Outcome::Recap {
@@ -9377,6 +9401,7 @@ fn recap(state: &State, workspace_id: &str, tag: Option<&str>, now_ms: u64) -> R
         publishing: state.remote_links.get(workspace_id).cloned(),
         scan_failure: state.scan_failures.get(workspace_id).cloned(),
         scan_coverage: state.scan_coverage.get(workspace_id).cloned(),
+        since: None,
     }
 }
 
@@ -15114,7 +15139,8 @@ fn error(code: &str, message: &str) -> CoreError {
 
 impl Recap {
     /// Drop items, newest-last lists first, until `fits` says the recap is
-    /// small enough. Each drop is counted in `omitted_items`.
+    /// small enough. Each drop is counted in `omitted_items`; what was
+    /// asked for with `since` goes last, counted in its own `omitted`.
     pub fn shrink_until(&mut self, mut fits: impl FnMut(&Recap) -> bool) {
         while !fits(self) {
             let dropped = self.notes.pop().is_some()
@@ -15124,10 +15150,11 @@ impl Recap {
                 || self.landings.pop().is_some()
                 || self.interface_changes.pop().is_some()
                 || self.sessions.pop().is_some();
-            if !dropped {
+            if dropped {
+                self.omitted_items = self.omitted_items.saturating_add(1);
+            } else if !self.since.as_mut().is_some_and(Since::pop) {
                 return;
             }
-            self.omitted_items = self.omitted_items.saturating_add(1);
         }
     }
 }

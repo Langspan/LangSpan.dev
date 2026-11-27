@@ -312,6 +312,15 @@ impl Placement {
         wall
     }
 
+    /// The wall time of `at_ms` on `generation`'s clock, when that is the
+    /// generation of the event last placed and it was anchored. Call after
+    /// `place` for the event the time belongs to.
+    pub(crate) fn wall_of(&self, at_ms: u64, generation: u64) -> Option<u64> {
+        self.anchor
+            .filter(|anchor| anchor.generation == generation)
+            .map(|anchor| anchor.wall(at_ms))
+    }
+
     /// From when every event is counted: the later of the oldest event
     /// placed that carries a time of its own and the retention cutoff, when
     /// either is known.

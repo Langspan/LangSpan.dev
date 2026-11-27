@@ -895,6 +895,7 @@ fn transcript_of_the_coordination_commands() {
     t.case("status", &["status"]);
     t.case("status --all", &["status", "--all"]);
     t.case("recap", &["recap", "w"]);
+    t.case("recap --since-seq", &["recap", "w", "--since-seq", "0"]);
     t.case("trail", &["trail", "w"]);
     t.case("today", &["today", "w"]);
     t.case("report", &["report", "w"]);

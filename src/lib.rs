@@ -32,6 +32,7 @@ pub mod report;
 pub mod service;
 mod sha1;
 mod sha256;
+pub mod since;
 pub mod skill;
 pub mod status_line;
 pub mod store;

@@ -1401,6 +1401,17 @@ fn lifecycle(
         }
         LifecycleKind::Start => (CodeAsk::default(), false),
     };
+    // At a start after the workspace was away (roadmap C10): what happened
+    // since its last interactive session, first, within the same room. A
+    // reply joining several workspaces may leave this one too little room
+    // for it: it is cut to fit, or left out.
+    let mut away_note = String::new();
+    let since_section = starting
+        .then(|| since_section(&step, &config.workspace_id, room, &mut away_note))
+        .flatten();
+    let room = since_section
+        .as_ref()
+        .map_or(room, |text| room.saturating_sub(text.len() + 2));
     // The code section is looked up before the briefing, so that the files
     // this prompt points at are compared with other sessions' in it.
     let code = session.code_context(&ids, ask);
@@ -1528,6 +1539,12 @@ fn lifecycle(
         Some((text, placed)) => (Some(text), placed),
         None => (None, None),
     };
+    targets_note.push_str(&away_note);
+    let told_since = since_section.is_some();
+    let context = match (since_section, context) {
+        (Some(since), Some(rest)) => Some(format!("{since}\n\n{rest}")),
+        (since, rest) => since.or(rest),
+    };
     if let Some(delivered) = &delivered {
         session.forget_unplaced(
             wire_id("forget", &[source, &ids.operation_id]),
@@ -1562,12 +1579,74 @@ fn lifecycle(
     let matched = code.map_or(0, |(matches, _)| matches.len());
     Reply {
         stdout,
-        coverage: if deliver { "briefed" } else { "code_briefed" },
+        coverage: if deliver || told_since {
+            "briefed"
+        } else {
+            "code_briefed"
+        },
         detail: format!(
             "{} peer session(s); {matched} prompt name(s) found in the source index{targets_note}",
             briefing.as_ref().map_or(0, |b| b.peers.len())
         ),
     }
+}
+
+/// The "since the last session here" section for a starting session
+/// (roadmap C10): only while the workspace has been away, with no
+/// interactive session at work since, and only when something happened.
+/// A failure to ask is noted and leaves the briefing as it would have been.
+/// The section and the separator after it fit `room`; with too little room
+/// for even its shortest form, it is left out and the note says so.
+fn since_section(
+    step: &dyn Fn(&str, Command) -> Result<Response, Failure>,
+    workspace_id: &str,
+    room: usize,
+    note: &mut String,
+) -> Option<String> {
+    let after_ms = match crate::since::away_after_ms() {
+        Ok(after_ms) => after_ms,
+        Err(message) => {
+            note.push_str(&format!("; since-away section left out: {message}"));
+            return None;
+        }
+    };
+    let asked = Command::Recap {
+        workspace_id: workspace_id.into(),
+        tag: None,
+        since: Some(langspan_core::SinceFrom::Away { after_ms }),
+    };
+    let since = match step("since-away", asked) {
+        Ok(Response {
+            outcome: Outcome::Recap { recap },
+            ..
+        }) => recap.since?,
+        Ok(_) => {
+            note.push_str(
+                "; since-away section left out: the daemon answered with another outcome",
+            );
+            return None;
+        }
+        Err(failure) => {
+            note.push_str(&format!(
+                "; since-away section left out: {}",
+                failure_reply(failure).detail
+            ));
+            return None;
+        }
+    };
+    if !since.ongoing {
+        return None;
+    }
+    let section = crate::since::section(&since, workspace_id, room.saturating_sub(2));
+    if section.is_none()
+        && crate::since::section(&since, workspace_id, crate::since::SECTION_BYTES).is_some()
+    {
+        note.push_str(&format!(
+            "; since-away section deferred: no room left in this reply; {}",
+            crate::since::full_command(workspace_id)
+        ));
+    }
+    section
 }
 
 /// The distinct files the code briefing found definitions in, in the order

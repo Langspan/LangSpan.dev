@@ -170,7 +170,10 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
   recap WORKSPACE [--tag TAG]    A bounded account of one workspace: sessions, recent
                                  edits, interface changes, checks, landings, notes and
                                  messages not yet acknowledged, then withdrawn ones.
-                                 --tag lists only the notes carrying TAG
+                                 --tag lists only the notes carrying TAG.
+                                 --since-away (or --since-seq SEQ) adds what happened
+                                 since the last interactive session before a gap of
+                                 2 hours (LANGSPAN_AWAY_AFTER_MS), or since event SEQ
   trail WORKSPACE [--limit N]    Trails ended sessions left, newest first (--limit 1
                                  to 16, default 4): task line, files read and edited
                                  with line ranges, checks after the last write, files

@@ -1,9 +1,9 @@
-lines	7346
+lines	7362
 fn	doctor	440
 fn	hook	260
 fn	hooks	181
 fn	integrate	390
-fn	print_human	1326
-fn	run	668
+fn	print_human	1329
+fn	run	663
 fn	user_install	465
 fn	user_level_findings	197

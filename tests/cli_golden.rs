@@ -381,6 +381,8 @@ const OPTIONS: &[(&str, Option<&str>)] = &[
     ("-h", None),
     ("--symbol", Some("name")),
     ("--tag", Some("t")),
+    ("--since-away", None),
+    ("--since-seq", Some("3")),
     ("--open", None),
     ("--allow-network", None),
     ("--demo", None),

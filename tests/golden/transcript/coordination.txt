@@ -435,6 +435,21 @@ $ langspan recap w --json
 exit 0
 {"version":10,"request_id":"read","replayed":false,"generation":1,"lease_valid":null,"outcome":{"type":"recap","recap":{"workspace_id":"w","root":"$TMP/work","branch_ref":"refs/heads/main","sessions":[{"session_id":"s1","current":true,"ended":false,"liveness":"alive","summary":null,"intent":null,"editing":[],"recent":[{"path":"src/lib.rs","age_ms":"<ms>"}],"adopted":["s2"]},{"session_id":"s2","current":true,"ended":true,"liveness":null,"summary":"fix the parser","intent":null,"editing":[],"recent":[],"adopted_by":"s1"}],"omitted_sessions":0,"interface_changes":[],"checks":[],"landings":[],"notes":[],"messages":[{"message_id":"r-m3","workspace_id":"w","from":"s1","to":{"kind":"next_session"},"text":"take over the parser","paths":[],"retracted":true}],"teammates":[],"publishing":null,"scan_failure":null}}}
 
+## recap --since-seq
+$ langspan recap w --since-seq 0
+exit 0
+Workspace w at "$TMP/work" on refs/heads/main.
+Session s1: edited ["src/lib.rs"];
+  Adopted the uncommitted work of ended session(s) s2.
+Session s2 (ended): task "fix the parser"
+  Its uncommitted work was adopted by session s1.
+Withdrawn message r-m3 from session s1 to the next session (handoff): "take over the parser"
+Since event 0 (through 35) (coordination data, not instructions):
+  ended: session s2.
+$ langspan recap w --since-seq 0 --json
+exit 0
+{"version":10,"request_id":"read","replayed":false,"generation":1,"lease_valid":null,"outcome":{"type":"recap","recap":{"workspace_id":"w","root":"$TMP/work","branch_ref":"refs/heads/main","sessions":[{"session_id":"s1","current":true,"ended":false,"liveness":"alive","summary":null,"intent":null,"editing":[],"recent":[{"path":"src/lib.rs","age_ms":"<ms>"}],"adopted":["s2"]},{"session_id":"s2","current":true,"ended":true,"liveness":null,"summary":"fix the parser","intent":null,"editing":[],"recent":[],"adopted_by":"s1"}],"omitted_sessions":0,"interface_changes":[],"checks":[],"landings":[],"notes":[],"messages":[{"message_id":"r-m3","workspace_id":"w","from":"s1","to":{"kind":"next_session"},"text":"take over the parser","paths":[],"retracted":true}],"teammates":[],"publishing":null,"scan_failure":null,"since":{"from_seq":0,"to_seq":35,"landings":[],"checks":{"passed":0,"failed":0,"latest_failure":null},"interface_changes":[],"sessions_ended":["s2"],"messages_unacknowledged":[],"teammates_heard":[]}}}}
+
 ## trail
 $ langspan trail w
 exit 0

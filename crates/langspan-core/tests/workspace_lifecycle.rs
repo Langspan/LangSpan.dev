@@ -253,6 +253,7 @@ fn a_move_rebinds_the_root_and_keeps_notes_messages_checks_and_landings() {
         Command::Recap {
             workspace_id: "work".into(),
             tag: None,
+            since: None,
         },
         11,
     ) else {

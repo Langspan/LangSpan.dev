@@ -39,6 +39,7 @@ order:
 | `interface_notices` | a briefing's `interface_notice_ids` (issue #214) | 5 |
 | `landing_rewrites` | a landing's `rebased` and `adapted`, in the landing and in `record_landing` (roadmap F5) | 6 |
 | `outline_reads` | a session activity's `outlined` and the `read_outlined` event (roadmap A11) | 10 |
+| `recap_since` | a recap's `since`, and `recap`'s `since` (roadmap C10) | none |
 | `refusal_outcomes` | a report's `refusal_outcomes` (roadmap H9) | 5 |
 | `renames` | the rename fields of interface changes, history entries and in-flight symbols, and private interface changes (roadmap D7) | 4 |
 | `symbol_findings` | a check record's `symbol_findings`, and `record_check`'s (issue #265) | 6 |
@@ -83,7 +84,7 @@ as the answer, and still refuses any other answer whose ID differs. Reshaping dr
 safe: `changes_only` in a briefing, findings in `record_check` (advisory;
 the check's result is recorded unchanged). It refuses, before sending, what
 would lose meaning: a rebased or adapted landing, a note's symbol or tags,
-and a recap by tag (`protocol::fits_with`). A version 10 daemon built before
+a recap by tag, and a recap asked for `since` (`protocol::fits_with`). A version 10 daemon built before
 this change rejects `capabilities`; restart it after upgrading. No release
 shipped version 10 before the handshake.
 

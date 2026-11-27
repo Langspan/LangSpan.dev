@@ -272,6 +272,7 @@ fn a_deleted_definition_reads_gone_and_the_note_is_still_listed() {
         Command::Recap {
             workspace_id: "demo".into(),
             tag: None,
+            since: None,
         },
         20,
     );
@@ -514,6 +515,7 @@ fn recap_with_a_tag_lists_only_notes_tagged_so() {
         Command::Recap {
             workspace_id: "demo".into(),
             tag: Some("api".into()),
+            since: None,
         },
         20,
     );
@@ -530,6 +532,7 @@ fn recap_with_a_tag_lists_only_notes_tagged_so() {
         Command::Recap {
             workspace_id: "demo".into(),
             tag: Some("API".into()),
+            since: None,
         },
         20,
     );

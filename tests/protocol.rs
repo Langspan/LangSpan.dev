@@ -2162,6 +2162,7 @@ fn anchored_notes_reach_an_earlier_client_only_while_current_and_without_the_new
         publishing: None,
         scan_failure: None,
         scan_coverage: None,
+        since: None,
     };
     let response = Response {
         version: PROTOCOL_VERSION,
@@ -2224,6 +2225,7 @@ fn a_note_with_a_symbol_or_tags_fits_only_version_9_and_later() {
     let recap = |tag: Option<&str>| Command::Recap {
         workspace_id: "app".into(),
         tag: tag.map(str::to_owned),
+        since: None,
     };
     for command in [
         remember(Some("parse_upload"), &[]),
@@ -2341,10 +2343,68 @@ fn versions_3_to_10_map_to_their_capability_sets() {
             "{version}"
         );
     }
+    // A capability added after version 10 (`None` in the table) reaches
+    // only a client that names it.
+    let all = Capabilities::ALL.names();
     assert_eq!(
-        Capabilities::negotiate(PROTOCOL_VERSION, None),
+        Capabilities::negotiate(PROTOCOL_VERSION, Some(&all)),
         Capabilities::ALL
     );
+    assert!(!Capabilities::negotiate(PROTOCOL_VERSION, None).has("recap_since"));
+}
+
+/// Roadmap C10: a recap's `since` reaches only a client with the
+/// `recap_since` capability, which no frozen version has, and a recap
+/// asked for `since` is sent only to a daemon that grants it.
+#[test]
+fn a_recap_since_reaches_only_a_client_with_the_recap_since_capability() {
+    let with = include_bytes!("../fixtures/capabilities/recap_since/with.json");
+    let without = include_bytes!("../fixtures/capabilities/recap_since/without.json");
+    let response: Response = serde_json::from_slice(with).unwrap();
+    let all = Capabilities::ALL.names();
+    assert_eq!(
+        encode_with(Capabilities::ALL, Some(&all), &response).unwrap(),
+        with
+    );
+    let others: Vec<String> = all
+        .iter()
+        .filter(|name| *name != "recap_since")
+        .cloned()
+        .collect();
+    let granted = Capabilities::negotiate(PROTOCOL_VERSION, Some(&others));
+    assert_eq!(
+        String::from_utf8(encode_with(granted, Some(&others), &response).unwrap()).unwrap(),
+        String::from_utf8_lossy(without)
+    );
+    for version in OLDEST_PROTOCOL_VERSION..=PROTOCOL_VERSION {
+        let text = String::from_utf8(encode_for(version, &response).unwrap()).unwrap();
+        assert!(!text.contains("\"since\""), "{version}: {text}");
+    }
+
+    let wire = include_bytes!("../fixtures/capabilities/recap_since/request.json");
+    let request: Request = serde_json::from_slice(wire).unwrap();
+    assert_eq!(encode(&request).unwrap(), wire);
+    assert!(matches!(
+        request.command,
+        Command::Recap {
+            since: Some(langspan_core::SinceFrom::Away {
+                after_ms: 7_200_000
+            }),
+            ..
+        }
+    ));
+    assert!(fits_with(Capabilities::ALL, &request.command));
+    assert!(!fits_with(granted, &request.command));
+    for version in OLDEST_PROTOCOL_VERSION..=PROTOCOL_VERSION {
+        let granted = Capabilities::negotiate(version, None);
+        assert!(!fits_with(granted, &request.command), "{version}");
+    }
+    let mut plain = request.command.clone();
+    let Command::Recap { since, .. } = &mut plain else {
+        unreachable!()
+    };
+    *since = None;
+    assert!(fits_with(granted, &plain));
 }
 
 /// The handshake: the daemon grants the names it knows and, when that is
