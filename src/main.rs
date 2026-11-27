@@ -1151,8 +1151,6 @@ fn user_install(
                 })
             })
             .collect::<Result<_, _>>()?,
-        // Antigravity is chosen only by name: `~/.gemini` is also made by
-        // other tools, Gemini CLI among them.
         None => found_hosts(&home),
     };
     // Gemini CLI is named only to remove an earlier install.
