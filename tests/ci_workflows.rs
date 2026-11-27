@@ -1197,8 +1197,8 @@ fn the_settings_drift_audit_names_each_changed_setting() {
 
     let drifted = desired
         .replacen(
-            "\"delete_branch_on_merge\": false",
             "\"delete_branch_on_merge\": true",
+            "\"delete_branch_on_merge\": false",
             1,
         )
         .replacen(
@@ -1213,7 +1213,7 @@ fn the_settings_drift_audit_names_each_changed_setting() {
     let _ = fs::remove_dir_all(&dir);
     assert_eq!(code, 1, "{stdout}");
     assert!(
-        stdout.contains("repo.delete_branch_on_merge: want false, GitHub has true"),
+        stdout.contains("repo.delete_branch_on_merge: want true, GitHub has false"),
         "{stdout}"
     );
     assert!(
