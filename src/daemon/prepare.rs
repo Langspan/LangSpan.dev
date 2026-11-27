@@ -154,7 +154,7 @@ pub(super) fn prepare_move(
         }
         // User-level hooks derive this ID from the old root, so every
         // new session there would claim it again and be refused.
-        (true, true) if workspace_id == crate::hook::user_workspace_id(old) => {
+        (true, true) if workspace_id == crate::ids::user_workspace_id(old) => {
             return Err((
                 "root_derived_id",
                 format!(

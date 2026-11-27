@@ -11,8 +11,8 @@
 
 use crate::{
     commit::is_own,
-    hook::{age, clean, session_label, truncate},
     journal,
+    text::{age, clean, session_label, truncate},
 };
 use langspan_core::{
     CheckResult, LineRange, MAX_TRAIL_FACTS, TRAIL_BYTES, TRAIL_FILES, TRAIL_RANGES, TrailFacts,

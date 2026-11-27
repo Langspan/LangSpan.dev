@@ -43,6 +43,8 @@ pub use prompt::{
     prompt_target_paths,
 };
 pub use reads::*;
+#[cfg(test)]
+use render::interface_change_text;
 pub use render::{BRIEFING, UNCOORDINATED, compose_context, render_briefing, render_code_briefing};
 #[cfg(test)]
 use render::{
@@ -55,8 +57,7 @@ use render::{
     compose_context_placed, compose_context_within, reply_context_bytes, shows_all_inflight,
 };
 pub(crate) use render::{
-    interface_change_text, interface_impact_line, render_briefing_placed, session_label,
-    shown_notice_ids,
+    interface_impact_line, render_briefing_placed, session_label, shown_notice_ids,
 };
 use shell_hooks::shell_looked_at;
 pub use shell_hooks::{SHELL_TOOL, shell_operation};
