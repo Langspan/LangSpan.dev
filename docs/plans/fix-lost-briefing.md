@@ -67,22 +67,13 @@ noted in the PR.
    and `benchmark_harness::dry_run_langspan_arm_following_briefings`
    (`--stress-count`, with the workspace suite as load).
 
-## Progress (paused for a reservation)
+## Progress
 
-Done, uncommitted in the worktree: steps 1 to 4 in code (core command,
-outcome, decision, `decide_brief` filter, protocol capability and reshaping,
-hook `confirm_placed` on both paths, vectors, transcript case, golden steps).
-The two core tests pass, and fail with the filter broken. The `langspan`
-crate builds with every target.
-
-Blocked on `crates/langspan-core/tests/anchored_notes.rs`, outside the first
-reservation: its `BriefPrepared` literal (line 372) needs `confirm: false`.
-Added to the reservation.
-
-Left: that line; bless the decision golden and the CLI transcript; the
-protocol capability test and `fixtures/capabilities/*`; the
-`confirmed_briefings` table row and docs; ratchets; fmt, clippy, the full
-suite; the stress loop of the two named tests; the PR.
+Steps 1 to 4 done. The core tests fail with the `decide_brief` filter
+broken; with either hook `confirm_placed` call disabled, two hook tests each
+fail (`briefing::a_starting_session_is_told_who_is_editing_what_and_only_again_when_it_changes`,
+`briefing::news_since_the_last_prompt_reaches_the_model_after_its_next_tool_call`
+and their neighbours). Step 5 and the PR remain.
 
 ## Shared contracts touched
 

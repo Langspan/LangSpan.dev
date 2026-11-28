@@ -1404,7 +1404,10 @@ pub(crate) fn decide_brief(
     // placed it (issue #531): until then, only what was told before is.
     let told_next = match command {
         Command::Brief { confirm: true, .. } | Command::BriefPrepared { confirm: true, .. } => {
-            told_next.into_iter().filter(|key| told.contains(key)).collect()
+            told_next
+                .into_iter()
+                .filter(|key| told.contains(key))
+                .collect()
         }
         _ => told_next,
     };

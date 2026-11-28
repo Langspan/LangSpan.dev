@@ -649,7 +649,12 @@ fn confirming_is_bounded_idempotent_and_a_plain_delivery_tells_at_once() {
         decision.outcome,
         Outcome::ToldConfirmed { confirmed, .. } if confirmed as usize == keys.len()
     ));
-    ok(run(&mut state, "c1", confirm_keys(keys.clone(), "alice"), 2_000));
+    ok(run(
+        &mut state,
+        "c1",
+        confirm_keys(keys.clone(), "alice"),
+        2_000,
+    ));
     assert_eq!(state.activity["alice"].told, keys);
     let retry = decide(&state, &confirm_keys(keys.clone(), "alice"), "c2", 2_000);
     assert!(retry.events.is_empty(), "a retry records nothing");

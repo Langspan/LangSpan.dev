@@ -2499,7 +2499,7 @@ fn nothing_older_than_the_window_or_from_before_the_current_boot_appears() {
                 recent_window_ms: Some(window),
                 mcp: false,
                 changes_only: false,
-            confirm: false,
+                confirm: false,
             },
             now,
         );
@@ -2658,6 +2658,7 @@ fn brief_changes(state: &mut State, session: &str, id: &str, now: u64) -> Briefi
             recent_window_ms: None,
             mcp: false,
             changes_only: true,
+            confirm: false,
         },
         now,
     )) {
