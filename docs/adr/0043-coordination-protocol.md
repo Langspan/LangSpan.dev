@@ -298,8 +298,9 @@ without writing to the store. In the protocol, an event page and a
 subscription frame carry each event's digest under the capability
 `chained_events`, so a client can check that what it received is continuous.
 
-ADR 0025 decided "not now" for row J9: the store has one writer and is
-owner-only, and a chain shows tampering without preventing it. The owner's
+ADR 0025 decided "not now" for row J9, because the store has one writer and
+is owner-only, and a chain shows tampering without preventing it. That row
+now points here. The owner's
 decision of 28 November 2026 names the threat that a chain answers. A
 standard needs a record that a person, or a second implementation replaying
 the same log, can check after the fact. The limits of ADR 0025 still hold.

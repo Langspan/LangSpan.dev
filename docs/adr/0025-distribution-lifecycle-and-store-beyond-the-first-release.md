@@ -23,7 +23,7 @@ below as Missing or Partial.
 | I10 | Setup and hook installation through MCP tools | CLI only | Not building. Installation changes the owner's host configuration, so it stays an owner command, as with `remote enable` ([ADR 0006](0006-remote-awareness-through-git-refs.md)) |
 | G6 | Move and remove workspaces | `workspace add`, `list`, `move [--switch]`, `remove [--apply]` | Built 25 November 2026 ([issue #75](https://github.com/Langspan/LangSpan.dev/issues/75)), ahead of the condition below; see the amendment. Not yet run on a host |
 | J7 | Retention limits for the event log and publications | `langspan compact` and `retention_days` | Built ([issue #90](https://github.com/Langspan/LangSpan.dev/issues/90)): compaction into a checked snapshot, below |
-| J9 | A hash-chained ledger with replay | Append-only events, no chain | Not now. The store has one writer and is owner-only; a chain would show tampering, not prevent it |
+| J9 | A hash-chained ledger with replay | Append-only events, no chain | Planned since 28 November 2026 ([ADR 0043](0043-coordination-protocol.md#the-audit-log), [issue #91](https://github.com/Langspan/LangSpan.dev/issues/91)): a standard protocol needs a record a person or a second implementation can check. It was "not now" because the store has one writer and is owner-only; a chain still shows tampering and does not prevent it |
 | J12 | Liveness on macOS | Process probe on Linux only, plus 30 minutes of activity | Not now. Activity age covers macOS until a probe is built |
 
 **Moving, switching and removing a workspace (row G6), amended 25 November
@@ -355,4 +355,4 @@ Decided and built 25 November 2026.
 
 These rows are on the public roadmap. They are worked on in the open after the first
 release of `Langspan/LangSpan.dev`, by many agent sessions developing LangSpan with
-LangSpan itself; the release does not wait for them. What would change it: Windows follows demand and a named-pipe transport design; G6, J7 and J12 are built, as recorded above; J9 follows a threat that a chain would answer. Self-update (I5) and I10 are not planned; I5's version check is built, as recorded above. A real-host Claude Code run after moving a checkout is still to be retained.
+LangSpan itself; the release does not wait for them. What would change it: Windows follows demand and a named-pipe transport design; G6, J7 and J12 are built, as recorded above; J9's threat was named on 28 November 2026 (ADR 0043). Self-update (I5) and I10 are not planned; I5's version check is built, as recorded above. A real-host Claude Code run after moving a checkout is still to be retained.
