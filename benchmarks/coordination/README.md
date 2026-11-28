@@ -59,14 +59,36 @@ stand-in does the same as Bash calls, at most three pushes. The combined
 result is what `origin main` holds when every session has ended (kept in
 `repo` as `bench/landed`); work a session left unpushed did not land.
 
-The record (version 9) counts, per task and per trial, the Bash calls that ran
-`git push` (`pushes.attempts`) and those whose result shows Git refusing the
-push (`pushes.rejections`), from the session's transcript. Other arms record
-`pushes.status: "not_applicable"` with null counts. The results document has a
-push attempts and a push rejections column per trial and per condition;
-tokens, turns and elapsed time come from the same record. Because one tree
-holds every session's edits, duplicate work is not measured (null) in this
-arm.
+The record (version 10) counts, per task and per trial, the Bash calls that
+ran `git push` (`pushes.attempts`), those whose result shows Git refusing the
+push (`pushes.rejections`) and those made after a refused one
+(`pushes.retries`), from the session's transcript; each task also counts the
+pushes that landed. `pushes.landed_after_s` is the time from the runner's
+start of the trial to the last update of `origin main`, read from the bare
+remote's reflog in whole seconds of this machine's clock, and null unless
+every session landed a push. A trial whose sessions do not push records
+`pushes.status: "not_applicable"` with null counts. The results document has
+push attempts, rejections, retries and all-landed-after columns per trial and
+per condition; tokens, turns, elapsed time and the combined build on the
+final `main` come from the same record. Because one tree holds every
+session's edits, duplicate work is not measured (null) in this arm.
+
+### Push contention (`push_contention`)
+
+In this family every arm's sessions land by pushing to `origin main` at once
+(no stagger), so the push counts measure contention for the default branch.
+In `shared` they share `work/trunk` as above; in `worktrees` and
+`awareness_only` each has its own clone `work/sN` of `work/origin.git`, on
+`main`, and its prompt asks it to commit, push, and fetch, merge and push
+again after a rejection, with the same Git commands allowed. The combined
+result is what `origin main` holds. The stand-in tries at most as many
+pushes as there are sessions, at least three: each refusal means a peer
+landed, so that many always land. `matrix.py run --families push_contention
+--arms shared worktrees` runs it live.
+
+Not built yet: the `langspan` arm with landing on, where a push to `main` is
+routed to `langspan land`. The stand-in does not drive landing, so the driver
+refuses `--arm langspan --family push_contention` with that reason.
 
 Not built yet: the `langspan_shared` arm (the same checkout with LangSpan's
 hooks). In one checkout every session has the same LangSpan workspace, and
@@ -201,6 +223,10 @@ pairs, 1 key alone and the control task. The seed also chooses which features
 or keys run, which side a key alone gets, and which session gets which task;
 the same arguments always give the same assignment. `discovered_change` has
 one changer and N - 1 dependents, chosen from nine features.
+`push_contention` ([#611](https://github.com/Langspan/LangSpan.dev/issues/611))
+has N - 1 of the rename family's features, calling `parse_config` as it is,
+and the control task: no task touches another's files, so the only contention
+is for `origin main` (see [push contention](#push-contention-push_contention)).
 `python3 benchmarks/coordination/driver.py --arm worktrees
 --family rename_vs_new_caller --sessions 5 --seed 7` prints the plan and every
 prompt without running anything, and lists any option the arm ignores.
@@ -304,9 +330,11 @@ LangSpan arm). For the stale-caller measure it gives `stale_writes_admitted`,
 summed, `stale_fixed_after_s`, each trial's time listed rather than
 averaged, and `stale_unfixed_trials`, the trials that ended with a stale
 caller. A group figure is `null` when any trial it counts lacks it.
-`push_attempts` and `push_rejections` are summed over the group's trials,
-and `null` unless every trial reports them ([shared checkout](#the-shared-checkout-shared)).
-It reads version 8 and 9 records; a version 8 record has no push counts.
+`push_attempts`, `push_rejections` and `push_retries` are summed over the
+group's trials, and `null` unless every trial reports them; `landed_after_s`
+lists each trial's time to all landed ([shared checkout](#the-shared-checkout-shared)).
+It reads version 8, 9 and 10 records; a version 8 record has no push counts,
+and a version 9 record has no retries or time to all landed (unknown).
 
 ### Staggered start
 
