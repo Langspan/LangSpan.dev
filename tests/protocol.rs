@@ -2795,7 +2795,7 @@ const NAMED_0_10: &[&str] = &[
 /// Each release, the protocol version it speaks, the capabilities it names
 /// (none before 0.5.0), and the event types it reads, frozen from that
 /// release's tag (issue #331).
-const RELEASES: [(&str, u16, Option<&[&str]>, &str); 12] = [
+const RELEASES: [(&str, u16, Option<&[&str]>, &str); 13] = [
     (
         "0.1.0",
         3,
@@ -2867,6 +2867,12 @@ const RELEASES: [(&str, u16, Option<&[&str]>, &str); 12] = [
         10,
         Some(NAMED_0_10),
         include_str!("../fixtures/event-types/0.10.0.txt"),
+    ),
+    (
+        "0.11.0",
+        10,
+        Some(NAMED_0_10),
+        include_str!("../fixtures/event-types/0.11.0.txt"),
     ),
 ];
 
