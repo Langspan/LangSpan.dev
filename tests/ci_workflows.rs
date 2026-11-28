@@ -240,10 +240,10 @@ fn code_split_into_new_core_daemon_or_hook_modules_runs_the_dry_runs() {
 #[test]
 fn linux_and_macos_start_together() {
     let text = workflow("check.yml");
-    for id in ["linux", "macos"] {
+    for id in ["linux", "linux-lint", "macos"] {
         assert!(
             !job(&text, id).contains("\n    needs:"),
-            "the {id} job waits for another job, so Linux and macOS run in series"
+            "the {id} job waits for another job, so Linux, its lint and macOS run in series"
         );
     }
 }
@@ -384,14 +384,32 @@ fn bench_yml_runs_the_dry_runs_off_the_merge_queue() {
 #[test]
 fn the_required_checks_wait_for_the_build_and_every_shard_whatever_they_ended_with() {
     let text = workflow("check.yml");
-    for (id, name, build, tests) in [
-        ("linux-result", "Linux", "linux", "linux-tests"),
-        ("macos-result", "macOS", "macos", "macos-tests"),
+    // Linux lints in a job of its own; macOS in its build job.
+    for (id, name, build, lint, tests) in [
+        (
+            "linux-result",
+            "Linux",
+            "linux",
+            Some("linux-lint"),
+            "linux-tests",
+        ),
+        ("macos-result", "macOS", "macos", None, "macos-tests"),
     ] {
         let result = job(&text, id);
+        let needs = match lint {
+            Some(lint) => {
+                let line = format!("          LINT: ${{{{ needs.{lint}.result }}}}\n");
+                assert!(result.contains(&line), "{id} lacks {line}");
+                format!("{build}, {lint}, {tests}")
+            }
+            None => {
+                assert!(!result.contains("LINT:"), "{result}");
+                format!("{build}, {tests}")
+            }
+        };
         for line in [
             format!("\n    name: {name}\n"),
-            format!("\n    needs: [{build}, {tests}]\n"),
+            format!("\n    needs: [{needs}]\n"),
             // Not `!cancelled()`: a skipped required check counts as passed.
             "\n    if: always()\n".into(),
             format!("          BUILD: ${{{{ needs.{build}.result }}}}\n"),
@@ -475,6 +493,33 @@ fn a_platform_check_passes_only_when_its_build_and_every_shard_passed() {
     for build in ["failure", "cancelled", "skipped", ""] {
         assert!(!ok("merge_group", "true", build, "skipped"), "{build}");
         assert!(!ok("pull_request", "true", build, "skipped"), "{build}");
+    }
+
+    // Linux's lint job: unset (macOS) leaves the verdict to the others;
+    // set, only success passes, whatever the build and the shards did. It
+    // succeeds without linting when nothing is code, so a skip is a failure.
+    let with_lint = |event: &str, code: &str, tests: &str, lint: &str| {
+        let env = [
+            ("EVENT", event),
+            ("CODE", code),
+            ("BUILD", "success"),
+            ("LINT", lint),
+            ("TESTS", tests),
+        ];
+        shard_results(&dir, &env)
+    };
+    assert!(with_lint("pull_request", "true", "skipped", "success").0);
+    assert!(with_lint("merge_group", "true", "success", "success").0);
+    assert!(with_lint("merge_group", "false", "skipped", "success").0);
+    for lint in ["failure", "cancelled", "skipped", ""] {
+        for (event, tests) in [("pull_request", "skipped"), ("merge_group", "success")] {
+            let (passed, _, stderr) = with_lint(event, "true", tests, lint);
+            assert!(!passed, "{event} with lint '{lint}'");
+            assert!(
+                stderr.contains(&format!("the lint job ended with '{lint}'")),
+                "{stderr}"
+            );
+        }
     }
 
     // The names of flaky and failed tests come from every shard's report:
@@ -717,7 +762,8 @@ fn check_sh_refuses_an_unknown_lane_before_it_runs_anything() {
     assert_eq!(out.status.code(), Some(2), "{out:?}");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("LANGSPAN_CHECK_LANE is 'quick'; set it to fast, full, build or shard"),
+        stderr
+            .contains("LANGSPAN_CHECK_LANE is 'quick'; set it to fast, full, build, shard or lint"),
         "{stderr}"
     );
 }
@@ -1257,7 +1303,16 @@ fn pull_requests_read_the_build_cache_and_only_main_writes_it() {
         !text.contains("Swatinem/rust-cache"),
         "the build cache has one owner"
     );
-    for id in ["linux", "macos"] {
+    // What shows a run built what it would cache: the test build's binary,
+    // or for the lint job, which builds no tests, langspan-core's lint output.
+    for (id, built) in [
+        ("linux", ""),
+        (
+            "linux-lint",
+            " 'debug/build/langspan-core/*/out/liblangspan_core-*.rmeta'",
+        ),
+        ("macos", ""),
+    ] {
         let job = job(&text, id);
         let restore = job
             .split("uses: actions/cache/restore@")
@@ -1289,7 +1344,7 @@ fn pull_requests_read_the_build_cache_and_only_main_writes_it() {
         // nothing under the key, and whether the checks passed or failed,
         // but not after a cancelled or timed-out run.
         assert!(job.contains(
-            "if: ${{ !cancelled() && github.ref == 'refs/heads/main' && steps.changes.outputs.code == 'true' && steps.cache.outputs.cache-hit != 'true' }}\n        env:\n          LIMIT_MB: ${{ env.CACHE_LIMIT_MB }}\n        run: bash scripts/ci-cache-prune.sh\n"
+            &format!("if: ${{{{ !cancelled() && github.ref == 'refs/heads/main' && steps.changes.outputs.code == 'true' && steps.cache.outputs.cache-hit != 'true' }}}}\n        env:\n          LIMIT_MB: ${{{{ env.CACHE_LIMIT_MB }}}}\n        run: bash scripts/ci-cache-prune.sh{built}\n")
         ), "{id} could save a cache off main, or not after a failed test");
         let save = job
             .split("uses: actions/cache/save@")
@@ -1416,6 +1471,7 @@ fn a_cold_run_on_main_saves_under_keys_the_skipped_restores_did_not_name() {
     );
     for (id, kinds) in [
         ("linux", &["build", "audit"][..]),
+        ("linux-lint", &["build"][..]),
         ("macos", &["build"][..]),
     ] {
         let job = job(&text, id);
@@ -1514,6 +1570,117 @@ fn check_sh_refuses_an_unknown_portable_setting_before_it_runs_anything() {
 }
 
 #[test]
+fn check_sh_refuses_an_unknown_lint_setting_or_a_lint_lane_with_lint_off() {
+    let (code, stderr) = check_sh_refusal("check-lint", &[("LANGSPAN_CHECK_LINT", "no")]);
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(
+        stderr.contains("LANGSPAN_CHECK_LINT is 'no'; set it to true or false"),
+        "{stderr}"
+    );
+    let (code, stderr) = check_sh_refusal(
+        "check-lint",
+        &[
+            ("LANGSPAN_CHECK_LANE", "lint"),
+            ("LANGSPAN_CHECK_LINT", "false"),
+        ],
+    );
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(
+        stderr.contains("the lint lane runs only lint, which LANGSPAN_CHECK_LINT=false skips"),
+        "{stderr}"
+    );
+}
+
+/// Runs check.sh outside the repository with a `cargo` on PATH that only
+/// records its arguments; returns (success, one line per cargo call).
+fn check_sh_cargo_calls(name: &str, env: &[(&str, &str)]) -> (bool, Vec<String>) {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = temp_dir(name);
+    let bin = dir.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let log = dir.join("cargo.log");
+    let cargo = bin.join("cargo");
+    fs::write(
+        &cargo,
+        format!("#!/bin/sh\necho \"$*\" >> '{}'\n", log.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let out = Command::new("sh")
+        .arg(root().join("scripts/check.sh"))
+        .current_dir(&dir)
+        .env("PATH", path)
+        .env_remove("CARGO_TARGET_DIR")
+        .env_remove("LANGSPAN_CHECK_LINT")
+        .env("LANGSPAN_CHECK_PORTABLE", "false")
+        .envs(env.iter().copied())
+        .output()
+        .unwrap();
+    let calls = fs::read_to_string(&log).unwrap_or_default();
+    let _ = fs::remove_dir_all(&dir);
+    (
+        out.status.success(),
+        calls.lines().map(str::to_owned).collect(),
+    )
+}
+
+#[test]
+fn the_lint_lane_runs_both_clippy_passes_and_nothing_else_and_lint_off_skips_them() {
+    // Which cargo commands each lane runs is check.sh's own control flow,
+    // so it runs here with a cargo that only records its calls.
+    let clippy = [
+        "clippy --workspace --all-targets --locked -- -D warnings",
+        "clippy --workspace --lib --bins --locked -- -D warnings -D clippy::unwrap_used \
+         -D clippy::expect_used -D clippy::panic -D clippy::unreachable -D clippy::unimplemented",
+    ];
+    let (passed, calls) =
+        check_sh_cargo_calls("check-lint-lane", &[("LANGSPAN_CHECK_LANE", "lint")]);
+    assert!(passed, "{calls:?}");
+    assert_eq!(calls, clippy);
+    // The fast lane lints, then fails here at the tests (no
+    // scripts/test-foreign-home.sh outside the repository); with lint off
+    // it reaches the tests having run no cargo command.
+    let (passed, calls) =
+        check_sh_cargo_calls("check-fast-lint", &[("LANGSPAN_CHECK_LANE", "fast")]);
+    assert!(!passed);
+    assert_eq!(calls, clippy);
+    let (passed, calls) = check_sh_cargo_calls(
+        "check-fast-no-lint",
+        &[
+            ("LANGSPAN_CHECK_LANE", "fast"),
+            ("LANGSPAN_CHECK_LINT", "false"),
+        ],
+    );
+    assert!(!passed);
+    assert!(calls.is_empty(), "{calls:?}");
+}
+
+#[test]
+fn linux_lints_beside_its_build_and_macos_in_its_build() {
+    let text = workflow("check.yml");
+    let lint = job(&text, "linux-lint");
+    for line in [
+        "\n    name: Linux lint\n",
+        "\n    runs-on: ${{ vars.LINUX_RUNNER || 'ubuntu-24.04' }}\n",
+        "\n    timeout-minutes: ${{ github.event_name == 'pull_request' && 6 || github.event_name == 'merge_group' && 15 || 30 }}\n",
+        "        run: bash scripts/ci-changes.sh\n",
+        "      - name: Check lint\n        if: steps.changes.outputs.code == 'true'\n        env:\n          LANGSPAN_CHECK_LANE: lint\n        run: sh scripts/check.sh\n",
+    ] {
+        assert!(lint.contains(line), "linux-lint lacks {line}");
+    }
+    // Every lane, the pull request's included.
+    assert!(
+        !lint.contains("github.event_name != 'pull_request'"),
+        "{lint}"
+    );
+    assert!(job(&text, "linux").contains(
+        "\n          LANGSPAN_CHECK_LINT: \"false\"\n        run: sh scripts/check.sh\n"
+    ));
+    assert!(!job(&text, "macos").contains("LANGSPAN_CHECK_LINT"));
+}
+
+#[test]
 fn runs_are_grouped_by_event_and_only_the_nightly_run_builds_the_release() {
     let text = workflow("check.yml");
     // A push to main and the merge-queue run of the same commit are in
@@ -1576,7 +1743,74 @@ fn main_saves_no_build_cache_from_a_run_that_built_no_tests() {
     let (output, stdout) = cache_prune(&dir);
     let _ = fs::remove_dir_all(&dir);
     assert_eq!(output, "save=false\n", "{stdout}");
-    assert!(stdout.contains("this run built no tests"), "{stdout}");
+    assert!(
+        stdout.contains("this run built nothing it caches (target/debug/langspan is missing)"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn main_saves_the_lint_jobs_cache_only_when_it_linted_langspan_core() {
+    use std::os::unix::fs::PermissionsExt;
+    // The lint job's run builds no langspan binary; clippy's output for
+    // langspan-core shows it linted. A run whose lint never started leaves
+    // only the restored dependencies. The glob is the one check.yml passes,
+    // and the files sit where the pinned toolchain's Cargo writes them.
+    let workflow = workflow("check.yml");
+    let lint = job(&workflow, "linux-lint");
+    let glob = lint
+        .split("run: bash scripts/ci-cache-prune.sh '")
+        .nth(1)
+        .and_then(|rest| rest.split('\'').next())
+        .expect("linux-lint passes ci-cache-prune.sh no glob");
+    let dir = temp_dir("cache-prune-lint");
+    let build = dir.join("target/debug/build");
+    for crate_dir in ["serde/0123/out", "langspan-core/4567/out"] {
+        fs::create_dir_all(build.join(crate_dir)).unwrap();
+    }
+    fs::write(build.join("serde/0123/out/libserde-0123.rmeta"), "").unwrap();
+    let prune = |dir: &Path| {
+        let output = dir.join("output");
+        let _ = fs::remove_file(&output);
+        // cargo itself isn't what this checks, and there is no workspace
+        // here for `cargo clean` to read: a stand-in that does nothing.
+        let bin = dir.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let cargo = bin.join("cargo");
+        fs::write(&cargo, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+        let out = Command::new("bash")
+            .arg(root().join("scripts/ci-cache-prune.sh"))
+            .arg(glob)
+            .current_dir(dir)
+            .env_remove("CARGO_TARGET_DIR")
+            .env("PATH", path)
+            .env("GITHUB_OUTPUT", &output)
+            .env("CACHE_PATHS", dir.join("target").display().to_string())
+            .env("LIMIT_MB", "64")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "ci-cache-prune.sh failed: {out:?}");
+        (
+            fs::read_to_string(&output).unwrap_or_default(),
+            String::from_utf8(out.stdout).unwrap(),
+        )
+    };
+    let (output, stdout) = prune(&dir);
+    assert_eq!(output, "save=false\n", "{stdout}");
+    assert!(
+        stdout.contains(&format!("target/{glob} is missing")),
+        "{stdout}"
+    );
+    fs::write(
+        build.join("langspan-core/4567/out/liblangspan_core-4567.rmeta"),
+        "",
+    )
+    .unwrap();
+    let (output, stdout) = prune(&dir);
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(output, "save=true\n", "{stdout}");
 }
 
 /// Runs scripts/ci-cache-size.sh over `paths` with `limit_mb`, and returns

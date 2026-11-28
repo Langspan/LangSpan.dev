@@ -10,7 +10,10 @@
 #
 # Environment: EVENT (github.event_name), CODE (the build job's `code`
 # output), BUILD and TESTS (the build job's and the shard matrix's result:
-# success, failure, cancelled or skipped). DIR holds the shards' JUnit
+# success, failure, cancelled or skipped), and LINT, the lint job's result
+# where lint has a job of its own (Linux); when LINT is set, only success
+# passes. That job decides what the change touches for itself, so it
+# succeeds without linting when nothing is code. DIR holds the shards' JUnit
 # reports, one directory each (missing when no shard ran). Under GitHub
 # Actions it writes the step outputs `flaky` and `failed`, the tests every
 # shard names (scripts/flaky-tests.py, scripts/ci-failed-tests.sh), for
@@ -36,6 +39,8 @@ fi
 
 if [ "${BUILD:-}" != success ]; then
   verdict="the build job ended with '${BUILD:-}', so no shard's result counts; its log says what failed"
+elif [ -n "${LINT+set}" ] && [ "$LINT" != success ]; then
+  verdict="the lint job ended with '$LINT'; its log says what failed"
 elif [ "${TESTS:-}" = success ]; then
   verdict=""
 elif [ "${TESTS:-}" = skipped ] && { [ "${EVENT:-}" = pull_request ] || [ "${CODE:-}" != true ]; }; then
@@ -45,7 +50,7 @@ else
 fi
 summary=${GITHUB_STEP_SUMMARY:-/dev/null}
 if [ -z "$verdict" ]; then
-  echo "ci-shard-results: passed (build ${BUILD}, shards ${TESTS})" | tee -a "$summary"
+  echo "ci-shard-results: passed (build ${BUILD}${LINT+, lint $LINT}, shards ${TESTS})" | tee -a "$summary"
   exit 0
 fi
 {

@@ -208,7 +208,10 @@ the event (`LANGSPAN_CHECK_LANE`):
   the filter's `binary_id(langspan::NAME)` names): it no longer compiles
   the integration tests it leaves out. The `macOS` check passes at once and says that the
   full run happens in the merge queue. Target: a result **under 3
-  minutes** from push. The job stops at 6 minutes.
+  minutes** from push. The job stops at 6 minutes. On Linux, lint has a
+  job of its own in every lane (`Linux lint`; `check.sh`'s `lint` lane)
+  that starts beside the build job, which skips it
+  (`LANGSPAN_CHECK_LINT=false`), so the test build doesn't wait for clippy.
 - **The full lane: a merge-queue commit, a push to `main`, the nightly run
   and a manual run.** On Linux and macOS side by side: everything in the
   fast lane, every other test (the `ci` profile, which leaves none out),
@@ -230,8 +233,8 @@ the event (`LANGSPAN_CHECK_LANE`):
   says, when the shards drift apart. Every test
   runs in exactly one shard: a shard fails unless nextest selects the
   count the script expects. The `Linux` and `macOS`
-  checks are jobs of their own that pass only when the build job and
-  every shard passed (`scripts/ci-shard-results.sh`); they name the
+  checks are jobs of their own that pass only when the build job, Linux's
+  lint job and every shard passed (`scripts/ci-shard-results.sh`); they name the
   shards' flaky and failed tests for the issues below. Four shards come
   from the measured test time
   ([evidence](evidence/ci/shards.md)). Target: **under 8 minutes** in the
