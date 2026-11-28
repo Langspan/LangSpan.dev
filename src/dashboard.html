@@ -1394,11 +1394,13 @@ async function refreshLive() {
       byId('live-empty').hidden = false;
       byId('live-empty').textContent = 'Reading the coordinator’s log to its newest step (' + got.next + ' events so far)…';
     }
+    feed.generation = view.generation;
   } catch (error) {
     failed = error && error.name === 'AbortError' ? 'the dashboard server did not answer within 8 s' : str(error && error.message);
   }
-  // The tail rarely holds the boot's clock anchor; the view carries it.
-  const events = LangSpanLive.withAnchor(feed.events, view.clock_anchor);
+  // The tail rarely holds the boot's clock anchor; the view carries it, for
+  // rows read in its generation.
+  const events = LangSpanLive.withAnchor(feed.events, view.clock_anchor, feed.generation);
   const now = LangSpanLive.daemonNow(events, Date.now());
   const timing = LangSpanLive.pace(LangSpanLive.model(view, events), events, { now_ms: now });
   if (liveView) liveView.update(timing); else liveView = LangSpanLiveView.mount(byId('live-view'), timing);
