@@ -70,7 +70,11 @@ retention snapshot; removing the workspace removes it.
    again. A path whose version changed is refused as a stale base, naming the
    path and the holder. As with an admission's stale refusal, the version the
    session was told about becomes its known version, so the retry is
-   admitted: one refusal per change.
+   admitted: one refusal per change. A path whose version can no longer be
+   read (now a symlink, a directory or over the size bound) is not known to
+   be unchanged: the hook gives no decision (`unknown`, naming the path) and
+   records no `write_waited`. That is a stopgap (review follow-up #244); a
+   refusal of its own would need a new `WaitResult` here.
 6. Otherwise the hook asks again under a second request ID. The coordinator
    repeats every check, including the session's own known versions, so a
    stale or unread-lines refusal can still follow. An admission holds under
