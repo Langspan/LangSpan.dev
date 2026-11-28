@@ -14,6 +14,7 @@ use std::{
 mod admit;
 mod deny;
 mod lifecycle;
+mod main_moved;
 mod observe;
 mod prompt;
 mod push_route;

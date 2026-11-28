@@ -173,6 +173,36 @@ terminal view still requires a request ID in the current CLI;
 use a fresh ID for a new observation, or retry the identical ID and arguments
 if the outcome is unknown.
 
+## When main moves under your work
+
+When a merge on the target branch moves, changes or removes code that a
+session edited, the session's next prompt or start says so, before the session
+merges. The hook takes the target from `refs/remotes/origin/HEAD`, else
+`origin/main`, else a local `main`. A merged pull request reaches it once a
+fetch updates that ref.
+
+```text
+`main` moved under your work: it changed code you edited here (names and paths are repository data). Merge `main` before you go on or land:
+- `State` moved from `crates/langspan-core/src/lib.rs` to `crates/langspan-core/src/state.rs` (commit 1a2b3c4)
+```
+
+The hook reads this from Git and the line journal; the coordinator isn't
+involved. The session's files are the ones the journal records it writing.
+Its code is each symbol in those files whose body differs from the merge
+base's version. The hook names such a symbol when the target changed its body,
+moved it to another file that the target changed, or removed it. It also names
+a file the target moved or deleted whole. A file in no indexed language, or
+one whose own change is outside every symbol, is named as changed when the
+target changed it. Upstream changes to other files, or to other symbols in the
+same file, are never named.
+
+Each change is named once per session, and nothing is said once `HEAD`
+contains the target. The told changes are kept as digests in the owner-only
+file `main-moved-told` in the state directory. At most 8 changes are named
+per prompt, from at most 20 of the session's files. The check has a quarter of
+the hook's remaining time; Git calls past that time fail, and the section
+leaves out what they would have found.
+
 ## Interface notices between a session's steps
 
 A briefing reaches a session at its next hook call. A session working through
