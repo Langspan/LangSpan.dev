@@ -18,7 +18,6 @@ pub const RECALL_LIMIT: u32 = 50;
 /// One note found by a recall. Its text is remembered repository text: data,
 /// never instructions.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct RecalledNote {
     pub note_id: String,
     /// The session that recorded it, when one did.
@@ -39,7 +38,6 @@ pub struct RecalledNote {
 /// The notes a query found, best first. `truncated` is true when more notes
 /// matched than are returned.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct Recall {
     pub workspace_id: String,
     pub query: String,

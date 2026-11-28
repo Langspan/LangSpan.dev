@@ -361,7 +361,7 @@ jobs:
           git apply --index "$PATCH"
           git diff --cached --name-only | while read -r path; do
             case $path in
-              "tests/fixtures/store-$version/"* | "fixtures/event-types/$version.txt" | docs/*.md) ;;
+              "tests/fixtures/store-$version/"* | "fixtures/event-types/$version.txt" | tests/protocol.rs | docs/*.md) ;;
               *) echo "the patch touches $path, which release-fixtures.sh does not write" >&2; exit 1 ;;
             esac
           done
@@ -369,11 +369,11 @@ jobs:
           git -c user.name="$SLUG[bot]" -c user.email="$SLUG[bot]@users.noreply.github.com" \
             commit -q -m "test: golden stores and frozen event-type list of $TAG (#566)"
           git push "https://x-access-token:$GH_TOKEN@github.com/$GH_REPO.git" "HEAD:refs/heads/$branch"
-          gh pr create --draft --base main --head "$branch" \
+          gh pr create --base main --head "$branch" \
             --title "test: golden stores and frozen event-type list of $TAG" --body "$(cat <<EOF
-          The release workflow wrote these with \`bash scripts/release-fixtures.sh $version\` on $TAG: the golden stores from that tag's demonstration and build (\`scripts/golden-stores.sh\`), their state snapshots (\`LANGSPAN_UPDATE_GOLDEN=1\` on \`tests/golden_stores.rs\`), the frozen event-type list and the generated table naming it.
+          The release workflow wrote these with \`bash scripts/release-fixtures.sh $version\` on $TAG: the golden stores from that tag's demonstration and build (\`scripts/golden-stores.sh\`), their state snapshots (\`LANGSPAN_UPDATE_GOLDEN=1\` on \`tests/golden_stores.rs\`), the frozen event-type list, the generated table naming it, and the $version row in \`RELEASES\` (\`tests/protocol.rs\`), copied from the newest row because $version reads the same event types, speaks the same protocol version and names the same capabilities.
 
-          To finish: add the $version row to \`RELEASES\` in \`tests/protocol.rs\` with the protocol version and the capabilities its requests name, review the new state snapshots, and mark this ready. The next release pull request fails until this lands (docs/development-process.md, Releases).
+          To finish: review the new state snapshots and merge this. The next release pull request fails until this lands (docs/development-process.md, Releases).
           EOF
           )"
 

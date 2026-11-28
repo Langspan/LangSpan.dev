@@ -109,7 +109,6 @@ impl Policy {
 
 /// One row of the policy table in effect for a workspace.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct PolicyRow {
     pub case: PolicyCase,
     pub policy: Policy,

@@ -134,7 +134,6 @@ pub struct Trail {
 /// A trail as a briefing or a listing shows it: with its age, when it was
 /// recorded in the current daemon run.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct TrailView {
     pub trail: Trail,
     #[serde(default, skip_serializing_if = "Option::is_none")]

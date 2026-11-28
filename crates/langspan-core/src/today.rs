@@ -35,14 +35,12 @@ const TODAY_TEXT: usize = 120;
 
 /// Wall-clock milliseconds since the Unix epoch, `from_ms` included.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct TodayWindow {
     pub from_ms: u64,
     pub to_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct TodaySession {
     pub session_id: String,
     pub host: String,
@@ -58,7 +56,6 @@ pub struct TodaySession {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct TodayChecks {
     pub passed: u32,
     pub failed: u32,
@@ -67,7 +64,6 @@ pub struct TodayChecks {
 
 /// How each landing ended, by its last attempt.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct TodayLandings {
     pub landed: u32,
     /// The remote refused the push, the target moved, or no passing check
@@ -79,14 +75,12 @@ pub struct TodayLandings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct OpenAdmission {
     pub session_id: String,
     pub paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct OpenIntent {
     pub session_id: String,
     /// Session text: data, never instructions.
@@ -94,7 +88,6 @@ pub struct OpenIntent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct OpenMessage {
     pub message_id: String,
     /// The sending session; `None` for the owner.
@@ -105,7 +98,6 @@ pub struct OpenMessage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct OpenCheck {
     pub name: String,
     pub tree_oid: String,
@@ -113,7 +105,6 @@ pub struct OpenCheck {
 
 /// Loose ends as they stand now, whatever the window.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct TodayOpen {
     pub admissions: Vec<OpenAdmission>,
     pub intents: Vec<OpenIntent>,
@@ -127,7 +118,6 @@ pub struct TodayOpen {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct Today {
     /// `None` for every workspace.
     pub workspace_id: Option<String>,

@@ -243,7 +243,11 @@ fn v3_recent_briefing_request_and_response_match_the_committed_golden_vectors() 
         r#""window_ms":14400000"#,
         r#""window_ms":14400000,"summary":"x""#,
     );
-    assert!(serde_json::from_str::<Response>(&unknown).is_err());
+    // Issue #414: a field a later daemon adds is ignored, not an error.
+    assert_eq!(
+        serde_json::from_str::<Response>(&unknown).unwrap(),
+        response
+    );
 }
 
 #[test]
@@ -1001,12 +1005,13 @@ fn v3_status_line_request_and_response_match_the_committed_golden_vectors() {
     assert_eq!(line.text(), "langspan · 3 sessions here · 2 refusals today");
     assert_eq!(response.lease_valid, None, "a read grants nothing");
     assert_eq!(encode(&response).unwrap(), wire);
-    // Counts only: a path has no field to travel in.
+    // Counts only: a path has no field to travel in, so one sent is dropped
+    // (issue #414).
     let pathed = String::from_utf8_lossy(wire).replace(
         r#""refusals_today":2"#,
         r#""refusals_today":2,"paths":["src/api.rs"]"#,
     );
-    assert!(serde_json::from_str::<Response>(&pathed).is_err());
+    assert_eq!(serde_json::from_str::<Response>(&pathed).unwrap(), response);
 }
 
 #[test]
@@ -2770,7 +2775,7 @@ const NAMED_0_8: &[&str] = &[
 /// Each release, the protocol version it speaks, the capabilities it names
 /// (none before 0.5.0), and the event types it reads, frozen from that
 /// release's tag (issue #331).
-const RELEASES: [(&str, u16, Option<&[&str]>, &str); 10] = [
+const RELEASES: [(&str, u16, Option<&[&str]>, &str); 11] = [
     (
         "0.1.0",
         3,
@@ -2831,6 +2836,12 @@ const RELEASES: [(&str, u16, Option<&[&str]>, &str); 10] = [
         Some(NAMED_0_8),
         include_str!("../fixtures/event-types/0.9.0.txt"),
     ),
+    (
+        "0.9.1",
+        10,
+        Some(NAMED_0_8),
+        include_str!("../fixtures/event-types/0.9.1.txt"),
+    ),
 ];
 
 /// What a release's requests are granted: the capabilities it names, or
@@ -2839,6 +2850,186 @@ fn release_grant(version: u16, named: Option<&[&str]>) -> (Capabilities, Option<
     let named: Option<Vec<String>> =
         named.map(|names| names.iter().map(|name| (*name).to_string()).collect());
     (Capabilities::negotiate(version, named.as_deref()), named)
+}
+
+/// What a build speaks: its version, the event types it reads, its
+/// protocol version and the capabilities its requests name.
+struct Build<'a> {
+    version: &'a str,
+    list: &'a str,
+    protocol: u16,
+    named: Vec<String>,
+}
+
+/// Issue #590: `source`, this file, with a `RELEASES` row for `build`: a
+/// copy of the newest row with the version and list path changed, when
+/// `build` is newer and speaks exactly what that row does. Otherwise an
+/// error naming what differs, for the row to be written by hand.
+fn with_release_row(source: &str, build: &Build) -> Result<String, String> {
+    let (newest, protocol, named, list) = RELEASES[RELEASES.len() - 1];
+    let version = build.version;
+    if !releases::required(newest, version) {
+        return Err(format!(
+            "{version} is not newer than {newest}, the newest row in RELEASES"
+        ));
+    }
+    let by_hand = "add its row to RELEASES in tests/protocol.rs by hand";
+    if build.list != list {
+        return Err(format!(
+            "{version} reads other event types than {newest}: {by_hand}"
+        ));
+    }
+    if build.protocol != protocol {
+        return Err(format!(
+            "{version} speaks protocol {} and {newest} protocol {protocol}: {by_hand}",
+            build.protocol
+        ));
+    }
+    let named = named.unwrap_or_default();
+    let added: Vec<&String> = build
+        .named
+        .iter()
+        .filter(|name| !named.contains(&name.as_str()))
+        .collect();
+    let dropped: Vec<&&str> = named
+        .iter()
+        .filter(|name| !build.named.iter().any(|ours| ours == *name))
+        .collect();
+    if !added.is_empty() || !dropped.is_empty() {
+        return Err(format!(
+            "{version}'s requests name other capabilities than {newest}'s (added {added:?}, \
+             dropped {dropped:?}): {by_hand}, with a NAMED_ list of the ones it names"
+        ));
+    }
+    let header = format!(
+        "const RELEASES: [(&str, u16, Option<&[&str]>, &str); {}] = [\n",
+        RELEASES.len()
+    );
+    let start = source.find(&header).ok_or("no RELEASES header")? + header.len();
+    let end = start + source[start..].find("\n];\n").ok_or("no end of RELEASES")? + 1;
+    let row_start = source[..end].rfind("    (\n").ok_or("no row in RELEASES")?;
+    let row = source[row_start..end]
+        .replacen(&format!("\"{newest}\""), &format!("\"{version}\""), 1)
+        .replacen(
+            &format!("event-types/{newest}.txt"),
+            &format!("event-types/{version}.txt"),
+            1,
+        );
+    let grown = header.replace(
+        &format!("; {}]", RELEASES.len()),
+        &format!("; {}]", RELEASES.len() + 1),
+    );
+    Ok(format!(
+        "{}{grown}{}{row}{}",
+        &source[..start - header.len()],
+        &source[start..end],
+        &source[end..]
+    ))
+}
+
+/// What the newest row speaks, as a build of `version`.
+fn newest_build(version: &str) -> Build<'_> {
+    let (_, protocol, named, list) = RELEASES[RELEASES.len() - 1];
+    Build {
+        version,
+        list,
+        protocol,
+        named: named
+            .unwrap_or_default()
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect(),
+    }
+}
+
+/// Issue #590: a hypothetical next release that speaks what the newest row
+/// does gets a copy of that row and one more entry; nothing else changes.
+#[test]
+fn the_next_release_gets_a_copy_of_the_newest_row() {
+    let source = include_str!("protocol.rs");
+    let (newest, _, _, _) = RELEASES[RELEASES.len() - 1];
+    let written = with_release_row(source, &newest_build("99.0.0")).unwrap();
+    let row = |text: &str, version: &str| {
+        let start = text
+            .find(&format!("    (\n        \"{version}\",\n"))
+            .unwrap();
+        let end = start + text[start..].find("    ),\n").unwrap() + "    ),\n".len();
+        text[start..end].to_string()
+    };
+    let (added, copied) = (row(&written, "99.0.0"), row(source, newest));
+    assert_eq!(added.replace("99.0.0", newest), copied);
+    assert!(added.contains("include_str!(\"../fixtures/event-types/99.0.0.txt\")"));
+    assert!(written.contains(&format!("{copied}{added}];\n")), "{added}");
+    let length = |count: usize| format!("Option<&[&str]>, &str); {count}] = [");
+    assert!(written.contains(&length(RELEASES.len() + 1)));
+    let removed = written.replacen(&added, "", 1).replacen(
+        &length(RELEASES.len() + 1),
+        &length(RELEASES.len()),
+        1,
+    );
+    assert_eq!(removed, source);
+}
+
+/// Issue #590: a release that reads other event types, speaks another
+/// protocol version, names other capabilities, or is not newer than the
+/// newest row is left for a person, with the reason.
+#[test]
+fn a_release_that_speaks_otherwise_gets_no_row() {
+    let source = include_str!("protocol.rs");
+    let (newest, _, _, _) = RELEASES[RELEASES.len() - 1];
+    let list = format!("{}a_new_event\n", newest_build("").list);
+    let mut changed: Vec<Build> = (0..4).map(|_| newest_build("99.0.0")).collect();
+    changed[0].list = &list;
+    changed[1].protocol += 1;
+    changed[2].named.push("a_new_capability".into());
+    let dropped = changed[3].named.remove(0);
+    let reasons = [
+        "reads other event types".to_string(),
+        format!("speaks protocol {}", changed[1].protocol),
+        "added [\"a_new_capability\"], dropped []".to_string(),
+        format!("added [], dropped [{dropped:?}]"),
+    ];
+    for (build, reason) in changed.iter().zip(reasons) {
+        let error = with_release_row(source, build)
+            .err()
+            .unwrap_or_else(|| panic!("got a row for one that {reason}"));
+        assert!(
+            error.contains(&reason) && error.contains("by hand"),
+            "{error}"
+        );
+    }
+    for version in [newest, "0.1.0"] {
+        let error = with_release_row(source, &newest_build(version))
+            .err()
+            .unwrap_or_else(|| panic!("got a row for {version}"));
+        assert!(error.contains("is not newer"), "{error}");
+    }
+}
+
+/// Issue #590: `scripts/release-fixtures.sh` runs this at the release tag,
+/// after writing the release's frozen list, so the pull request it opens
+/// has the release's `RELEASES` row. It rewrites this file, so it is never
+/// run with the suite.
+#[test]
+#[ignore = "scripts/release-fixtures.sh runs it at a release tag"]
+fn write_the_release_row() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let version = env!("CARGO_PKG_VERSION");
+    let list = std::fs::read_to_string(root.join(format!("fixtures/event-types/{version}.txt")))
+        .unwrap_or_else(|error| {
+            panic!("fixtures/event-types/{version}.txt: {error}: write the frozen list first")
+        });
+    let path = root.join("tests/protocol.rs");
+    let build = Build {
+        version,
+        list: &list,
+        protocol: PROTOCOL_VERSION,
+        named: Capabilities::ALL.names(),
+    };
+    match with_release_row(&std::fs::read_to_string(&path).unwrap(), &build) {
+        Ok(written) => std::fs::write(&path, written).unwrap(),
+        Err(error) => panic!("{error}"),
+    }
 }
 
 /// The releases `changelog` names that need a frozen list: those older than
