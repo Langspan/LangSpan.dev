@@ -168,7 +168,9 @@ _PUB = re.compile(
 # string literal and a `\x01` a comment (see strip's mark); rustfmt keeps a comment
 # between an operand and its `[`, so the operand is matched across one.
 _RESULT = re.compile(r"->\s*(?:\w+::)*Result\s*<")
-_INDEX = re.compile(r"(\w+|[)\]?\"])(?:[\s\x01]*\x01[\s\x01]*)?\[")
+# One run of spacing and comment, so a long comment is read once, not backtracked over;
+# `indexing` drops a run with no comment in it.
+_INDEX = re.compile(r"(\w+|[)\]?\"])([\s\x01]*)\[")
 # Keywords that start an array, slice type or slice pattern after a comment. A raw
 # identifier such as `r#match` is an operand, so `indexing` checks for its `r#`.
 _NOT_OPERAND = {
@@ -182,12 +184,18 @@ def _is_attribute_end(s, i):
     for j in range(i, -1, -1):
         depth += {"]": 1, "[": -1}.get(s[j], 0)
         if not depth:
-            k = j - 1
-            while k >= 0 and s[k].isspace():
-                k -= 1
-            k -= k >= 0 and s[k] == "!"
+            k = _before_gap(s, j - 1)
+            if k >= 0 and s[k] == "!":
+                k = _before_gap(s, k - 1)
             return k >= 0 and s[k] == "#"
     return False
+
+
+def _before_gap(s, k):
+    """The offset of the last character at or before k that is not spacing or a marked comment."""
+    while k >= 0 and (s[k].isspace() or s[k] == "\x01"):
+        k -= 1
+    return k
 
 
 def _not_operand(s, m):
@@ -276,7 +284,7 @@ class Source:
             return self._indexing
         counts, s = [0, 0], self._marked
         for m in _INDEX.finditer(s):
-            if _not_operand(s, m):
+            if (m.group(2) and "\x01" not in m.group(2)) or _not_operand(s, m):
                 continue
             depth, j = 0, m.end()
             while j < len(s) and (depth or s[j] != "]"):

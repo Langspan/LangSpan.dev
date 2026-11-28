@@ -46,6 +46,9 @@ lockfile's versions. When those change, the job's lockfile check fails until
 it is refreshed with
 `cargo update --manifest-path fuzz/Cargo.toml --workspace` (and, for a
 version that moved, `-p <crate> --precise <version>` to match `Cargo.lock`).
+Each release pull request bumps the workspace packages' versions in it
+through `extra-files` in `release-please-config.json`, and
+`tests/ci_workflows.rs` fails when they differ from `Cargo.toml`'s.
 
 ## Adding a target
 

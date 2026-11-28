@@ -244,6 +244,30 @@ test("one edit that saves two holds clears both, and is re-read only if both fil
     ["Write held", "Write held", "Read", "Saved on retry", "Edited", "Edited"]);
 });
 
+test("a hold on several files is re-read only when each file it saves was read", () => {
+  seq = 0;
+  const hold = () => Object.assign(held(B, A, 3000), { paths: ["a.ts", "b.ts"] });
+  // a.ts was read again; the edit saves b.ts, which was not.
+  const m = model(STATE, [anchor(), hold(), read(B, 3500, "a.ts"), op(B, 4000, "b.ts")]);
+  assert.equal(m.cards[2].verb, "Saved on retry");
+  seq = 0;
+  const both = model(STATE, [anchor(), hold(), read(B, 3500, "b.ts"), op(B, 4000, "b.ts")]);
+  assert.equal(both.cards[2].verb, "Saved after re-reading");
+});
+
+test("each row's time comes from its own generation's clock anchor", () => {
+  seq = 0;
+  // A restart re-anchors: at 1000 the clock read 08:00:00 in the first
+  // generation; at 9000 it read 09:00:00 in the second.
+  const events = [anchor(), op(A, 2000), row({ type: "clock_anchored", wall_ms: 1_800_003_600_000, clock_ms: 9000 }),
+    op(A, 70_000, "b.ts")];
+  assert.deepEqual(model(STATE, events).cards.map((c) => c.time), ["08:00:01", "09:01:01"]);
+  // A row before the first anchor read has no known generation, so no time.
+  seq = 0;
+  const late = model(STATE, [op(A, 2000), anchor(), op(A, 70_000, "b.ts")]);
+  assert.deepEqual(late.cards.map((c) => c.time), [null, "08:01:09"]);
+});
+
 test("an edit card of several files counts them, and merges only with an edit of the same files", () => {
   seq = 0;
   const events = [anchor(), multi(A, 2000, ["a.ts", "b.ts"]), multi(A, 3000, ["a.ts", "b.ts"]),
