@@ -39,8 +39,7 @@ impl From<&str> for Refused {
 
 const ALONE: &str = "run `git push` as a command of its own: no `&&`, `;`, `||`, pipe, subshell, `cd` or prefix such as `env`";
 
-/// The `git push` that `command` runs; `None` when it runs none, or only a
-/// dry run.
+/// The `git push` that `command` runs; `None` when it runs none.
 pub(crate) fn git_push(command: &str) -> Result<Option<GitPush>, Refused> {
     if !(command.contains("git") && command.contains("push")) {
         return Ok(None);
@@ -93,13 +92,14 @@ fn push_at(words: &[Word]) -> Option<usize> {
 
 /// A `-c` setting the dry run may carry: where the push goes, and nothing
 /// that runs a program (`core.sshCommand`, `credential.helper`,
-/// `remote.NAME.receivepack`, `protocol.*.allow`, `include.path`).
+/// `remote.NAME.receivepack`, `protocol.*.allow`, `include.path`) or changes
+/// what the dry run does or prints (any `push.*` but `push.default`).
 fn destination_setting(setting: &str) -> bool {
     let key = setting.split_once('=').map_or(setting, |(key, _)| key);
     let key = key.to_ascii_lowercase();
     let parts: Vec<&str> = key.split('.').collect();
     match (parts.first(), parts.len(), parts.last()) {
-        (Some(&"push"), 2, _) | (Some(&"remote"), 2, Some(&"pushdefault")) => true,
+        (Some(&"push"), 2, Some(&"default")) | (Some(&"remote"), 2, Some(&"pushdefault")) => true,
         (Some(&"remote"), 3.., Some(name)) => {
             matches!(*name, "push" | "mirror" | "url" | "pushurl")
         }
@@ -133,7 +133,7 @@ fn lone(words: &[Word]) -> Result<Option<GitPush>, Refused> {
             "-c" => {
                 let setting = global.next().ok_or_else(missing)?;
                 if !destination_setting(setting) {
-                    return Err("this push sets something with `git -c` other than where it goes (push.*, remote.*, branch.*), and LangSpan runs a dry run of the push before it runs; set it with `git config`, or leave it out".into());
+                    return Err("this push sets something with `git -c` other than where it goes (push.default, remote.*, branch.*), and LangSpan runs a dry run of the push before it runs; set it with `git config`, or leave it out".into());
                 }
                 push.config.push((*setting).to_owned());
             }
@@ -145,41 +145,55 @@ fn lone(words: &[Word]) -> Result<Option<GitPush>, Refused> {
             }
         }
     }
-    let (mut options_end, mut value_next) = (false, false);
-    for arg in texts.iter().skip(at + 1) {
-        let arg = *arg;
-        if options_end || value_next || !arg.starts_with('-') || arg == "-" {
+    let mut words = texts.iter().skip(at + 1).copied();
+    let mut value_next = false;
+    while let Some(arg) = words.next() {
+        if value_next || !arg.starts_with('-') || arg == "-" {
             push.args.push(arg.to_owned());
             value_next = false;
             continue;
         }
-        match arg {
-            "--" => options_end = true,
-            "-n" | "--dry-run" => return Ok(None),
-            // A dry run must say which refs it updates.
-            "-q" | "--quiet" => continue,
-            "-o" | "--push-option" => value_next = true,
-            _ if arg.starts_with("--receive-pack") || arg.starts_with("--exec") => {
+        if arg == "--" {
+            // The dry run's own options follow the push's words, and after
+            // `--` they would be refspecs.
+            if words.next().is_some() {
+                return Err("this push has words after `--`, and LangSpan adds its dry run's options after the push's; name refs that start with `-` as `refs/heads/NAME`".into());
+            }
+            continue;
+        }
+        if let Some(long) = arg.strip_prefix("--") {
+            // Git takes any unambiguous start of a long option's name.
+            let name = long.split_once('=').map_or(long, |(name, _)| name);
+            let names = |full: &[&str]| full.iter().any(|full| full.starts_with(name));
+            if names(&["dry-run", "no-dry-run", "porcelain", "no-porcelain"]) {
+                return Err(format!("this push has `{arg}`, and LangSpan runs a dry run of every push with `--porcelain` itself, which that option would change; run the push without it").into());
+            }
+            if names(&["receive-pack", "exec"]) {
                 return Err("this push names the program to run on the remote side (`--receive-pack`, `--exec`), which LangSpan does not run in a dry run; set `remote.NAME.receivepack` with `git config` instead".into());
             }
-            _ if arg.starts_with("--") => {}
-            _ => {
-                // A cluster of short options, such as `-fu` or `-qoci.skip`:
-                // after `o`, the rest is its value.
-                let letters = arg.trim_start_matches('-');
-                let (flags, value) = letters.split_at(letters.find('o').unwrap_or(letters.len()));
-                if flags.contains('n') {
-                    return Ok(None);
-                }
-                let flags: String = flags.chars().filter(|letter| *letter != 'q').collect();
-                value_next = value == "o";
-                if !(flags.is_empty() && value.is_empty()) {
-                    push.args.push(format!("-{flags}{value}"));
-                }
+            // A dry run must say which refs it updates.
+            if names(&["quiet"]) {
                 continue;
             }
+            value_next = name == long && names(&["push-option"]);
+            push.args.push(arg.to_owned());
+            continue;
         }
-        push.args.push(arg.to_owned());
+        // A cluster of short options, such as `-fu` or `-qoci.skip`: after
+        // `o`, the rest is its value.
+        let letters = arg.trim_start_matches('-');
+        let (flags, value) = letters.split_at(letters.find('o').unwrap_or(letters.len()));
+        if flags.contains('n') {
+            return Err(format!("this push has `{arg}`, which holds `-n`, and LangSpan runs a dry run of every push itself; run the push without it").into());
+        }
+        let flags: String = flags.chars().filter(|letter| *letter != 'q').collect();
+        value_next = value == "o";
+        if !(flags.is_empty() && value.is_empty()) {
+            push.args.push(format!("-{flags}{value}"));
+        }
+    }
+    if value_next {
+        return Err("this push ends with `-o` or `--push-option` and no value; give it one".into());
     }
     Ok(Some(push))
 }
@@ -205,7 +219,11 @@ mod tests {
         );
         assert_eq!(args("git push origin main 2>&1"), ["origin", "main"]);
         assert_eq!(args("git push -o -q origin x"), ["-o", "-q", "origin", "x"]);
-        assert_eq!(args("git push origin -- -q"), ["origin", "--", "-q"]);
+        assert_eq!(
+            args("git push --push -n --push-option=x origin"),
+            ["--push", "-n", "--push-option=x", "origin"]
+        );
+        assert_eq!(args("git push origin main --"), ["origin", "main"]);
         let push = git_push("git -C a -C b -c push.default=matching --no-pager push")
             .unwrap()
             .unwrap();
@@ -215,15 +233,13 @@ mod tests {
 
     /// A quiet dry run says nothing about the refs it would update.
     #[test]
-    fn quiet_is_dropped_and_a_dry_run_is_no_push() {
+    fn quiet_is_dropped_in_any_spelling() {
         assert_eq!(args("git push -q origin main"), ["origin", "main"]);
         assert_eq!(args("git push --quiet origin main"), ["origin", "main"]);
+        assert_eq!(args("git push --qui origin main"), ["origin", "main"]);
         assert_eq!(args("git push -qf origin main"), ["-f", "origin", "main"]);
         assert_eq!(args("git push -qoci.skip origin"), ["-oci.skip", "origin"]);
         for command in [
-            "git push -n origin main",
-            "git push --dry-run origin main",
-            "git push -fn origin main",
             "git status",
             "echo push",
             "git commit -m 'then push'",
@@ -267,7 +283,26 @@ mod tests {
                 "other than `-C`",
             ),
             ("git push --receive-pack=evil origin main", "receivepack"),
+            ("git push --receive=evil origin main", "receivepack"),
             ("git push --exec evil origin main", "receivepack"),
+            ("git push --ex=evil origin main", "receivepack"),
+            // Review of PR #576: the push's words must not undo the dry run
+            // or change what it prints.
+            ("git push -n origin main", "`-n`"),
+            ("git push -fn origin main", "`-n`"),
+            ("git push --dry-run origin main", "--porcelain"),
+            ("git push --no-dry-run origin main", "--porcelain"),
+            ("git push --no-dry origin main", "--porcelain"),
+            ("git push --porcelain origin main", "--porcelain"),
+            ("git push --no-porcelain origin main", "--porcelain"),
+            ("git push --porc origin main", "--porcelain"),
+            ("git push origin -- main", "after `--`"),
+            ("git push origin -- --no-dry-run", "after `--`"),
+            ("git push origin main -o", "no value"),
+            ("git push origin main --push-option", "no value"),
+            ("git push origin main -fo", "no value"),
+            ("git -c push.recurseSubmodules=on-demand push", "git config"),
+            ("git -c push.pushOption=x push", "git config"),
             ("git push 'unterminated", "could not read"),
         ] {
             let why = git_push(command).unwrap_err().0;

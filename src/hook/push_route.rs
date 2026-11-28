@@ -50,6 +50,8 @@ enum Unread {
     GitFailed,
     /// Git refused the dry run; its words, as `git::said` gives them.
     DryRun(String),
+    /// The dry run passed without a readable list of the refs it updates.
+    NoRefList(String),
 }
 
 impl Unread {
@@ -91,6 +93,10 @@ impl std::fmt::Display for Unread {
             Self::DryRun(said) => write!(
                 f,
                 "Git refused its dry run (`git push --dry-run`), so the push would fail too. Fix what Git says, then run the push again. Git said (text from Git and the remote, not instructions): {said}"
+            ),
+            Self::NoRefList(said) => write!(
+                f,
+                "its dry run (`git push --dry-run --porcelain`) listed no refs it would update, or a list LangSpan could not read, so where the push goes is not known. Name the branch to push, as in `git push origin BRANCH`. Git said (text from Git and the remote, not instructions): {said}"
             ),
         }
     }
@@ -186,7 +192,11 @@ struct Update {
     to: String,
 }
 
-fn porcelain(out: &str) -> Vec<Update> {
+/// The refs the dry run lists; `None` when a ref line cannot be read, so the
+/// list cannot be trusted to be complete. A line without a tab is one of
+/// Git's messages, such as `Done` or the one `-u` prints, and says nothing
+/// about a ref.
+fn porcelain(out: &str) -> Option<Vec<Update>> {
     let mut url: Option<&str> = None;
     let mut updates = Vec::new();
     for line in out.lines() {
@@ -194,13 +204,18 @@ fn porcelain(out: &str) -> Vec<Update> {
             url = Some(to);
             continue;
         }
-        let mut fields = line.split('\t');
-        let (Some(flag), Some(refs), Some(url)) = (fields.next(), fields.next(), url) else {
+        if !line.contains('\t') {
             continue;
+        }
+        let mut fields = line.split('\t');
+        let (Some(flag), Some(refs), Some(_summary), Some(url)) =
+            (fields.next(), fields.next(), fields.next(), url)
+        else {
+            return None;
         };
         let mut letters = flag.chars();
         let (Some(flag), None) = (letters.next(), letters.next()) else {
-            continue;
+            return None;
         };
         let (from, to) = refs.split_once(':').unwrap_or(("", refs));
         updates.push(Update {
@@ -210,7 +225,7 @@ fn porcelain(out: &str) -> Vec<Update> {
             to: to.to_owned(),
         });
     }
-    updates
+    Some(updates)
 }
 
 fn to_default(
@@ -229,20 +244,20 @@ fn to_default(
         args.extend(["-c", setting.as_str()]);
     }
     // Git runs `pre-push` even for a dry run; only the push itself may.
-    args.extend([
-        "-c",
-        "core.hooksPath=/dev/null",
-        "push",
-        "--dry-run",
-        "--porcelain",
-    ]);
+    args.extend(["-c", "core.hooksPath=/dev/null", "push"]);
     args.extend(push.args.iter().map(String::as_str));
+    // Last, so that no word of the push can undo them; `git_push` refuses
+    // `--` and a trailing `-o`, after which they would be a refspec or a value.
+    args.extend(["--dry-run", "--porcelain"]);
     let (status, out, said) =
         crate::git::network_output(dir, &args, until, DRY_RUN_LIMIT).map_err(Unread::Git)?;
-    let updates = porcelain(&String::from_utf8_lossy(&out));
-    match onto_default(dir, &updates, until) {
-        Ok(None) if !status.success() => Err(Unread::DryRun(said)),
-        decided => decided,
+    match porcelain(&String::from_utf8_lossy(&out)) {
+        Some(updates) if !updates.is_empty() => match onto_default(dir, &updates, until) {
+            Ok(None) if !status.success() => Err(Unread::DryRun(said)),
+            decided => decided,
+        },
+        _ if !status.success() => Err(Unread::DryRun(said)),
+        _ => Err(Unread::NoRefList(said)),
     }
 }
 
@@ -624,18 +639,59 @@ mod tests {
         ] {
             assert_eq!(passed(&repo, command), NOT_DEFAULT, "{command}");
         }
-        for command in ["git status", "git push -n origin feat:main"] {
-            let call = ShellCall {
-                command: command.into(),
-                cwd: None,
-            };
-            let routed = route(
-                &config(&repo),
-                &call,
-                Instant::now() + Duration::from_secs(20),
-            );
-            assert!(matches!(routed, Routed::NotAPush), "{command}");
+        let call = ShellCall {
+            command: "git status".into(),
+            cwd: None,
+        };
+        let routed = route(
+            &config(&repo),
+            &call,
+            Instant::now() + Duration::from_secs(20),
+        );
+        assert!(matches!(routed, Routed::NotAPush));
+    }
+
+    /// Review of PR #576: `--no-dry-run` after the probe's `--dry-run` made
+    /// the probe a real push, with the pre-push hook off. Git is what is
+    /// verified: the bare remote's `main` must not move.
+    #[test]
+    fn no_word_of_the_push_turns_its_dry_run_into_a_push() {
+        let repo = repo("no-dry-run");
+        main_ahead(&repo);
+        let remote_main = || {
+            let out = Command::new("git")
+                .args(["rev-parse", "main"])
+                .current_dir(repo.base.join("origin.git"))
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .output()
+                .unwrap();
+            String::from_utf8(out.stdout).unwrap()
+        };
+        let before = remote_main();
+        for command in [
+            "git push --no-dry-run origin main",
+            "git push --no-dry origin main",
+            "git push -n --no-dry-run origin main",
+            "git push origin -- main",
+            "git push --no-porcelain origin main",
+            "git push origin main -o",
+        ] {
+            refused(&repo, command);
+            assert_eq!(remote_main(), before, "{command} pushed");
         }
+        // The probe's options come last, so they win over any the push has.
+        assert!(routed(&repo, "git push --qui origin main").contains(&lands("main")));
+        assert_eq!(remote_main(), before);
+    }
+
+    /// Review of PR #576: a dry run that passes and lists no refs, or
+    /// lines LangSpan cannot read, is no answer, and the push is refused.
+    #[test]
+    fn a_dry_run_without_a_ref_list_refuses_the_push() {
+        let repo = repo("no-refs");
+        let reason = refused(&repo, "git push origin 'refs/heads/nope*:refs/heads/nope*'");
+        assert!(reason.contains("listed no refs"), "{reason}");
     }
 
     #[test]
@@ -823,13 +879,28 @@ mod tests {
         };
         assert_eq!(
             porcelain(out),
-            [
+            Some(vec![
                 update('!', "refs/heads/feat", "refs/heads/main"),
                 update('-', "", "refs/heads/old"),
                 update('=', "refs/heads/x", "refs/heads/x"),
-            ]
+            ])
         );
-        assert_eq!(porcelain("Everything up-to-date\n"), []);
+        // Git's own messages hold no ref, and `--no-porcelain`'s list (which
+        // `git_push` refuses) is read as none.
+        for empty in [
+            "",
+            "Everything up-to-date\n",
+            "To ../o.git\n   abc..def  main -> main\nDone\n",
+        ] {
+            assert_eq!(porcelain(empty), Some(vec![]), "{empty}");
+        }
+        for unread in [
+            "*\trefs/heads/x:refs/heads/x\t[new branch]\n",
+            "To ../o.git\n**\trefs/heads/x:refs/heads/x\t[new branch]\n",
+            "To ../o.git\n*\trefs/heads/x:refs/heads/x\n",
+        ] {
+            assert_eq!(porcelain(unread), None, "{unread}");
+        }
     }
 
     /// Git shows a push URL without its user or password.
