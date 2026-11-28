@@ -381,7 +381,9 @@ no longer exists, a row whose file measures no production lines, and a file
 of 100 production lines or more without a row. Under 100 lines one line is
 more than a point, so the 2-point margin would be a line or two of noise.
 A nightly run under the floor, or with a failing test, opens or comments on
-the issue "Nightly Rust checks on main failed".
+the issue "Nightly Rust checks on main failed". The suite runs that step's
+own shell against a stand-in `gh`, after a report under the floor, so the
+path is tested without a drop on `main` or a call to GitHub.
 
 To raise the baseline, run `bash scripts/coverage.sh` (or download the
 `coverage` artifact of a run on `main` into `target/coverage`), then
