@@ -552,18 +552,19 @@ from an agent's command before the command itself runs: for a lone
 `git push`, the PreToolUse hook runs `git push --dry-run --porcelain` with the
 same arguments, which contacts the remote, before the host asks the owner to
 approve the call. Tampering and elevation: the dry run passes the agent's words
-to Git as an argument array, never through a shell, with its own
-`--dry-run --porcelain` last. It refuses words that would turn the dry run
-into a push or change its ref list (`-n`, `--[no-]dry-run`,
-`--[no-]porcelain` in any abbreviation, words after `--`, a trailing `-o`),
-and a dry run that passes without a readable, non-empty ref list refuses the
-push. It refuses `--receive-pack` and `--exec`, and Git options other than
-`-C` and `-c` before `push`. It accepts `-c` only for `push.default`,
-`remote.pushDefault`,
-`remote.NAME.{push,mirror,url,pushurl}` and
-`branch.NAME.{remote,pushRemote,merge}`, so an agent's command cannot make it
-run a program (`core.sshCommand`, `credential.helper`, `include.path`,
-`protocol.*.allow` are refused). It sets `core.hooksPath=/dev/null`, because
+to Git as an argument array, never through a shell, as
+`git push --dry-run --porcelain ARGS`. ARGS passes an allowlist: remote names
+and refspecs (no leading `-`) and nine options that take no value and cannot
+undo the dry run or hide its ref list (`-u`, `-q`, which is dropped, `-v`,
+`--tags`, `--[no-]follow-tags`, `--atomic`, `--[no-]progress`), in full.
+Every other word is refused, fail closed: an option that would turn the dry
+run into a push (`--no-dry-run`), take the dry run's own option as its value
+(a trailing `--repo`), change the ref list (`--no-porcelain`) or name a
+program (`--receive-pack`, `--exec`), any abbreviation, `--`, and every
+Git option before `push` but `-C` and `--no-pager`, `-c` included, so an
+agent's command cannot set `core.sshCommand`, `credential.helper` or a
+remote named `--dry-run`. A dry run that passes without a readable,
+non-empty ref list refuses the push. It sets `core.hooksPath=/dev/null`, because
 Git runs `pre-push` even for a dry run. What the repository's own
 configuration runs for a push (its SSH command, credential helper, receive-pack
 program) runs for the dry run too, under the network rules above: no prompt,

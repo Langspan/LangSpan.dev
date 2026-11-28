@@ -5,10 +5,10 @@
 //! pass, never forced. Pushes to other branches pass untouched.
 //!
 //! Where a push goes is Git's answer, not LangSpan's reading: the hook runs
-//! `git push --dry-run --porcelain` with the same options and arguments and
-//! reads which refs it would update. A push it cannot check that way (one
-//! combined with another command, or a dry run that fails or runs out of
-//! time) is refused.
+//! `git push --dry-run --porcelain` with the same arguments and reads which
+//! refs it would update. A push it cannot check that way (one combined with
+//! another command, one with an option outside a short allowlist, or a dry
+//! run that fails or runs out of time) is refused.
 
 use super::{Config, Reply, ShellCall};
 use crate::shell::GitPush;
@@ -234,21 +234,22 @@ fn to_default(
     push: &GitPush,
     until: Instant,
 ) -> Result<Option<ToDefault>, Unread> {
-    // Read without the push's `-c`, which cannot set it.
+    // `git_push` refuses `git -c`, so the push cannot set it.
     if git(dir, &["config", "--get", DIRECT_SETTING], until)?.as_deref() == Some("direct") {
         return Err(Unread::Direct);
     }
     in_workspace(config, dir, until)?;
-    let mut args = Vec::new();
-    for setting in &push.config {
-        args.extend(["-c", setting.as_str()]);
-    }
-    // Git runs `pre-push` even for a dry run; only the push itself may.
-    args.extend(["-c", "core.hooksPath=/dev/null", "push"]);
+    // Git runs `pre-push` even for a dry run; only the push itself may. The
+    // probe's options come first, and `git_push` lets through only options
+    // that take no value and cannot undo them (its `ALLOWED`).
+    let mut args = vec![
+        "-c",
+        "core.hooksPath=/dev/null",
+        "push",
+        "--dry-run",
+        "--porcelain",
+    ];
     args.extend(push.args.iter().map(String::as_str));
-    // Last, so that no word of the push can undo them; `git_push` refuses
-    // `--` and a trailing `-o`, after which they would be a refspec or a value.
-    args.extend(["--dry-run", "--porcelain"]);
     let (status, out, said) =
         crate::git::network_output(dir, &args, until, DRY_RUN_LIMIT).map_err(Unread::Git)?;
     match porcelain(&String::from_utf8_lossy(&out)) {
@@ -632,7 +633,7 @@ mod tests {
             "git push",
             "git push -u origin feat",
             "git push origin HEAD",
-            "git push -f origin feat",
+            "git push origin +feat",
             "git push origin feat:refs/tags/main",
             // Up to date: the default branch is not updated.
             "git push origin main",
@@ -651,13 +652,20 @@ mod tests {
         assert!(matches!(routed, Routed::NotAPush));
     }
 
-    /// Review of PR #576: `--no-dry-run` after the probe's `--dry-run` made
-    /// the probe a real push, with the pre-push hook off. Git is what is
-    /// verified: the bare remote's `main` must not move.
+    /// Review of PR #576: `--no-dry-run` after the probe's `--dry-run`, or a
+    /// trailing `--repo` taking it as its value, made the probe a real push,
+    /// with the pre-push hook off. Only allowed options reach the probe, after
+    /// its own. Git is what is verified: the bare remote's `main` must not
+    /// move, with a remote named `--dry-run` configured as the review found.
     #[test]
     fn no_word_of_the_push_turns_its_dry_run_into_a_push() {
         let repo = repo("no-dry-run");
         main_ahead(&repo);
+        git_ok(
+            &repo.work,
+            &["config", "remote.--dry-run.url", "../origin.git"],
+        );
+        git_ok(&repo.work, &["config", "push.default", "current"]);
         let remote_main = || {
             let out = Command::new("git")
                 .args(["rev-parse", "main"])
@@ -669,20 +677,35 @@ mod tests {
             String::from_utf8(out.stdout).unwrap()
         };
         let before = remote_main();
-        for command in [
-            "git push --no-dry-run origin main",
-            "git push --no-dry origin main",
-            "git push -n --no-dry-run origin main",
-            "git push origin -- main",
-            "git push --no-porcelain origin main",
-            "git push origin main -o",
+        for (command, word) in [
+            ("git push origin main --repo", "--repo"),
+            ("git push --repo origin main", "--repo"),
+            ("git push --no-dry-run origin main", "--no-dry-run"),
+            ("git push --no-dry origin main", "--no-dry"),
+            ("git push --no-porcelain origin main", "--no-porcelain"),
+            ("git push --qui origin main", "--qui"),
+            ("git push origin -- main", "--"),
+            ("git push origin main -o", "-o"),
+            (
+                "git push --prune origin 'refs/heads/*:refs/heads/*'",
+                "--prune",
+            ),
+            ("git -c remote.--dry-run.url=../origin.git push", "-c"),
         ] {
-            refused(&repo, command);
+            let reason = refused(&repo, command);
+            assert!(reason.contains(&format!("`{word}`")), "{command}: {reason}");
             assert_eq!(remote_main(), before, "{command} pushed");
         }
-        // The probe's options come last, so they win over any the push has.
-        assert!(routed(&repo, "git push --qui origin main").contains(&lands("main")));
-        assert_eq!(remote_main(), before);
+        for command in [
+            "git push -q origin main",
+            "git push origin main --quiet",
+            "git push -u --set-upstream -v --verbose origin main",
+            "git push --tags --follow-tags --atomic --progress origin main",
+            "git push --no-follow-tags --no-progress origin main",
+        ] {
+            assert!(routed(&repo, command).contains(&lands("main")), "{command}");
+            assert_eq!(remote_main(), before, "{command} pushed");
+        }
     }
 
     /// Review of PR #576: a dry run that passes and lists no refs, or
@@ -697,18 +720,21 @@ mod tests {
     #[test]
     fn forcing_or_deleting_the_default_branch_is_routed_and_says_so() {
         let repo = repo("force");
+        let forced = routed(&repo, "git push origin +feat:main");
+        assert!(forced.contains("landing never does"), "{forced}");
+        assert!(forced.contains(&lands("feat")), "{forced}");
+        let delete = routed(&repo, "git push origin :main");
+        assert!(delete.contains("would delete main"), "{delete}");
+        assert!(!delete.contains("land "), "{delete}");
+        // The options are refused; the refusal says to use a refspec.
         for command in [
             "git push -f origin feat:main",
             "git push --force-with-lease origin feat:main",
-            "git push origin +feat:main",
+            "git push origin --delete main",
         ] {
-            let forced = routed(&repo, command);
-            assert!(forced.contains("landing never does"), "{command}: {forced}");
-            assert!(forced.contains(&lands("feat")), "{command}: {forced}");
+            let reason = refused(&repo, command);
+            assert!(reason.contains("`+SRC:DST`, `:DST`"), "{command}: {reason}");
         }
-        let delete = routed(&repo, "git push origin --delete main");
-        assert!(delete.contains("would delete main"), "{delete}");
-        assert!(!delete.contains("land "), "{delete}");
     }
 
     /// Review of PR #576: a push combined with other commands was read in
@@ -747,43 +773,32 @@ mod tests {
         }
     }
 
-    /// Review of PR #576: `--prune` with a wildcard refspec deletes the
-    /// remote branches that have no local branch, the default one too.
+    /// Review of PR #576: a configured refspec and wildcard refspecs decide
+    /// where a push goes, and Git applies them. `git -c` is refused, since a
+    /// setting can change what the dry run does.
     #[test]
-    fn a_prune_with_a_wildcard_refspec_is_routed() {
-        let repo = repo("prune");
-        let glob = "git push --prune origin 'refs/heads/*:refs/heads/*'";
-        main_ahead(&repo);
-        assert!(routed(&repo, glob).contains(&lands("main")));
-        git_ok(&repo.work, &["branch", "-q", "-D", "main"]);
-        let reason = routed(&repo, glob);
-        assert!(reason.contains("would delete main"), "{reason}");
-        assert_eq!(
-            passed(
-                &repo,
-                "git push --prune origin 'refs/heads/feat:refs/heads/feat'"
-            ),
-            NOT_DEFAULT
-        );
-    }
-
-    /// Review of PR #576: `git -c` changes where a push goes. The dry run
-    /// carries the same settings; one that could run a program is refused.
-    #[test]
-    fn git_c_settings_are_carried_into_the_dry_run() {
+    fn configured_and_wildcard_refspecs_are_gits_to_apply_and_git_c_is_refused() {
         let repo = repo("dash-c");
-        let command = "git -c remote.origin.push=refs/heads/feat:refs/heads/main push origin";
-        assert!(routed(&repo, command).contains(&lands("feat")));
+        git_ok(
+            &repo.work,
+            &[
+                "config",
+                "remote.origin.push",
+                "refs/heads/feat:refs/heads/main",
+            ],
+        );
+        assert!(routed(&repo, "git push origin").contains(&lands("feat")));
+        git_ok(&repo.work, &["config", "--unset", "remote.origin.push"]);
         main_ahead(&repo);
-        assert_eq!(passed(&repo, "git push"), NOT_DEFAULT);
-        let command = "git -c push.default=matching push";
-        assert!(routed(&repo, command).contains(&lands("main")));
+        let glob = "git push origin 'refs/heads/*:refs/heads/*'";
+        assert!(routed(&repo, glob).contains(&lands("main")));
         for command in [
             "git -c core.sshCommand=false push origin feat",
+            "git -c push.default=matching push",
             "git -c langspan.defaultBranchPush=direct push origin feat:main",
         ] {
             let reason = refused(&repo, command);
-            assert!(reason.contains("git config"), "{command}: {reason}");
+            assert!(reason.contains("`-c` before `push`"), "{command}: {reason}");
         }
     }
 

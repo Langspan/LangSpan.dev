@@ -15,9 +15,8 @@ use std::path::PathBuf;
 pub(crate) struct GitPush {
     /// Each `git -C DIR`, joined in order; relative to the call's directory.
     pub(crate) cwd: Option<PathBuf>,
-    /// Each `git -c KEY=VALUE`, in order.
-    pub(crate) config: Vec<String>,
-    /// The words after `push`, as Git receives them, without `-q`.
+    /// The words after `push`, as Git receives them, without `-q`: remote
+    /// names, refspecs and only the options in `ALLOWED`.
     pub(crate) args: Vec<String>,
 }
 
@@ -90,23 +89,26 @@ fn push_at(words: &[Word]) -> Option<usize> {
     None
 }
 
-/// A `-c` setting the dry run may carry: where the push goes, and nothing
-/// that runs a program (`core.sshCommand`, `credential.helper`,
-/// `remote.NAME.receivepack`, `protocol.*.allow`, `include.path`) or changes
-/// what the dry run does or prints (any `push.*` but `push.default`).
-fn destination_setting(setting: &str) -> bool {
-    let key = setting.split_once('=').map_or(setting, |(key, _)| key);
-    let key = key.to_ascii_lowercase();
-    let parts: Vec<&str> = key.split('.').collect();
-    match (parts.first(), parts.len(), parts.last()) {
-        (Some(&"push"), 2, Some(&"default")) | (Some(&"remote"), 2, Some(&"pushdefault")) => true,
-        (Some(&"remote"), 3.., Some(name)) => {
-            matches!(*name, "push" | "mirror" | "url" | "pushurl")
-        }
-        (Some(&"branch"), 3.., Some(name)) => matches!(*name, "remote" | "pushremote" | "merge"),
-        _ => false,
-    }
-}
+/// The only options a hooked `git push` may have. None takes a value, so no
+/// word of the push can consume one of the dry run's own; anything else is
+/// refused, an abbreviation of these too. `-q` is dropped from the dry run,
+/// where it would hide the ref list.
+const ALLOWED: &[&str] = &[
+    "-u",
+    "--set-upstream",
+    "-q",
+    "--quiet",
+    "-v",
+    "--verbose",
+    "--tags",
+    "--follow-tags",
+    "--no-follow-tags",
+    "--atomic",
+    "--progress",
+    "--no-progress",
+];
+
+const NAMES: &str = "-u, -q, -v, --tags, --[no-]follow-tags, --atomic, --[no-]progress";
 
 fn lone(words: &[Word]) -> Result<Option<GitPush>, Refused> {
     let Some(at) = push_at(words) else {
@@ -130,70 +132,24 @@ fn lone(words: &[Word]) -> Result<Option<GitPush>, Refused> {
                     None => PathBuf::from(dir),
                 });
             }
-            "-c" => {
-                let setting = global.next().ok_or_else(missing)?;
-                if !destination_setting(setting) {
-                    return Err("this push sets something with `git -c` other than where it goes (push.default, remote.*, branch.*), and LangSpan runs a dry run of the push before it runs; set it with `git config`, or leave it out".into());
-                }
-                push.config.push((*setting).to_owned());
-            }
             "--no-pager" | "-P" => {}
             _ => {
-                return Err(
-                    "this push has a Git option before `push` other than `-C` or `-c`; run it without".into(),
-                );
+                return Err(format!(
+                    "this push has `{option}` before `push`, and LangSpan accepts only `-C` there (a setting such as `-c` changes what its dry run of the push does); set it with `git config`, or leave it out"
+                ).into());
             }
         }
     }
-    let mut words = texts.iter().skip(at + 1).copied();
-    let mut value_next = false;
-    while let Some(arg) = words.next() {
-        if value_next || !arg.starts_with('-') || arg == "-" {
+    for arg in texts.iter().skip(at + 1).copied() {
+        if !arg.starts_with('-') {
             push.args.push(arg.to_owned());
-            value_next = false;
-            continue;
-        }
-        if arg == "--" {
-            // The dry run's own options follow the push's words, and after
-            // `--` they would be refspecs.
-            if words.next().is_some() {
-                return Err("this push has words after `--`, and LangSpan adds its dry run's options after the push's; name refs that start with `-` as `refs/heads/NAME`".into());
-            }
-            continue;
-        }
-        if let Some(long) = arg.strip_prefix("--") {
-            // Git takes any unambiguous start of a long option's name.
-            let name = long.split_once('=').map_or(long, |(name, _)| name);
-            let names = |full: &[&str]| full.iter().any(|full| full.starts_with(name));
-            if names(&["dry-run", "no-dry-run", "porcelain", "no-porcelain"]) {
-                return Err(format!("this push has `{arg}`, and LangSpan runs a dry run of every push with `--porcelain` itself, which that option would change; run the push without it").into());
-            }
-            if names(&["receive-pack", "exec"]) {
-                return Err("this push names the program to run on the remote side (`--receive-pack`, `--exec`), which LangSpan does not run in a dry run; set `remote.NAME.receivepack` with `git config` instead".into());
-            }
-            // A dry run must say which refs it updates.
-            if names(&["quiet"]) {
-                continue;
-            }
-            value_next = name == long && names(&["push-option"]);
+        } else if !ALLOWED.contains(&arg) {
+            return Err(format!(
+                "this push has `{arg}`, and LangSpan runs a dry run of every push before it runs, which accepts only remote names, refspecs and the options {NAMES}; run the push without it, name a ref that starts with `-` as `refs/heads/NAME`, and force or delete with a refspec (`+SRC:DST`, `:DST`)"
+            ).into());
+        } else if !matches!(arg, "-q" | "--quiet") {
             push.args.push(arg.to_owned());
-            continue;
         }
-        // A cluster of short options, such as `-fu` or `-qoci.skip`: after
-        // `o`, the rest is its value.
-        let letters = arg.trim_start_matches('-');
-        let (flags, value) = letters.split_at(letters.find('o').unwrap_or(letters.len()));
-        if flags.contains('n') {
-            return Err(format!("this push has `{arg}`, which holds `-n`, and LangSpan runs a dry run of every push itself; run the push without it").into());
-        }
-        let flags: String = flags.chars().filter(|letter| *letter != 'q').collect();
-        value_next = value == "o";
-        if !(flags.is_empty() && value.is_empty()) {
-            push.args.push(format!("-{flags}{value}"));
-        }
-    }
-    if value_next {
-        return Err("this push ends with `-o` or `--push-option` and no value; give it one".into());
     }
     Ok(Some(push))
 }
@@ -207,38 +163,30 @@ mod tests {
     }
 
     #[test]
-    fn a_lone_push_keeps_its_words_for_the_dry_run() {
+    fn a_lone_push_keeps_its_allowed_words_for_the_dry_run() {
         assert_eq!(args("git push"), Vec::<String>::new());
         assert_eq!(
-            args("git push --prune origin 'refs/heads/*:refs/heads/*'"),
-            ["--prune", "origin", "refs/heads/*:refs/heads/*"]
+            args("git push origin 'refs/heads/*:refs/heads/*' +feat:main :old"),
+            ["origin", "refs/heads/*:refs/heads/*", "+feat:main", ":old"]
         );
         assert_eq!(
-            args("/usr/bin/git push -fu origin HEAD"),
-            ["-fu", "origin", "HEAD"]
+            args("/usr/bin/git push -u --set-upstream origin HEAD 2>&1"),
+            ["-u", "--set-upstream", "origin", "HEAD"]
         );
-        assert_eq!(args("git push origin main 2>&1"), ["origin", "main"]);
-        assert_eq!(args("git push -o -q origin x"), ["-o", "-q", "origin", "x"]);
-        assert_eq!(
-            args("git push --push -n --push-option=x origin"),
-            ["--push", "-n", "--push-option=x", "origin"]
-        );
-        assert_eq!(args("git push origin main --"), ["origin", "main"]);
-        let push = git_push("git -C a -C b -c push.default=matching --no-pager push")
-            .unwrap()
-            .unwrap();
+        let every =
+            "-v --verbose --tags --follow-tags --no-follow-tags --atomic --progress --no-progress";
+        let mut expected: Vec<&str> = every.split(' ').collect();
+        expected.push("origin");
+        assert_eq!(args(&format!("git push {every} origin")), expected);
+        let push = git_push("git -C a -C b --no-pager push").unwrap().unwrap();
         assert_eq!(push.cwd, Some(PathBuf::from("a/b")));
-        assert_eq!(push.config, ["push.default=matching"]);
     }
 
     /// A quiet dry run says nothing about the refs it would update.
     #[test]
-    fn quiet_is_dropped_in_any_spelling() {
+    fn quiet_is_dropped() {
         assert_eq!(args("git push -q origin main"), ["origin", "main"]);
-        assert_eq!(args("git push --quiet origin main"), ["origin", "main"]);
-        assert_eq!(args("git push --qui origin main"), ["origin", "main"]);
-        assert_eq!(args("git push -qf origin main"), ["-f", "origin", "main"]);
-        assert_eq!(args("git push -qoci.skip origin"), ["-oci.skip", "origin"]);
+        assert_eq!(args("git push origin main --quiet"), ["origin", "main"]);
         for command in [
             "git status",
             "echo push",
@@ -269,53 +217,67 @@ mod tests {
         }
     }
 
+    /// Review of PR #576: options that took a value or undid the dry run
+    /// were refused one by one; now only `ALLOWED` passes, and the refusal
+    /// names the word.
     #[test]
-    fn what_a_dry_run_could_not_repeat_safely_is_refused() {
+    fn every_option_outside_the_allowlist_is_refused_by_name() {
+        for (command, word) in [
+            ("git push origin main --repo", "--repo"),
+            ("git push --repo origin main", "--repo"),
+            ("git push --repo=origin main", "--repo=origin"),
+            ("git push --no-dry-run origin main", "--no-dry-run"),
+            ("git push --no-dry origin main", "--no-dry"),
+            ("git push -n origin main", "-n"),
+            ("git push --dry-run origin main", "--dry-run"),
+            ("git push --no-porcelain origin main", "--no-porcelain"),
+            ("git push --qui origin main", "--qui"),
+            ("git push -qu origin main", "-qu"),
+            ("git push -f origin main", "-f"),
+            (
+                "git push --force-with-lease origin main",
+                "--force-with-lease",
+            ),
+            ("git push --delete origin main", "--delete"),
+            ("git push --prune origin main", "--prune"),
+            ("git push --mirror origin", "--mirror"),
+            ("git push --all origin", "--all"),
+            ("git push origin main -o", "-o"),
+            ("git push -o x origin main", "-o"),
+            (
+                "git push --receive-pack=evil origin main",
+                "--receive-pack=evil",
+            ),
+            ("git push --exec evil origin main", "--exec"),
+            ("git push origin -- main", "--"),
+            ("git push origin main --", "--"),
+            ("git push - main", "-"),
+        ] {
+            let why = git_push(command).unwrap_err().0;
+            assert!(why.contains(&format!("has `{word}`,")), "{command}: {why}");
+            assert!(why.contains("--[no-]follow-tags"), "{command}: {why}");
+        }
+        for (command, word) in [
+            ("git -c core.sshCommand=evil push", "-c"),
+            ("git -c remote.--dry-run.url=../o.git push", "-c"),
+            ("git -c push.default=matching push", "-c"),
+            ("git --config-env=a=B push", "--config-env=a=B"),
+            (
+                "git --git-dir=/x/.git push origin main",
+                "--git-dir=/x/.git",
+            ),
+        ] {
+            let why = git_push(command).unwrap_err().0;
+            let named = format!("has `{word}` before `push`");
+            assert!(why.contains(&named), "{command}: {why}");
+        }
         for (command, says) in [
             ("git push origin $BRANCH", "expansion"),
             ("git push \"$(git remote)\" main", "expansion"),
-            ("git -c core.sshCommand=evil push", "git config"),
-            ("git -c credential.helper=x push", "git config"),
-            ("git -c remote.origin.receivepack=x push", "git config"),
-            ("git -c include.path=/x push", "git config"),
-            (
-                "git --git-dir=/elsewhere/.git push origin main",
-                "other than `-C`",
-            ),
-            ("git push --receive-pack=evil origin main", "receivepack"),
-            ("git push --receive=evil origin main", "receivepack"),
-            ("git push --exec evil origin main", "receivepack"),
-            ("git push --ex=evil origin main", "receivepack"),
-            // Review of PR #576: the push's words must not undo the dry run
-            // or change what it prints.
-            ("git push -n origin main", "`-n`"),
-            ("git push -fn origin main", "`-n`"),
-            ("git push --dry-run origin main", "--porcelain"),
-            ("git push --no-dry-run origin main", "--porcelain"),
-            ("git push --no-dry origin main", "--porcelain"),
-            ("git push --porcelain origin main", "--porcelain"),
-            ("git push --no-porcelain origin main", "--porcelain"),
-            ("git push --porc origin main", "--porcelain"),
-            ("git push origin -- main", "after `--`"),
-            ("git push origin -- --no-dry-run", "after `--`"),
-            ("git push origin main -o", "no value"),
-            ("git push origin main --push-option", "no value"),
-            ("git push origin main -fo", "no value"),
-            ("git -c push.recurseSubmodules=on-demand push", "git config"),
-            ("git -c push.pushOption=x push", "git config"),
             ("git push 'unterminated", "could not read"),
         ] {
             let why = git_push(command).unwrap_err().0;
             assert!(why.contains(says), "{command}: {why}");
-        }
-        for setting in [
-            "push.default=current",
-            "remote.pushDefault=fork",
-            "remote.origin.push=+refs/heads/*:refs/heads/*",
-            "remote.my.fork.mirror=true",
-            "branch.feat.pushRemote=fork",
-        ] {
-            assert!(destination_setting(setting), "{setting}");
         }
         let long = format!("git push origin {}", "a".repeat(MAX_GIT_COMMAND_BYTES));
         assert!(git_push(&long).unwrap_err().0.contains("longer"));

@@ -146,16 +146,20 @@ Run `langspan --state-dir DIR land WORKSPACE --onto main --name CHECK feat --app
 
 The agent fills in a check name and the project's test command. To learn
 where a push goes, the hook runs it first as `git push --dry-run --porcelain`
-with the same arguments and `-c` settings. The push is routed when the dry
+with the same arguments. The push is routed when the dry
 run would update, force or delete the default branch, whether through a
-refspec, `--all`, `--mirror`, `--prune`, `push.default`, `remote.pushDefault`
+refspec, a mirror remote, `push.default`, `remote.pushDefault`
 or a configured `remote.origin.push`. Pushes to other branches and tags pass.
+An agent's push may name remotes and refspecs and use only `-u`, `-q`, `-v`,
+`--tags`, `--[no-]follow-tags`, `--atomic` and `--[no-]progress`, spelled out;
+force with `+SRC:DST` and delete with `:DST`, and set anything else with
+`git config` (not `git -c`).
 The hook refuses a push it cannot check this way: one combined with another
 command (`git add -A && git push`), one with an expansion in its words, one
-with its own `-n`, `--[no-]dry-run`, `--[no-]porcelain` or words after `--`,
+with any other option, `--` or `git -c`,
 and one whose dry run fails, lists no refs or does not finish in the hook's
 time. The message
-says what to run instead. A push from another checkout, to a URL no remote has,
+names the word and says what to run instead. A push from another checkout, to a URL no remote has,
 or with no `REMOTE/HEAD` runs. Set the remote's HEAD with
 `git remote set-head origin --auto`. Pushes from your own terminal are never
 touched. To let agents push the default branch directly, run

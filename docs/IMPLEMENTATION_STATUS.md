@@ -371,11 +371,13 @@ Push routing (issue #536, first slice): in a hooked shell call, an agent's
 time with the exact `land --apply --rebase --check-again` command;
 `langspan.defaultBranchPush direct` lets it through. Where a push goes is
 Git's answer: the hook runs a dry run of the same lone push, and it refuses a
-push combined with another command or one whose dry run fails. Tests: the push
+push combined with another command, one with an option outside a short
+allowlist, or one whose dry run fails. Tests: the push
 reader's forms (pure), and the shell hook's routing and refusals against real
 temporary repositories with a local bare remote. These include mirror remotes,
-`--prune` globs, `-c` overrides, `push.default`, `remote.pushDefault` and
-compound commands. Not yet retained: a native
+wildcard refspecs, `push.default`, `remote.pushDefault`, compound commands, and
+refused options (`--repo`, `--no-dry-run`, `git -c`) leaving the remote
+unchanged. Not yet retained: a native
 session whose push lands in one step after main moved, and push retries per
 benchmark arm.
 

@@ -337,17 +337,25 @@ rounds of review on PR #576), and Git already has the answer:
   refused, whatever its destination, with a message to run the push on its own
   (`src/shell/git_push.rs`, the commit guard's lenient reader). So is one with
   an expansion in its words.
-- A lone `git push` is run first as `git push ARGS --dry-run --porcelain`,
-  with the push's arguments and the dry run's options last so that none of
-  them can undo it, in the same directory, with the same `git -C` and `-c`
-  options (`src/hook/push_route.rs`, with two thirds of the hook's remaining
+- A hooked `git push` may hold only remote names, refspecs (words that do
+  not start with `-`) and the options `-u`/`--set-upstream`, `-q`/`--quiet`,
+  `-v`/`--verbose`, `--tags`, `--follow-tags`, `--no-follow-tags`,
+  `--atomic`, `--progress` and `--no-progress`, spelled out in full; before
+  `push`, only `git -C DIR` and `--no-pager`. Anything else (any other
+  option, an abbreviation, `--`, `git -c`) is refused with a message naming
+  the word: forcing and deleting are written as refspecs (`+SRC:DST`,
+  `:DST`), and settings with `git config`. Refusing options one by one
+  missed some in every round of review (`--no-dry-run`, `--no-porcelain`, a
+  trailing `--repo` that took the dry run's `--dry-run` as its value), so
+  the list says what passes instead.
+- The push is run first as `git push --dry-run --porcelain ARGS`, the dry
+  run's options first and none of the allowed ones able to undo them or take
+  a value, in the same directory and with the same `git -C`
+  (`src/hook/push_route.rs`, with two thirds of the hook's remaining
   time, no prompt, SSH in batch mode). It runs with `core.hooksPath=/dev/null`,
   since Git runs `pre-push` even for a dry run. The hook drops `-q`, which
-  would hide the ref list. It refuses `-n`, `--[no-]dry-run` and
-  `--[no-]porcelain` in any abbreviation, any word after `--`, a trailing
-  `-o` without its value, and `-c` settings other than push destinations
-  (of `push.*`, only `push.default`), plus `--receive-pack` and `--exec`, so
-  the dry run stays a dry run and cannot run a program the agent names
+  would hide the ref list. The agent's command cannot name a program for the
+  dry run to run
   ([threat model](../security/threat-model.md#checks-combining-and-landing)).
   A dry run that fails or times out, or passes without a readable, non-empty
   ref list, refuses the push with the reason and Git's words, labelled as data.
@@ -371,8 +379,8 @@ the default branch, and the safety rules are the landing's own:
 - It never pushes the default branch unless the repository configures that:
   `git config langspan.defaultBranchPush direct` lets every push through.
   The refusal does not mention the setting; the owner chooses it.
-- A push that updates other refs with the default branch (`--all`,
-  `--mirror`, a matching or wildcard refspec) says to push the others by
+- A push that updates other refs with the default branch (a mirror remote,
+  `push.default=matching`, a wildcard refspec) says to push the others by
   name.
 
 Pushes to other branches and tags, and the owner's terminal, pass untouched;
