@@ -140,7 +140,7 @@ class SharedUnit(unittest.TestCase):
         plan.update(langspan="/b/lang span", state_dir="/tmp/it's")
         tools = driver.land_tools(plan)
         self.assertEqual(tools, ("Bash('/b/lang span' --state-dir '/tmp/it'\\''s' land:*)", "Bash(langspan land:*)"))
-        argv = driver.claude_argv("claude", "", "langspan", push=True, land=tools)
+        argv = driver.claude_argv("claude", "", "langspan", push=True, land=tools, skill="s")
         self.assertTrue(set(tools) <= set(argv[argv.index("--allowedTools"):]))
         self.assertEqual(driver.land_tools(dict(driver.make_plan("worktrees", "push_contention", 2, 1),
                                                 langspan="/b/langspan", state_dir="/tmp/s")), ())
@@ -255,7 +255,7 @@ class SharedUnit(unittest.TestCase):
             self.assertNotIn("Do not push", prompt)
         self.assertIn("Do not push", driver.make_plan("worktrees", "rename_vs_new_caller", 2, 1)["prompts"][0])
         for arm in driver.ARMS + driver.SHARED_ARMS:
-            argv = driver.claude_argv("claude", "", arm)
+            argv = driver.claude_argv("claude", "", arm, skill=driver.skill_placeholder(arm))
             self.assertEqual("Bash(git push:*)" in argv, arm == "shared", arm)
         self.assertEqual(driver.memory_directory("shared", "/w", 2), Path("/w/trunk"))
 

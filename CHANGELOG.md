@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.11.0](https://github.com/Langspan/LangSpan.dev/compare/v0.10.0...v0.11.0) (2026-11-28)
+
+
+### Features
+
+* a push-contention benchmark family ([#611](https://github.com/Langspan/LangSpan.dev/issues/611)) ([#615](https://github.com/Langspan/LangSpan.dev/issues/615)) ([bd895d7](https://github.com/Langspan/LangSpan.dev/commit/bd895d7bd73325348fdced9a0c0d08b90f56a496))
+* an evidence report of person-touches per merged change ([#529](https://github.com/Langspan/LangSpan.dev/issues/529)) ([#616](https://github.com/Langspan/LangSpan.dev/issues/616)) ([a68e5c4](https://github.com/Langspan/LangSpan.dev/commit/a68e5c405ebd32e5683a33f9fc45dfc4c09807cf))
+* the langspan arm runs push contention through landing ([#611](https://github.com/Langspan/LangSpan.dev/issues/611)) ([#620](https://github.com/Langspan/LangSpan.dev/issues/620)) ([38cbd17](https://github.com/Langspan/LangSpan.dev/commit/38cbd17baa10bc7f479ef1644ebae57a6049c640))
+* write wire error codes through an ErrorCode enum with a committed list ([#367](https://github.com/Langspan/LangSpan.dev/issues/367)) ([#612](https://github.com/Langspan/LangSpan.dev/issues/612)) ([a9dbdae](https://github.com/Langspan/LangSpan.dev/commit/a9dbdae8a34cb59f7a3c3490c0a355c42d9fdcdf))
+
+
+### Bug fixes
+
+* landing refuses a push hidden in a substitution, eval or sh -c ([#610](https://github.com/Langspan/LangSpan.dev/issues/610)) ([#613](https://github.com/Langspan/LangSpan.dev/issues/613)) ([f3c02a8](https://github.com/Langspan/LangSpan.dev/commit/f3c02a8f5b75f9585618c8a3bede4e1d0f6ff908))
+
 ## [0.10.0](https://github.com/Langspan/LangSpan.dev/compare/v0.9.1...v0.10.0) (2026-11-28)
 
 

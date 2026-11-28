@@ -119,7 +119,11 @@ Every session, in every arm, gets the same tools and the same denials, so in
 `langspan` the only extra information is what LangSpan sends:
 
 - **Built-in tools only, and only these:** Bash, Edit, Glob, Grep, Read and
-  Write (`--tools`), plus Skill in the LangSpan arm to load LangSpan's skill.
+  Write (`--tools`), in every arm. The LangSpan arm gets LangSpan's skill,
+  as `langspan install --skill` writes it, appended to the system prompt
+  (`--append-system-prompt`). Until #624 it got the Skill tool, which also
+  listed every skill the host has: about 7,000 tokens on every turn that
+  were not LangSpan's.
   Claude Code's cross-session tools (`ListAgents`, `SendMessage`), subagents,
   web search and fetch, tool search and scheduling tools are absent, and also
   named in `--disallowedTools`.
@@ -534,7 +538,8 @@ LangSpan arm. No flag or tool approves a permission prompt, and the driver
 refuses to build a command line with a flag that bypasses permissions or adds
 a directory. `stream-json` keeps every message and tool call, in order, as the
 session's transcript. `plan.json` keeps the driver's own command line and
-each session's exact command (`agent_commands`), with the prompt left out.
+each session's exact command (`agent_commands`), with the prompt and the
+skill text left out.
 
 Before the first full run, run one trial per arm at N = 2 and check that its
 record's `tool_check` is `passed`. A host version that adds a tool the
