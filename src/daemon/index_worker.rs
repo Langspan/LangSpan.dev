@@ -9,7 +9,7 @@ use std::{
     fs,
     io::{self, Read},
     os::unix::fs::OpenOptionsExt,
-    path::{Path, PathBuf},
+    path::Path,
     sync::mpsc,
     time::{Duration, Instant},
 };
@@ -236,6 +236,22 @@ fn report_delay() -> Duration {
         .map_or(Duration::ZERO, |ms| Duration::from_millis(ms.min(5000)))
 }
 
+/// The indexer's index, opened with its schema complete. The daemon calls
+/// this before its owner thread answers a request, so no request's reader
+/// finds the file without its tables or locked while they are created.
+///
+/// For tests only: `LANGSPAN_TEST_INDEX_OPEN_DELAY_MS`, at most 5 s,
+/// waits that long first, so a test can show that nothing is answered
+/// before the schema exists. Not a setting: it is undocumented for users.
+pub(super) fn open_index(path: &Path) -> Result<crate::graph::Index, String> {
+    let delay = std::env::var("LANGSPAN_TEST_INDEX_OPEN_DELAY_MS")
+        .ok()
+        .and_then(|text| text.parse::<u64>().ok())
+        .map_or(Duration::ZERO, |ms| Duration::from_millis(ms.min(5000)));
+    std::thread::sleep(delay);
+    crate::graph::Index::open(path).map_err(|error| error.to_string())
+}
+
 /// The index's single writer. It only ever reads working trees and its
 /// own file; what it learns reaches coordination state as a request to
 /// the state owner, like any other client's.
@@ -243,15 +259,15 @@ pub(super) fn index_worker(
     jobs: mpsc::Receiver<IndexJob>,
     transfers: mpsc::Receiver<Transfer>,
     sender: mpsc::SyncSender<Job>,
-    path: PathBuf,
+    index: Result<crate::graph::Index, String>,
 ) {
     super::remote_worker::panic_in_thread_for_test();
-    let mut index = match crate::graph::Index::open(&path) {
+    let mut index = match index {
         Ok(index) => index,
-        Err(error) => {
+        Err(detail) => {
             eprintln!(
                 "{}",
-                serde_json::json!({"level":"error","event":"index_unavailable","detail":error.to_string()})
+                serde_json::json!({"level":"error","event":"index_unavailable","detail":detail})
             );
             return;
         }

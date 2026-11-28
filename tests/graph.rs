@@ -361,6 +361,17 @@ fn paths(list: &Value) -> Vec<String> {
         .collect()
 }
 
+/// Issue #552: the first lookup after the daemon starts found the index
+/// file without its tables ("no such table: roots") or locked while the
+/// indexer created them. A real daemon, since the race is between its
+/// threads and the SQLite file they share.
+#[test]
+fn a_lookup_as_soon_as_the_daemon_answers_finds_the_index_ready() {
+    let w = World::with_daemon_env(vec![("LANGSPAN_TEST_INDEX_OPEN_DELAY_MS", "1500".into())]);
+    let outcome = w.graph("symbol", "upload");
+    assert_ne!(outcome["type"], "error", "{outcome:#}");
+}
+
 #[test]
 fn definitions_mentions_and_impact_are_answered_with_coverage_and_follow_the_files() {
     let w = World::new();
