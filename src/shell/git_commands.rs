@@ -408,8 +408,8 @@ pub(super) struct Lexer {
     pending: Vec<(String, bool, bool)>,
     /// How many substitutions the lexer is inside.
     depth: usize,
-    /// The text of each outermost substitution, and of each unquoted
-    /// heredoc that expands something: commands the shell runs first.
+    /// The text of each outermost substitution, unquoted heredoc bodies'
+    /// included: commands the shell runs first.
     substituted: Vec<String>,
 }
 
@@ -475,7 +475,7 @@ impl Lexer {
                     self.at += 1;
                     end_word(&mut segments, &mut word);
                     if c == '\n' {
-                        self.skip_heredoc_bodies();
+                        self.skip_heredoc_bodies()?;
                     }
                     if segments.last().is_some_and(|last| !last.is_empty()) {
                         segments.push(Vec::new());
@@ -626,13 +626,8 @@ impl Lexer {
                 self.substitute(Self::substitution)
             }
             Some('{') => {
-                while let Some(c) = self.peek(0) {
-                    self.at += 1;
-                    if c == '}' {
-                        return Ok(());
-                    }
-                }
-                Err("an unterminated parameter expansion")
+                self.at += 1;
+                self.parameter()
             }
             Some('\'') => {
                 // `$'…'`: skip to the closing quote, honouring escapes.
@@ -657,6 +652,59 @@ impl Lexer {
                 Ok(())
             }
         }
+    }
+
+    /// After `${`: to the closing brace, keeping the substitutions in it
+    /// (`${x:-$(cmd)}` runs `cmd`).
+    fn parameter(&mut self) -> Result<(), &'static str> {
+        let mut depth = 1_usize;
+        while let Some(c) = self.peek(0) {
+            self.at += 1;
+            match c {
+                '\\' => self.at += 1,
+                '$' if self.peek(0) == Some('{') => {
+                    self.at += 1;
+                    depth += 1;
+                }
+                '$' if self.peek(0) == Some('(') => {
+                    self.at += 1;
+                    self.substitute(Self::substitution)?;
+                }
+                '`' => self.substitute(Self::backquoted)?,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Ok(());
+                    }
+                }
+                _ => {}
+            }
+        }
+        Err("an unterminated parameter expansion")
+    }
+
+    /// The substitutions in an unquoted heredoc's body, read as Bash expands
+    /// it: quotes and `#` are text there, and a backslash escapes only `$`,
+    /// a backquote, a backslash and a newline.
+    fn heredoc_substitutions(body: &str) -> Result<Vec<String>, &'static str> {
+        let mut lexer = Self::new(body);
+        while let Some(c) = lexer.peek(0) {
+            lexer.at += 1;
+            match c {
+                '\\' if matches!(lexer.peek(0), Some('$' | '`' | '\\' | '\n')) => lexer.at += 1,
+                '$' if lexer.peek(0) == Some('(') => {
+                    lexer.at += 1;
+                    lexer.substitute(Self::substitution)?;
+                }
+                '$' if lexer.peek(0) == Some('{') => {
+                    lexer.at += 1;
+                    lexer.parameter()?;
+                }
+                '`' => lexer.substitute(Self::backquoted)?,
+                _ => {}
+            }
+        }
+        Ok(lexer.substituted)
     }
 
     fn backquoted(&mut self) -> Result<(), &'static str> {
@@ -714,7 +762,7 @@ impl Lexer {
                         self.at += 1;
                     }
                 }
-                '\n' => self.skip_heredoc_bodies(),
+                '\n' => self.skip_heredoc_bodies()?,
                 _ => {}
             }
             word_start = matches!(c, ' ' | '\t' | '\n' | ';' | '&' | '|' | '(');
@@ -767,8 +815,8 @@ impl Lexer {
     }
 
     /// At the start of a line: skip the bodies of the heredocs begun on the
-    /// line before, keeping an unquoted one that expands something.
-    fn skip_heredoc_bodies(&mut self) {
+    /// line before, keeping the substitutions of an unquoted one.
+    fn skip_heredoc_bodies(&mut self) -> Result<(), &'static str> {
         for (delimiter, strip_tabs, quoted) in std::mem::take(&mut self.pending) {
             let mut body = String::new();
             loop {
@@ -793,10 +841,12 @@ impl Lexer {
                     break;
                 }
             }
-            if !quoted && self.depth == 0 && body.contains(['$', '`']) {
-                self.substituted.push(body);
+            // Inside a substitution, the outermost one's text holds the body.
+            if !quoted && self.depth == 0 {
+                self.substituted.extend(Self::heredoc_substitutions(&body)?);
             }
         }
+        Ok(())
     }
 }
 

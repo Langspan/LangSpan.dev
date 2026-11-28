@@ -404,12 +404,14 @@ cooperative. The reader removes line continuations (`\` before a newline) as
 Bash does. It does not look into an `sh -c` or `eval` string, so a command
 other than `git …` that names both `git` and `push` in its words
 (`bash -c 'git push'`, `xargs git push`) is refused with the reason. The
-shell runs a substitution (`$(…)`, a backquote, `<(…)`, `>(…)` or an
-unquoted heredoc that expands something) before the command it is in, so
-the reader reads each one's text as a command of its own, anywhere in the
-line, and refuses the whole command when that text could push (issue #610:
-`git log --format="$(git push origin HEAD:main)"`). Deeper than eight
-substitutions it refuses without reading. A push outside the hooks, through
+shell runs a substitution (`$(…)`, a backquote, `<(…)` or `>(…)`, in a
+`${…}` default too) before the command it is in, so the reader reads each
+one's text as a command of its own, anywhere in the line, and refuses the
+whole command when that text could push (issue #610:
+`git log --format="$(git push origin HEAD:main)"`). An unquoted heredoc's
+body is not shell: its quotes and `#` are text, so the reader takes the
+substitutions out of it as Bash expands it and reads only those (review of
+PR #613). Deeper than eight substitutions it refuses without reading. A push outside the hooks, through
 a Git alias, or in a program a `git …` command runs (`git rebase --exec`)
 is not refused. The dry run costs one round trip to the remote before every
 hooked push, and a remote slower than the hook's budget refuses it. The

@@ -316,6 +316,17 @@ mod tests {
             "git log --format=\"$(g\"\"it push origin HEAD:main)\"",
             "git commit -F - <<EOF\n$(git push origin HEAD:main)\nEOF",
             "git commit -F - <<EOF\n`git push origin HEAD:main`\nEOF",
+            // Review of PR #613: an unquoted heredoc body is not shell, so
+            // its quotes do not stop the substitutions in it.
+            "git commit -F - <<EOF\ngit log '$(git push origin HEAD:main)'\nEOF",
+            "git commit -F - <<EOF\nnote: '`git push origin HEAD:main`'\nEOF",
+            "git commit -F - <<EOF\n\"it's\" $'$(git push origin HEAD:main)'\nEOF",
+            "git commit -F - <<EOF\n# $(git push origin HEAD:main)\nEOF",
+            "git commit -F - <<EOF\n\\\\$(git push origin HEAD:main)\nEOF",
+            // A substitution in a parameter expansion's default runs too.
+            "git commit -F - <<EOF\n${x:-$(git push origin HEAD:main)}\nEOF",
+            "git log --format=\"${x:-$(git push origin HEAD:main)}\"",
+            "git log --format=${x:-`git push origin HEAD:main`}",
         ] {
             let why = git_push(command).unwrap_err().0;
             assert!(why.contains("inside a substitution"), "{command:?}: {why}");
@@ -325,6 +336,8 @@ mod tests {
         for command in [
             "git commit -m \"$(cat <<'EOF'\nfix: refuse a hidden git push\nEOF\n)\"",
             "git commit -F - <<'EOF'\nsee $(git push) in the docs\nEOF",
+            "git commit -F - <<EOF\nan escaped \\$(git push) and \\`git push\\` in $USER's note\nEOF",
+            "git commit -F - <<EOF\n'unbalanced \"quotes in $HOME: git push\nEOF",
             "git log --format=\"$(git config user.name)\" --grep push",
         ] {
             assert_eq!(git_push(command), Ok(None), "{command:?}");
