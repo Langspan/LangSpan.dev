@@ -2383,6 +2383,35 @@ fn coverage_runs_nightly_reports_a_drop_and_is_not_a_required_check() {
     }
 }
 
+#[test]
+fn fuzzing_runs_nightly_only_and_files_one_bug_issue_with_the_crash_artifact() {
+    let text = workflow("fuzz.yml");
+    assert!(
+        text.contains("\non:\n  schedule:\n    - cron: \"17 5 * * *\"\n  workflow_dispatch:\n"),
+        "{text}"
+    );
+    for trigger in ["pull_request", "merge_group", "push:"] {
+        assert!(!text.contains(trigger), "fuzz.yml still names {trigger}");
+    }
+    assert!(
+        job(&text, "fuzz").contains(
+            "    outputs:\n      artifact-url: ${{ steps.crashes.outputs.artifact-url }}\n"
+        )
+    );
+    let report = job(&text, "nightly-report");
+    for line in [
+        "if: github.event_name == 'schedule' && failure()",
+        "TITLE: Nightly fuzz run on main failed",
+        "ARTIFACT_URL: ${{ needs.fuzz.outputs.artifact-url }}",
+        // An open issue with the same title gets a comment, never a twin.
+        "gh issue list --state open --label bug --search \"\\\"$TITLE\\\" in:title\"",
+        "gh issue comment \"$number\" --body \"$body\"",
+        "gh issue create --title \"$TITLE\" --label bug --body \"$body\"",
+    ] {
+        assert!(report.contains(line), "nightly-report lacks {line}");
+    }
+}
+
 /// One measured file: its production lines, how many of them integration
 /// tests cover, and how many more only in-file unit tests cover.
 struct Measured(&'static str, usize, usize, usize);

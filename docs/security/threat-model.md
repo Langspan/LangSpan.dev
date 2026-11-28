@@ -1091,13 +1091,14 @@ reports, bounded at 64 MiB each by the scripts that parse them, and fail
 unless the build and every shard passed. A cancelled or timed-out part
 fails them; it doesn't leave them skipped.
 
-The fuzz workflow (`fuzz.yml`) restores and saves no cache. Its fuzz job,
-which also runs on a pull request that changes `fuzz/`, has only `contents:
-read` and keeps no credentials; a crashing input leaves the run only as an
-artifact of that run. Its one writer, `nightly-report`, runs only for a
-scheduled run on `main`, holds `issues: write` and no other scope, checks out
-nothing and runs no repository code; the issue text is the commit and the
-run's link, never fuzz output.
+The fuzz workflow (`fuzz.yml`) restores and saves no cache, and runs only
+nightly on `main` or when started by hand, never for a pull request. Its fuzz
+job has only `contents: read` and keeps no credentials; a crashing input
+leaves the run only as an artifact of that run. Its one writer,
+`nightly-report`, runs only for a scheduled run on `main`, holds `issues:
+write` and no other scope, checks out nothing and runs no repository code;
+the issue text is the commit, the run's link and the artifact's link, never
+fuzz output.
 
 ## Mixed versions and `doctor`'s version check
 

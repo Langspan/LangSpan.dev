@@ -35,9 +35,11 @@ to `fuzz/artifacts/<target>/`; reproduce it with
 parser is fixed, add the input to that target's corpus.
 
 The nightly job (`.github/workflows/fuzz.yml`) runs every target for three
-minutes on a copy of its seeds. A crash fails the run, uploads
-`fuzz/artifacts/` as the `fuzz-artifacts` artifact, and opens or comments on
-the issue "Nightly Rust checks on main failed".
+minutes on a copy of its seeds; no pull request runs it, and you can start it
+by hand with `gh workflow run fuzz.yml`. A crash fails the run, uploads
+`fuzz/artifacts/` as the `fuzz-artifacts` artifact, and opens the issue
+"Nightly fuzz run on main failed", labelled `bug`, with the artifact's link,
+or comments on that issue while it is open.
 
 `fuzz/Cargo.lock` also locks the main crate's dependencies, at the main
 lockfile's versions. When those change, the job's lockfile check fails until
