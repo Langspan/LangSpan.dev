@@ -38,14 +38,23 @@ script and style inline and nothing loaded from anywhere) and
 event log through the existing `Command::Events`, one row per stored event in
 seq order, so a poll from the last `next` misses none. `after` defaults to 0
 and `limit` to 100, at most 1000; anything else is a 400 that says the range.
-The page is `{"available": true, "version": 1, "next": SEQ, "events": [...]}`
+The page is `{"available": true, "version": 2, "next": SEQ, "events": [...]}`
 and each row is an allowlist: `seq`, `type`, the first `session_id`,
-`workspace_id` and `at_ms` the event names, and its `path` and `paths`
-values, at most 8 and every string clipped as in the view (`more_paths`
-counts the rest). Every other field, and any added later, is left out, so
-prompt summaries, message and note text, task lines and publication payloads
-are never sent; the page still shows message and note text only through
-`/api/state`. `--demo` answers it with 404, and an unreachable coordinator
+`workspace_id` and `at_ms` (or an operation's `observed_at_ms`) the event
+names, and its `path` and `paths` values, at most 8 and every string clipped
+as in the view (`more_paths` counts the rest). Another session's holdings
+named in an operation (`concurrent_holders`) are not its paths. Every other
+field, and any added later, is left out, so prompt summaries, message and
+note text, task lines and publication payloads are never sent; the page still
+shows message and note text only through `/api/state`. Version 2 (issue #491)
+adds the facts the Live view's cards and wires read, each optional and taken
+from one event type only: a `write_refused` row's `peer_session_id` and
+`refusal` kind, an `operation_observed` row's `tool` (clipped) and `result`,
+a `source_observed` row's `origin`, and a `clock_anchored` row's `wall_ms`
+and `clock_ms`. They are IDs, enums and numbers; the input digest stays out.
+A version 1 reader ignores them, and a version 2 reader decodes a version 1
+row without them (`fixtures/dashboard-events-v2.json` is the golden page).
+`--demo` answers it with 404, and an unreachable coordinator
 with 503 and `available: false`. It reads only a request head of at most
 8 KiB and 64 headers, within 2 s per read and 5 s in total; refuses every other
 method, any request with a body, and unknown paths; and serves at most 16
@@ -92,6 +101,43 @@ the counts of rows the view left out. Its styles copy the design tokens of the
 LangSpan site's `assets/site.css`, and its header embeds the brand kit's
 lockups from `docs/assets/brand/` line for line; nothing is loaded at run
 time. It changes nothing, and it adds no route, listener or CORS header.
+
+**The Live view (issue #491, in progress).** A second view, with the file
+matrix kept as the other, shows recorded work as it happens. It has no story
+mode: no selected incident, scene tour, caption or panel that opens by
+itself. One renderer serves both the dashboard and the homepage hero (site PR
+Langspan/langspan.github.io#41): the site passes its recorded fixture, and
+the dashboard passes the model of `/api/state` and `/api/events`. The model,
+`src/dashboard-live.js`, is pure functions with no DOM, clock or network,
+tested under `node --test`, and returns the hero's data shape without its
+playback fields (`fixtures/live-view-model.json` pins it):
+
+- one lane per local session with a timed step, labelled from its
+  `/api/state` row (task line, harness, shared or own checkout, branch) and
+  never by an ID. Remote sessions are not in the local log, so a remote edit
+  is never a card or a wire;
+- one card per recorded step: a read, a successful edit (`Edit`, `Write`,
+  `MultiEdit`, `NotebookEdit` or `apply_patch`), another successful command,
+  a held write with its reason in words, and the held session's next
+  successful edit of the held path, "Saved after re-reading" when a read of
+  it came between and "Saved on retry" otherwise. Edits of one file, or
+  reads, in a row within 20 s merge into one card with a neutral count, only
+  for legibility;
+- exactly one wire per held write that names a peer with a lane, from the
+  peer's newest card on that path, or from its lane when it has none. A hold
+  without a recorded peer has no wire, and nothing else draws one.
+
+A row without a time (`session_registered`, lease events, a `message_sent`
+recorded before messages kept one) is never a card; it goes to the inspector
+in seq order, and the view never invents its time. Daemon times become wall
+times through the newest `clock_anchored` row; `at_ms` is monotonic across
+generations. A page of the feed can hold fewer rows than asked, so the view
+reads until a page comes back empty, at most a bounded number of pages per
+poll. Path text from the feed is data; the renderer places it with
+`textContent`. Later slices of the issue: the renderer ported from the hero
+with its QA checks as layout tests, then the dashboard's Live and Files
+switch, tested against a real coordinator, and then the site's hero loading
+the shared file.
 
 **Identities for joins.** Overlap rows named their sessions only by shortened
 labels, which collide: two sessions with the same host and first eight
@@ -148,8 +194,8 @@ page is plain HTTP, so anyone on the path can read the token and the view.
 - The counts are what one bounded view reports, not daily totals or measured
   outcomes. Refusals are a lower bound when the store found more than it
   passed. A daily count through `langspan today` remains a possible later
-  addition. The page does not yet read `/api/events`; until it does, it does
-  not build a chronology from successive polls.
+  addition. The page does not yet read `/api/events`; until the Live view
+  ships, it does not build a chronology from successive polls.
 - A binary older than this change cannot decode a newer coordinator's view,
   as with every earlier addition to it; the dashboard and the daemon normally
   run from one binary.

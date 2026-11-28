@@ -50,7 +50,7 @@ after upgrading.
 
 An event page (`langspan events`, `langspan_events`, `changes`) leaves out
 the events whose type the client's release cannot read: releases 0.1.0 to
-0.8.0 are served, each with the types in `fixtures/event-types/` for that
+0.9.0 are served, each with the types in `fixtures/event-types/` for that
 release. 0.1.0 and 0.2.0 both speak version 3 and get the 53 types 0.1.0
 reads. A client of 0.6.0 or later is told how many were left out, in the
 frame's `withheld`; an earlier release cannot read that count and is not
@@ -70,6 +70,7 @@ events remain: upgrade the client to read them all.
 | 0.6.0 | 78 | none |
 | 0.7.0 | 78 | none |
 | 0.8.0 | 78 | none |
+| 0.9.0 | 78 | none |
 
 <!-- end generated -->
 

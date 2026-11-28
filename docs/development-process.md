@@ -40,7 +40,7 @@ Limit open work so that each pull request merges quickly:
   today:
   - `protocol`, the wire protocol: `src/protocol.rs` and its clients;
   - `briefing`: `src/briefing.rs` and `src/briefing/`;
-  - `install`: `src/install.rs`, `src/user_install.rs` and `src/install/detect.rs`;
+  - `install`: `src/install.rs`, `src/install/` and `src/user_install.rs`;
   - `cli`, its argument list and flags table: `src/main.rs` and `src/cli/`;
   - `graph`, the source graph: `src/graph.rs`, `src/graph/`,
     `src/index_file.rs` and `crates/langspan-graph`.
@@ -253,30 +253,39 @@ timed-out run, or one that built no tests
 with `cold` set restores nothing, to measure a build from nothing; on
 `main`, it still saves an entry that `main` lacks.
 
-In the full lane, the benchmark harness's dry runs (the `dry_run_*` tests
-in `tests/benchmark_harness.rs`) run only when the change touches one of
-the following paths: `benchmarks/`, `tests/benchmark_harness.rs`, the
+The benchmark harness's dry runs (the `dry_run_*` tests in
+`tests/benchmark_harness.rs`, 92 to 132 s each on macOS) never run in
+`check.yml`, so the merge queue never waits on them; there the harness's
+other tests, about 11 s on an Apple M-series laptop, are its smoke test.
+The workflow `bench.yml` ("Benchmark dry runs", not a required check) runs
+them on Linux and macOS for a pull request or push to `main` that touches
+one of the following paths, and otherwise passes at once and says why: `benchmarks/`, `tests/benchmark_harness.rs`, the
 daemon, hook and briefing code they drive (`src/daemon.rs`, `src/daemon/`,
 `src/hook.rs`, `src/hook/`, `src/briefing.rs`, `src/briefing/`,
 `src/text.rs`, `src/text/`, `src/claude_code.rs` and all of
 `crates/langspan-core/src/`, so code moved into a new module there still
 counts), or what builds and runs the suite
 (`Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `.config/nextest.toml`,
-`check.yml`, `scripts/check.sh`, `scripts/test-foreign-home.sh`,
-`scripts/ci-changes.sh`). The dry runs took about 11 minutes of an
-18-minute macOS job under `cargo test`. A change that touches only Markdown
-builds nothing in either lane.
+`check.yml`, `bench.yml`, `scripts/check.sh`, `scripts/test-foreign-home.sh`,
+`scripts/ci-changes.sh`). A change that touches only Markdown builds
+nothing in either lane of `check.yml`.
 
-- **A merge-queue commit** is judged on every change from the queue's base
-  on `main` to that commit, so a benchmark change in a pull request queued
-  ahead runs the dry runs.
 - **A push to `main`** that adds one commit, as a squash merge does,
   follows the same rule for the dry runs. A push of several commits runs
-  them.
-- **The nightly run** (03:23 UTC on `main`) and **a manual run** run
-  everything. If the nightly run fails, it opens an issue titled "Nightly
-  Rust checks on main failed", or comments on that issue while it is open.
-  Treat that issue like a failing check on `main`.
+  them. Since the queue doesn't run them, `main` can hold a change that
+  breaks them; this run and the nightly one show it.
+- **The nightly runs** on `main` (`check.yml` at 03:23 UTC, `bench.yml`
+  with the dry runs at 03:53) and **a manual run** run everything. If one
+  fails, it opens an issue titled "Nightly Rust checks on main failed" or
+  "Nightly benchmark dry runs on main failed", or comments on that issue
+  while it is open. Treat that issue like a failing check on `main`.
+- **An advisory dry run** shows that path without an advisory on `main`:
+  `gh workflow run check.yml --ref BRANCH -f advisory_dry_run=true`. The
+  Linux build audits the real lockfile, then
+  `tests/fixtures/advisory-dry-run/known-advisory.lock` (RUSTSEC-2021-0003),
+  and fails on it; `nightly-report` then opens or comments on an issue
+  titled "Advisory dry run of the nightly report", never the real one.
+  Close that issue afterwards ([evidence](evidence/ci/advisories.md)).
 
 The two times are targets the lanes should meet, not gates: a run over
 them still passes. `bash scripts/measure-ci.sh` reports them from GitHub's
@@ -297,7 +306,8 @@ unset, each job uses GitHub's standard runner.
 
 When a dry run is skipped, the test log shows
 `skipped: no benchmark or briefing change`. A local `sh scripts/check.sh`
-runs every test unless `LANGSPAN_BENCH_DRY_RUNS=skip` is set.
+runs every test unless `LANGSPAN_BENCH_DRY_RUNS=skip` is set, which
+`check.yml` always sets.
 [`scripts/ci-changes.sh`](../scripts/ci-changes.sh) owns the path list;
 change the list there and here together.
 
@@ -346,8 +356,9 @@ has reached still take longer (issue #311).
 ### Coverage
 
 The `Coverage` workflow ([`coverage.yml`](../.github/workflows/coverage.yml))
-runs `bash scripts/coverage.sh` every night on `main` (04:41 UTC), and on a
-pull request that changes the measurement. It isn't a required check. The
+runs `bash scripts/coverage.sh` on every push to `main`, every night on
+`main` (04:41 UTC), and on a pull request that changes the measurement. It
+isn't a required check. The
 script runs the suite once under cargo-llvm-cov and cargo-nextest, with the
 profile written continuously, so coordinators that tests stop with SIGKILL
 still count. It counts production lines only (`src/` and `crates/*/src/`,
@@ -356,20 +367,26 @@ source with `#[path]`); in-file unit tests still cover them. The exports
 name sources relative to the checkout, so a downloaded artifact reads the
 same in yours. The run summary has the per-file table.
 
-The floor: production lines 90% covered or more, and none of the ten files
-with the most production lines more than 2 points under its row in
+The floor: production lines 90% covered or more, and no file more than 2
+points under its row in
 [`scripts/coverage-baseline.tsv`](../scripts/coverage-baseline.tsv), one
-row per file. A file among those ten without a row is named in the summary.
+row per file. Every row is checked. The run also fails for a row whose file
+no longer exists, a row whose file measures no production lines, and a file
+of 100 production lines or more without a row. Under 100 lines one line is
+more than a point, so the 2-point margin would be a line or two of noise.
 A nightly run under the floor, or with a failing test, opens or comments on
 the issue "Nightly Rust checks on main failed".
 
 To raise the baseline, run `bash scripts/coverage.sh` (or download the
-`coverage` artifact of a nightly run into `target/coverage`), then
+`coverage` artifact of a run on `main` into `target/coverage`), then
 `python3 -I -B scripts/coverage-report.py --write-baseline . target/coverage`,
-which rewrites one row per measured file. Commit only the rows of files your
-change raised or added. A pull request that splits or moves a file replaces
-its rows with the new files' rows. Lowering a row needs the reason in the
-pull request.
+which rewrites one row per measured file of 100 production lines or more.
+Commit only the rows of files your change raised or added. A pull request
+that splits or moves a file moves its rows with it: the old row goes, and
+each new file of 100 lines or more gets a row. Lowering a row needs the
+reason in the pull request.
+A refactor that moves or renames files moves their rows in the same pull
+request; `tests/coverage_report.rs` fails on a row whose file is gone.
 
 ### Ratchets
 
@@ -418,6 +435,14 @@ passes, and the check names the file; run
 the pull request that moved the code. `--tighten` never raises a number,
 and it deletes a baseline that has nothing left to record. The checker's
 own tests are in `scripts/ratchets/test_*.py`.
+
+One more number is kept per crate rather than per file: the count of
+production function and closure signatures that return
+`Result<_, String>`, in `scripts/ratchets/string-errors.tsv` (rows
+`CRATE<TAB>N`). A crate may not go above its row. When the count falls,
+the check prints the new number; lower the row by hand in the same pull
+request. Return a typed error instead, as `client::ClientError` and
+`git::GitError` do (issue #368).
 
 ### Repository settings
 

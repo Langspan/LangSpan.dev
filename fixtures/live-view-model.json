@@ -1,0 +1,124 @@
+{
+ "about": "The Live view's model (src/dashboard-live.js) of fixtures/dashboard-events-v2.json with this state, times in UTC. tests/live-view-model.test.mjs checks it; LANGSPAN_UPDATE_GOLDEN=1 rewrites model.",
+ "state": {
+  "agents": [
+   {
+    "id": "local:codex.bob.sub",
+    "local": true,
+    "host": "codex",
+    "session": "codex.bo",
+    "session_id": "codex.bob.sub",
+    "workspace_id": "app",
+    "branch_ref": "refs/heads/feat/api",
+    "task": "#7 API errors"
+   }
+  ]
+ },
+ "model": {
+  "lanes": [
+   {
+    "label": "Agent · #7 API errors",
+    "short": "#7 API",
+    "agent": "Codex",
+    "checkout": "own checkout",
+    "branch": "feat/api"
+   }
+  ],
+  "cards": [
+   {
+    "id": "c0",
+    "lane": 0,
+    "kind": "held",
+    "seq": [
+     3
+    ],
+    "time": "08:00:01",
+    "verb": "Write held",
+    "code": "src/api.rs",
+    "sub": "changed since this agent read it",
+    "who": "LangSpan",
+    "title": "Write held",
+    "rows": [
+     [
+      "File",
+      "src/api.rs"
+     ],
+     [
+      "Time",
+      "08:00:01"
+     ],
+     [
+      "Why",
+      "changed since this agent read it"
+     ]
+    ],
+    "next": "c1"
+   },
+   {
+    "id": "c1",
+    "lane": 0,
+    "kind": "read",
+    "seq": [
+     4
+    ],
+    "time": "08:00:01",
+    "verb": "Read",
+    "code": "src/api.rs",
+    "title": "Read again",
+    "rows": [
+     [
+      "File",
+      "src/api.rs"
+     ],
+     [
+      "Time",
+      "08:00:01"
+     ]
+    ],
+    "next": "c2"
+   },
+   {
+    "id": "c2",
+    "lane": 0,
+    "kind": "saved",
+    "seq": [
+     5
+    ],
+    "time": "08:00:01",
+    "verb": "Saved after re-reading",
+    "code": "src/api.rs",
+    "title": "Saved after re-reading",
+    "rows": [
+     [
+      "File",
+      "src/api.rs"
+     ],
+     [
+      "Time",
+      "08:00:01"
+     ],
+     [
+      "Started from",
+      "the current file"
+     ]
+    ],
+    "next": null
+   }
+  ],
+  "wires": [],
+  "status": {
+   "agents": 1,
+   "held": 1
+  },
+  "untimed": [
+   {
+    "seq": 2,
+    "type": "session_registered",
+    "session_id": "codex.bob.sub",
+    "workspace_id": "app",
+    "paths": [],
+    "more_paths": 0
+   }
+  ]
+ }
+}

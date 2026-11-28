@@ -1382,7 +1382,7 @@ fn standings(
             }
             Err(detail) => eprintln!(
                 "{}",
-                serde_json::json!({"level":"info","event":"change_standing_unknown","workspace_id":question.workspace_id,"detail":detail})
+                serde_json::json!({"level":"info","event":"change_standing_unknown","workspace_id":question.workspace_id,"detail":detail.to_string()})
             ),
         }
     }
