@@ -133,6 +133,27 @@ value or a key-shaped argument is stored and shown as `[redacted]`, while the
 check's name and program stay readable. Prefer passing secrets through the
 environment, which is never recorded.
 
+### An agent's push to the default branch
+
+In a hooked session, an agent's `git push` that would update the remote's
+default branch (the branch `REMOTE/HEAD` names) does not run. The hook
+refuses it, every time, with the landing command to run instead:
+
+```text
+LangSpan: push routed to landing. main is the default branch of the remote, and a push to it goes through landing: ...
+Run `langspan --state-dir DIR land WORKSPACE --onto main --name CHECK feat --apply --rebase --check-again -- TEST_COMMAND` ...
+```
+
+The agent fills in a check name and the project's test command. A forced
+push, a deletion of the default branch, and `--all` or `--mirror` are refused
+too; pushes to other branches, tags and dry runs pass. When the hook cannot
+tell where a push goes (an expansion in the remote or refspec, a URL instead
+of a remote name, or no `REMOTE/HEAD`), it lets the push run; set the remote's
+HEAD with `git remote set-head origin --auto`. Pushes from your own terminal
+are never touched. To let agents push the default branch directly, run
+`git config langspan.defaultBranchPush direct` in the repository. See
+[ADR 0007](../adr/0007-check-evidence-integration-and-landing.md#routing-an-agents-push).
+
 Tests use real daemons, CLI commands and local file remotes. Hosted branch
 protection and native-agent workflows remain unverified. See
 [ADR 0007](../adr/0007-check-evidence-integration-and-landing.md) for command syntax,

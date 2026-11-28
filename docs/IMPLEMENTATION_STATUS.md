@@ -366,6 +366,15 @@ teammate's push during the owner's push (refused without a new check, landed
 with `--check-again`), a hook refusal that is not retried, and an agent's check
 and landing over MCP. No native-agent run uses these commands yet.
 
+Push routing (issue #536, first slice): in a hooked shell call, an agent's
+`git push` to the remote's default branch, forced or not, is refused every
+time with the exact `land --apply --rebase --check-again` command;
+`langspan.defaultBranchPush direct` lets it through. Tests: the push reader's
+forms (pure), and the routing and the shell hook's refusal against real
+temporary repositories with a local bare remote. Not yet retained: a native
+session whose push lands in one step after main moved, and push retries per
+benchmark arm.
+
 ### Source index and interface notices (branch `feat/source-graph`)
 
 [ADR 0008](adr/0008-derived-source-index.md).

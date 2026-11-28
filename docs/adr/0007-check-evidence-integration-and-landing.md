@@ -319,12 +319,53 @@ command as an argument array, run without a shell, with a time limit of 1 to
 has no `--check-again`: an agent checks with `langspan_integrate_check` first.
 A retry of a landing that is still waiting keeps its place in line (the ticket
 is the request ID).
-LangSpan never rewrites or intercepts the owner's own `git push`.
+LangSpan never rewrites or intercepts the owner's own `git push`. An agent's
+push to the default branch through a hooked shell call is refused with the
+landing command instead (below).
+
+**Routing an agent's push.** Issue
+[#536](https://github.com/Langspan/LangSpan.dev/issues/536): agents ran
+`git push`, met a rejection when the target had moved, and retried by hand.
+Before a hooked shell call runs, the hook reads each `git push` in it
+(`src/shell/git_push.rs`, the commit guard's lenient reader) and asks Git
+where it would go (`src/hook/push_route.rs`, `git --no-optional-locks`,
+within a third of the hook's time left): the remote's default branch is what
+`refs/remotes/REMOTE/HEAD` names, and a push without refspecs goes where
+`%(push:remoteref)` of the current branch says. A push that would update the
+default branch is refused, on every attempt, with the exact command:
+`langspan --state-dir DIR land WORKSPACE --onto MAIN --name CHECK BRANCH --apply --rebase --check-again -- TEST_COMMAND`.
+That command is the only way the hook leaves to land an agent's commits on
+the default branch, and the safety rules are the landing's own:
+
+- It never force-pushes. A forced push to the default branch (`-f`,
+  `--force`, `--force-with-lease`, `--force-if-includes`, a `+` refspec) is
+  refused and says that landing never forces; a deletion of the default
+  branch is refused without a command.
+- It never lands on a failed check: `land` pushes only with a passing check
+  of exactly the combined tree. With `--check-again` a failing check pushes
+  nothing and the result is `check_failed` with the check's output (exit 1);
+  with no passing record it exits 6.
+- It never pushes the default branch unless the repository configures that:
+  `git config langspan.defaultBranchPush direct` lets every push through.
+  The refusal does not mention the setting; the owner chooses it.
+- `--all`, `--branches`, `--mirror` and `push.default=matching` are refused
+  too, since they would update the default branch with the rest.
+
+Pushes to other branches, tags, dry runs and the owner's terminal pass
+untouched. What the hook cannot read passes with a detail in its log, as the
+commit guard does: an expansion where a remote or refspec is needed, another
+Git directory, a URL or path instead of a named remote, Git failing, or no
+`REMOTE/HEAD` (`git remote set-head REMOTE --auto` records it). Routing is
+cooperative: a push outside the hooks, or one written to escape the reader,
+is not refused. The check's name and command are placeholders in the
+refusal; the agent supplies the project's test command.
 
 **Choices in the land flow.** The turn is keyed by workspace and target, not
 by repository. A moved target needs a passing check on exactly the new combined tree before
 it is pushed, not merely a test run. The owner's `git push` is never
-rewritten. Without the coordinator there is no turn and no landing, rather
+rewritten, and an agent's push to the default branch is refused rather than
+rewritten into a landing: the agent runs the landing itself, so its tool
+result shows the check and the push. Without the coordinator there is no turn and no landing, rather
 than a landing without a turn. The turn outlives a slow check because it is
 sized to the check's limit and renewed before each push; it is always
 fetched after it is taken; and only a refusal after which the target is found
