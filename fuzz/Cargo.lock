@@ -411,6 +411,7 @@ version = "0.9.1"
 dependencies = [
  "langspan-core",
  "langspan-graph",
+ "langspan-windows",
  "rmcp",
  "rusqlite",
  "rustix",
@@ -447,6 +448,13 @@ dependencies = [
  "tree-sitter-python",
  "tree-sitter-rust",
  "tree-sitter-typescript",
+]
+
+[[package]]
+name = "langspan-windows"
+version = "0.9.1"
+dependencies = [
+ "windows-sys",
 ]
 
 [[package]]

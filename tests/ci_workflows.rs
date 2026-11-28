@@ -3361,7 +3361,12 @@ fn the_settings_drift_audit_names_each_changed_setting() {
     assert_eq!(stdout.lines().count(), 2, "{stdout}");
 }
 
-const WORKSPACE_PACKAGES: [&str; 3] = ["langspan", "langspan-core", "langspan-graph"];
+const WORKSPACE_PACKAGES: [&str; 4] = [
+    "langspan",
+    "langspan-core",
+    "langspan-graph",
+    "langspan-windows",
+];
 
 /// The version of each workspace package that `lock` pins, from its
 /// `[[package]]` tables, sorted by name.

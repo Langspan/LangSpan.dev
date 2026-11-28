@@ -157,7 +157,9 @@ pub fn is_owner_only(file: &File) -> io::Result<bool> {
     // pointers, since both kinds of information were requested.
     let (owner, dacl) = unsafe { (owner.assume_init(), dacl.assume_init()) };
     if owner.is_null() || descriptor.is_null() {
-        return Err(invalid_data("GetSecurityInfo returned no owner or descriptor"));
+        return Err(invalid_data(
+            "GetSecurityInfo returned no owner or descriptor",
+        ));
     }
     // SAFETY: `owner` is a non-null SID pointer into `descriptor`, which is
     // alive; IsValidSid only reads it.
@@ -224,9 +226,11 @@ fn entries_are_owner_only(acl: &[u8], count: u32, user: &[u8]) -> io::Result<boo
     // SID after a 4-byte access mask.
     let mut offset = size_of::<ACL>();
     for _ in 0..count {
-        let header = acl.get(offset..offset + 4).ok_or_else(malformed)?;
-        let (kind, flags) = (header[0], header[1]);
-        let length = usize::from(u16::from_le_bytes([header[2], header[3]]));
+        let [kind, flags, low, high] = *acl
+            .get(offset..)
+            .and_then(<[u8]>::first_chunk::<4>)
+            .ok_or_else(malformed)?;
+        let length = usize::from(u16::from_le_bytes([low, high]));
         if length < 4 {
             return Err(malformed());
         }
@@ -264,20 +268,22 @@ fn sid_prefix(bytes: &[u8]) -> Option<&[u8]> {
 }
 
 /// A binary SID from [`sid_prefix`] in string form, such as `S-1-5-18`, as
-/// `ConvertSidToStringSidW` and SDDL write it.
-fn sid_string(sid: &[u8]) -> String {
-    let authority = sid[2..8]
+/// `ConvertSidToStringSidW` and SDDL write it; `None` if it is shorter than
+/// a SID's 8-byte header.
+fn sid_string(sid: &[u8]) -> Option<String> {
+    let (&[revision, _, ref authority @ ..], subauthorities) = sid.split_first_chunk::<8>()?;
+    let authority = authority
         .iter()
         .fold(0u64, |value, &byte| (value << 8) | u64::from(byte));
     let mut text = if authority < 1 << 32 {
-        format!("S-{}-{authority}", sid[0])
+        format!("S-{revision}-{authority}")
     } else {
-        format!("S-{}-0x{authority:012X}", sid[0])
+        format!("S-{revision}-0x{authority:012X}")
     };
-    for &part in sid[8..].as_chunks::<4>().0 {
+    for &part in subauthorities.as_chunks::<4>().0 {
         text.push_str(&format!("-{}", u32::from_le_bytes(part)));
     }
-    text
+    Some(text)
 }
 
 fn invalid_data(message: &str) -> io::Error {
@@ -288,7 +294,8 @@ fn invalid_data(message: &str) -> io::Error {
 /// SYSTEM only, owned by the current user and protected from inheritance. A
 /// directory's entries are also inherited by what is created inside it.
 fn owner_only_descriptor(directory: bool) -> io::Result<LocalBox> {
-    let user = sid_string(UserSid::current()?.bytes());
+    let user = sid_string(UserSid::current()?.bytes())
+        .ok_or_else(|| invalid_data("the user's SID is too short"))?;
     let inherit = if directory { "OICI" } else { "" };
     let sddl = wide(OsStr::new(&format!(
         "O:{user}D:P(A;{inherit};FA;;;{user})(A;{inherit};FA;;;SY)"
@@ -521,8 +528,9 @@ mod tests {
         }
         // SAFETY: the `length` units before the NUL are initialized.
         let expected = String::from_utf16(unsafe { std::slice::from_raw_parts(text, length) });
-        assert_eq!(sid_string(user.bytes()), expected.unwrap());
-        assert_eq!(sid_string(LOCAL_SYSTEM_SID), "S-1-5-18");
+        assert_eq!(sid_string(user.bytes()), Some(expected.unwrap()));
+        assert_eq!(sid_string(LOCAL_SYSTEM_SID).unwrap(), "S-1-5-18");
+        assert_eq!(sid_string(&[1, 0, 0, 0, 0, 0, 0]), None);
     }
 
     /// An ACL's bytes: the 8-byte header, then `entries`, each a type, flags
