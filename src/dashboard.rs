@@ -539,9 +539,10 @@ fn feed_query(query: &str) -> Result<(u64, u32), String> {
 
 /// One row per recorded event, reduced to an allowlist: its type, the first
 /// session, workspace and time it names (breadth first, so a field of the
-/// event wins over one nested in it), and every `path` and `paths` it
-/// carries. Nothing else, so prompt summaries, message and note text, task
-/// lines, payloads and any field added later are never served.
+/// event wins over one nested in it), every `path` and `paths` it carries,
+/// and the typed Live view facts of `DashboardEvent::detail`. Nothing else, so
+/// prompt summaries, message and note text, task lines, payloads and any
+/// field added later are never served.
 fn feed_page(after: u64, events: &[langspan_core::RecordedEvent]) -> DashboardEvents {
     use serde_json::Value;
     let rows = events.iter().map(|recorded| {
@@ -560,10 +561,14 @@ fn feed_page(after: u64, events: &[langspan_core::RecordedEvent]) -> DashboardEv
                             ("workspace_id", Value::String(id)) => {
                                 workspace_id = workspace_id.or(Some(id.as_str()));
                             }
-                            ("at_ms", Value::Number(ms)) => at_ms = at_ms.or_else(|| ms.as_u64()),
+                            ("at_ms" | "observed_at_ms", Value::Number(ms)) => {
+                                at_ms = at_ms.or_else(|| ms.as_u64());
+                            }
                             ("path", Value::String(path)) => paths.push(path.clone()),
                             ("paths", Value::Array(items)) => paths
                                 .extend(items.iter().filter_map(Value::as_str).map(str::to_owned)),
+                            // Other sessions' holdings, not this event's files.
+                            ("concurrent_holders", _) => {}
                             _ => queue.push_back(field),
                         }
                     }
@@ -577,6 +582,7 @@ fn feed_page(after: u64, events: &[langspan_core::RecordedEvent]) -> DashboardEv
             .and_then(Value::as_str)
             .unwrap_or_default();
         DashboardEvent::new(recorded.seq, kind, session_id, workspace_id, at_ms, paths)
+            .detail(&recorded.event)
     });
     DashboardEvents::new(after, rows.collect())
 }
@@ -978,9 +984,10 @@ mod tests {
         assert!(!host_allowed("localhost:7311", lan));
     }
 
-    /// The `/api/events` page (issue #500), version 1: one row per stored
-    /// event in seq order, each an allowlist projection. Prompt summaries,
-    /// message text, task lines and publication payloads are never in it.
+    /// The `/api/events` page (issue #500), version 2 (issue #491): one row
+    /// per stored event in seq order, each an allowlist projection. Prompt
+    /// summaries, message text, task lines, publication payloads and input
+    /// digests are never in it; an operation's time is its `observed_at_ms`.
     #[test]
     fn the_event_feed_keeps_ids_times_and_paths_and_drops_every_text() {
         use langspan_core::{DASHBOARD_PATHS, DASHBOARD_TEXT, RecordedEvent};
@@ -1004,6 +1011,15 @@ mod tests {
                 "session_id": "s1", "workspace_id": "work", "paths": leased,
                 "generation": 1, "expires_at_ms": 9, "status": "active"}}),
             serde_json::json!({"type": "booted", "generation": 2}),
+            serde_json::json!({"type": "write_refused", "session_id": "s2", "workspace_id": "work",
+                "kind": "stale_base", "paths": ["b.rs"], "peer_session_id": "s1",
+                "input_digest": "SECRET-DIGEST", "at_ms": 10, "generation": 2}),
+            serde_json::json!({"type": "operation_observed", "observation": {
+                "observation_id": "o1", "session_id": "s2", "workspace_id": "work",
+                "operation_id": "op1", "source": "codex", "tool": "Edit", "paths": ["b.rs"],
+                "result": "succeeded", "lease_id": "l2", "lease_relation": "current",
+                "concurrent_holders": [{"lease_id": "l1", "session_id": "s1", "paths": ["c.rs"]}],
+                "observed_at_ms": 11, "generation": 2}}),
         ];
         let recorded: Vec<RecordedEvent> = events
             .into_iter()
@@ -1020,7 +1036,7 @@ mod tests {
         shown[0] = clipped;
         assert_eq!(
             page,
-            serde_json::json!({"version": 1, "next": 46, "events": [
+            serde_json::json!({"version": 2, "next": 48, "events": [
                 {"seq": 41, "type": "session_prompted", "session_id": "s1", "at_ms": 5,
                  "paths": [], "more_paths": 0},
                 {"seq": 42, "type": "message_sent", "workspace_id": "work", "at_ms": 6,
@@ -1032,13 +1048,19 @@ mod tests {
                 {"seq": 45, "type": "lease_granted", "session_id": "s1", "workspace_id": "work",
                  "paths": shown, "more_paths": 2},
                 {"seq": 46, "type": "booted", "paths": [], "more_paths": 0},
+                {"seq": 47, "type": "write_refused", "session_id": "s2", "workspace_id": "work",
+                 "at_ms": 10, "paths": ["b.rs"], "more_paths": 0,
+                 "peer_session_id": "s1", "refusal": "stale_base"},
+                {"seq": 48, "type": "operation_observed", "session_id": "s2",
+                 "workspace_id": "work", "at_ms": 11, "paths": ["b.rs"], "more_paths": 0,
+                 "tool": "Edit", "result": "succeeded"},
             ]})
         );
         assert!(!page.to_string().contains("SECRET"), "{page}");
         // An empty page resumes where it was asked from.
         assert_eq!(
             serde_json::to_value(feed_page(46, &[])).unwrap(),
-            serde_json::json!({"version": 1, "next": 46, "events": []})
+            serde_json::json!({"version": 2, "next": 46, "events": []})
         );
     }
 

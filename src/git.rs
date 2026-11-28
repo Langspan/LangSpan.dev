@@ -7,13 +7,56 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Why a Git operation failed, in the classes a caller acts on. Its text is
+/// the message the operation gives people.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GitError {
+    /// Git could not be started, or does not run on this platform.
+    Unavailable(String),
+    /// The caller's deadline passed before Git finished.
+    TimedOut,
+    /// Git ran and failed, or warned; its own words are not kept.
+    Failed(String),
+    /// Git's answer was not of the form asked for, or over its bound.
+    Corrupt(String),
+    /// A worktree file or Git's output could not be read.
+    Io(String),
+    /// The caller asked for something Git would read as something else.
+    Invalid(String),
+}
+
+impl std::fmt::Display for GitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TimedOut => f.write_str("Git operation deadline elapsed"),
+            Self::Unavailable(message)
+            | Self::Failed(message)
+            | Self::Corrupt(message)
+            | Self::Io(message)
+            | Self::Invalid(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for GitError {}
+
+impl From<GitError> for String {
+    fn from(error: GitError) -> Self {
+        error.to_string()
+    }
+}
+
+fn corrupt(message: &str) -> GitError {
+    GitError::Corrupt(message.to_owned())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Identity {
     pub root: PathBuf,
     pub common_dir: PathBuf,
 }
 
-pub fn identity(cwd: &Path, deadline: Instant) -> Result<Identity, String> {
+pub fn identity(cwd: &Path, deadline: Instant) -> Result<Identity, GitError> {
     let root = output(cwd, &["rev-parse", "--show-toplevel"], deadline, 8192)?;
     let common = output(
         cwd,
@@ -21,10 +64,11 @@ pub fn identity(cwd: &Path, deadline: Instant) -> Result<Identity, String> {
         deadline,
         8192,
     )?;
-    let path = |bytes: Vec<u8>| -> Result<PathBuf, String> {
-        let text = String::from_utf8(bytes).map_err(|_| "Git path is not UTF-8")?;
+    let path = |bytes: Vec<u8>| -> Result<PathBuf, GitError> {
+        let text = String::from_utf8(bytes).map_err(|_| corrupt("Git path is not UTF-8"))?;
         let text = text.strip_suffix('\n').unwrap_or(&text);
-        fs::canonicalize(text).map_err(|e| format!("cannot resolve Git identity: {e}"))
+        fs::canonicalize(text)
+            .map_err(|e| GitError::Io(format!("cannot resolve Git identity: {e}")))
     };
     Ok(Identity {
         root: path(root)?,
@@ -38,7 +82,7 @@ pub fn identity(cwd: &Path, deadline: Instant) -> Result<Identity, String> {
 /// a required filter that is not installed (Git LFS absent) is not an error.
 /// Content is then hashed as the raw bytes on disk, as the observer reads it.
 /// Only the driver names are read from the configuration, never the values.
-pub fn filter_overrides(cwd: &Path, deadline: Instant) -> Result<Vec<String>, String> {
+pub fn filter_overrides(cwd: &Path, deadline: Instant) -> Result<Vec<String>, GitError> {
     let (status, bytes) = run_with_env(
         cwd,
         &[
@@ -56,20 +100,25 @@ pub fn filter_overrides(cwd: &Path, deadline: Instant) -> Result<Vec<String>, St
         Some(0) => {}
         // No such key.
         Some(1) => return Ok(Vec::new()),
-        _ => return Err("Git could not list the configured filters".into()),
+        _ => {
+            return Err(GitError::Failed(
+                "Git could not list the configured filters".into(),
+            ));
+        }
     }
     let mut names = std::collections::BTreeSet::new();
     for record in bytes.split(|byte| *byte == 0).filter(|r| !r.is_empty()) {
-        let key = std::str::from_utf8(record).map_err(|_| "Git filter name is not UTF-8")?;
+        let key =
+            std::str::from_utf8(record).map_err(|_| corrupt("Git filter name is not UTF-8"))?;
         let name = key
             .strip_prefix("filter.")
             .and_then(|rest| rest.rsplit_once('.'))
             .map(|(name, _)| name)
             .filter(|name| !name.is_empty() && !name.contains(['\n', '=']))
-            .ok_or("Git filter configuration is malformed")?;
+            .ok_or_else(|| corrupt("Git filter configuration is malformed"))?;
         names.insert(name.to_owned());
         if names.len() > 64 {
-            return Err("more than 64 Git filter drivers are configured".into());
+            return Err(corrupt("more than 64 Git filter drivers are configured"));
         }
     }
     let mut arguments = Vec::new();
@@ -87,7 +136,7 @@ pub fn output(
     args: &[&str],
     deadline: Instant,
     limit: usize,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, GitError> {
     output_with_env(cwd, args, &[], deadline, limit)
 }
 
@@ -99,15 +148,15 @@ pub fn output_with_env(
     env: &[(&str, &std::ffi::OsStr)],
     deadline: Instant,
     limit: usize,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, GitError> {
     let (status, bytes) = run_with_env(cwd, args, env, deadline, limit)?;
     if status.success() {
         return Ok(bytes);
     }
     // Repository-controlled stderr can contain private values; do not relay it.
-    Err(format!(
+    Err(GitError::Failed(format!(
         "read-only Git operation failed ({status}); check repository state"
-    ))
+    )))
 }
 
 /// Run Git and return its exit status with its bounded standard output, for
@@ -119,10 +168,10 @@ pub fn run_with_env(
     env: &[(&str, &std::ffi::OsStr)],
     deadline: Instant,
     limit: usize,
-) -> Result<(std::process::ExitStatus, Vec<u8>), String> {
+) -> Result<(std::process::ExitStatus, Vec<u8>), GitError> {
     let (status, bytes, errors) = run_with_errors(cwd, args, env, deadline, limit)?;
     if status.success() && !errors.is_empty() {
-        return Err("read-only Git operation emitted a warning; observation is incomplete, check repository state".into());
+        return Err(GitError::Failed("read-only Git operation emitted a warning; observation is incomplete, check repository state".into()));
     }
     Ok((status, bytes))
 }
@@ -136,7 +185,7 @@ pub fn run_with_errors(
     env: &[(&str, &std::ffi::OsStr)],
     deadline: Instant,
     limit: usize,
-) -> Result<Ran, String> {
+) -> Result<Ran, GitError> {
     run(cwd, args, env, deadline, limit)
 }
 
@@ -161,7 +210,7 @@ pub fn run_network(
     cwd: &Path,
     args: &[&str],
     deadline: Instant,
-) -> Result<std::process::ExitStatus, String> {
+) -> Result<std::process::ExitStatus, GitError> {
     network(cwd, args, deadline).map(|(status, _)| status)
 }
 
@@ -176,7 +225,7 @@ pub fn network(
     cwd: &Path,
     args: &[&str],
     deadline: Instant,
-) -> Result<(std::process::ExitStatus, String), String> {
+) -> Result<(std::process::ExitStatus, String), GitError> {
     network_run(cwd, args, deadline, 64 * 1024).map(|(status, _, errors)| (status, said(&errors)))
 }
 
@@ -186,7 +235,7 @@ pub fn run_network_output(
     args: &[&str],
     deadline: Instant,
     limit: usize,
-) -> Result<(std::process::ExitStatus, Vec<u8>), String> {
+) -> Result<(std::process::ExitStatus, Vec<u8>), GitError> {
     network_run(cwd, args, deadline, limit).map(|(status, output, _)| (status, output))
 }
 
@@ -197,7 +246,7 @@ fn network_run(
     args: &[&str],
     deadline: Instant,
     limit: usize,
-) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), String> {
+) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), GitError> {
     let mut env: Vec<(&str, &std::ffi::OsStr)> = vec![("GIT_ASKPASS", NO_ASKPASS.as_ref())];
     if !owner_ssh(cwd, deadline)? {
         env.push(("GIT_SSH_COMMAND", BATCH_SSH.as_ref()));
@@ -237,7 +286,7 @@ pub fn said(errors: &[u8]) -> String {
 }
 
 /// Whether the owner chose the SSH command Git uses in this repository.
-fn owner_ssh(cwd: &Path, deadline: Instant) -> Result<bool, String> {
+fn owner_ssh(cwd: &Path, deadline: Instant) -> Result<bool, GitError> {
     if std::env::var_os("GIT_SSH_COMMAND").is_some() || std::env::var_os("GIT_SSH").is_some() {
         return Ok(true);
     }
@@ -265,20 +314,20 @@ pub fn standing(
     path: &str,
     base: &Path,
     deadline: Instant,
-) -> Result<langspan_core::Standing, String> {
+) -> Result<langspan_core::Standing, GitError> {
     use langspan_core::Standing;
     // A path for Git's own syntax only: relative, no option or revision
     // punctuation Git would read as something else.
     if path.is_empty() || path.starts_with(['-', '/']) || path.contains(['\n', '\0']) {
-        return Err("not a worktree-relative path".into());
+        return Err(GitError::Invalid("not a worktree-relative path".into()));
     }
-    let object = |bytes: Vec<u8>| -> Result<String, String> {
-        let text = String::from_utf8(bytes).map_err(|_| "Git object ID is not UTF-8")?;
+    let object = |bytes: Vec<u8>| -> Result<String, GitError> {
+        let text = String::from_utf8(bytes).map_err(|_| corrupt("Git object ID is not UTF-8"))?;
         let id = text.trim_end_matches('\n');
         if (id.len() == 40 || id.len() == 64) && id.bytes().all(|b| b.is_ascii_hexdigit()) {
             Ok(id.to_owned())
         } else {
-            Err("Git did not answer with an object ID".into())
+            Err(corrupt("Git did not answer with an object ID"))
         }
     };
     let (status, committed) = run_with_env(
@@ -293,15 +342,23 @@ pub fn standing(
     } else if status.code() == Some(1) {
         None
     } else {
-        return Err("Git could not read the worktree's HEAD".into());
+        return Err(GitError::Failed(
+            "Git could not read the worktree's HEAD".into(),
+        ));
     };
     let working = match fs::symlink_metadata(changed.join(path)) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-        Err(error) => return Err(format!("cannot read the worktree's file: {error}")),
+        Err(error) => {
+            return Err(GitError::Io(format!(
+                "cannot read the worktree's file: {error}"
+            )));
+        }
         // `hash-object` would follow a symbolic link, and a device or FIFO
         // has no content to compare.
         Ok(metadata) if !metadata.is_file() => {
-            return Err("the worktree's file is not a regular file".into());
+            return Err(GitError::Invalid(
+                "the worktree's file is not a regular file".into(),
+            ));
         }
         Ok(_) => Some(object(output(
             changed,
@@ -333,7 +390,9 @@ pub fn standing(
     match status.code() {
         Some(0) => Ok(Standing::Merged),
         Some(1) => Ok(Standing::Unmerged),
-        _ => Err("Git could not compare the commit with the checkout's HEAD".into()),
+        _ => Err(GitError::Failed(
+            "Git could not compare the commit with the checkout's HEAD".into(),
+        )),
     }
 }
 
@@ -352,7 +411,7 @@ fn crlf_committed(
     path: &str,
     blob: &str,
     deadline: Instant,
-) -> Result<bool, String> {
+) -> Result<bool, GitError> {
     let mut working = Vec::new();
     let mut options = fs::OpenOptions::new();
     options.read(true);
@@ -368,7 +427,7 @@ fn crlf_committed(
             file.take(CRLF_COMPARE_LIMIT as u64 + 1)
                 .read_to_end(&mut working)
         })
-        .map_err(|error| format!("cannot read the worktree's file: {error}"))?;
+        .map_err(|error| GitError::Io(format!("cannot read the worktree's file: {error}")))?;
     if working.len() > CRLF_COMPARE_LIMIT || !working.windows(2).any(|w| w == b"\r\n") {
         return Ok(false);
     }
@@ -406,18 +465,21 @@ fn run(
     env: &[(&str, &std::ffi::OsStr)],
     deadline: Instant,
     limit: usize,
-) -> Result<Ran, String> {
+) -> Result<Ran, GitError> {
     #[cfg(not(unix))]
     {
         let _ = (cwd, args, env, deadline, limit);
-        Err("Git observer currently requires Unix".into())
+        Err(GitError::Unavailable(
+            "Git observer currently requires Unix".into(),
+        ))
     }
     #[cfg(unix)]
     {
         use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
         use std::os::unix::process::CommandExt;
+        let io = |e: &dyn std::fmt::Display| GitError::Io(e.to_string());
         if Instant::now() >= deadline {
-            return Err("Git operation deadline elapsed".into());
+            return Err(GitError::TimedOut);
         }
         // Its own process group, so a credential helper, SSH or remote
         // helper it started is stopped with it.
@@ -434,32 +496,40 @@ fn run(
             .stderr(Stdio::piped())
             .process_group(0)
             .spawn()
-            .map_err(|e| format!("cannot start read-only Git operation: {e}"))?;
+            .map_err(|e| {
+                GitError::Unavailable(format!("cannot start read-only Git operation: {e}"))
+            })?;
         let group = rustix::process::Pid::from_child(&child);
         let result = (|| {
-            let mut stdout = child.stdout.take().ok_or("Git stdout pipe missing")?;
-            let mut stderr = child.stderr.take().ok_or("Git stderr pipe missing")?;
+            let mut stdout = child
+                .stdout
+                .take()
+                .ok_or_else(|| io(&"Git stdout pipe missing"))?;
+            let mut stderr = child
+                .stderr
+                .take()
+                .ok_or_else(|| io(&"Git stderr pipe missing"))?;
             fcntl_setfl(
                 &stdout,
-                fcntl_getfl(&stdout).map_err(|e| e.to_string())? | OFlags::NONBLOCK,
+                fcntl_getfl(&stdout).map_err(|e| io(&e))? | OFlags::NONBLOCK,
             )
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| io(&e))?;
             fcntl_setfl(
                 &stderr,
-                fcntl_getfl(&stderr).map_err(|e| e.to_string())? | OFlags::NONBLOCK,
+                fcntl_getfl(&stderr).map_err(|e| io(&e))? | OFlags::NONBLOCK,
             )
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| io(&e))?;
             let mut bytes = Vec::new();
             let mut errors = Vec::new();
             let mut stdout_done = false;
             let mut stderr_done = false;
             loop {
                 if Instant::now() >= deadline {
-                    return Err("Git operation deadline elapsed".into());
+                    return Err(GitError::TimedOut);
                 }
                 drain(&mut stdout, &mut bytes, limit, &mut stdout_done)?;
                 drain_tail(&mut stderr, &mut errors, 8192, &mut stderr_done)?;
-                if let Some(status) = child.try_wait().map_err(|e| e.to_string())?
+                if let Some(status) = child.try_wait().map_err(|e| io(&e))?
                     && stdout_done
                     && stderr_done
                 {
@@ -485,7 +555,7 @@ fn drain_tail(
     bytes: &mut Vec<u8>,
     limit: usize,
     done: &mut bool,
-) -> Result<(), String> {
+) -> Result<(), GitError> {
     let mut buffer = [0_u8; 8192];
     loop {
         match reader.read(&mut buffer) {
@@ -501,7 +571,7 @@ fn drain_tail(
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(()),
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(format!("cannot read Git output: {e}")),
+            Err(e) => return Err(GitError::Io(format!("cannot read Git output: {e}"))),
         }
     }
 }
@@ -511,7 +581,7 @@ fn drain(
     bytes: &mut Vec<u8>,
     limit: usize,
     done: &mut bool,
-) -> Result<(), String> {
+) -> Result<(), GitError> {
     let mut buffer = [0_u8; 8192];
     loop {
         match reader.read(&mut buffer) {
@@ -521,15 +591,15 @@ fn drain(
             }
             Ok(n) => {
                 if bytes.len() + n > limit {
-                    return Err(
-                        "Git output exceeded its size bound; observation is incomplete".into(),
-                    );
+                    return Err(corrupt(
+                        "Git output exceeded its size bound; observation is incomplete",
+                    ));
                 }
                 bytes.extend_from_slice(&buffer[..n]);
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(()),
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(format!("cannot read Git output: {e}")),
+            Err(e) => return Err(GitError::Io(format!("cannot read Git output: {e}"))),
         }
     }
 }
@@ -599,7 +669,7 @@ mod tests {
         fn tree(&self) -> PathBuf {
             self.base.join("tree")
         }
-        fn of(&self, path: &str) -> Result<Standing, String> {
+        fn of(&self, path: &str) -> Result<Standing, super::GitError> {
             standing(
                 &self.tree(),
                 path,
@@ -700,5 +770,19 @@ mod tests {
         assert!(repo.of("link.rs").is_err());
         // A deadline already past runs nothing.
         assert!(standing(&repo.tree(), "a.rs", &repo.main(), Instant::now()).is_err());
+    }
+
+    /// A process test: what it checks is the deadline of the Git child.
+    #[test]
+    fn a_past_deadline_is_timed_out_with_the_same_words() {
+        let error = super::output(Path::new("."), &["version"], Instant::now(), 64).unwrap_err();
+        assert_eq!(error, super::GitError::TimedOut);
+        assert_eq!(error.to_string(), "Git operation deadline elapsed");
+        let invalid = standing(Path::new("."), "-a", Path::new("."), Instant::now()).unwrap_err();
+        assert!(
+            matches!(&invalid, super::GitError::Invalid(_)),
+            "{invalid:?}"
+        );
+        assert_eq!(invalid.to_string(), "not a worktree-relative path");
     }
 }

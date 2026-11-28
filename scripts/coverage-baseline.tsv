@@ -123,8 +123,12 @@ src/shell/parse.rs	95.4
 src/shell/snapshot.rs	90.1
 src/skill.rs	94.5
 src/spool.rs	87.3
-src/store.rs	95.2
+src/store.rs	96.7
+src/store/messages.rs	92.4
+src/store/paging.rs	94.9
+src/store/reads.rs	95.4
 src/store/retention.rs	89.5
+src/store/scan.rs	96.3
 src/test_output.rs	98.3
 src/text/redact.rs	99.2
 src/today.rs	86.8

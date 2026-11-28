@@ -156,6 +156,12 @@ impl From<String> for Refusal {
     }
 }
 
+impl From<crate::git::GitError> for Refusal {
+    fn from(error: crate::git::GitError) -> Self {
+        error.to_string().into()
+    }
+}
+
 /// True when Git's text says the host decided, rather than that it could not
 /// be reached: HTTP 401 or 403, or a refusal, denial or protection rule.
 pub fn permanent(said: &str) -> bool {

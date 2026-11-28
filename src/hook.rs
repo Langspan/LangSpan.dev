@@ -157,14 +157,8 @@ impl Session<'_> {
         let request = Request::new(id, command);
         let response =
             client::call_until(&self.config.state_dir, &request, by).map_err(|error| {
-                let text = error.to_string();
-                let coverage = if text.contains("deadline") || text.contains("timed out") {
-                    "timeout"
-                } else {
-                    "unavailable"
-                };
                 self.unreachable.set(true);
-                Failure::Transport(coverage, text)
+                Failure::Transport(coverage(&error), error.to_string())
             })?;
         match &response.outcome {
             Outcome::Error { code, message } if code == "coordination_unavailable" => {
@@ -291,6 +285,29 @@ impl Session<'_> {
                 json!({"event":"liveness_unavailable", "coverage":diagnostic.coverage, "detail":diagnostic.detail})
             );
         }
+    }
+}
+
+/// The coverage a hook reports for a call that did not reach the daemon.
+fn coverage(error: &client::ClientError) -> &'static str {
+    match error {
+        client::ClientError::TimedOut(_) => "timeout",
+        _ => "unavailable",
+    }
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::{client::ClientError, coverage};
+
+    #[test]
+    fn only_a_timed_out_call_is_reported_as_a_timeout() {
+        // A path that names a deadline no longer reads as one.
+        let path = "coordination unavailable at /tmp/deadline/daemon.sock: refused".to_owned();
+        assert_eq!(coverage(&ClientError::TimedOut("late".into())), "timeout");
+        assert_eq!(coverage(&ClientError::Unavailable(path)), "unavailable");
+        assert_eq!(coverage(&ClientError::Refused("x".into())), "unavailable");
+        assert_eq!(coverage(&ClientError::Corrupt("x".into())), "unavailable");
     }
 }
 

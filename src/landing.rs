@@ -463,7 +463,7 @@ pub fn ask(
 /// landing it already made, so a view that left landings out to fit a
 /// frame would run the same landing again.
 fn read_state(state_dir: &Path) -> Result<State, crate::Error> {
-    client::status_from(state_dir, &["landings"]).map(|(state, _)| state)
+    Ok(client::status_from(state_dir, &["landings"])?.0)
 }
 
 /// The registered root of `workspace`.

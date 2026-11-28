@@ -161,7 +161,9 @@ fn blob(
     {
         return Err(format!("{path:?} is larger than {limit} bytes"));
     }
-    git::output(root, &["cat-file", "blob", &object], deadline, limit).map(Some)
+    git::output(root, &["cat-file", "blob", &object], deadline, limit)
+        .map(Some)
+        .map_err(String::from)
 }
 
 /// The structure of `path` at `commit`, with body digests. `Ok(None)` when

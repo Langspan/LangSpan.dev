@@ -279,6 +279,13 @@ nothing in either lane of `check.yml`.
   fails, it opens an issue titled "Nightly Rust checks on main failed" or
   "Nightly benchmark dry runs on main failed", or comments on that issue
   while it is open. Treat that issue like a failing check on `main`.
+- **An advisory dry run** shows that path without an advisory on `main`:
+  `gh workflow run check.yml --ref BRANCH -f advisory_dry_run=true`. The
+  Linux build audits the real lockfile, then
+  `tests/fixtures/advisory-dry-run/known-advisory.lock` (RUSTSEC-2021-0003),
+  and fails on it; `nightly-report` then opens or comments on an issue
+  titled "Advisory dry run of the nightly report", never the real one.
+  Close that issue afterwards ([evidence](evidence/ci/advisories.md)).
 
 The two times are targets the lanes should meet, not gates: a run over
 them still passes. `bash scripts/measure-ci.sh` reports them from GitHub's
@@ -428,6 +435,14 @@ passes, and the check names the file; run
 the pull request that moved the code. `--tighten` never raises a number,
 and it deletes a baseline that has nothing left to record. The checker's
 own tests are in `scripts/ratchets/test_*.py`.
+
+One more number is kept per crate rather than per file: the count of
+production function and closure signatures that return
+`Result<_, String>`, in `scripts/ratchets/string-errors.tsv` (rows
+`CRATE<TAB>N`). A crate may not go above its row. When the count falls,
+the check prints the new number; lower the row by hand in the same pull
+request. Return a typed error instead, as `client::ClientError` and
+`git::GitError` do (issue #368).
 
 ### Repository settings
 
