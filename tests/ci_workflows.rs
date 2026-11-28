@@ -2913,7 +2913,10 @@ fn locked_workspace_versions(lock: &str) -> Vec<(String, String)> {
 /// (fuzz.yml), which release-please's rust updater doesn't touch, so a
 /// release PR that bumps the workspace version without it fails Fuzz (#571).
 /// release-please-config.json bumps it through `extra-files`, one entry per
-/// workspace package, and the lock holds the current version.
+/// workspace package, and the lock holds the current version. release-please's
+/// toml updater parses the file into tagged values (`{ value, start, end }`),
+/// so a filter compares `@.name.value`; `@.name` is an object and matches
+/// nothing.
 #[test]
 fn fuzz_lock_pins_the_current_workspace_version() {
     let version = env!("CARGO_PKG_VERSION");
@@ -2936,7 +2939,7 @@ fn fuzz_lock_pins_the_current_workspace_version() {
         let entry = serde_json::json!({
             "type": "toml",
             "path": "fuzz/Cargo.lock",
-            "jsonpath": format!("$.package[?(@.name=='{name}')].version"),
+            "jsonpath": format!("$.package[?(@.name.value=='{name}')].version"),
         });
         assert!(
             extra.contains(&entry),

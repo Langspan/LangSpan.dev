@@ -11,9 +11,9 @@
       "draft": true,
       "force-tag-creation": true,
       "extra-files": [
-        { "type": "toml", "path": "fuzz/Cargo.lock", "jsonpath": "$.package[?(@.name=='langspan')].version" },
-        { "type": "toml", "path": "fuzz/Cargo.lock", "jsonpath": "$.package[?(@.name=='langspan-core')].version" },
-        { "type": "toml", "path": "fuzz/Cargo.lock", "jsonpath": "$.package[?(@.name=='langspan-graph')].version" }
+        { "type": "toml", "path": "fuzz/Cargo.lock", "jsonpath": "$.package[?(@.name.value=='langspan')].version" },
+        { "type": "toml", "path": "fuzz/Cargo.lock", "jsonpath": "$.package[?(@.name.value=='langspan-core')].version" },
+        { "type": "toml", "path": "fuzz/Cargo.lock", "jsonpath": "$.package[?(@.name.value=='langspan-graph')].version" }
       ]
     }
   },
