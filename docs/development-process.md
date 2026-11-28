@@ -40,7 +40,7 @@ Limit open work so that each pull request merges quickly:
   today:
   - `protocol`, the wire protocol: `src/protocol.rs` and its clients;
   - `briefing`: `src/briefing.rs` and `src/briefing/`;
-  - `install`: `src/install.rs`, `src/user_install.rs` and `src/install/detect.rs`;
+  - `install`: `src/install.rs`, `src/install/` and `src/user_install.rs`;
   - `cli`, its argument list and flags table: `src/main.rs` and `src/cli/`;
   - `graph`, the source graph: `src/graph.rs`, `src/graph/`,
     `src/index_file.rs` and `crates/langspan-graph`.
