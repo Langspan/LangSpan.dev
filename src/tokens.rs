@@ -154,32 +154,47 @@ struct Merge {
     process_files: Vec<String>,
 }
 
-/// `git log --format=%x00%ct --name-only` output as merges.
+/// `git log -z --format=%x00%ct --name-only` output as merges. Each commit
+/// is an empty field, its time, then its paths, the first after a newline;
+/// a path is never empty, so the empty field can only start a commit. The
+/// final NUL leaves one more empty field, which is the end.
 fn merges(log: &[u8]) -> Result<Vec<Merge>, Error> {
-    let text = std::str::from_utf8(log).map_err(|_| "Git's log was not UTF-8")?;
-    let mut found = Vec::new();
-    for record in text.split('\0').skip(1) {
-        let mut lines = record.lines();
-        let seconds: u64 = lines
-            .next()
-            .and_then(|line| line.parse().ok())
-            .ok_or("Git's log had a commit without a committer time")?;
-        let process_files = lines
-            .filter(|path| {
-                let name = path.rsplit('/').next().unwrap_or(path);
-                name == "AGENTS.md"
-                    || name == "CLAUDE.md"
-                    || path.starts_with(".claude/")
-                    || path.contains("/.claude/")
-            })
-            .map(str::to_owned)
-            .collect();
-        found.push(Merge {
-            at_ms: seconds.saturating_mul(1000),
-            process_files,
-        });
+    let mut found: Vec<Merge> = Vec::new();
+    let mut fields = log.split(|byte| *byte == 0).peekable();
+    while let Some(field) = fields.next() {
+        if field.is_empty() {
+            if fields.peek().is_none() {
+                break;
+            }
+            let seconds: u64 = fields
+                .next()
+                .and_then(|time| std::str::from_utf8(time).ok()?.parse().ok())
+                .ok_or("Git's log had a commit without a committer time")?;
+            found.push(Merge {
+                at_ms: seconds.saturating_mul(1000),
+                process_files: Vec::new(),
+            });
+            if let Some(first) = fields.next_if(|path| !path.is_empty()) {
+                note(&mut found, first.strip_prefix(b"\n").unwrap_or(first));
+            }
+        } else {
+            note(&mut found, field);
+        }
     }
     Ok(found)
+}
+
+/// Add `path` to the last merge's process files if it is one.
+fn note(found: &mut [Merge], path: &[u8]) {
+    let path = String::from_utf8_lossy(path);
+    let name = path.rsplit('/').next().unwrap_or(&path);
+    let process = name == "AGENTS.md"
+        || name == "CLAUDE.md"
+        || path.starts_with(".claude/")
+        || path.contains("/.claude/");
+    if let (true, Some(merge)) = (process, found.last_mut()) {
+        merge.process_files.push(path.into_owned());
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -305,13 +320,18 @@ pub fn measure(
         each_line(BufReader::new(opened), |line| tally.add(line))
             .map_err(|error| format!("cannot read {}: {error}", file.display()))?;
     }
-    let since_arg = format!("--since=@{}", since_ms / 1000);
+    // `--since-as-filter`, not `--since`: commit dates can go backwards, and
+    // `--since` stops the walk at the first older one. `--no-renames` keeps a
+    // renamed instruction file's old path; `-z` writes paths unquoted.
+    let since_arg = format!("--since-as-filter=@{}", since_ms / 1000);
     let log = git::output(
         root,
         &[
             "log",
+            "-z",
             "--first-parent",
             "--diff-merges=first-parent",
+            "--no-renames",
             "--format=%x00%ct",
             "--name-only",
             &since_arg,
@@ -552,11 +572,20 @@ mod tests {
 
     #[test]
     fn log_records_mark_instruction_changes() {
-        let log = b"\x001795000000\n\nsrc/a.rs\ndocs/CLAUDE.md\n\x001795000001\n\n.claude/settings.json\nsrc/AGENTS.mdx\n";
-        let found = merges(log).unwrap();
-        assert_eq!(found.len(), 2);
-        assert_eq!(found[0].process_files, ["docs/CLAUDE.md"]);
-        assert_eq!(found[1].process_files, [".claude/settings.json"]);
-        assert!(merges(b"\0not a time\n").is_err());
+        // The layout `git log -z` writes: an empty commit, then paths that
+        // are unquoted and may hold a newline, ending in a NUL.
+        let log = "\x001795000002\0\x001795000000\0\nsrc/a.rs\0é/CLAUDE.md\0\
+                   \x001795000001\0\n\n.claude/x\0src/AGENTS.mdx\0a\n/AGENTS.md\0.claude/settings.json\0";
+        let found = merges(log.as_bytes()).unwrap();
+        assert_eq!(found.len(), 3);
+        assert!(found[0].process_files.is_empty());
+        assert_eq!(found[0].at_ms, 1_795_000_002_000);
+        assert_eq!(found[1].process_files, ["é/CLAUDE.md"]);
+        assert_eq!(
+            found[2].process_files,
+            ["a\n/AGENTS.md", ".claude/settings.json"]
+        );
+        assert!(merges(b"").unwrap().is_empty());
+        assert!(merges(b"\0not a time\0").is_err());
     }
 }

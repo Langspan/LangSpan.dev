@@ -142,6 +142,44 @@ fn tokens_per_merged_change_from_a_claude_folder_and_a_branch() {
     );
 }
 
+/// Git itself is what's verified here: how `--since` walks a history whose
+/// commit dates go backwards, how a rename is reported, and how a non-ASCII
+/// path is written.
+#[test]
+fn history_with_older_dates_renames_and_quoted_paths_is_read_whole() {
+    let base = base();
+    let work = base.0.join("work");
+    let today = today();
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let (year, month, day) = langspan::today::civil_from_days((seconds / 86_400) as i64 - 40);
+    let older = format!("{year:04}-{month:02}-{day:02}");
+    support::git(&work, &["init", "-q", "-b", "main"]);
+    commit(&work, "é/CLAUDE.md", &today);
+    // Older than the window, between two commits inside it.
+    commit(&work, "AGENTS.md", &older);
+    support::git(&work, &["mv", "AGENTS.md", "old-instructions.md"]);
+    commit(&work, "src/a.rs", &today);
+    fs::create_dir_all(base.0.join("claude/projects")).unwrap();
+
+    let output = tokens(
+        &base.0.join("claude"),
+        &work,
+        &["--onto", "main", "--days", "1", "--json"],
+    );
+    assert!(output.status.success(), "{output:?}");
+    let answer: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let days = answer["days"].as_array().unwrap();
+    assert_eq!(days[0]["merged"], 2, "{answer}");
+    assert_eq!(
+        days[0]["process_changes"],
+        serde_json::json!(["AGENTS.md", "é/CLAUDE.md"]),
+        "{answer}"
+    );
+}
+
 #[test]
 fn tokens_says_what_is_missing() {
     let base = base();

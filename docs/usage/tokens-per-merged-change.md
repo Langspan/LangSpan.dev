@@ -43,9 +43,11 @@ whatever order the files are read in.
   **Uncached input** is input and cache writes: what wasn't served from the
   cache. **Output** is output tokens. No dollar amounts are shown.
 - **A merged change** is a first-parent commit of `--onto`, on the local day
-  of its committer time.
+  of its committer time. Every first-parent commit is visited, so one whose
+  date is older than its parent's doesn't hide the commits before it.
 - **A process change** is a merged change that touches an `AGENTS.md`, a
-  `CLAUDE.md` or a file under `.claude/`. The day shows those paths.
+  `CLAUDE.md` or a file under `.claude/`, including renaming one away. The
+  day shows those paths.
 - **Per change** is the day's tokens divided by its merged changes, rounded
   down. A day without a merged change shows its tokens and no per-change
   figure.
