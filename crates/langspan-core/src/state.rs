@@ -114,7 +114,7 @@ pub struct State {
     pub adoptions: BTreeMap<String, Adoption>,
     /// Reserved numbers per repository, then key (ADR 0040); not in `status`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub reservations: BTreeMap<String, BTreeMap<String, Counter>>,
+    pub(crate) reservations: BTreeMap<String, BTreeMap<String, Counter>>,
     /// Recorded renames per workspace, newest first, at most `MAX_RENAMES`
     /// (roadmap D7): what `graph symbol --renamed` follows. A name defined
     /// again is dropped. Derived on replay; not part of the status reply.

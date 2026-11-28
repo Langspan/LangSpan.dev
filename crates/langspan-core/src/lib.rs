@@ -108,7 +108,8 @@ pub use report::{
     ReportKnown, ReportQuery, ReportSession, host_kind, known_sessions, open_intents, report,
     session_workspaces,
 };
-pub use reservations::{Counter, MAX_RESERVATION_KEYS, Reservation};
+pub(crate) use reservations::Counter;
+pub use reservations::{MAX_RESERVATION_KEYS, Reservation};
 pub use route::Route;
 pub use sessions::*;
 pub(crate) use shared::*;

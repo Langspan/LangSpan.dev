@@ -3,11 +3,9 @@
 //! it, so that a session in another worktree of the repository takes
 //! another. Advisory, like an intent: it holds and refuses no file.
 
-use std::collections::BTreeMap;
-
 use serde::{Deserialize, Serialize};
 
-use crate::{CoreError, Decision, Event, Outcome, State, current_session, error};
+use crate::{BTreeMap, CoreError, Decision, Event, Outcome, State, current_session, error};
 
 /// Keys counted per scope. A new key past this is refused.
 pub const MAX_RESERVATION_KEYS: usize = 256;
@@ -35,9 +33,9 @@ pub struct Reservation {
 /// A counter: the highest number it handed out, and its newest claims.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct Counter {
-    pub highest: u64,
-    pub claims: Vec<Reservation>,
+pub(crate) struct Counter {
+    pub(crate) highest: u64,
+    pub(crate) claims: Vec<Reservation>,
 }
 
 fn validate_key(key: &str) -> Result<(), CoreError> {

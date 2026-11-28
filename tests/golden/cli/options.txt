@@ -185,6 +185,20 @@ same: --json --state-dir
 every other option
   exit 1: {"level":"error","message":"option {option} is not valid for this command"}
 
+## langspan reserve s1 adr 39 --request-id r1
+alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
+same: --json --state-dir
+--apply
+  exit 1: {"level":"error","message":"--apply is valid only for `install`, `uninstall`, `hooks install|remove`, `land`, `compact`, `workspace remove` and `graph import`"}
+--help -h
+  exit 0: the help
+--request-id
+  exit 1: {"level":"error","message":"duplicate option --request-id"}
+--home
+  exit 1: {"level":"error","message":"--home is valid only for `install`, `uninstall`, `doctor` and `hosts`"}
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
 ## langspan admit s1 a.rs --request-id r1
 alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
 same: --json --state-dir --ttl-ms

@@ -131,6 +131,25 @@ apply arm there.
   the reservation. The field is serialized, so `SnapshotRecord` there does
   not change.
 
+## Changed during the fourth run (after merging main at a9dbdae8)
+
+- `reservations` in `State` is `pub(crate)` and `Counter` crate-private, so
+  the `fields State` ratchet stays at 32 and the core's public names grow
+  by two (`Reservation`, `MAX_RESERVATION_KEYS`).
+- Files outside the reservation, found by the suite after the merge:
+  - `src/briefing/render.rs` and `scripts/ratchets/baseline/src/briefing/render.rs.tsv`:
+    main moved `src/hook/render.rs` there (#526 and after); the briefing
+    line this branch added moved with it, so only its baseline is recorded.
+  - `tests/tolerant_responses.rs`: a `Reservation` is stored in the
+    `reserved` event, so it keeps `deny_unknown_fields` and the two places
+    in `reserved-outcome-v10.json` join `STRICT`.
+  - `crates/langspan-core/src/error_code.rs`,
+    `crates/langspan-core/tests/golden/error_codes.txt`, `docs/usage.md`:
+    #367 (#612) made a committed list of error codes; the three this
+    branch adds (`invalid_key`, `invalid_number`, `too_many_keys`) join it
+    and the usage guide's table, and `reservations.rs` writes them through
+    `ErrorCode`.
+
 ## Shared contracts touched
 
 `Command`, `Event`, `Outcome`, `Briefing`, `State` (one field each, additive),
