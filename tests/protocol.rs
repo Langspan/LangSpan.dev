@@ -244,7 +244,10 @@ fn v3_recent_briefing_request_and_response_match_the_committed_golden_vectors() 
         r#""window_ms":14400000,"summary":"x""#,
     );
     // Issue #414: a field a later daemon adds is ignored, not an error.
-    assert_eq!(serde_json::from_str::<Response>(&unknown).unwrap(), response);
+    assert_eq!(
+        serde_json::from_str::<Response>(&unknown).unwrap(),
+        response
+    );
 }
 
 #[test]
