@@ -307,7 +307,8 @@ target and what would close it are in
 Locally, `sh scripts/check.sh` runs the full lane, and
 `LANGSPAN_CHECK_LANE=fast sh scripts/check.sh` the fast one. The runners
 come from the repository variables `LINUX_RUNNER` and `MACOS_RUNNER`;
-unset, each job uses GitHub's standard runner.
+unset, each job uses GitHub's standard runner. The Linux benchmark dry
+runs use the [self-hosted runner](#self-hosted-runner) instead.
 
 When a dry run is skipped, the test log shows
 `skipped: no benchmark or briefing change`. A local `sh scripts/check.sh`
@@ -448,6 +449,44 @@ production function and closure signatures that return
 the check prints the new number; lower the row by hand in the same pull
 request. Return a typed error instead, as `client::ClientError` and
 `git::GitError` do (issue #368).
+
+### Self-hosted runner
+
+The owner runs one Linux machine (8 cores, 16 GB) as a self-hosted runner
+with the labels `self-hosted` and `langspan-trusted`. One slow Linux job
+uses it: the Linux benchmark dry runs (`bench.yml`). Everything in
+`check.yml`, coverage, macOS, releases, fuzzing, Scorecard and the agentic
+workflows stay on GitHub's runners. A runner process takes one job at a
+time, so the four Linux test shards would wait for each other there; on
+GitHub's runners they run side by side. Coverage stays there until a timing
+test it runs passes on the machine: in `tests/report.rs` an admission waits
+about 1.8 s while a report reads (issue #581).
+
+The runner is used only for a trusted event: any event except
+`pull_request`, or a pull request whose branch is in this repository
+(`github.event.pull_request.head.repo.full_name == github.repository`).
+The job picks its runner with one expression, and a pull request from a
+fork gets `ubuntu-24.04`. A fork's pull request runs code from anyone on
+GitHub, and a self-hosted runner keeps its disk, home directory and tool
+installs from one job to the next. Code from a fork could leave something
+behind that a later run on `main` executes, or read what other jobs left on
+the machine. A GitHub runner is a fresh virtual machine for every job, so a
+fork's code can't reach anything after its own job. `tests/ci_workflows.rs`
+checks that only this job names the runner, with that expression, and that
+coverage and the `check.yml` shards don't.
+
+Because the machine keeps its state, the job doesn't assume a fresh one.
+It installs nothing with `sudo` or system-wide. The toolchain comes
+from the runner user's `rustup` (`rustup toolchain install` reads
+`rust-toolchain.toml`). CI tools are downloaded and checked again on every
+run into `~/.cache/langspan-ci-tools`. `actions/checkout` removes untracked
+files, `target/` included, before each job. The dry runs restore
+`check.yml`'s Linux entry with the same key as on GitHub's runners and save
+no cache, so a trusted pull request's run on the machine can't write an
+entry that `main` restores. The runner needs
+`rustup`, `python3`, `curl` and `sha256sum` for its user. It also needs a
+glibc at least as new as Ubuntu 24.04's, because the dry runs restore
+build scripts and dependencies compiled on `ubuntu-24.04`.
 
 ### Repository settings
 

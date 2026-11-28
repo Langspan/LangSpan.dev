@@ -1094,6 +1094,21 @@ reports, bounded at 64 MiB each by the scripts that parse them, and fail
 unless the build and every shard passed. A cancelled or timed-out part
 fails them; it doesn't leave them skipped.
 
+The Linux benchmark dry runs run on the owner's self-hosted runner, which
+keeps its disk between jobs
+([self-hosted runner](../development-process.md#self-hosted-runner)); no
+`check.yml` job does, so no required check runs there. The threat is a
+fork's code leaving something on the machine that a later run on `main`
+executes. The job picks the runner only for an event other than
+`pull_request`, or for a pull request whose branch is in this repository.
+A fork's pull request gets `ubuntu-24.04`, and `tests/ci_workflows.rs`
+holds that rule. The residual risk is that someone who can push a branch to
+this repository can leave state on the machine, and that state could change
+the result of a later run there. They can already open a pull request whose
+code CI runs. The job saves no build cache and publishes no release, so
+the most such state can change is the result of a check that isn't
+required.
+
 The fuzz workflow (`fuzz.yml`) restores and saves no cache, and runs only
 nightly on `main` or when started by hand, never for a pull request. Its fuzz
 job has only `contents: read` and keeps no credentials; a crashing input
