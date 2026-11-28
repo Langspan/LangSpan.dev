@@ -28,9 +28,9 @@ on:
         description: The run id the dry run reports on (default this run)
         type: string
         default: ""
-  # Every night on main (schedules run on the default branch), with the
-  # benchmark harness's dry runs whatever changed. A failure opens or
-  # updates one issue (job nightly-report).
+  # Every night on main (schedules run on the default branch). A failure
+  # opens or updates one issue (job nightly-report). The benchmark
+  # harness's dry runs run in bench.yml, never in this workflow.
   schedule:
     - cron: "23 3 * * *"
 # No token permission unless a job asks for it; each job reads only, except
@@ -131,7 +131,6 @@ jobs:
       contents: read
     outputs:
       code: ${{ steps.changes.outputs.code }}
-      dry_runs: ${{ steps.changes.outputs.dry_runs }}
     steps:
       # Two commits deep: a pull request's run checks out the merge commit,
       # whose first parent is the base, so the change is HEAD^1..HEAD with
@@ -142,8 +141,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: ${{ github.event_name != 'merge_group' && 2 || 0 }}
-      # Whether the change is code at all, and whether the benchmark dry
-      # runs are needed: the script says why.
+      # Whether the change is code at all: the script says why.
       - name: Decide what the change touches
         id: changes
         env:
@@ -219,8 +217,9 @@ jobs:
       - name: Check formatting, dependencies, lint, real integration tests and the demonstration
         if: steps.changes.outputs.code == 'true'
         env:
-          # `skip` or `run`; tests/benchmark_harness.rs skips on `skip` only.
-          LANGSPAN_BENCH_DRY_RUNS: ${{ steps.changes.outputs.dry_runs }}
+          # The benchmark dry runs (92 to 132 s each on macOS) run in
+          # bench.yml, never here, so they are off the merge queue's path.
+          LANGSPAN_BENCH_DRY_RUNS: skip
           LANGSPAN_TEST_ARCHIVE: ${{ runner.temp }}/tests.tar.zst
         run: sh scripts/check.sh
       # The fast lane ran its tests here; the full lane's run in the shards.
@@ -338,7 +337,7 @@ jobs:
           LANGSPAN_CHECK_LANE: shard
           LANGSPAN_TEST_ARCHIVE: ${{ runner.temp }}/tests.tar.zst
           LANGSPAN_TEST_PARTITION: time:${{ matrix.shard }}/${{ strategy.job-total }}
-          LANGSPAN_BENCH_DRY_RUNS: ${{ needs.linux.outputs.dry_runs }}
+          LANGSPAN_BENCH_DRY_RUNS: skip
         run: sh scripts/check.sh
       # No test took over 10 s unless it is named `slow_…` (issue #311,
       # docs/development-process.md#slow-tests). It reports without failing
@@ -412,7 +411,6 @@ jobs:
       contents: read
     outputs:
       code: ${{ steps.changes.outputs.code }}
-      dry_runs: ${{ steps.changes.outputs.dry_runs }}
     steps:
       - name: Pass a pull request at once
         if: github.event_name == 'pull_request'
@@ -476,7 +474,7 @@ jobs:
       - name: Check formatting, dependencies, lint, real integration tests and the demonstration
         if: steps.changes.outputs.code == 'true'
         env:
-          LANGSPAN_BENCH_DRY_RUNS: ${{ steps.changes.outputs.dry_runs }}
+          LANGSPAN_BENCH_DRY_RUNS: skip
           LANGSPAN_TEST_ARCHIVE: ${{ runner.temp }}/tests.tar.zst
           LANGSPAN_CHECK_PORTABLE: "false"
         run: sh scripts/check.sh
@@ -557,7 +555,7 @@ jobs:
           LANGSPAN_CHECK_LANE: shard
           LANGSPAN_TEST_ARCHIVE: ${{ runner.temp }}/tests.tar.zst
           LANGSPAN_TEST_PARTITION: time:${{ matrix.shard }}/${{ strategy.job-total }}
-          LANGSPAN_BENCH_DRY_RUNS: ${{ needs.macos.outputs.dry_runs }}
+          LANGSPAN_BENCH_DRY_RUNS: skip
         run: sh scripts/check.sh
       - name: Name the tests that passed only on retry
         if: always()
@@ -657,7 +655,7 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           SHA: ${{ github.sha }}
         run: |
-          body=$(printf 'The nightly Rust checks failed on main at %s.\n\nRun: %s\n\nThe nightly run includes the benchmark harness dry runs, which pull requests skip when they touch no benchmark, briefing, hook or daemon code, and checks the unchanged lockfile against the latest RustSec advisories with cargo-deny and cargo-audit; the job log names any new advisory. Fix the failure the same day (docs/development-process.md).' "$SHA" "$RUN_URL")
+          body=$(printf 'The nightly Rust checks failed on main at %s.\n\nRun: %s\n\nThe nightly run checks the unchanged lockfile against the latest RustSec advisories with cargo-deny and cargo-audit; the job log names any new advisory. Fix the failure the same day (docs/development-process.md).' "$SHA" "$RUN_URL")
           number=$(gh issue list --state open --search "\"$TITLE\" in:title" --json number,title \
             --jq 'map(select(.title == env.TITLE)) | .[0].number // empty')
           if [ -n "$number" ]; then
