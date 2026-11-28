@@ -936,6 +936,42 @@ mod tests {
         assert_eq!(passed(&repo, "git push origin feat"), NOT_DEFAULT);
     }
 
+    /// Issue #610: `git log --format="$(git push origin main)"` ran the push
+    /// before the hook read it, and advanced the remote's `main`. Each form
+    /// goes through the real hook, which runs Git for its opt-out and must
+    /// refuse before any dry run, so the bare remote's `main` is checked.
+    #[test]
+    fn a_push_hidden_in_a_substitution_eval_or_sh_c_is_refused() {
+        let repo = repo("hidden");
+        main_ahead(&repo);
+        let remote_main = || {
+            let out = Command::new("git")
+                .args(["rev-parse", "main"])
+                .current_dir(repo.base.join("origin.git"))
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .output()
+                .unwrap();
+            String::from_utf8(out.stdout).unwrap()
+        };
+        let before = remote_main();
+        for command in [
+            "git log -1 --format=\"$(git push origin main)\"",
+            "git log -1 --format=`git push origin main`",
+            "git diff <(git push origin main)",
+            "git log -1 --format=\"$(eval 'git push origin main')\"",
+            "git log -1 --format=\"$(sh -c 'git push origin main')\"",
+            "git log -1 --format=\"$(bash -c 'git push origin main')\"",
+            "git log -1 --format=\"$(zsh -c 'git push origin main')\"",
+            "eval 'git push origin main'",
+            "sh -c 'git push origin main'",
+        ] {
+            let reason = refused(&repo, command);
+            assert!(reason.contains("command of its own"), "{command}: {reason}");
+            assert_eq!(remote_main(), before, "{command} pushed");
+        }
+    }
+
     /// Review of PR #576: `remote.origin.mirror` makes a plain `git push`
     /// update every ref, the default branch with them.
     #[test]

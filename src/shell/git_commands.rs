@@ -403,8 +403,14 @@ fn commit(words: &[Word], cwd: Option<PathBuf>) -> Result<Option<GitStep>, &'sta
 pub(super) struct Lexer {
     chars: Vec<char>,
     at: usize,
-    /// Heredoc delimiters whose bodies start after the current line.
-    pending: Vec<(String, bool)>,
+    /// Heredoc delimiters whose bodies start after the current line: the
+    /// delimiter, `<<-`, and whether it is quoted (the body not expanded).
+    pending: Vec<(String, bool, bool)>,
+    /// How many substitutions the lexer is inside.
+    depth: usize,
+    /// The text of each outermost substitution, unquoted heredoc bodies'
+    /// included: commands the shell runs first.
+    substituted: Vec<String>,
 }
 
 impl Lexer {
@@ -413,15 +419,68 @@ impl Lexer {
             chars: command.chars().collect(),
             at: 0,
             pending: Vec::new(),
+            depth: 0,
+            substituted: Vec::new(),
         }
+    }
+
+    /// The simple commands of the line, as words.
+    pub(super) fn segments(self) -> Result<Vec<Vec<Word>>, &'static str> {
+        self.read().map(|(segments, _)| segments)
+    }
+
+    /// Read the rest of a substitution with `skip`, keeping its text when it
+    /// is outermost.
+    fn substitute(
+        &mut self,
+        skip: fn(&mut Self) -> Result<(), &'static str>,
+    ) -> Result<(), &'static str> {
+        let start = self.at;
+        self.depth += 1;
+        let skipped = skip(self);
+        self.depth -= 1;
+        skipped?;
+        if self.depth == 0 {
+            // Without the closing `)` or backquote.
+            let end = self.at.saturating_sub(1).max(start);
+            let text = self.chars.get(start..end).unwrap_or_default();
+            self.substituted.push(text.iter().collect());
+        }
+        Ok(())
+    }
+
+    /// Read the rest of a backquote substitution, keeping its text as Bash
+    /// runs it: without the backslash before `$`, a backquote or a
+    /// backslash, or before `"` when `quoted` (inside double quotes).
+    fn backquote(&mut self, quoted: bool) -> Result<(), &'static str> {
+        let kept = self.substituted.len();
+        self.substitute(Self::backquoted)?;
+        if let Some(text) = self.substituted.get_mut(kept) {
+            let mut decoded = String::with_capacity(text.len());
+            let mut chars = text.chars().peekable();
+            while let Some(c) = chars.next() {
+                if c == '\\'
+                    && let Some(&next) = chars.peek()
+                    && (matches!(next, '$' | '`' | '\\') || (quoted && next == '"'))
+                {
+                    decoded.push(next);
+                    chars.next();
+                } else {
+                    decoded.push(c);
+                }
+            }
+            *text = decoded;
+        }
+        Ok(())
     }
 
     fn peek(&self, offset: usize) -> Option<char> {
         self.chars.get(self.at + offset).copied()
     }
 
-    /// The simple commands of the line, as words.
-    pub(super) fn segments(mut self) -> Result<Vec<Vec<Word>>, &'static str> {
+    /// The simple commands of the line, as words, and the text of each
+    /// substitution the shell runs before them.
+    pub(super) fn read(mut self) -> Result<(Vec<Vec<Word>>, Vec<String>), &'static str> {
         let mut segments = vec![Vec::new()];
         let mut word: Option<Word> = None;
         let end_word = |segments: &mut Vec<Vec<Word>>, word: &mut Option<Word>| {
@@ -441,7 +500,7 @@ impl Lexer {
                     self.at += 1;
                     end_word(&mut segments, &mut word);
                     if c == '\n' {
-                        self.skip_heredoc_bodies();
+                        self.skip_heredoc_bodies()?;
                     }
                     if segments.last().is_some_and(|last| !last.is_empty()) {
                         segments.push(Vec::new());
@@ -459,6 +518,8 @@ impl Lexer {
                     self.at += 2;
                     self.heredoc_delimiter()?;
                 }
+                // A process substitution: part of a word.
+                '<' | '>' if self.peek(1) == Some('(') => self.word_part(&mut word)?,
                 '<' | '>' => {
                     // A redirection: its descriptor and its target are not
                     // words of the command.
@@ -491,7 +552,7 @@ impl Lexer {
         }
         end_word(&mut segments, &mut word);
         segments.retain(|segment| !segment.is_empty());
-        Ok(segments)
+        Ok((segments, self.substituted))
     }
 
     /// Read one piece of a word (a character, a quoted string, an escape or
@@ -530,11 +591,16 @@ impl Lexer {
             },
             '$' => {
                 word.expanded = true;
-                self.dollar()?;
+                self.dollar(false)?;
             }
             '`' => {
                 word.expanded = true;
-                self.backquoted()?;
+                self.backquote(false)?;
+            }
+            '<' | '>' if self.peek(0) == Some('(') => {
+                word.expanded = true;
+                self.at += 1;
+                self.substitute(Self::substitution)?;
             }
             '*' | '?' | '[' | '~' | '{' => {
                 word.expanded = true;
@@ -566,32 +632,28 @@ impl Lexer {
                 }
                 '$' => {
                     word.expanded = true;
-                    self.dollar()?;
+                    self.dollar(true)?;
                 }
                 '`' => {
                     word.expanded = true;
-                    self.backquoted()?;
+                    self.backquote(true)?;
                 }
                 c => word.text.push(c),
             }
         }
     }
 
-    /// After a `$`: a substitution, a parameter or a lone dollar sign.
-    fn dollar(&mut self) -> Result<(), &'static str> {
+    /// After a `$`: a substitution, a parameter or a lone dollar sign;
+    /// `quoted` inside double quotes.
+    fn dollar(&mut self, quoted: bool) -> Result<(), &'static str> {
         match self.peek(0) {
             Some('(') => {
                 self.at += 1;
-                self.substitution()
+                self.substitute(Self::substitution)
             }
             Some('{') => {
-                while let Some(c) = self.peek(0) {
-                    self.at += 1;
-                    if c == '}' {
-                        return Ok(());
-                    }
-                }
-                Err("an unterminated parameter expansion")
+                self.at += 1;
+                self.parameter(quoted)
             }
             Some('\'') => {
                 // `$'…'`: skip to the closing quote, honouring escapes.
@@ -616,6 +678,73 @@ impl Lexer {
                 Ok(())
             }
         }
+    }
+
+    /// After `${`: to the closing brace, keeping the substitutions in it
+    /// (`${x:-$(cmd)}` runs `cmd`). Outside double quotes (`quoted` false),
+    /// single quotes in it make their text literal, and `$'…'` honours its
+    /// escapes, as Bash reads them.
+    fn parameter(&mut self, quoted: bool) -> Result<(), &'static str> {
+        let mut depth = 1_usize;
+        let mut double = false;
+        while let Some(c) = self.peek(0) {
+            self.at += 1;
+            match c {
+                '\\' => self.at += 1,
+                '$' if !quoted && !double && self.peek(0) == Some('\'') => self.dollar(false)?,
+                '\'' if !quoted && !double => {
+                    while self.peek(0).is_some_and(|c| c != '\'') {
+                        self.at += 1;
+                    }
+                    if self.peek(0).is_none() {
+                        return Err("an unterminated quote");
+                    }
+                    self.at += 1;
+                }
+                '"' => double = !double,
+                '$' if self.peek(0) == Some('{') => {
+                    self.at += 1;
+                    depth += 1;
+                }
+                '$' if self.peek(0) == Some('(') => {
+                    self.at += 1;
+                    self.substitute(Self::substitution)?;
+                }
+                '`' => self.backquote(quoted || double)?,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Ok(());
+                    }
+                }
+                _ => {}
+            }
+        }
+        Err("an unterminated parameter expansion")
+    }
+
+    /// The substitutions in an unquoted heredoc's body, read as Bash expands
+    /// it: quotes and `#` are text there, and a backslash escapes only `$`,
+    /// a backquote, a backslash and a newline.
+    fn heredoc_substitutions(body: &str) -> Result<Vec<String>, &'static str> {
+        let mut lexer = Self::new(body);
+        while let Some(c) = lexer.peek(0) {
+            lexer.at += 1;
+            match c {
+                '\\' if matches!(lexer.peek(0), Some('$' | '`' | '\\' | '\n')) => lexer.at += 1,
+                '$' if lexer.peek(0) == Some('(') => {
+                    lexer.at += 1;
+                    lexer.substitute(Self::substitution)?;
+                }
+                '$' if lexer.peek(0) == Some('{') => {
+                    lexer.at += 1;
+                    lexer.parameter(true)?;
+                }
+                '`' => lexer.backquote(false)?,
+                _ => {}
+            }
+        }
+        Ok(lexer.substituted)
     }
 
     fn backquoted(&mut self) -> Result<(), &'static str> {
@@ -673,7 +802,7 @@ impl Lexer {
                         self.at += 1;
                     }
                 }
-                '\n' => self.skip_heredoc_bodies(),
+                '\n' => self.skip_heredoc_bodies()?,
                 _ => {}
             }
             word_start = matches!(c, ' ' | '\t' | '\n' | ';' | '&' | '|' | '(');
@@ -691,9 +820,11 @@ impl Lexer {
             self.at += 1;
         }
         let mut delimiter = String::new();
+        let mut quoted = false;
         while let Some(c) = self.peek(0) {
             match c {
                 '\'' | '"' => {
+                    quoted = true;
                     self.at += 1;
                     while let Some(inner) = self.peek(0) {
                         self.at += 1;
@@ -704,6 +835,7 @@ impl Lexer {
                     }
                 }
                 '\\' => {
+                    quoted = true;
                     self.at += 1;
                 }
                 c if c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')' | '<' | '>') => {
@@ -718,14 +850,15 @@ impl Lexer {
         if delimiter.is_empty() {
             return Err("a heredoc without a delimiter");
         }
-        self.pending.push((delimiter, strip_tabs));
+        self.pending.push((delimiter, strip_tabs, quoted));
         Ok(())
     }
 
     /// At the start of a line: skip the bodies of the heredocs begun on the
-    /// line before.
-    fn skip_heredoc_bodies(&mut self) {
-        for (delimiter, strip_tabs) in std::mem::take(&mut self.pending) {
+    /// line before, keeping the substitutions of an unquoted one.
+    fn skip_heredoc_bodies(&mut self) -> Result<(), &'static str> {
+        for (delimiter, strip_tabs, quoted) in std::mem::take(&mut self.pending) {
+            let mut body = String::new();
             loop {
                 let start = self.at;
                 while self.peek(0).is_some_and(|c| c != '\n') {
@@ -739,11 +872,21 @@ impl Lexer {
                 } else {
                     line.as_str()
                 };
-                if line == delimiter || at_end {
+                if line == delimiter {
+                    break;
+                }
+                body.push_str(line);
+                body.push('\n');
+                if at_end {
                     break;
                 }
             }
+            // Inside a substitution, the outermost one's text holds the body.
+            if !quoted && self.depth == 0 {
+                self.substituted.extend(Self::heredoc_substitutions(&body)?);
+            }
         }
+        Ok(())
     }
 }
 
@@ -839,6 +982,30 @@ mod tests {
         assert_eq!(steps(command), [commit(true, &[])]);
         let unquoted = "git commit -F - <<EOF\nmessage; git add -A\nEOF\ngit status";
         assert_eq!(steps(unquoted), [commit(false, &[])]);
+    }
+
+    /// Review of PR #613: a single-quoted parameter default is literal, so
+    /// an unpaired backquote in it does not hide the commit.
+    #[test]
+    fn a_single_quoted_parameter_default_is_literal() {
+        for command in [
+            "git commit -m ${msg:-'fix: `example'}",
+            "git commit -m ${msg:-'a } and $(x'}",
+        ] {
+            assert_eq!(steps(command), [commit(false, &[])], "{command}");
+        }
+    }
+
+    /// Review of PR #613: an ANSI-C quote in a parameter default honours its
+    /// escapes, so `\'` does not end it.
+    #[test]
+    fn an_ansi_c_quoted_parameter_default_honours_escapes() {
+        for command in [
+            r"git commit -m ${msg:-$'it\'s fine'}",
+            r"git commit -m ${msg:-$'a \' } and $(x'}",
+        ] {
+            assert_eq!(steps(command), [commit(false, &[])], "{command}");
+        }
     }
 
     #[test]
