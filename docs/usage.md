@@ -111,4 +111,6 @@ to those pages and keep the anchors this guide had as a single page.
 
 ## [Configuration and limits](usage/configuration-and-limits.md)
 
+### [Commands that need the owner's own action](usage/configuration-and-limits.md#commands-that-need-the-owners-own-action)
+
 ### [Retention](usage/configuration-and-limits.md#retention)

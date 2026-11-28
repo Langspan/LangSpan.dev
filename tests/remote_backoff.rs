@@ -105,7 +105,8 @@ impl World {
         fs::create_dir(&state).unwrap();
         fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
         let config = state.join("config.json");
-        fs::write(&config, r#"{"remote_pass_ms":200}"#).unwrap();
+        // Turning publication on is an owner grant; the owner allows it.
+        fs::write(&config, r#"{"remote_pass_ms":200,"owner_grants":true}"#).unwrap();
         fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
         let mut world = Self { base, daemon: None };
         world.daemon = Some(

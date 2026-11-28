@@ -4,6 +4,8 @@
 //! write's result, through the host's context. Real daemon, real observer
 //! and indexer, a real Git repository and the real hook executable.
 
+mod support;
+
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -1120,6 +1122,7 @@ fn a_removed_name_is_not_told_while_the_index_cannot_read_every_file() {
 #[test]
 fn a_break_alert_admits_the_write_with_the_wait_policy_on() {
     let w = World::new(true);
+    support::owner_grants(&w.base.join("state"), true);
     let (code, text) = w.cli(&[
         "policy",
         "set",
