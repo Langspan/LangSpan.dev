@@ -198,6 +198,11 @@ const COMMANDS: &[Flags] = &[
         ..Flags::NONE
     },
     Flags {
+        form: |_, before| before == ["tokens"],
+        values: &["--onto", "--days", "--root"],
+        ..Flags::NONE
+    },
+    Flags {
         form: |_, before| matches!(before, ["notify", _]),
         values: &["--sound"],
         ..Flags::NONE

@@ -75,6 +75,8 @@ to those pages and keep the anchors this guide had as a single page.
 
 ## [Refusals this month](usage/refusals-this-month.md)
 
+## [Tokens per merged change](usage/tokens-per-merged-change.md)
+
 ## [The coordination report](usage/the-coordination-report.md)
 
 ### [What a session did after a refusal](usage/the-coordination-report.md#what-a-session-did-after-a-refusal)

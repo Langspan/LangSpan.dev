@@ -86,6 +86,7 @@ pub(crate) const COMMANDS: &[&str] = &[
     "today",
     "report w",
     "count",
+    "tokens --onto main",
     "policy w",
     "policy set w conflict refuse --request-id r1",
     "remember w text --request-id r1",

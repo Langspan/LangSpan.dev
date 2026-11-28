@@ -98,6 +98,45 @@ pub(crate) fn refusal_count(
     Ok(0)
 }
 
+/// `tokens --onto BRANCH [--days N] [--root DIR]`: Claude Code tokens per
+/// merged change by local day, from the transcripts in the Claude Code
+/// folder (`CLAUDE_CONFIG_DIR`, else `~/.claude`) and the branch's history
+/// (#493). Reads only; no daemon.
+pub(crate) fn tokens(
+    options: &mut BTreeMap<String, String>,
+    json: bool,
+) -> Result<u8, langspan::Error> {
+    use langspan::tokens;
+    let onto = options
+        .remove("--onto")
+        .ok_or("`tokens` needs --onto BRANCH, the branch changes merge onto")?;
+    let days = number(options, "--days", tokens::DEFAULT_DAYS as u64)?;
+    if !(1..=tokens::MAX_DAYS as u64).contains(&days) {
+        return Err(format!("--days must be 1 to {}", tokens::MAX_DAYS).into());
+    }
+    let root = match options.remove("--root") {
+        Some(root) => PathBuf::from(root),
+        None => std::env::current_dir()?,
+    };
+    no_unused_options(options)?;
+    let claude = langspan::install::detect::UserHome::new(None)?
+        .files(langspan::install::Vendor::ClaudeCode)
+        .config_dir;
+    let trend = tokens::measure(
+        &claude,
+        &root,
+        &onto,
+        days as i64,
+        langspan::store::wall_now_ms(),
+    )?;
+    if json {
+        println!("{}", serde_json::to_string(&trend)?);
+    } else {
+        println!("{}", trend.text());
+    }
+    Ok(0)
+}
+
 /// `notify on|off|status [--sound on|off]`: desktop notices (H3). Writes
 /// only `notify` and `notify_sound` in `config.json`; the daemon reads them
 /// at each notice.
