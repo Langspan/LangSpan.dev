@@ -206,7 +206,8 @@ def run_claude(plan, state_dir, checkout, run_dir, time_limit):
     processes = []
     for index, (key, value, why) in enumerate(SETTINGS_ADDED, 1):
         prompt = TASK.format(index=index, key=key, value=value, why=why)
-        argv = driver.claude_argv(executable, prompt, "langspan", model=plan.get("model"))
+        argv = driver.claude_argv(executable, prompt, "langspan", model=plan.get("model"),
+                                  skill=driver.skill_text(checkout))
         transcript = open(run_dir / ("s%d.jsonl" % index), "wb")
         processes.append((index, transcript, subprocess.Popen(argv, cwd=checkout, env=env, stdout=transcript,
                                                               stderr=subprocess.STDOUT,

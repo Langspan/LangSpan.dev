@@ -102,10 +102,12 @@ LANGSPAN_TOOLS = (
 )
 # A shared-checkout session lands its work by pushing.
 PUSH_TOOLS = ("Bash(git push:*)", "Bash(git pull:*)", "Bash(git fetch:*)", "Bash(git merge:*)")
-# The only built-in tools a session has (`--tools`). Claude Code's
-# cross-session tools, web access and tool search are not among them, so no
-# arm reaches another session or an outside service through the host. The
-# LangSpan arm adds Skill, which loads LangSpan's skill.
+# The only built-in tools a session has (`--tools`), the same in every arm.
+# Claude Code's cross-session tools, web access and tool search are not among
+# them, so no arm reaches another session or an outside service through the
+# host. Skill is not among them either: it lists every skill the host has,
+# about 7,000 tokens re-read on each turn of the run of 28 Nov (#624), so the
+# LangSpan arm gets LangSpan's skill as appended system prompt text instead.
 SESSION_TOOLS = ("Bash", "Edit", "Glob", "Grep", "Read", "Write")
 # Denied by name as well, in case a host version offers them anyway.
 DENIED_TOOLS = (
@@ -127,6 +129,8 @@ PEER_GIT_RULES = tuple(
                                                        "-C ", "--git-dir", "--work-tree"))
 # No MCP server or hosted connector reaches a session.
 MCP_CONFIG = '{"mcpServers": {}}'
+# Where `install_skill` puts LangSpan's skill, under a home and each checkout.
+SKILL_PATH = Path(".claude", "skills", "langspan", "SKILL.md")
 # Claude Code keeps auto memory in one directory per repository, so the
 # worktrees of the LangSpan arm would share one: a channel between sessions
 # that the other arms lack. Every session turns it off, with the setting and
@@ -335,8 +339,20 @@ def make_plan(arm, family, sessions, seed, agent="standin", standin_mode=None, t
 
 def session_tools(arm):
     """The built-in tools a session of ARM has, and the only tools its
-    first event may list."""
-    return SESSION_TOOLS + (("Skill",) if arm == "langspan" else ())
+    first event may list: the same in every arm."""
+    return SESSION_TOOLS
+
+
+def skill_text(checkout):
+    """LangSpan's skill as `install_skill` wrote it into CHECKOUT, for a
+    LangSpan-arm session's `--append-system-prompt`."""
+    return (Path(checkout) / SKILL_PATH).read_text(encoding="utf-8")
+
+
+def skill_placeholder(arm):
+    """What stands for the skill text in a command line built before the
+    skill is installed (the plan's `agent_commands`, the preflight)."""
+    return "<%s>" % SKILL_PATH if arm == "langspan" else None
 
 
 def peer_paths(work, sessions, index):
@@ -373,21 +389,27 @@ def land_tools(plan):
             "Bash(langspan land:*)")
 
 
-def claude_argv(executable, prompt, arm, model=None, denied_paths=(), push=False, land=()):
+def claude_argv(executable, prompt, arm, model=None, denied_paths=(), push=False, land=(), skill=None):
     """The exact Claude Code command line for one session. Permission
     prompts stay on (`--permission-mode default`), and nobody answers them
     (`--permission-prompts none`), so a call outside the allowed list is
     refused. stream-json keeps the whole transcript; with -p it needs
     --verbose. The tool and MCP options are the same in every arm but for
-    LangSpan's own skill and commands. DENIED_PATHS are denied to every
-    file tool (Claude Code's `//` marks an absolute path). A session that
-    lands by pushing (PUSH, or the shared arm) may push, pull, fetch and merge,
-    and run LAND, the rules of land_tools."""
+    LangSpan's own commands. SKILL, LangSpan's skill text, is appended to
+    the system prompt (`skill_text`); a LangSpan-arm command without it is
+    refused, since its session would lack the skill. DENIED_PATHS are denied to every file tool (Claude Code's `//`
+    marks an absolute path). A session that lands by pushing (PUSH, or the
+    shared arm) may push, pull, fetch and merge, and run LAND, the rules of
+    land_tools."""
     argv = [executable, "-p", prompt, "--permission-mode", "default", "--permission-prompts", "none",
             "--output-format", "stream-json", "--verbose", "--tools", ",".join(session_tools(arm)),
             "--strict-mcp-config", "--mcp-config", MCP_CONFIG, "--settings", MEMORY_SETTINGS]
     if model:
         argv += ["--model", model]
+    if arm == "langspan" and not skill:
+        raise ValueError("a LangSpan-arm session needs LangSpan's skill text (driver.skill_text)")
+    if skill:
+        argv += ["--append-system-prompt", skill]
     paths = [rule % ("/" + str(path).lstrip("/")) for path in denied_paths for rule in ("Read(/%s/**)", "Edit(/%s/**)")]
     argv += ["--disallowedTools", *DENIED_TOOLS, *PEER_GIT_RULES, *paths]
     tools = CLAUDE_TOOLS + (LANGSPAN_TOOLS if arm == "langspan" else ()) + (PUSH_TOOLS if push or arm in SHARED_ARMS else ()) \
@@ -651,13 +673,12 @@ def install_skill(langspan, state_dir, clones, work):
            if key not in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "GEMINI_CLI_HOME")}
     langspan_cli(langspan, state_dir, "install", "--home", str(home), "--hosts", "claude-code",
                  "--skill", "--apply", env=env)
-    skill = home / ".claude" / "skills" / "langspan" / "SKILL.md"
+    skill = home / SKILL_PATH
     if not skill.is_file():
         raise RuntimeError("langspan install --skill wrote no skill at " + str(skill))
     for path in clones:
-        target = path / ".claude" / "skills" / "langspan"
-        target.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(skill, target / "SKILL.md")
+        (path / SKILL_PATH).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(skill, path / SKILL_PATH)
 
 
 class StatusReader:
@@ -802,9 +823,10 @@ def session_main(plan_path, index):
         argv = [sys.executable, "-I", "-B", str(HERE / "standin_agent.py"), str(plan_path), str(index),
                 plan["standin_mode"]]
     else:
+        skill = skill_text(checkout_of(plan["arm"], plan["work"], index)) if plan["arm"] == "langspan" else None
         argv = claude_argv(os.environ.get(CLAUDE_BIN_ENV, "claude"), plan["prompts"][index - 1], plan["arm"],
                            plan.get("model"), peer_paths(plan["work"], plan["sessions"], index),
-                           push=lands_by_pushing(plan), land=land_tools(plan))
+                           push=lands_by_pushing(plan), land=land_tools(plan), skill=skill)
         argv[0] = shutil.which(argv[0], path=env["PATH"]) or argv[0]
     return guard_session(argv, env, session_tools(plan["arm"]), sys.stdout.buffer)
 
@@ -2210,7 +2232,8 @@ def preflight(args, plan):
         work = Path(plan["work"])
         refuse_shared_memory(plan, [
             claude_argv(os.environ.get(CLAUDE_BIN_ENV, "claude"), "", plan["arm"], plan["model"],
-                        peer_paths(work, plan["sessions"], index)) for index in range(1, plan["sessions"] + 1)],
+                        peer_paths(work, plan["sessions"], index), skill=skill_placeholder(plan["arm"]))
+            for index in range(1, plan["sessions"] + 1)],
             [session_env(plan, os.environ, config_dir)] * plan["sessions"])
     if plan["arm"] != "langspan":
         return None
@@ -2254,11 +2277,12 @@ def run(args):
         state = Path(tempfile.mkdtemp(prefix="lsb-", dir="/tmp"))
         plan["state_dir"] = str(state)
     if args.agent == "claude":
-        # The exact command each session runs, with its prompt from `prompts`.
+        # The exact command each session runs, with its prompt from `prompts`
+        # and, in the LangSpan arm, the skill its checkout holds.
         plan["agent_commands"] = [
             claude_argv(os.environ.get(CLAUDE_BIN_ENV, "claude"), "<prompts[%d]>" % (index - 1), plan["arm"],
                         plan["model"], peer_paths(work, plan["sessions"], index), push=lands_by_pushing(plan),
-                        land=land_tools(plan))
+                        land=land_tools(plan), skill=skill_placeholder(plan["arm"]))
             for index in range(1, plan["sessions"] + 1)]
     coordinator_state = None
     try:

@@ -162,7 +162,8 @@ class DriverUnitTests(Temporary):
 
     def test_claude_command_streams_its_transcript_keeps_prompts_and_limits_tools(self):
         for arm in driver.ARMS:
-            argv = driver.claude_argv("claude", "do the task", arm)
+            skill = "the skill" if arm == "langspan" else None
+            argv = driver.claude_argv("claude", "do the task", arm, skill=skill)
             self.assertEqual(argv[:3], ["claude", "-p", "do the task"])
             self.assertEqual(argv[argv.index("--permission-mode") + 1], "default")
             # Nothing approves a permission prompt: anything that would ask is refused.
@@ -178,7 +179,14 @@ class DriverUnitTests(Temporary):
             self.assertEqual(any(t.startswith("Bash(langspan") for t in allowed), arm == "langspan")
             # The built-in tools are exactly the arm's set: no cross-session tool.
             self.assertEqual(self.option(argv, "--tools"), [",".join(driver.session_tools(arm))])
-            self.assertEqual("Skill" in driver.session_tools(arm), arm == "langspan")
+            # Skill would list every skill the host has (#624): no arm gets
+            # it, and the LangSpan arm's skill is appended to the system prompt.
+            self.assertNotIn("Skill", driver.session_tools(arm))
+            self.assertEqual("--append-system-prompt" in argv, arm == "langspan")
+            if skill:
+                self.assertEqual(self.option(argv, "--append-system-prompt"), [skill])
+        with self.assertRaisesRegex(ValueError, "skill"):
+            driver.claude_argv("claude", "x", "langspan")
             # No MCP server or hosted connector from any configuration.
             self.assertIn("--strict-mcp-config", argv)
             self.assertEqual(json.loads(self.option(argv, "--mcp-config")[0]), {"mcpServers": {}})
@@ -201,7 +209,8 @@ class DriverUnitTests(Temporary):
         paths = driver.peer_paths(work, 3, 2)
         self.assertEqual(sorted(path.name for path in paths),
                          ["integration", "repo", "s1", "s3", "shared", "skill-home"])
-        denied = self.option(driver.claude_argv("claude", "x", "langspan", denied_paths=paths), "--disallowedTools")
+        denied = self.option(driver.claude_argv("claude", "x", "langspan", denied_paths=paths, skill="s"),
+                             "--disallowedTools")
         for rule in ("Read(//runs/k1/work/s1/**)", "Edit(//runs/k1/work/s3/**)", "Read(//runs/k1/work/repo/**)"):
             self.assertIn(rule, denied)
         self.assertFalse([rule for rule in denied if "/work/s2/" in rule], "a session keeps its own checkout")
@@ -599,24 +608,34 @@ class DriverUnitTests(Temporary):
         self.assertEqual(record["versions"]["requested_model"], "model-x")
         self.assertEqual(record["versions"]["models"], [])
 
-    def test_a_langspan_arm_claude_session_uses_its_own_coordinator(self):
+    def test_a_langspan_arm_claude_session_uses_its_own_coordinator_and_skill(self):
         """The session's bare `langspan status` and `langspan brief` must
-        reach the coordinator its hooks use, not a default state."""
+        reach the coordinator its hooks use, not a default state, and its
+        checkout's LangSpan skill is appended to its system prompt (#624).
+        A process test: `driver.py session` builds the command and its
+        environment in the child it starts."""
         bin_dir = self.root / "bin"
         bin_dir.mkdir()
         langspan = bin_dir / "langspan"
         langspan.write_text("#!/bin/sh\nexit 0\n")
         langspan.chmod(0o755)
-        seen = self.root / "seen.txt"
+        seen = self.root / "seen.json"
         claude = self.root / "fake-claude"
-        claude.write_text('#!/bin/sh\nprintf "%%s\\n%%s\\n" "$LANGSPAN_STATE_DIR" "$(command -v langspan)" > %s\n%s'
-                          % (seen, self.init_line(driver.session_tools("langspan"))))
+        claude.write_text(
+            "#!%s -I\nimport json, os, shutil, sys\n"
+            "json.dump({'argv': sys.argv[1:], 'state': os.environ.get('LANGSPAN_STATE_DIR'),"
+            " 'langspan': shutil.which('langspan')}, open(%r, 'w'))\n"
+            "print(json.dumps({'type': 'system', 'subtype': 'init', 'tools': %r, 'mcp_servers': []}))\n"
+            % (sys.executable, str(seen), list(driver.session_tools("langspan"))))
         claude.chmod(0o755)
         config = self.root / "claude-config"
         config.mkdir()
         state = str(self.root / "lsb-1")
         plan = driver.make_plan("langspan", "rename_vs_new_caller", 2, 1, agent="claude")
         plan.update(langspan=str(langspan), state_dir=state, work=str(self.root / "work"))
+        skill = self.root / "work" / "s2" / driver.SKILL_PATH
+        skill.parent.mkdir(parents=True)
+        skill.write_text("# LangSpan skill of session 2\n")
         plan_path = self.root / "plan.json"
         plan_path.write_text(json.dumps(plan))
         env = dict(os.environ, **{driver.CLAUDE_CONFIG_ENV: str(config), driver.CLAUDE_BIN_ENV: str(claude),
@@ -624,7 +643,10 @@ class DriverUnitTests(Temporary):
         done = subprocess.run([sys.executable, "-I", "-B", str(HERE / "driver.py"), "session", str(plan_path), "2"],
                               capture_output=True, text=True, timeout=30, env=env)
         self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertEqual(seen.read_text().splitlines(), [state, str(langspan)])
+        got = json.loads(seen.read_text())
+        self.assertEqual([got["state"], got["langspan"]], [state, str(langspan)])
+        self.assertEqual(self.option(got["argv"], "--append-system-prompt"), ["# LangSpan skill of session 2\n"])
+        self.assertEqual(self.option(got["argv"], "--tools"), [",".join(driver.SESSION_TOOLS)])
         self.assertEqual(driver.tool_check(done.stdout)["status"], "passed", done.stdout)
 
     def test_each_arm_gets_its_checkout_kind_and_sessions_cannot_reach_peers_through_git_remotes(self):
@@ -953,11 +975,11 @@ class DriverUnitTests(Temporary):
         CLI's own setting, and the preflight refuses a trial whose sessions
         would share one."""
         for arm in driver.ARMS:
-            argv = driver.claude_argv("claude", "x", arm)
+            argv = driver.claude_argv("claude", "x", arm, skill=driver.skill_placeholder(arm))
             self.assertEqual(json.loads(self.option(argv, "--settings")[0]), {"autoMemoryEnabled": False})
             self.assertFalse(driver.auto_memory_on(argv, {}))
             self.assertEqual(driver.shared_memory(arm, self.root / "work", [argv] * 3, [{}] * 3), [])
-        on = [a for a in driver.claude_argv("claude", "x", "langspan") if "autoMemoryEnabled" not in a]
+        on = [a for a in driver.claude_argv("claude", "x", "langspan", skill="s") if "autoMemoryEnabled" not in a]
         on.remove("--settings")
         self.assertTrue(driver.auto_memory_on(on, {}))
         self.assertFalse(driver.auto_memory_on(on, {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"}))
@@ -974,7 +996,7 @@ class DriverUnitTests(Temporary):
         plan.update(work=str(self.root / "work"))
         with self.assertRaisesRegex(driver.Refused, "sessions 1, 2 would share one Claude Code auto-memory"):
             driver.refuse_shared_memory(plan, [on] * 2, [{}] * 2)
-        driver.refuse_shared_memory(plan, [driver.claude_argv("claude", "x", "langspan")] * 2, [{}] * 2)
+        driver.refuse_shared_memory(plan, [driver.claude_argv("claude", "x", "langspan", skill="s")] * 2, [{}] * 2)
         config = self.root / "claude-config"
         config.mkdir()
         args = type("Args", (), {"agent": "claude", "langspan": None})()
