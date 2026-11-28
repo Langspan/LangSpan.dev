@@ -122,6 +122,15 @@ apply arm there.
 - The briefing line is rendered in `src/hook/render.rs`; it also shows in
   `langspan brief`'s human output, pinned in the coordination transcript.
 
+## Changed during the third run (after merging main at e245e5f2)
+
+- #533 moved `State` out of `crates/langspan-core/src/lib.rs` into
+  `crates/langspan-core/src/state.rs`. The `reservations` field (three
+  lines) and the `Counter` import move with it, and its `fields State`
+  ratchet goes from 32 to 33, so `state.rs` and its baseline were added to
+  the reservation. The field is serialized, so `SnapshotRecord` there does
+  not change.
+
 ## Shared contracts touched
 
 `Command`, `Event`, `Outcome`, `Briefing`, `State` (one field each, additive),
