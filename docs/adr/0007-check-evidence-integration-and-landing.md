@@ -401,11 +401,17 @@ checkout other than the workspace's (the landing command lands from the
 workspace's root), a push to a URL no configured remote has, and no
 `REMOTE/HEAD` (`git remote set-head REMOTE --auto` records it). Routing is
 cooperative. The reader removes line continuations (`\` before a newline) as
-Bash does. It does not look into a command substitution or an `sh -c`
-string, so a command other than `git …` that names both `git` and `push`
-there or in its words (`bash -c 'git push'`, `xargs git push`) is refused
-with the reason. A push outside the hooks, through a Git alias, or in a
-substitution inside a `git …` command's own words is not refused. The dry run costs one round trip to the remote before every
+Bash does. It does not look into an `sh -c` or `eval` string, so a command
+other than `git …` that names both `git` and `push` in its words
+(`bash -c 'git push'`, `xargs git push`) is refused with the reason. The
+shell runs a substitution (`$(…)`, a backquote, `<(…)`, `>(…)` or an
+unquoted heredoc that expands something) before the command it is in, so
+the reader reads each one's text as a command of its own, anywhere in the
+line, and refuses the whole command when that text could push (issue #610:
+`git log --format="$(git push origin HEAD:main)"`). Deeper than eight
+substitutions it refuses without reading. A push outside the hooks, through
+a Git alias, or in a program a `git …` command runs (`git rebase --exec`)
+is not refused. The dry run costs one round trip to the remote before every
 hooked push, and a remote slower than the hook's budget refuses it. The
 check's name and command are placeholders in the refusal; the agent supplies
 the project's test command.

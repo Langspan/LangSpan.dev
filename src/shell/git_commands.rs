@@ -403,8 +403,14 @@ fn commit(words: &[Word], cwd: Option<PathBuf>) -> Result<Option<GitStep>, &'sta
 pub(super) struct Lexer {
     chars: Vec<char>,
     at: usize,
-    /// Heredoc delimiters whose bodies start after the current line.
-    pending: Vec<(String, bool)>,
+    /// Heredoc delimiters whose bodies start after the current line: the
+    /// delimiter, `<<-`, and whether it is quoted (the body not expanded).
+    pending: Vec<(String, bool, bool)>,
+    /// How many substitutions the lexer is inside.
+    depth: usize,
+    /// The text of each outermost substitution, and of each unquoted
+    /// heredoc that expands something: commands the shell runs first.
+    substituted: Vec<String>,
 }
 
 impl Lexer {
@@ -413,15 +419,43 @@ impl Lexer {
             chars: command.chars().collect(),
             at: 0,
             pending: Vec::new(),
+            depth: 0,
+            substituted: Vec::new(),
         }
+    }
+
+    /// The simple commands of the line, as words.
+    pub(super) fn segments(self) -> Result<Vec<Vec<Word>>, &'static str> {
+        self.read().map(|(segments, _)| segments)
+    }
+
+    /// Read the rest of a substitution with `skip`, keeping its text when it
+    /// is outermost.
+    fn substitute(
+        &mut self,
+        skip: fn(&mut Self) -> Result<(), &'static str>,
+    ) -> Result<(), &'static str> {
+        let start = self.at;
+        self.depth += 1;
+        let skipped = skip(self);
+        self.depth -= 1;
+        skipped?;
+        if self.depth == 0 {
+            // Without the closing `)` or backquote.
+            let end = self.at.saturating_sub(1).max(start);
+            let text = self.chars.get(start..end).unwrap_or_default();
+            self.substituted.push(text.iter().collect());
+        }
+        Ok(())
     }
 
     fn peek(&self, offset: usize) -> Option<char> {
         self.chars.get(self.at + offset).copied()
     }
 
-    /// The simple commands of the line, as words.
-    pub(super) fn segments(mut self) -> Result<Vec<Vec<Word>>, &'static str> {
+    /// The simple commands of the line, as words, and the text of each
+    /// substitution the shell runs before them.
+    pub(super) fn read(mut self) -> Result<(Vec<Vec<Word>>, Vec<String>), &'static str> {
         let mut segments = vec![Vec::new()];
         let mut word: Option<Word> = None;
         let end_word = |segments: &mut Vec<Vec<Word>>, word: &mut Option<Word>| {
@@ -459,6 +493,8 @@ impl Lexer {
                     self.at += 2;
                     self.heredoc_delimiter()?;
                 }
+                // A process substitution: part of a word.
+                '<' | '>' if self.peek(1) == Some('(') => self.word_part(&mut word)?,
                 '<' | '>' => {
                     // A redirection: its descriptor and its target are not
                     // words of the command.
@@ -491,7 +527,7 @@ impl Lexer {
         }
         end_word(&mut segments, &mut word);
         segments.retain(|segment| !segment.is_empty());
-        Ok(segments)
+        Ok((segments, self.substituted))
     }
 
     /// Read one piece of a word (a character, a quoted string, an escape or
@@ -534,7 +570,12 @@ impl Lexer {
             }
             '`' => {
                 word.expanded = true;
-                self.backquoted()?;
+                self.substitute(Self::backquoted)?;
+            }
+            '<' | '>' if self.peek(0) == Some('(') => {
+                word.expanded = true;
+                self.at += 1;
+                self.substitute(Self::substitution)?;
             }
             '*' | '?' | '[' | '~' | '{' => {
                 word.expanded = true;
@@ -570,7 +611,7 @@ impl Lexer {
                 }
                 '`' => {
                     word.expanded = true;
-                    self.backquoted()?;
+                    self.substitute(Self::backquoted)?;
                 }
                 c => word.text.push(c),
             }
@@ -582,7 +623,7 @@ impl Lexer {
         match self.peek(0) {
             Some('(') => {
                 self.at += 1;
-                self.substitution()
+                self.substitute(Self::substitution)
             }
             Some('{') => {
                 while let Some(c) = self.peek(0) {
@@ -691,9 +732,11 @@ impl Lexer {
             self.at += 1;
         }
         let mut delimiter = String::new();
+        let mut quoted = false;
         while let Some(c) = self.peek(0) {
             match c {
                 '\'' | '"' => {
+                    quoted = true;
                     self.at += 1;
                     while let Some(inner) = self.peek(0) {
                         self.at += 1;
@@ -704,6 +747,7 @@ impl Lexer {
                     }
                 }
                 '\\' => {
+                    quoted = true;
                     self.at += 1;
                 }
                 c if c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')' | '<' | '>') => {
@@ -718,14 +762,15 @@ impl Lexer {
         if delimiter.is_empty() {
             return Err("a heredoc without a delimiter");
         }
-        self.pending.push((delimiter, strip_tabs));
+        self.pending.push((delimiter, strip_tabs, quoted));
         Ok(())
     }
 
     /// At the start of a line: skip the bodies of the heredocs begun on the
-    /// line before.
+    /// line before, keeping an unquoted one that expands something.
     fn skip_heredoc_bodies(&mut self) {
-        for (delimiter, strip_tabs) in std::mem::take(&mut self.pending) {
+        for (delimiter, strip_tabs, quoted) in std::mem::take(&mut self.pending) {
+            let mut body = String::new();
             loop {
                 let start = self.at;
                 while self.peek(0).is_some_and(|c| c != '\n') {
@@ -739,9 +784,17 @@ impl Lexer {
                 } else {
                     line.as_str()
                 };
-                if line == delimiter || at_end {
+                if line == delimiter {
                     break;
                 }
+                body.push_str(line);
+                body.push('\n');
+                if at_end {
+                    break;
+                }
+            }
+            if !quoted && self.depth == 0 && body.contains(['$', '`']) {
+                self.substituted.push(body);
             }
         }
     }
