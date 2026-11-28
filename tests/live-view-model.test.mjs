@@ -399,3 +399,70 @@ test("readFeed stops at its page bound, and on a page that doesn't advance", asy
   const stuck = async (after) => ({ events: [{ seq: after }], next: after });
   assert.deepEqual(await Live.readFeed(stuck, 7, 3), { events: [], next: 7, complete: false });
 });
+
+// A coordinator's /api/events over `log`: the rows after `after`, at most
+// `limit`, counting every row it serves.
+function server(log) {
+  const served = { rows: 0, pages: 0 };
+  const fetchPage = async (after, limit) => {
+    const start = log.findIndex((e) => e.seq > after);
+    const events = start < 0 ? [] : log.slice(start, start + limit);
+    served.rows += events.length;
+    served.pages += 1;
+    return { events, next: events.length ? events.at(-1).seq : after };
+  };
+  return { fetchPage, served };
+}
+const TAIL = { window_ms: 10 * 60 * 1000, keep: 4000, page: 1000 };
+// A clock anchor at boot, then `n` edits `every` ms apart, seqs `step` apart.
+function longLog(n, every, step = 1) {
+  const log = [{ seq: 1, type: "clock_anchored", wall_ms: 1_800_000_000_000, clock_ms: 0, paths: [], more_paths: 0 }];
+  for (let i = 0; i < n; i++) {
+    log.push({ seq: 2 + i * step, type: "operation_observed", session_id: i % 2 ? A : B, workspace_id: "app",
+      at_ms: 1000 + i * every, paths: ["src/f" + (i % 7) + ".rs"], more_paths: 0, tool: "Edit", result: "succeeded" });
+  }
+  return log;
+}
+
+test("the first read of a 50,000-event log takes only the last 10 minutes, without reading the log from its start", async () => {
+  for (const step of [1, 3]) {
+    const log = longLog(50_000, 1000, step);
+    const { fetchPage, served } = server(log);
+    const tail = await Live.readTail(fetchPage, TAIL);
+    const newest = log.at(-1);
+    const window = log.filter((e) => e.at_ms >= newest.at_ms - TAIL.window_ms);
+    assert.equal(window.length, 601);
+    assert.deepEqual(tail, { events: window, next: newest.seq }, "step " + step);
+    // One page of the tail and two one-row probes per bit of the newest seq.
+    assert.ok(served.rows <= TAIL.page + 2 * 18, served.rows + " rows read, step " + step);
+    assert.ok(served.pages <= 1 + 2 * 18, served.pages + " pages read, step " + step);
+    // And it draws: both lanes, the newest edit last.
+    const m = Live.pace(Live.model(STATE, tail.events), tail.events);
+    assert.equal(m.lanes.length, 2);
+    assert.deepEqual(m.cards.at(-1).seq, [newest.seq]);
+  }
+});
+
+test("a busy tail stops at its row bound, a short log is read whole with its anchor, and an empty one is empty", async () => {
+  const busy = longLog(50_000, 10);
+  const one = server(busy);
+  const tail = await Live.readTail(one.fetchPage, TAIL);
+  assert.deepEqual(tail.events, busy.slice(-TAIL.keep));
+  assert.ok(one.served.rows <= TAIL.keep + 2 * 18, one.served.rows + " rows read");
+  const short = longLog(20, 1000);
+  assert.deepEqual(await Live.readTail(server(short).fetchPage, TAIL), { events: short, next: short.at(-1).seq });
+  // Older than the window, but still the clock.
+  const old = longLog(900, 1000);
+  const kept = await Live.readTail(server(old).fetchPage, TAIL);
+  assert.deepEqual(kept.events[0], old[0]);
+  assert.equal(kept.events.length, 1 + 601);
+  assert.deepEqual(await Live.readTail(server([]).fetchPage, TAIL), { events: [], next: 0 });
+});
+
+test("the Files view never draws a session's task line or intent: the agent's prompt, untrusted text", () => {
+  const page = readFileSync(new URL("../src/dashboard.html", import.meta.url), "utf8");
+  const script = page.slice(page.indexOf("<script"));
+  // The page builds text only from fields it names, so naming neither of
+  // these fields is what keeps them off the screen.
+  assert.deepEqual([...script.matchAll(/\.(task|intent)\b|\[['"](task|intent)['"]\]/g)].map((m) => m[0]), []);
+});

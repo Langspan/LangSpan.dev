@@ -296,8 +296,14 @@ var LangSpanLiveView = (function () {
       if (live) return to.sub.charAt(0).toUpperCase() + to.sub.slice(1) + ".";
       return T.lanes[w.from_lane].label + " changed " + to.code + (from && from.time ? " (" + from.time + ")" : "") + " after " + T.lanes[to.lane].label + " last read it.";
     }
+    // The source chip's text after its "Held" label, on the same terms.
+    function chipText(i) {
+      const w = WIRES[i], to = byId[w.to], lane = T.lanes[w.from_lane];
+      if (live) return " · " + lane.short + ": " + to.sub;
+      return " · " + lane.short + " edited " + (to.code || "").split("/").pop() + " earlier";
+    }
 
-    return { T, P, live, LOOP, CARDS, WIRES, byId, order, flowAt, frameState, layout, copies, cardY, cardH, flowCamera, clampY, openingY, frameFor, flowView, wireRoute, pathD, heldWhy };
+    return { T, P, live, LOOP, CARDS, WIRES, byId, order, flowAt, frameState, layout, copies, cardY, cardH, flowCamera, clampY, openingY, frameFor, flowView, wireRoute, pathD, heldWhy, chipText };
   }
 
   /* ---------- Drawing: the hero's markup, pools and interactions ---------- */
@@ -393,13 +399,12 @@ var LangSpanLiveView = (function () {
     function chipEl(key, w, i) {
       let el = chipPool.get(key);
       if (el) return el;
-      const to = V.byId[w.to], lane = V.T.lanes[w.from_lane];
       el = document.createElement("button");
       el.type = "button"; el.className = "source-chip"; el.dataset.detailOpen = "wire:" + i;
       el.setAttribute("aria-haspopup", "dialog"); el.setAttribute("aria-expanded", "false");
       const held = document.createElement("b");
       held.textContent = w.label;
-      el.append(held, " · " + lane.short + " edited " + (to.code || "").split("/").pop() + " earlier");
+      el.append(held, V.chipText(i));
       chipPool.set(key, el);
       return el;
     }

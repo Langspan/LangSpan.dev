@@ -261,10 +261,13 @@ test("a held wire says the recorded refusal, not a stale read, for every kind", 
     const V = View.prepare(Live.pace(Live.model({ agents: [] }, ev), ev));
     assert.equal(V.WIRES.length, 1, refusal);
     assert.equal(V.heldWhy(0), words, refusal);
+    // The source chip too, never "edited … earlier" for a hold that isn't one.
+    assert.equal(V.chipText(0), " · " + V.T.lanes[V.WIRES[0].from_lane].short + ": " + words.charAt(0).toLowerCase() + words.slice(1, -1), refusal);
   }
   // The hero's recording keeps its own sentence.
   const hero = View.prepare(HERO), i = hero.WIRES.findIndex((w) => w.kind === "held");
   assert.match(hero.heldWhy(i), / last read it\.$/);
+  assert.match(hero.chipText(i), / edited \S+ earlier$/);
 });
 
 test("the route of a hero wire is the hero's own path", () => {

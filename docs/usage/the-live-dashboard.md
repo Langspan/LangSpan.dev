@@ -48,8 +48,10 @@ started doesn't count), and the writes held in the same 10 minutes.
 - With reduced motion, or `?motion=static` added to the URL, the view shows
   the newest work without motion.
 
-The view keeps the newest 4,000 feed rows. On opening it reads the log to
-its end before drawing, so a long log shows its current work, not its oldest. Steps without a recorded time
+The view keeps the newest 4,000 feed rows. On opening it reads only the
+log's tail: it finds the newest step, then reads back to the 10 minutes of
+recorded work before it (at most 4,000 rows), so a long log draws at once and
+shows its current work, not its oldest. Steps without a recorded time
 (a session starting, a lease) are never cards; a lane's details list them.
 
 **Files** has four parts:
@@ -63,7 +65,9 @@ its end before drawing, so a long log shows its current work, not its oldest. St
 - **Traffic scope.** Sessions in rows, grouped by workspace on this machine
   and by teammate, and file paths in columns. A column is one path in one
   repository, so linked worktrees share it and an unrelated repository's file
-  of the same name does not. Each cell names its signal in text: refused,
+  of the same name does not. A session row names its harness and short
+  session ID, then its branch, or else its workspace (a teammate's machine),
+  never its prompt or task line. Each cell names its signal in text: refused,
   held, teammate editing, shared, interface notice, teammate published or
   recent. By default the matrix shows only paths with a coordination signal
   and sessions current in this run; the filters show every observed path,

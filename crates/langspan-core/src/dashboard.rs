@@ -9,9 +9,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Applicability, BRIEF_HORIZON_MS, CheckResult, Event, GraphCoverage, LivenessStatus,
-    QueuedLanding, REMOTE_HORIZON_MS, Recipient, RefusalKind, SourceOrigin, State, ToolResult,
-    live_lease,
+    Applicability, BRIEF_HORIZON_MS, CheckResult, ClockAnchor, Event, GraphCoverage,
+    LivenessStatus, QueuedLanding, REMOTE_HORIZON_MS, Recipient, RefusalKind, SourceOrigin, State,
+    ToolResult, live_lease,
 };
 
 /// Agent rows in one view, at most.
@@ -366,6 +366,11 @@ pub struct Dashboard {
     /// by name; at most `MAX_HOSTS` (roadmap A7).
     #[serde(default)]
     pub uninstalled_hosts: Vec<String>,
+    /// This run's clock anchor, recorded at boot and so far back in a long
+    /// log, for the Live view, which reads only the log's tail (issue
+    /// #491). Absent before one is recorded, and from an older daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clock_anchor: Option<ClockAnchor>,
 }
 
 /// Bytes a string takes encoded as JSON, an upper bound.
@@ -1141,6 +1146,7 @@ pub(crate) fn dashboard(state: &State, now_ms: u64) -> Dashboard {
         workspaces,
         more_workspaces,
         uninstalled_hosts: state.uninstalled_hosts.keys().cloned().collect(),
+        clock_anchor: state.clock_anchor,
     }
 }
 

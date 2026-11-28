@@ -182,10 +182,18 @@ names two hashes. It differs from the hero in four places:
   details list its rows recorded without a time.
 
 The page has a Live and a Files switch: Live is the default once the feed has
-a timed step, and Files is the matrix, unchanged. The page reads
-`/api/events` from the last `next` after each `/api/state` poll, at most 50
-pages of 1000 rows a poll, and keeps the newest 4,000 rows and the newest
-clock anchor once it holds more than 6,000. `--demo` shows the Files view
+a timed step, and Files is the matrix, without the session's task line or
+intent, which are the agent's prompt: a row names its harness and branch, or
+its workspace. The first read takes only the log's tail, so a long log draws
+at once: the newest seq is found with one-row pages (doubling, then halving,
+about 2·log2 of it), and pages of 1000 seqs are read back from it until one
+reaches a timed row 10 minutes before the newest, the log's start, or 4,000
+rows. The boot's clock anchor is then far back, so the view carries the
+state's newest one as `clock_anchor`, optional and additive: absent before
+one is recorded, and an older view decodes without it. After that the page
+reads `/api/events` from the last `next` after each `/api/state` poll, at
+most 50 pages of 1000 rows a poll, and keeps the newest 4,000 rows and the
+newest clock anchor once it holds more than 6,000. `--demo` shows the Files view
 only. Left for later: the site's hero loading the shared file, in
 Langspan/langspan.github.io.
 

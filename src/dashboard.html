@@ -844,7 +844,7 @@ function renderScope(d) {
   const table = el('table', 'grid');
   add(table, el('caption', 'sr-only', 'Sessions in rows, file paths in columns; each cell shows how a session relates to a path.'));
   const headRow = el('tr');
-  add(headRow, el('th', 'col-session', 'Session and task'));
+  add(headRow, el('th', 'col-session', 'Session and branch'));
   headRow.firstChild.scope = 'col';
   for (const col of columns) {
     const [dir, file] = splitPath(col.path);
@@ -895,7 +895,9 @@ function renderScope(d) {
           add(el('span', 'session-text'),
             // A subagent shares its parent's short session name; say which.
             add(el('span', 'session-name'), hostName(row.host) + ' ', el('span', 'mono', str(row.session))),
-            el('span', 'session-task', row.task || row.intent || (row.local ? 'Task not recorded' : 'Task not shared')),
+            // Never its task line or intent: that is the agent's prompt,
+            // untrusted text.
+            el('span', 'session-task', branch(row.branch_ref) || (row.local ? str(row.workspace_id) : str(row.machine)) || 'No branch recorded'),
             add(el('span', 'state state-' + str(row.state)), el('span', 'status-dot'), state || 'unknown',
               row.subagent ? el('span', 'mono muted', ' · subagent ' + row.subagent) : null)));
         sessionButton.title = row.label;
@@ -1057,8 +1059,6 @@ function inspectSession(row) {
     ['Branch', branch(row.branch_ref) || 'not recorded'],
     [row.local ? 'Last activity' : 'Last heard', row.local ? (num(row.active_age_ms) === null ? 'none this run' : ago(row.active_age_ms))
       : (num(row.heard_age_ms) === null ? 'before this coordinator started' : ago(row.heard_age_ms))],
-    ['Task', row.task ? quoted(str(row.task)) : (row.local ? 'not recorded' : 'not shared')],
-    ['Intent', row.intent ? quoted(str(row.intent)) : null],
     ['Uncommitted work adopted by', row.adopted_by ? el('span', 'mono', str(row.adopted_by)) : null],
     ['Adopted the uncommitted work of', strings(row.adopted).length ? el('span', 'mono', strings(row.adopted).join(', ')) : null]]));
   if (row.editing.length) out.push(block(row.local ? 'lock' : 'edit', row.local ? 'Held now' : 'Editing, as published', chips(row.editing)));
@@ -1341,12 +1341,14 @@ function unavailable(reason) {
 function tick() { refresh().then(refreshLive).finally(() => window.setTimeout(tick, 2000)); }
 
 // ---- Live view: /api/events through the shared renderer (issue #491) ------
-// Rows are read from the last cursor until a page comes back empty, in runs
-// of FEED_PAGES pages, keeping the newest FEED_KEEP rows and the newest clock
-// anchor once the page holds more than FEED_TRIM. A long log is read to its
-// end before the view draws, so the view starts at the current work.
-const FEED_PAGES = 50, FEED_KEEP = 4000, FEED_TRIM = 6000;
-const feed = { events: [], next: 0 };
+// The first read takes only the log's tail: the newest FEED_WINDOW_MS of
+// recorded steps, at most FEED_KEEP rows, found back from the newest seq, so
+// a long log draws at once. Later reads go on from the last cursor until a
+// page comes back empty, in runs of FEED_PAGES pages, keeping the newest
+// FEED_KEEP rows and the newest clock anchor once the page holds more than
+// FEED_TRIM.
+const FEED_PAGES = 50, FEED_KEEP = 4000, FEED_TRIM = 6000, FEED_WINDOW_MS = 10 * 60 * 1000;
+const feed = { events: [], next: 0, started: false };
 let liveView = null;
 let viewChoice = null;
 function showView(which) {
@@ -1358,11 +1360,11 @@ function showView(which) {
 }
 byId('view-live').addEventListener('click', () => { viewChoice = 'live'; showView('live'); });
 byId('view-files').addEventListener('click', () => { viewChoice = 'files'; showView('files'); });
-async function eventsPage(after) {
+async function eventsPage(after, limit = 1000) {
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), 8000);
   try {
-    const response = await fetch('/api/events?after=' + after + '&limit=1000', { headers: { 'X-LangSpan-Token': token }, cache: 'no-store', signal: controller.signal });
+    const response = await fetch('/api/events?after=' + after + '&limit=' + limit, { headers: { 'X-LangSpan-Token': token }, cache: 'no-store', signal: controller.signal });
     const body = await response.json();
     if (!response.ok || !body || body.available !== true || !Array.isArray(body.events) || typeof body.next !== 'number') {
       throw new Error(str(body && body.error) || 'HTTP ' + response.status);
@@ -1377,6 +1379,12 @@ async function refreshLive() {
   byId('views').hidden = false;
   let failed = '';
   try {
+    if (!feed.started) {
+      byId('live-empty').hidden = false;
+      byId('live-empty').textContent = 'Reading the newest recorded steps…';
+      const tail = await LangSpanLive.readTail(eventsPage, { window_ms: FEED_WINDOW_MS, keep: FEED_KEEP, page: 1000 });
+      Object.assign(feed, { events: tail.events, next: tail.next, started: true });
+    }
     for (;;) {
       const from = feed.next, got = await LangSpanLive.readFeed(eventsPage, from, FEED_PAGES);
       feed.events.push(...got.events);
@@ -1389,9 +1397,14 @@ async function refreshLive() {
   } catch (error) {
     failed = error && error.name === 'AbortError' ? 'the dashboard server did not answer within 8 s' : str(error && error.message);
   }
-  const anchor = feed.events.filter((e) => e.type === 'clock_anchored').pop();
+  // The tail rarely holds the boot's clock anchor; the view carries it.
+  const recorded = feed.events.filter((e) => e.type === 'clock_anchored').pop();
+  const given = view.clock_anchor || {};  const kept = num(given.clock_ms) !== null && num(given.wall_ms) !== null && (!recorded || recorded.clock_ms !== given.clock_ms)
+    ? { type: 'clock_anchored', seq: feed.next, paths: [], more_paths: 0, clock_ms: given.clock_ms, wall_ms: given.wall_ms } : null;
+  const events = kept ? [...feed.events, kept] : feed.events;
+  const anchor = kept || recorded;
   const now = anchor ? anchor.clock_ms + (Date.now() - anchor.wall_ms) : undefined;
-  const timing = LangSpanLive.pace(LangSpanLive.model(view, feed.events), feed.events, { now_ms: now });
+  const timing = LangSpanLive.pace(LangSpanLive.model(view, events), events, { now_ms: now });
   if (liveView) liveView.update(timing); else liveView = LangSpanLiveView.mount(byId('live-view'), timing);
   const empty = byId('live-empty');
   empty.hidden = timing.cards.length > 0 && !failed;

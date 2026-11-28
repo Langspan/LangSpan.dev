@@ -319,5 +319,54 @@ var LangSpanLive = (function () {
     return { events, next: after, complete: false };
   }
 
-  return { model, pace, readFeed, trim, PACING };
+  // The newest recorded seq, 0 for an empty log: the least `after` with
+  // nothing after it, found with one-row pages, doubling and then halving,
+  // so about 2·log2(seq) rows are read however long the log is.
+  async function newestSeq(fetchPage) {
+    let [lo, hi] = [0, 1];
+    if (!(await fetchPage(0, 1)).events.length) return 0;
+    for (;;) {
+      const page = await fetchPage(hi, 1);
+      if (!page.events.length) break;
+      if (page.next <= hi) throw new Error("the event feed did not advance past " + hi);
+      lo = page.next;
+      hi = Math.max(hi * 2, lo);
+    }
+    // A row is at `lo` (or lo is 0) and none is after `hi`.
+    while (lo < hi) {
+      const mid = Math.floor((lo + hi) / 2);
+      const page = await fetchPage(mid, 1);
+      if (!page.events.length) hi = mid;
+      else if (page.next <= mid) throw new Error("the event feed did not advance past " + mid);
+      else lo = page.next;
+    }
+    return lo;
+  }
+
+  // The log's tail: from the newest seq back, a page of `page` seqs at a
+  // time, until a page reaches a timed row more than `window_ms` before the
+  // newest timed row, the log's start, or `keep` rows. Rows before that
+  // window are dropped but the newest clock anchor read. `next` is the
+  // cursor to read on from.
+  async function readTail(fetchPage, { window_ms, keep, page }) {
+    const newest = await newestSeq(fetchPage);
+    const chunks = [];
+    let [end, total, latest] = [newest, 0, null];
+    while (end > 0 && total < keep) {
+      const start = Math.max(0, end - page);
+      // Every row in (start, end] fits one page; rows after `end` were read.
+      const rows = (await fetchPage(start, page)).events.filter((e) => e.seq <= end);
+      chunks.unshift(rows);
+      total += rows.length;
+      const timed = rows.filter((e) => e.at_ms != null);
+      if (latest === null && timed.length) latest = timed[timed.length - 1].at_ms;
+      if (latest !== null && timed.length && timed[0].at_ms < latest - window_ms) break;
+      end = start;
+    }
+    const events = chunks.flat();
+    const from = latest === null ? 0 : events.findIndex((e) => e.at_ms != null && e.at_ms >= latest - window_ms);
+    return { events: trim(events, events.length - Math.max(0, from)), next: newest };
+  }
+
+  return { model, pace, readFeed, readTail, trim, PACING };
 })();
