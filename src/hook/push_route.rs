@@ -127,11 +127,10 @@ struct ToDefault {
 }
 
 pub(crate) fn route(config: &Config, call: &ShellCall, deadline: Instant) -> Routed {
-    let push = match crate::shell::git_push(&call.command) {
-        Ok(None) => return Routed::NotAPush,
-        Ok(Some(push)) => push,
-        Err(why) => return Routed::Denied(refused(&why.0)),
-    };
+    let parsed = crate::shell::git_push(&call.command);
+    if let Ok(None) = parsed {
+        return Routed::NotAPush;
+    }
     // Most of the time left: the dry run asks the remote, and nothing runs
     // after a refused push.
     let now = Instant::now();
@@ -140,15 +139,36 @@ pub(crate) fn route(config: &Config, call: &ShellCall, deadline: Instant) -> Rou
         .cwd
         .as_deref()
         .map_or_else(|| config.root.clone(), Into::into);
-    let dir = push
-        .cwd
-        .as_ref()
-        .map_or_else(|| start.clone(), |cwd| start.join(cwd));
+    let dir = match &parsed {
+        Ok(Some(GitPush { cwd: Some(cwd), .. })) => start.join(cwd),
+        _ => start,
+    };
+    // The opt-out lets every push through, so it is read before the push's
+    // words are refused. It is read from the repository's configuration,
+    // which the command's own `git -c` or environment does not reach.
+    match direct(&dir, until) {
+        Err(why) if why.passes() => return Routed::Passed(format!("push route: {why}")),
+        Err(why) if parsed.is_ok() => return Routed::Denied(refused(&why.to_string())),
+        _ => {}
+    }
+    let push = match parsed {
+        Ok(Some(push)) => push,
+        Ok(None) => return Routed::NotAPush,
+        Err(why) => return Routed::Denied(refused(&why.0)),
+    };
     match to_default(config, &dir, &push, until) {
         Ok(Some(hit)) => Routed::Denied(denied(config, &hit)),
         Ok(None) => Routed::Passed("push route: no push to the default branch".into()),
         Err(why) if why.passes() => Routed::Passed(format!("push route: {why}")),
         Err(why) => Routed::Denied(refused(&why.to_string())),
+    }
+}
+
+/// `Err(Direct)` when the repository at `dir` allows direct pushes.
+fn direct(dir: &Path, until: Instant) -> Result<(), Unread> {
+    match git(dir, &["config", "--get", DIRECT_SETTING], until)?.as_deref() {
+        Some("direct") => Err(Unread::Direct),
+        _ => Ok(()),
     }
 }
 
@@ -234,10 +254,6 @@ fn to_default(
     push: &GitPush,
     until: Instant,
 ) -> Result<Option<ToDefault>, Unread> {
-    // `git_push` refuses `git -c`, so the push cannot set it.
-    if git(dir, &["config", "--get", DIRECT_SETTING], until)?.as_deref() == Some("direct") {
-        return Err(Unread::Direct);
-    }
     in_workspace(config, dir, until)?;
     // Git runs `pre-push` even for a dry run; only the push itself may. The
     // probe's options come first, and `git_push` lets through only options
@@ -664,6 +680,21 @@ mod tests {
         assert!(!marker.exists(), "the dry run ran the pre-push hook");
     }
 
+    /// Review of PR #576: a push wrapped with a backslash-newline after
+    /// `git` was not seen, and ran without landing. Bash's reading of the
+    /// line and Git's dry run of it are what is verified, so this runs Git.
+    #[test]
+    fn a_line_wrapped_push_to_the_default_branch_is_routed() {
+        let repo = repo("wrapped");
+        for command in [
+            "git \\\n push origin feat:main",
+            "git push \\\n origin \\\n feat:main",
+        ] {
+            let reason = routed(&repo, command);
+            assert!(reason.contains(&lands("feat")), "{command:?}: {reason}");
+        }
+    }
+
     #[test]
     fn a_push_to_another_branch_passes_and_so_does_what_is_not_a_push() {
         let repo = repo("other");
@@ -904,8 +935,17 @@ mod tests {
     fn the_repositorys_setting_an_unknown_default_or_an_unknown_url_passes_with_a_detail() {
         let repo = repo("setting");
         git_ok(&repo.work, &["config", DIRECT_SETTING, "direct"]);
-        let detail = passed(&repo, "git push origin feat:main");
-        assert!(detail.contains("is `direct`"), "{detail}");
+        // Review of PR #576: the setting lets every push through, so it is
+        // read before any refusal of the push's syntax.
+        for command in [
+            "git push origin feat:main",
+            "git push --force-with-lease origin main",
+            "git add -A && git push",
+            "bash -c 'git push origin feat:main'",
+        ] {
+            let detail = passed(&repo, command);
+            assert!(detail.contains("is `direct`"), "{command}: {detail}");
+        }
         git_ok(&repo.work, &["config", "--unset", DIRECT_SETTING]);
         git_ok(
             &repo.base,

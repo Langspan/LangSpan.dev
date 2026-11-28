@@ -157,14 +157,16 @@ force with `+SRC:DST` and delete with `:DST`, and set anything else with
 `git config` (not `git -c`).
 The hook refuses a push it cannot check this way: one combined with another
 command (`git add -A && git push`), one with an expansion in its words, one
-with any other option, `--` or `git -c`,
+with any other option, `--` or `git -c`, any other command that names `git`
+and `push` (`bash -c 'git push'`, `xargs git push`),
 and one whose dry run fails, lists no refs or does not finish in the hook's
 time. The message
 names the word and says what to run instead. A push from another checkout, to a URL no remote has,
 or with no `REMOTE/HEAD` runs. Set the remote's HEAD with
 `git remote set-head origin --auto`. Pushes from your own terminal are never
 touched. To let agents push the default branch directly, run
-`git config langspan.defaultBranchPush direct` in the repository. See
+`git config langspan.defaultBranchPush direct` in the repository; with it set,
+the hook refuses none of these. See
 [ADR 0007](../adr/0007-check-evidence-integration-and-landing.md#routing-an-agents-push).
 
 Tests use real daemons, CLI commands and local file remotes. Hosted branch

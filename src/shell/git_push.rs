@@ -40,7 +40,9 @@ const ALONE: &str = "run `git push` as a command of its own: no `&&`, `;`, `||`,
 
 /// The `git push` that `command` runs; `None` when it runs none.
 pub(crate) fn git_push(command: &str) -> Result<Option<GitPush>, Refused> {
-    if !(command.contains("git") && command.contains("push")) {
+    // Without its line continuations, as Bash reads it: `git pu\⏎sh` pushes.
+    let joined = command.replace("\\\n", "");
+    if !(joined.contains("git") && joined.contains("push")) {
         return Ok(None);
     }
     if command.len() > MAX_GIT_COMMAND_BYTES {
@@ -55,6 +57,12 @@ pub(crate) fn git_push(command: &str) -> Result<Option<GitPush>, Refused> {
         .iter()
         .any(|words| push_at(command_words(words)).is_some())
     {
+        if segments.iter().any(|words| unread(words, &joined)) {
+            return Err(format!(
+                "this command names `git` and `push` in a command that does not read as a Git command (a shell, `xargs` or a substitution, say), so it may push where LangSpan cannot check; {ALONE}"
+            )
+            .into());
+        }
         return Ok(None);
     }
     let [words] = segments.as_slice() else {
@@ -69,6 +77,29 @@ pub(crate) fn git_push(command: &str) -> Result<Option<GitPush>, Refused> {
         .into());
     }
     lone(words)
+}
+
+/// Whether the words `git` and `push` appear, in `text`.
+fn names_a_push(text: &str) -> bool {
+    let tokens = || text.split(|c: char| !c.is_ascii_alphanumeric());
+    tokens().any(|token| token == "git") && tokens().any(|token| token == "push")
+}
+
+/// A command that may run a push LangSpan cannot read, in a `command` that
+/// names one: not a `git …` command, and with both words among its own, or
+/// with a substitution whose text the lexer does not keep (`$(git push)`,
+/// `bash -c 'git push'`). A `git …` command that is not a push is read.
+fn unread(words: &[Word], command: &str) -> bool {
+    let run = command_words(words);
+    if run
+        .first()
+        .is_some_and(|first| first.text == "git" || first.text.ends_with("/git"))
+    {
+        return false;
+    }
+    let texts: Vec<&str> = words.iter().map(|word| word.text.as_str()).collect();
+    names_a_push(&texts.join(" "))
+        || (words.iter().any(|word| word.expanded) && names_a_push(command))
 }
 
 /// Where `push` is in a `git …` command's words, past Git's own options.
@@ -192,6 +223,52 @@ mod tests {
             "echo push",
             "git commit -m 'then push'",
             "git log --grep push && git status",
+        ] {
+            assert_eq!(git_push(command), Ok(None), "{command}");
+        }
+    }
+
+    /// Review of PR #576: a backslash-newline right after `git` made an empty
+    /// word, so the push was not seen; one after `push` gave the dry run an
+    /// empty argument. Bash removes the pair, and so does the lexer.
+    #[test]
+    fn a_line_continuation_is_removed_as_bash_removes_it() {
+        for command in [
+            "git \\\npush origin main",
+            "git \\\n  push origin main",
+            "git push \\\n origin \\\nmain",
+            "git pu\\\nsh origin ma\\\nin",
+            "git push origin main \\\n",
+        ] {
+            assert_eq!(args(command), ["origin", "main"], "{command:?}");
+        }
+    }
+
+    /// Review of PR #576: `git` and `push` in a command the parser does not
+    /// read as a Git command are refused, not allowed.
+    #[test]
+    fn git_and_push_in_a_command_that_is_not_read_as_git_are_refused() {
+        for command in [
+            "bash -c 'git push origin main'",
+            "sh -c \"git push\"",
+            "xargs git push origin",
+            "echo x | xargs /usr/bin/git push",
+            "git status; nice git push origin main",
+            "$(git push origin main)",
+            "git status && echo `git push`",
+        ] {
+            let why = git_push(command).unwrap_err().0;
+            assert!(
+                why.contains("does not read as a Git command"),
+                "{command}: {why}"
+            );
+        }
+        // A Git command that is not a push, and words that only resemble.
+        for command in [
+            "git commit -m \"$(cat <<'EOF'\nfix: push routing\nEOF\n)\"",
+            "git log --grep push && git status",
+            "echo pushed by git",
+            "gitk --all; pushd x",
         ] {
             assert_eq!(git_push(command), Ok(None), "{command}");
         }

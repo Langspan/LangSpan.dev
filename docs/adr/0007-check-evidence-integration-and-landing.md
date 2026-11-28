@@ -378,7 +378,9 @@ the default branch, and the safety rules are the landing's own:
   with no passing record it exits 6.
 - It never pushes the default branch unless the repository configures that:
   `git config langspan.defaultBranchPush direct` lets every push through.
-  The refusal does not mention the setting; the owner chooses it.
+  The hook reads it before any refusal of a push's words, so a combined push
+  or one with `-f` runs too. The refusal does not mention the setting; the
+  owner chooses it.
 - A push that updates other refs with the default branch (a mirror remote,
   `push.default=matching`, a wildcard refspec) says to push the others by
   name.
@@ -388,9 +390,12 @@ an agent's own `git push -n` is refused, since the hook's dry run answers it. Th
 checkout other than the workspace's (the landing command lands from the
 workspace's root), a dry run whose URL no configured remote has, and no
 `REMOTE/HEAD` (`git remote set-head REMOTE --auto` records it). Routing is
-cooperative. A push outside the hooks, through a Git alias, or inside a
-command substitution or `sh -c` string, which the reader does not look into,
-is not refused. The dry run costs one round trip to the remote before every
+cooperative. The reader removes line continuations (`\` before a newline) as
+Bash does. It does not look into a command substitution or an `sh -c`
+string, so a command other than `git …` that names both `git` and `push`
+there or in its words (`bash -c 'git push'`, `xargs git push`) is refused
+with the reason. A push outside the hooks, through a Git alias, or in a
+substitution inside a `git …` command's own words is not refused. The dry run costs one round trip to the remote before every
 hooked push, and a remote slower than the hook's budget refuses it. The
 check's name and command are placeholders in the refusal; the agent supplies
 the project's test command.
