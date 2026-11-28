@@ -159,8 +159,10 @@ The hook refuses a push it cannot check this way: one combined with another
 command (`git add -A && git push`), one with an expansion in its words, one
 with any other option, `--` or `git -c`, any other command that names `git`
 and `push` (`bash -c 'git push'`, `xargs git push`),
-and one whose dry run fails, lists no refs or does not finish in the hook's
-time. The message
+one whose dry run fails, lists no refs or does not finish in the hook's
+time, and one that names no remote and goes to a URL that two remotes share
+once their logins are left out (`alice@host:repo.git`, `bob@host:repo.git`;
+name the remote). The message
 names the word and says what to run instead. A push from another checkout, to a URL no remote has,
 or with no `REMOTE/HEAD` runs. Set the remote's HEAD with
 `git remote set-head origin --auto`. Pushes from your own terminal are never

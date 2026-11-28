@@ -361,8 +361,18 @@ rounds of review on PR #576), and Git already has the answer:
   ref list, refuses the push with the reason and Git's words, labelled as data.
 - The push is routed when any ref the dry run would update, force or delete
   (any line but `=` up to date, a rejected one included) is
-  `refs/heads/MAIN` of a configured remote whose push URL is the dry run's
-  `To` URL, with MAIN what `refs/remotes/REMOTE/HEAD` names.
+  `refs/heads/MAIN` of the pushed remote, with MAIN what
+  `refs/remotes/REMOTE/HEAD` names. The pushed remote is the one the push
+  names, or the configured remote whose push URL is the URL it names (exactly,
+  or else once logins are left out).
+  A push that names none goes where Git's settings say
+  (`branch.NAME.pushRemote`, `remote.pushDefault`, `branch.NAME.remote`, then
+  `origin`), and the dry run's `To` URL must be that remote's. The remote is
+  never found from the `To` URL alone: Git shows it without a login, so
+  `alice@host:repo.git` and `bob@host:repo.git` can be different repositories
+  that look alike there. A push naming no remote, to a URL another remote
+  shares once logins are left out, is refused and says to name the remote, as
+  is a named URL that two remotes match.
 
 A routed push is refused, on every attempt, with the exact command:
 `langspan --state-dir DIR land WORKSPACE --onto MAIN --name CHECK BRANCH --apply --rebase --check-again -- TEST_COMMAND`.
@@ -388,7 +398,7 @@ the default branch, and the safety rules are the landing's own:
 Pushes to other branches and tags, and the owner's terminal, pass untouched;
 an agent's own `git push -n` is refused, since the hook's dry run answers it. Three cases pass with a detail in the hook's log: a push run in a
 checkout other than the workspace's (the landing command lands from the
-workspace's root), a dry run whose URL no configured remote has, and no
+workspace's root), a push to a URL no configured remote has, and no
 `REMOTE/HEAD` (`git remote set-head REMOTE --auto` records it). Routing is
 cooperative. The reader removes line continuations (`\` before a newline) as
 Bash does. It does not look into a command substitution or an `sh -c`
