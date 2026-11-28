@@ -348,13 +348,16 @@ the default branch, and the safety rules are the landing's own:
 - It never pushes the default branch unless the repository configures that:
   `git config langspan.defaultBranchPush direct` lets every push through.
   The refusal does not mention the setting; the owner chooses it.
-- `--all`, `--branches`, `--mirror` and `push.default=matching` are refused
-  too, since they would update the default branch with the rest.
+- `--all`, `--branches`, `--mirror`, the matching refspec `:` and
+  `push.default=matching` are refused too, since they would update the
+  default branch with the rest. Without a named remote, the remote is the
+  one Git picks: the current branch's push remote, else `origin`.
 
 Pushes to other branches, tags, dry runs and the owner's terminal pass
 untouched. What the hook cannot read passes with a detail in its log, as the
 commit guard does: an expansion where a remote or refspec is needed, another
-Git directory, a URL or path instead of a named remote, Git failing, or no
+Git directory, a push run in a checkout other than the workspace's (the
+landing command lands from the workspace's root), a URL or path instead of a named remote, Git failing, or no
 `REMOTE/HEAD` (`git remote set-head REMOTE --auto` records it). Routing is
 cooperative: a push outside the hooks, or one written to escape the reader,
 is not refused. The check's name and command are placeholders in the

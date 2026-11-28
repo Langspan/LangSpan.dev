@@ -145,10 +145,11 @@ Run `langspan --state-dir DIR land WORKSPACE --onto main --name CHECK feat --app
 ```
 
 The agent fills in a check name and the project's test command. A forced
-push, a deletion of the default branch, and `--all` or `--mirror` are refused
-too; pushes to other branches, tags and dry runs pass. When the hook cannot
-tell where a push goes (an expansion in the remote or refspec, a URL instead
-of a remote name, or no `REMOTE/HEAD`), it lets the push run; set the remote's
+push, a deletion of the default branch, and `--all`, `--mirror` or the
+matching refspec `:` are refused too; pushes to other branches, tags and dry
+runs pass. When the hook cannot tell where a push goes (an expansion in the
+remote or refspec, a URL instead of a remote name, a checkout other than the
+workspace's, or no `REMOTE/HEAD`), it lets the push run; set the remote's
 HEAD with `git remote set-head origin --auto`. Pushes from your own terminal
 are never touched. To let agents push the default branch directly, run
 `git config langspan.defaultBranchPush direct` in the repository. See

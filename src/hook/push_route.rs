@@ -34,6 +34,8 @@ enum Unread {
     GitFailed,
     NotNamed,
     NoDefault(String),
+    /// The push runs in a checkout other than the workspace's.
+    OtherRepository,
 }
 
 impl std::fmt::Display for Unread {
@@ -48,6 +50,10 @@ impl std::fmt::Display for Unread {
             Self::NotNamed => write!(
                 f,
                 "no decision (a push to a URL, a path or an unusual remote name)"
+            ),
+            Self::OtherRepository => write!(
+                f,
+                "no decision (the push runs in another checkout than this workspace's; land from a session in that checkout)"
             ),
             Self::NoDefault(remote) => write!(
                 f,
@@ -100,13 +106,40 @@ pub(crate) fn route(config: &Config, call: &ShellCall, deadline: Instant) -> Rou
             .cwd
             .as_ref()
             .map_or_else(|| start.clone(), |cwd| start.join(cwd));
-        match to_default(&dir, push, until) {
+        match to_default(&dir, push, until).and_then(|hit| in_workspace(config, &dir, hit, until)) {
             Ok(Some(hit)) => return Routed::Denied(denied(config, &hit)),
             Ok(None) => {}
             Err(error) => why = error.to_string(),
         }
     }
     Routed::Passed(format!("push route: {why}"))
+}
+
+/// The hit, when the push runs in the workspace's own checkout: the landing
+/// command lands from the workspace's root, so a push from another
+/// repository (`git -C OTHER push`) is not routed there.
+fn in_workspace(
+    config: &Config,
+    dir: &Path,
+    hit: Option<ToDefault>,
+    until: Instant,
+) -> Result<Option<ToDefault>, Unread> {
+    let Some(hit) = hit else {
+        return Ok(None);
+    };
+    let top = git(dir, &["rev-parse", "--show-toplevel"], until)?.ok_or(Unread::GitFailed)?;
+    let root = config
+        .root
+        .canonicalize()
+        .unwrap_or_else(|_| config.root.clone());
+    let top = Path::new(&top)
+        .canonicalize()
+        .unwrap_or_else(|_| top.into());
+    if top == root {
+        Ok(Some(hit))
+    } else {
+        Err(Unread::OtherRepository)
+    }
 }
 
 /// Git's answer, `None` when it says no (exit 1); a failure otherwise.
@@ -126,28 +159,43 @@ fn to_default(dir: &Path, push: &GitPush, until: Instant) -> Result<Option<ToDef
         return Err(Unread::Direct);
     }
     let current = git(dir, &["symbolic-ref", "--quiet", "--short", "HEAD"], until)?;
-    let matching = push.refspecs.is_empty()
-        && git(dir, &["config", "--get", "push.default"], until)?.as_deref() == Some("matching");
+    // `:` (or `+:`, the parser drops the `+`) pushes the matching branches.
+    let matching = push.refspecs.iter().any(|refspec| refspec == ":")
+        || push.refspecs.is_empty()
+            && git(dir, &["config", "--get", "push.default"], until)?.as_deref()
+                == Some("matching");
     let every_branch = push.every_branch || matching;
     // Each (source, destination) the push would update.
     let mut updates: Vec<(Option<String>, String)> = Vec::new();
     let mut remote = push.remote.clone();
+    // Without refspecs, Git pushes to the current branch's push remote,
+    // whether it pushes one branch or every branch.
+    let pushed = match &current {
+        Some(current) if push.refspecs.is_empty() => {
+            let format = "--format=%(push:remotename) %(push:remoteref)";
+            let line = git(
+                dir,
+                &["for-each-ref", format, &format!("refs/heads/{current}")],
+                until,
+            )?
+            .unwrap_or_default();
+            let (to_remote, to_ref) = line.split_once(' ').unwrap_or((line.as_str(), ""));
+            let (to_remote, to_ref) = (to_remote.to_owned(), to_ref.to_owned());
+            if remote.is_none() {
+                remote = Some(to_remote.clone());
+            }
+            Some((current, to_remote, to_ref))
+        }
+        _ => None,
+    };
     if push.refspecs.is_empty() && !every_branch {
         // Git's choice: the current branch, to its push destination.
-        let Some(current) = &current else {
+        let Some((current, to_remote, to_ref)) = pushed else {
             return Ok(None);
         };
-        let format = "--format=%(push:remotename) %(push:remoteref)";
-        let line = git(
-            dir,
-            &["for-each-ref", format, &format!("refs/heads/{current}")],
-            until,
-        )?
-        .unwrap_or_default();
-        let (to_remote, to_ref) = line.split_once(' ').unwrap_or((line.as_str(), ""));
-        let remote = remote.get_or_insert_with(|| to_remote.to_owned());
+        let remote = remote.as_deref().unwrap_or_default();
         let destination = if remote == to_remote && !to_ref.is_empty() {
-            to_ref.to_owned()
+            to_ref
         } else {
             current.clone()
         };
@@ -421,6 +469,54 @@ mod tests {
         let delete = reason(run(&repo, "git push origin --delete main"));
         assert!(delete.contains("would delete main"), "{delete}");
         assert!(!delete.contains("land "), "{delete}");
+    }
+
+    #[test]
+    fn the_matching_refspec_is_routed_as_a_push_of_every_branch() {
+        let repo = repo("matching");
+        for command in ["git push origin :", "git push origin +:"] {
+            let every = reason(run(&repo, command));
+            assert!(
+                every.contains("push the other branches by name"),
+                "{command}: {every}"
+            );
+        }
+    }
+
+    /// Git picks the current branch's push remote for a push without
+    /// refspecs, even of every branch; `origin` is not assumed.
+    #[test]
+    fn a_push_of_every_branch_goes_to_the_current_branchs_remote() {
+        let repo = repo("remote");
+        git_ok(&repo.work, &["remote", "add", "fork", "../origin.git"]);
+        git_ok(&repo.work, &["fetch", "-q", "fork"]);
+        git_ok(&repo.work, &["remote", "set-head", "fork", "main"]);
+        git_ok(&repo.work, &["branch", "-q", "-u", "fork/feat"]);
+        git_ok(&repo.work, &["remote", "set-head", "origin", "-d"]);
+        let every = reason(run(&repo, "git push --all"));
+        assert!(
+            every.contains("--onto main --remote fork --name CHECK BRANCH"),
+            "{every}"
+        );
+        git_ok(&repo.work, &["config", "push.default", "matching"]);
+        let matching = reason(run(&repo, "git push"));
+        assert!(matching.contains("--remote fork"), "{matching}");
+    }
+
+    /// The landing command lands from the workspace's root, so a push run in
+    /// another checkout is not routed there; one run from a subdirectory of
+    /// the workspace is.
+    #[test]
+    fn a_push_in_another_checkout_passes_and_one_in_a_subdirectory_is_routed() {
+        let repo = repo("elsewhere");
+        let other = repo.base.join("other");
+        git_ok(&repo.base, &["clone", "-q", "origin.git", "other"]);
+        git_ok(&other, &["switch", "-q", "feat"]);
+        let detail = passed(run(&repo, "git -C ../other push origin feat:main"));
+        assert!(detail.contains("another checkout"), "{detail}");
+        std::fs::create_dir(repo.work.join("sub")).unwrap();
+        let reason = reason(run(&repo, "cd sub && git push origin feat:main"));
+        assert!(reason.contains("land 'app' --onto main"), "{reason}");
     }
 
     /// The shell hook refuses before it records a run, and a push that
