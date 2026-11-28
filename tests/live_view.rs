@@ -6,6 +6,29 @@
 use std::path::Path;
 use std::process::Command;
 
+/// The model draws a step as an edit only if its tool is in `EDIT_TOOLS`;
+/// a host tool missing there draws as a command and never saves a hold.
+#[test]
+fn the_live_view_names_every_adapters_edit_tools() {
+    let source = include_str!("../src/dashboard-live.js");
+    let start = source.find("const EDIT_TOOLS = new Set([").unwrap();
+    let list = &source[start..start + source[start..].find("]);").unwrap()];
+    let cursor = langspan::cursor::ADMITTED_TOOLS
+        .into_iter()
+        .filter(|t| *t != langspan::cursor::SHELL_TOOL);
+    let tools = langspan::claude_code::SUPPORTED_TOOLS
+        .into_iter()
+        .chain(langspan::antigravity::EDIT_TOOLS)
+        .chain(cursor)
+        .chain(["apply_patch"]);
+    for tool in tools {
+        assert!(
+            list.contains(&format!("\"{tool}\"")),
+            "src/dashboard-live.js EDIT_TOOLS lacks {tool}; add it so its edits draw as edits"
+        );
+    }
+}
+
 #[test]
 fn the_live_view_model_passes_its_node_tests() {
     let required = std::env::var_os("LANGSPAN_REQUIRE_TOOLS").is_some_and(|v| v == "1");

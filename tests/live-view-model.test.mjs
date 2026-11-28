@@ -207,6 +207,65 @@ test("the model of the golden events page equals fixtures/live-view-model.json",
   assert.deepEqual(got, golden.model);
 });
 
+test("every host's file-edit tool draws as an edit, and as a save after a hold", () => {
+  const tools = ["Edit", "Write", "MultiEdit", "NotebookEdit", "apply_patch", "Delete",
+    "edit_file", "write_to_file", "replace_file_content", "multi_replace_file_content"];
+  for (const tool of tools) {
+    seq = 0;
+    const m = model(STATE, [anchor(), op(A, 2000, F, tool), held(B, A, 3000), read(B, 3500), op(B, 4000, F, tool)]);
+    assert.deepEqual(m.cards.map((c) => c.verb), ["Edited", "Write held", "Read", "Saved after re-reading"], tool);
+  }
+  for (const tool of ["Bash", "run_command", "Shell"]) {
+    seq = 0;
+    assert.equal(model(STATE, [anchor(), op(A, 2000, null, tool)]).cards[0].verb, "Ran a command", tool);
+  }
+});
+
+const multi = (id, at, paths, tool = "apply_patch") => Object.assign(op(id, at, null, tool), { paths });
+
+test("an edit of several files saves a hold on any of them, and its card names every file", () => {
+  seq = 0;
+  const m = model(STATE, [anchor(), held(B, A, 3000, "stale_base", "b.ts"), read(B, 3500, "b.ts"), multi(B, 4000, ["a.ts", "b.ts"])]);
+  assert.deepEqual(m.cards.map((c) => [c.kind, c.verb, c.code]), [
+    ["held", "Write held", "b.ts"], ["read", "Read", "b.ts"], ["saved", "Saved after re-reading", "a.ts"],
+  ]);
+  assert.deepEqual(m.cards[2].rows, [["File", "a.ts, b.ts"], ["Time", "08:00:03"], ["Started from", "the current file"]]);
+  // The hold is saved: a later edit of b.ts is a plain edit.
+  seq = 0;
+  const later = model(STATE, [anchor(), held(B, A, 3000, "stale_base", "b.ts"), multi(B, 4000, ["a.ts", "b.ts"]), op(B, 60_000, "b.ts")]);
+  assert.deepEqual(later.cards.map((c) => c.verb), ["Write held", "Saved on retry", "Edited"]);
+});
+
+test("one edit that saves two holds clears both, and is re-read only if both files were", () => {
+  seq = 0;
+  const events = [anchor(), held(B, A, 3000, "stale_base", "a.ts"), held(B, A, 3100, "stale_base", "b.ts"),
+    read(B, 3500, "a.ts"), multi(B, 4000, ["a.ts", "b.ts"]), op(B, 60_000, "a.ts"), op(B, 90_000, "b.ts")];
+  assert.deepEqual(model(STATE, events).cards.map((c) => c.verb),
+    ["Write held", "Write held", "Read", "Saved on retry", "Edited", "Edited"]);
+});
+
+test("an edit card of several files counts them, and merges only with an edit of the same files", () => {
+  seq = 0;
+  const events = [anchor(), multi(A, 2000, ["a.ts", "b.ts"]), multi(A, 3000, ["a.ts", "b.ts"]),
+    multi(A, 4000, ["a.ts", "c.ts"]), op(A, 5000, "a.ts")];
+  const m = model(STATE, events);
+  assert.deepEqual(m.cards.map((c) => [c.code, c.sub, c.seq]), [
+    ["a.ts", "2 edits, 2 files", [2, 3]], ["a.ts", "2 files", [4]], ["a.ts", undefined, [5]],
+  ]);
+  assert.deepEqual(m.cards[1].rows[0], ["File", "a.ts, c.ts"]);
+});
+
+test("a hold on several files lists them, and its wire starts at the peer's edit of any of them", () => {
+  seq = 0;
+  const events = [anchor(), op(A, 2000, "b.ts"), Object.assign(held(B, A, 3000), { paths: ["a.ts", "b.ts"] }),
+    read(B, 3500, "b.ts"), op(B, 4000, "b.ts")];
+  const m = model(STATE, events);
+  assert.deepEqual(m.cards[1].rows[0], ["File", "a.ts, b.ts"]);
+  assert.equal(m.cards[2].title, "Read again");
+  assert.equal(m.cards[3].verb, "Saved after re-reading");
+  assert.deepEqual(m.wires, [{ kind: "held", label: "Held", from: "c0", from_lane: 0, to: "c1", seq: [3] }]);
+});
+
 test("readFeed reads until a page comes back empty, even after short pages", async () => {
   const pages = { 0: [1, 2], 2: [3], 3: [4, 5], 5: [] };
   const asked = [];

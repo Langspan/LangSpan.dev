@@ -5,7 +5,14 @@
 // wire is one held write. Paths and task lines are data, never interpreted.
 "use strict";
 var LangSpanLive = (function () {
-  const EDIT_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit", "apply_patch"]);
+  // Every adapter's file-changing tools; tests/live_view.rs checks this
+  // against the adapters' own lists.
+  const EDIT_TOOLS = new Set([
+    "Edit", "Write", "MultiEdit", "NotebookEdit", // Claude Code
+    "apply_patch", // Codex
+    "Delete", // Cursor, with Write
+    "edit_file", "write_to_file", "replace_file_content", "multi_replace_file_content", // Antigravity
+  ]);
   // The hero's `group_edits_within_s` and `idle_after_s`.
   const MERGE_MS = 20 * 1000;
   const IDLE_MS = 30 * 1000;
@@ -59,6 +66,7 @@ var LangSpanLive = (function () {
     const first = c.steps[0];
     const n = c.steps.length;
     const path = first.paths[0];
+    const all = first.paths.join(", ");
     const [t0, t1] = [time(first.at_ms), time(c.steps[n - 1].at_ms)];
     const span = n > 1 && t0 !== null ? t0 + "–" + t1 : t0;
     const out = { id, lane: c.lane, kind: c.kind, seq: c.steps.map((e) => e.seq), time: t0 };
@@ -66,8 +74,9 @@ var LangSpanLive = (function () {
     const set = (key, value) => value !== undefined && (out[key] = value);
     if (c.kind === "edit") {
       Object.assign(out, { verb: "Edited", code: path });
-      set("sub", n > 1 ? n + " edits" : undefined);
-      rows.push(["File", path]);
+      const sub = [n > 1 && n + " edits", first.paths.length > 1 && first.paths.length + " files"].filter(Boolean);
+      set("sub", sub.length ? sub.join(", ") : undefined);
+      rows.push(["File", all]);
       if (span !== null) rows.push(["Time", n > 1 ? span + ", " + n + " edits" : span]);
     } else if (c.kind === "read") {
       const files = [...new Set(c.steps.flatMap((e) => e.paths))];
@@ -84,12 +93,12 @@ var LangSpanLive = (function () {
     } else if (c.kind === "held") {
       const why = WHY[first.refusal] || "held by LangSpan";
       Object.assign(out, { verb: "Write held", code: path, sub: why, who: "LangSpan" });
-      rows.push(["File", path]);
+      rows.push(["File", all]);
       if (t0 !== null) rows.push(["Time", t0]);
       rows.push(["Why", why]);
     } else {
       Object.assign(out, { verb: c.reread ? "Saved after re-reading" : "Saved on retry", code: path });
-      rows.push(["File", path]);
+      rows.push(["File", all]);
       if (t0 !== null) rows.push(["Time", t0]);
       if (c.reread) rows.push(["Started from", "the current file"]);
     }
@@ -122,7 +131,7 @@ var LangSpanLive = (function () {
         open.push(new Map());
       }
       const l = lane.get(e.session_id);
-      const path = e.paths[0];
+      const files = e.paths.join("\n");
       const prev = last[l];
       let again = false;
       if (kind === "read") {
@@ -132,20 +141,21 @@ var LangSpanLive = (function () {
           again = true;
         }
       }
-      let hold = null;
-      if (kind === "edit" && open[l].has(path)) {
-        hold = open[l].get(path);
-        open[l].delete(path);
+      // An edit saves every hold on any of its files; it started from the
+      // current files only if each of those holds was re-read.
+      const holds = kind === "edit" ? e.paths.filter((p) => open[l].has(p)).map((p) => open[l].get(p)) : [];
+      if (holds.length) {
+        for (const p of e.paths) open[l].delete(p);
         kind = "saved";
       }
       const near = prev && prev.kind === kind && e.at_ms - prev.steps[prev.steps.length - 1].at_ms <= MERGE_MS;
-      if (near && (kind === "read" || (kind === "edit" && prev.steps[0].paths[0] === path))) {
+      if (near && (kind === "read" || (kind === "edit" && prev.steps[0].paths.join("\n") === files))) {
         prev.steps.push(e);
         prev.again = prev.again || again;
         continue;
       }
-      const run = { lane: l, kind, steps: [e], again, reread: hold ? hold.reread : false };
-      if (kind === "held" && path !== undefined) open[l].set(path, run);
+      const run = { lane: l, kind, steps: [e], again, reread: holds.length > 0 && holds.every((h) => h.reread) };
+      if (kind === "held") for (const p of e.paths) open[l].set(p, run);
       runs.push(run);
       last[l] = run;
     }
@@ -162,7 +172,7 @@ var LangSpanLive = (function () {
       const e = r.steps[0];
       if (r.kind !== "held" || !lane.has(e.peer_session_id)) return;
       const peer = lane.get(e.peer_session_id);
-      const changed = (x) => x.lane === peer && ["edit", "saved", "command"].includes(x.kind) && x.steps.some((s) => s.seq < e.seq && s.paths.includes(e.paths[0]));
+      const changed = (x) => x.lane === peer && ["edit", "saved", "command"].includes(x.kind) && x.steps.some((s) => s.seq < e.seq && s.paths.some((p) => e.paths.includes(p)));
       const from = runs.findLastIndex(changed);
       wires.push({ kind: "held", label: "Held", from: from < 0 ? null : cards[from].id, from_lane: peer, to: cards[i].id, seq: [e.seq] });
     });
