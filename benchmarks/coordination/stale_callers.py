@@ -144,7 +144,9 @@ def stale_callers(plan, transcripts, base, committed, changed):
     order, each still attributed to its own session, and the checkout is
     checked against that combined replay. There a file is the checkout's,
     not its writer's: a dependent's stale caller is fixed by whichever
-    session's admitted write leaves it in the new form."""
+    session's admitted write leaves it in the new form, and made stale again
+    by whichever session's write puts the old form back, though
+    `writes_admitted` counts only the dependents' writes."""
     changer = next((index for index, task in enumerate(plan["tasks"], 1) if task["role"] == "changer"), None)
     if plan["family"] != "discovered_change" or changer is None:
         return {"status": "not_applicable", "reason": "the family has no interface change"}
@@ -206,12 +208,18 @@ def stale_callers(plan, transcripts, base, committed, changed):
             now.add(file)
             item(index, file, change, "stale_at_change")
     ever |= now  # before a write that follows the change can fix one
+    owned = set(at_change)  # the files a dependent has written so far
     for ns, index, file, text in timeline:
         if ns < change:
             continue
+        if dependent(index):
+            owned.add(file)
         if stale(text, interface):
-            if dependent(index):
-                admitted += 1
+            # A peer's write can leave a dependent's file stale again; only
+            # a dependent's own write counts in `writes_admitted`.
+            if file in owned:
+                if dependent(index):
+                    admitted += 1
                 now.add(file)
                 item(index, file, ns, "stale_write")
         elif file in now:
