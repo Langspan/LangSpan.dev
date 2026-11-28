@@ -108,6 +108,20 @@ apply arm there.
   tests, `docs/tables/capabilities/reservations.txt` (generated ADR 0037
   table, from #486), and ratchet baselines of the other touched core files.
 
+## Changed during the second run (after merging main at 18f4354c)
+
+- The hook split (#501 and after) moved the `Briefing` test literals into
+  `src/hook/briefing_text.rs`, `src/hook/code_briefing_text.rs` and
+  `src/hook/placed_briefing.rs`, and the CLI option matrix's command forms
+  into `src/cli/run/option_table.rs`. Each needs a one-line addition (and
+  `briefing_text.rs` the hook render test), so they were added to the
+  reservation with their ratchet baselines.
+- `crates/langspan-core/src/lib.rs` was at the 1,500-line limit on main; the
+  new command adds 11 lines there. Its baseline is recorded with that reason
+  in the pull request.
+- The briefing line is rendered in `src/hook/render.rs`; it also shows in
+  `langspan brief`'s human output, pinned in the coordination transcript.
+
 ## Shared contracts touched
 
 `Command`, `Event`, `Outcome`, `Briefing`, `State` (one field each, additive),
