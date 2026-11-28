@@ -45,7 +45,8 @@ Every release has one, `store-0.1.0/` through `store-0.8.0/`; each was made
 by `scripts/golden-stores.sh VERSION`, which builds `langspan` from tag
 `vVERSION` with its lockfile and runs that tag's own demonstration with it.
 `every_release_has_a_golden_store_directory` fails for a changelog version
-without a directory.
+older than the current one without a directory; the release workflow opens
+the pull request that adds it (issue #566).
 Event types the demonstration does not produce (for example `scan_failed`,
 `message_sent`, `checkout_changed`) are not covered by these fixtures.
 Each store's events, folded by the core's `apply`, must also give the state

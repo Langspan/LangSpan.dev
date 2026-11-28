@@ -6,6 +6,9 @@ use langspan::protocol::{
 };
 use langspan_core::Command;
 
+#[path = "support/releases.rs"]
+mod releases;
+
 // V1 fixtures are archived parsing/replay vectors. Their continued readability
 // does not imply that the live V2 daemon accepts V1 IPC requests.
 #[test]
@@ -2838,137 +2841,102 @@ fn release_grant(version: u16, named: Option<&[&str]>) -> (Capabilities, Option<
     (Capabilities::negotiate(version, named.as_deref()), named)
 }
 
-/// The releases `changelog` names that are published. A release PR adds the
-/// heading of the version it creates and bumps `current` to it, so that
-/// heading is published only once `tagged` finds its tag; every other
-/// heading is a release that has been tagged (issue #518).
-fn published_releases<'a>(
-    changelog: &'a str,
-    current: &str,
-    tagged: impl Fn(&str) -> bool,
-) -> Vec<&'a str> {
-    changelog
-        .lines()
-        .filter_map(|line| line.strip_prefix("## ["))
-        .filter_map(|line| line.split(']').next())
-        .filter(|release| *release != current || tagged(release))
+/// The releases `changelog` names that need a frozen list: those older than
+/// `current`, the version this build carries (issue #566,
+/// `support/releases.rs`).
+fn published_releases<'a>(changelog: &'a str, current: &str) -> Vec<&'a str> {
+    changelog_headings(changelog)
+        .into_iter()
+        .filter(|release| releases::required(release, current))
         .collect()
 }
 
-/// The published releases of `changelog`, after checking that the parse
-/// found the eight bracketed headings the repository already has, so a
-/// change of heading format cannot leave the test checking nothing. The
-/// check counts every heading, published or not: a run without tags drops
-/// the version this build carries from the published list (issue #518).
-fn published_releases_checked<'a>(
-    changelog: &'a str,
-    current: &str,
-    tagged: impl Fn(&str) -> bool,
-) -> Vec<&'a str> {
-    let headings = published_releases(changelog, current, |_| true);
+/// Every bracketed `## [x.y.z]` heading of `changelog`, after checking that
+/// the parse found the eight the repository already has, so a change of
+/// heading format cannot leave the test checking nothing.
+fn changelog_headings(changelog: &str) -> Vec<&str> {
+    let headings: Vec<&str> = changelog
+        .lines()
+        .filter_map(|line| line.strip_prefix("## ["))
+        .filter_map(|line| line.split(']').next())
+        .collect();
     assert!(headings.len() >= 8, "{headings:?}");
-    published_releases(changelog, current, tagged)
+    headings
 }
 
-/// Whether the repository has the tag `v<release>`. A failing `git` fails
-/// the test: it never counts as untagged.
-fn has_release_tag(root: &std::path::Path, release: &str) -> bool {
-    let output = std::process::Command::new("git")
-        .args([
-            "--no-optional-locks",
-            "tag",
-            "--list",
-            &format!("v{release}"),
-        ])
-        .current_dir(root)
-        .output()
-        .unwrap_or_else(|error| panic!("cannot run git to list the tags: {error}; install git"));
-    assert!(
-        output.status.success(),
-        "git tag --list v{release} failed in {}: {}; run the test in a Git checkout",
-        root.display(),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    !output.stdout.trim_ascii().is_empty()
+fn changelog_of(versions: &[&str]) -> String {
+    versions
+        .iter()
+        .map(|version| format!("## [{version}](link) (2026-11-01)\n\n### Features\n\n"))
+        .collect()
 }
 
-const RELEASE_PR_CHANGELOG: &str = "# Changelog\n\n## [0.9.0](link) (2026-11-27)\n\n### Features\n\n## [0.8.0](link) (2026-11-01)\n";
-
-/// Issue #518: on a release PR the version is bumped and the changelog
-/// names it, but there is no tag yet, so it is not published; older
-/// headings are published without looking for their tags.
+/// A release PR bumps the version to 0.9.0 and adds its heading: 0.9.0 is
+/// not asked for a list, the older releases are.
 #[test]
-fn a_release_pr_version_without_its_tag_is_not_published() {
-    let published = published_releases(RELEASE_PR_CHANGELOG, "0.9.0", |_| false);
-    assert_eq!(published, ["0.8.0"]);
+fn a_release_pr_needs_no_list_for_the_version_it_creates() {
+    let older = [
+        "0.8.0", "0.7.0", "0.6.0", "0.5.1", "0.5.0", "0.4.0", "0.3.0",
+    ];
+    let changelog = changelog_of(&[&["0.9.0"], &older[..]].concat());
+    assert_eq!(published_releases(&changelog, "0.9.0"), older);
 }
 
-/// Issue #518: once the version being released is tagged it is published,
-/// so a tagged release without a frozen list still fails.
+/// Issue #566: publishing 0.9.0 tags main without changing it, so main and
+/// every pull request still carry 0.9.0 and still need no 0.9.0 list. The
+/// next release PR, at 0.10.0, needs it: 0.10.0 is newer than 0.9.0 by
+/// number, though not as text.
 #[test]
-fn a_tagged_release_is_published() {
-    let published = published_releases(RELEASE_PR_CHANGELOG, "0.9.0", |release| release == "0.9.0");
-    assert_eq!(published, ["0.9.0", "0.8.0"]);
+fn the_next_release_pr_needs_the_previous_release_list() {
+    let older = [
+        "0.9.0", "0.8.0", "0.7.0", "0.6.0", "0.5.1", "0.5.0", "0.4.0",
+    ];
+    let changelog = changelog_of(&[&["0.10.0"], &older[..]].concat());
+    assert_eq!(published_releases(&changelog, "0.10.0"), older);
 }
 
-/// A pull request run has no tags, so the version this build carries is
-/// not published. The repository's changelog still passes the parse check,
-/// and every other heading is published.
+/// Patch, minor and major releases compare by their numbers.
 #[test]
-fn a_tagless_run_of_the_repository_changelog_passes_the_parse_check() {
+fn releases_compare_by_number() {
+    assert!(releases::required("0.9.9", "0.10.0"));
+    assert!(releases::required("0.5.0", "0.5.1"));
+    assert!(releases::required("0.99.0", "1.0.0"));
+    assert!(!releases::required("0.9.0", "0.9.0"));
+    assert!(!releases::required("1.0.0", "0.10.0"));
+}
+
+/// The repository's changelog parses, and every heading but the version
+/// this build carries needs a list.
+#[test]
+fn the_repository_changelog_needs_every_list_but_the_current_one() {
     let changelog = include_str!("../CHANGELOG.md");
     let current = env!("CARGO_PKG_VERSION");
-    let published = published_releases_checked(changelog, current, |_| false);
-    let others: Vec<&str> = published_releases(changelog, current, |_| true)
+    let others: Vec<&str> = changelog_headings(changelog)
         .into_iter()
         .filter(|release| *release != current)
         .collect();
-    assert_eq!(published, others);
+    assert_eq!(published_releases(changelog, current), others);
 }
 
-/// With every tag present, the repository's changelog passes the parse
-/// check and every heading is published, the current version's too.
-#[test]
-fn a_tagged_run_of_the_repository_changelog_publishes_every_heading() {
-    let changelog = include_str!("../CHANGELOG.md");
-    let current = env!("CARGO_PKG_VERSION");
-    let published = published_releases_checked(changelog, current, |_| true);
-    assert!(published.contains(&current), "{published:?}");
-}
-
-/// The parse check counts the headings the changelog names, not the ones
-/// published, so a release PR's untagged version does not count against it.
-#[test]
-fn the_parse_check_does_not_count_the_untagged_version_against_it() {
-    let changelog: String = (1..=8)
-        .rev()
-        .map(|minor| format!("## [0.{minor}.0](link) (2026-11-01)\n\n"))
-        .collect();
-    let published = published_releases_checked(&changelog, "0.8.0", |_| false);
-    assert_eq!(published.len(), 7, "{published:?}");
-}
-
-/// Issue #331: every published release `CHANGELOG.md` names has a frozen
-/// list in `fixtures/event-types/` and a row in `RELEASES`, and every list
-/// has a row, so a release cannot ship without the test of its pages. The
-/// version this build carries counts once its `v` tag exists (issue #518):
-/// locally and in the merge queue, which fetches the tags; a pull request
-/// run has no tags and checks it from the next release on. This test runs
-/// `git` because what it checks is the repository's tags.
+/// Issue #331: every release `CHANGELOG.md` names that is older than this
+/// build has a frozen list in `fixtures/event-types/` and a row in
+/// `RELEASES`, and every list has a row, so a release cannot be followed by
+/// another without the test of its pages. The version this build carries
+/// is never asked for one (issue #566): publishing it changes no commit, so
+/// it turns no pull request red. The release workflow opens the pull request
+/// that adds the list, and the next release PR fails until it lands.
 #[test]
 fn every_published_release_has_a_frozen_list() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let rows: std::collections::BTreeSet<&str> = RELEASES.iter().map(|row| row.0).collect();
     let changelog = std::fs::read_to_string(root.join("CHANGELOG.md")).unwrap();
-    let published = published_releases_checked(&changelog, env!("CARGO_PKG_VERSION"), |release| {
-        has_release_tag(root, release)
-    });
-    for release in published {
+    for release in published_releases(&changelog, env!("CARGO_PKG_VERSION")) {
         assert!(
             root.join(format!("fixtures/event-types/{release}.txt"))
                 .is_file(),
-            "{release} is published and has no fixtures/event-types/{release}.txt: \
-             write the event types its tag reads there"
+            "{release} is published and has no fixtures/event-types/{release}.txt: merge the \
+             pull request the release workflow opened for it (docs/development-process.md, \
+             Releases)"
         );
         assert!(rows.contains(release), "{release}: add it to RELEASES");
     }
