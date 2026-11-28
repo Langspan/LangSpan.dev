@@ -38,6 +38,10 @@ impl From<&str> for Refused {
 
 const ALONE: &str = "run `git push` as a command of its own: no `&&`, `;`, `||`, pipe, subshell, `cd` or prefix such as `env`";
 
+/// How deep in substitutions within substitutions LangSpan reads; a push
+/// any deeper is refused.
+const MAX_NESTING: usize = 8;
+
 /// The `git push` that `command` runs; `None` when it runs none.
 pub(crate) fn git_push(command: &str) -> Result<Option<GitPush>, Refused> {
     // Without its line continuations, as Bash reads it: `git pu\⏎sh` pushes.
@@ -45,19 +49,36 @@ pub(crate) fn git_push(command: &str) -> Result<Option<GitPush>, Refused> {
     if !(joined.contains("git") && joined.contains("push")) {
         return Ok(None);
     }
+    read(command, &joined, 0)
+}
+
+fn read(command: &str, joined: &str, nesting: usize) -> Result<Option<GitPush>, Refused> {
     if command.len() > MAX_GIT_COMMAND_BYTES {
         return Err(
             format!("this command is longer than LangSpan reads and may push; {ALONE}").into(),
         );
     }
-    let segments = Lexer::new(command)
-        .segments()
+    let (segments, substituted) = Lexer::new(command)
+        .read()
         .map_err(|why| format!("LangSpan could not read this command ({why}); {ALONE}"))?;
+    // Issue #610: the shell runs a substitution before the command it is in,
+    // so a push there runs before any word below is read. Its text is read
+    // as a command of its own, with `g""it` and the like, so the cheap check
+    // in `git_push` is not repeated.
+    for text in &substituted {
+        let pushes = || !matches!(read(text, &text.replace("\\\n", ""), nesting + 1), Ok(None));
+        if nesting >= MAX_NESTING || pushes() {
+            return Err(format!(
+                "this command runs `git` and `push` inside a substitution (`$(…)`, a backquote, `<(…)` or an unquoted heredoc), or in an `eval` or `sh -c` there, which the shell runs before LangSpan could check where it pushes; {ALONE}"
+            )
+            .into());
+        }
+    }
     if !segments
         .iter()
         .any(|words| push_at(command_words(words)).is_some())
     {
-        if segments.iter().any(|words| unread(words, &joined)) {
+        if segments.iter().any(|words| unread(words, joined)) {
             return Err(format!(
                 "this command names `git` and `push` in a command that does not read as a Git command (a shell, `xargs` or a substitution, say), so it may push where LangSpan cannot check; {ALONE}"
             )
@@ -87,8 +108,8 @@ fn names_a_push(text: &str) -> bool {
 
 /// A command that may run a push LangSpan cannot read, in a `command` that
 /// names one: not a `git …` command, and with both words among its own, or
-/// with a substitution whose text the lexer does not keep (`$(git push)`,
-/// `bash -c 'git push'`). A `git …` command that is not a push is read.
+/// with an expansion whose value is not known (`bash -c 'git push'`,
+/// `sh -c "$CMD"`). A `git …` command that is not a push is read.
 fn unread(words: &[Word], command: &str) -> bool {
     let run = command_words(words);
     if run
@@ -254,8 +275,7 @@ mod tests {
             "xargs git push origin",
             "echo x | xargs /usr/bin/git push",
             "git status; nice git push origin main",
-            "$(git push origin main)",
-            "git status && echo `git push`",
+            "eval 'git push origin main'",
         ] {
             let why = git_push(command).unwrap_err().0;
             assert!(
@@ -272,6 +292,76 @@ mod tests {
         ] {
             assert_eq!(git_push(command), Ok(None), "{command}");
         }
+    }
+
+    /// Issue #610: a push in a substitution inside a `git …` command's own
+    /// words runs before the hook sees it. Each substitution's text is read
+    /// as a command of its own.
+    #[test]
+    fn a_push_hidden_in_a_substitution_is_refused() {
+        for command in [
+            "$(git push origin main)",
+            "git status && echo `git push`",
+            "git push origin feat <<EOF\n$(git push origin HEAD:main)\nEOF",
+            "git log -1 --format=\"$(git push origin HEAD:main)\"",
+            "git log -1 --format=`git push origin HEAD:main`",
+            "git log -1 --format=\"`git push origin HEAD:main`\"",
+            "git diff <(git push origin HEAD:main)",
+            "git diff --output >(git push origin HEAD:main)",
+            "git log --format=\"$(echo \"$(git push origin HEAD:main)\")\"",
+            "git log --format=\"$(eval 'git push origin HEAD:main')\"",
+            "git log --format=\"$(sh -c 'git push origin HEAD:main')\"",
+            "git log --format=\"$(bash -c 'git push origin HEAD:main')\"",
+            "git log --format=\"$(zsh -c 'git push origin HEAD:main')\"",
+            "git log --format=\"$(g\"\"it push origin HEAD:main)\"",
+            "git commit -F - <<EOF\n$(git push origin HEAD:main)\nEOF",
+            "git commit -F - <<EOF\n`git push origin HEAD:main`\nEOF",
+            // Review of PR #613: an unquoted heredoc body is not shell, so
+            // its quotes do not stop the substitutions in it.
+            "git commit -F - <<EOF\ngit log '$(git push origin HEAD:main)'\nEOF",
+            "git commit -F - <<EOF\nnote: '`git push origin HEAD:main`'\nEOF",
+            "git commit -F - <<EOF\n\"it's\" $'$(git push origin HEAD:main)'\nEOF",
+            "git commit -F - <<EOF\n# $(git push origin HEAD:main)\nEOF",
+            "git commit -F - <<EOF\n\\\\$(git push origin HEAD:main)\nEOF",
+            // A substitution in a parameter expansion's default runs too.
+            "git commit -F - <<EOF\n${x:-$(git push origin HEAD:main)}\nEOF",
+            "git log --format=\"${x:-$(git push origin HEAD:main)}\"",
+            "git log --format=${x:-`git push origin HEAD:main`}",
+            // Review of PR #613: Bash removes a backquote's escapes before
+            // it runs the text, and `\"` too inside double quotes.
+            "git log --format=`git log --format=\"\\$(git push origin main)\"`",
+            "git log --format=`echo \\`git push origin main\\``",
+            "git log --format=\"`g\\\"\\\"it push origin main`\"",
+            "git commit -F - <<EOF\n`git log --format=\"\\$(git push origin main)\"`\nEOF",
+            // Single quotes in a default are literal inside double quotes.
+            "git log --format=\"${x:-'`git push origin main`'}\"",
+            "git log --format=${x:-\"$(git push origin main)\"}",
+        ] {
+            let why = git_push(command).unwrap_err().0;
+            assert!(why.contains("inside a substitution"), "{command:?}: {why}");
+            assert!(why.contains("command of its own"), "{command:?}: {why}");
+        }
+        // Words only, in a quoted heredoc or a substitution that runs no push.
+        for command in [
+            "git commit -m \"$(cat <<'EOF'\nfix: refuse a hidden git push\nEOF\n)\"",
+            "git commit -F - <<'EOF'\nsee $(git push) in the docs\nEOF",
+            "git commit -F - <<EOF\nan escaped \\$(git push) and \\`git push\\` in $USER's note\nEOF",
+            "git commit -F - <<EOF\n'unbalanced \"quotes in $HOME: git push\nEOF",
+            "git log --format=\"$(git config user.name)\" --grep push",
+            // Review of PR #613: a single-quoted default outside double
+            // quotes is literal.
+            "git log --format=${x:-'`git push origin main`'}",
+            "git log --format=${x:-'$(git push origin main)'}",
+        ] {
+            assert_eq!(git_push(command), Ok(None), "{command:?}");
+        }
+        // Nested deeper than LangSpan reads: refused, not read.
+        let deep = format!(
+            "git log {}git push{}",
+            "$(echo ".repeat(MAX_NESTING + 1),
+            ")".repeat(MAX_NESTING + 1)
+        );
+        assert!(git_push(&deep).is_err());
     }
 
     #[test]

@@ -158,7 +158,9 @@ force with `+SRC:DST` and delete with `:DST`, and set anything else with
 The hook refuses a push it cannot check this way: one combined with another
 command (`git add -A && git push`), one with an expansion in its words, one
 with any other option, `--` or `git -c`, any other command that names `git`
-and `push` (`bash -c 'git push'`, `xargs git push`),
+and `push` (`bash -c 'git push'`, `xargs git push`), any command with a
+push in a substitution (`git log --format="$(git push)"`, a backquote,
+`<(…)` or an unquoted heredoc),
 one whose dry run fails, lists no refs or does not finish in the hook's
 time, and one that names no remote and goes to a URL that two remotes share
 once their logins are left out (`alice@host:repo.git`, `bob@host:repo.git`;

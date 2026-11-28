@@ -51,6 +51,9 @@ junit.path = "junit.xml"
 # in the merge queue, on main and nightly (the `ci` profile, no filter).
 # A test named `slow_…` is slow for a reason its comment states, and only
 # the full lane runs it (docs/development-process.md#slow-tests).
+# scripts/check.sh's fast lane builds only the targets this filter can
+# select, from scripts/ci-fast-targets.sh, which reads the binary_id names
+# below: keep each on one line in the form binary_id(langspan::NAME).
 [profile.ci-fast]
 inherits = "ci"
 default-filter = """

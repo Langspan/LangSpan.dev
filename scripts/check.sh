@@ -16,6 +16,10 @@
 # (`time:K/N`: shard K of N, by measured test time; scripts/ci-shards.py)
 # selects.
 #
+# `lint` runs only lint, the two clippy passes, and LANGSPAN_CHECK_LINT=false
+# skips them in the other lanes: CI's Linux lint job runs them beside the
+# Linux build job, which sets that, so neither waits for the other.
+#
 # LANGSPAN_CHECK_RELEASE=false skips the release build and the demonstration
 # on it. CI sets that except on the nightly run; nothing else reads the
 # release binary, and the release workflow builds its own.
@@ -35,8 +39,22 @@ case $portable in
     exit 2
     ;;
 esac
+lint=${LANGSPAN_CHECK_LINT:-true}
+case $lint in
+  true | false) ;;
+  *)
+    echo "check.sh: LANGSPAN_CHECK_LINT is '$lint'; set it to true or false" >&2
+    exit 2
+    ;;
+esac
 case $lane in
   full) ;;
+  lint)
+    if [ "$lint" = false ]; then
+      echo "check.sh: the lint lane runs only lint, which LANGSPAN_CHECK_LINT=false skips; unset one of them" >&2
+      exit 2
+    fi
+    ;;
   fast)
     : "${NEXTEST_PROFILE:=ci-fast}"
     export NEXTEST_PROFILE
@@ -50,7 +68,7 @@ case $lane in
     export LANGSPAN_TEST_STAGE
     ;;
   *)
-    echo "check.sh: LANGSPAN_CHECK_LANE is '$lane'; set it to fast, full, build or shard" >&2
+    echo "check.sh: LANGSPAN_CHECK_LANE is '$lane'; set it to fast, full, build, shard or lint" >&2
     exit 2
     ;;
 esac
@@ -101,6 +119,20 @@ if [ "$lane" = shard ]; then
   exit 0
 fi
 
+clippy() {
+  cargo clippy --workspace --all-targets --locked -- -D warnings
+  # Code outside tests returns an error instead of panicking (issue #330);
+  # tests may still unwrap, so this pass leaves them out.
+  cargo clippy --workspace --lib --bins --locked -- -D warnings \
+    -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic \
+    -D clippy::unreachable -D clippy::unimplemented
+}
+if [ "$lane" = lint ]; then
+  clippy
+  leftovers
+  exit 0
+fi
+
 if [ "$portable" = true ]; then
   cargo fmt --all -- --check
   cargo deny --locked check
@@ -119,12 +151,9 @@ if [ "$portable" = true ]; then
   fi
   cargo machete
 fi
-cargo clippy --workspace --all-targets --locked -- -D warnings
-# Code outside tests returns an error instead of panicking (issue #330);
-# tests may still unwrap, so this pass leaves them out.
-cargo clippy --workspace --lib --bins --locked -- -D warnings \
-  -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic \
-  -D clippy::unreachable -D clippy::unimplemented
+if [ "$lint" = true ]; then
+  clippy
+fi
 # A broken intra-doc link or any other rustdoc warning fails.
 if [ "$portable" = true ]; then
   RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --locked
@@ -132,8 +161,16 @@ fi
 # The suite under cargo-nextest, with HOME at a read-only home holding a
 # foreign LangSpan install, so no test can depend on the machine's own
 # (issue #108). The build lane only builds the suite into its archive here,
-# and runs the doc tests.
-sh scripts/test-foreign-home.sh
+# and runs the doc tests. The fast lane builds only the test targets its
+# filter can select (scripts/ci-fast-targets.sh).
+if [ "$lane" = fast ]; then
+  # An assignment, so the script's failure stops the check.
+  targets=$(sh scripts/ci-fast-targets.sh)
+  # shellcheck disable=SC2086 # one argument per line, none with a space
+  sh scripts/test-foreign-home.sh $targets
+else
+  sh scripts/test-foreign-home.sh
+fi
 if [ "$lane" = fast ]; then
   leftovers
   echo "check.sh: fast lane done; the other tests and the demonstration run in the merge queue"
