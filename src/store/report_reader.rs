@@ -1,7 +1,7 @@
 //! A report read on a connection of its own (issue #581), so a report of
 //! a long history never holds the state owner while an admission waits.
 
-use super::{Store, StoreResult};
+use super::{Store, StoreResult, wall_now_ms};
 use langspan_core::{Outcome, REPORT_HISTORY_EVENTS, TODAY_EVENTS};
 use rusqlite::{Connection, OpenFlags};
 use std::path::{Path, PathBuf};
@@ -30,18 +30,23 @@ impl ReportReader {
 
     /// The report the owner's [`Store::report`] would give, from one
     /// snapshot of the log. Refusals that need the state are the owner's,
-    /// asked first with `Store::report_refused`.
+    /// asked first with `Store::report_refused` at `asked_ms`. The window
+    /// ends once the snapshot is open, never before `asked_ms`: a report
+    /// that waited behind another reads the writes committed meanwhile,
+    /// and its counts and refusal outcomes must both include them.
     pub fn report(
         &mut self,
         workspace_id: &str,
         from_ms: u64,
-        wall_ms: u64,
+        asked_ms: u64,
     ) -> StoreResult<Outcome> {
         let read = self.connection.transaction()?;
+        // A deferred transaction takes its snapshot at its first read.
         let snapshot_seq: i64 =
             read.query_row("SELECT coalesce(max(seq), 0) FROM snapshots", [], |row| {
                 row.get(0)
             })?;
+        let wall_ms = asked_ms.max(wall_now_ms());
         pause_for_test(&self.path);
         Store::read_report(
             &read,

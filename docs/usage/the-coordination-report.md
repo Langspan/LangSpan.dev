@@ -111,6 +111,8 @@ with "coordination unavailable".
 
 The daemon reads a report on its own read-only connection, from one
 snapshot of the log, on a thread apart from the one that admits edits, so
-a report of a long history never delays an admission. Up to four reports
+a report of a long history never delays an admission. Its window ends
+when that snapshot is taken, so a report that waited for another includes
+the work done meanwhile. Up to four reports
 wait behind the one being read; one more is refused with `report_busy`
 ("ask again when they finish").
