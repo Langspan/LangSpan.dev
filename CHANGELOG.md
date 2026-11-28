@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.1](https://github.com/Langspan/LangSpan.dev/compare/v0.11.0...v0.11.1) (2026-11-28)
+
+
+### Performance
+
+* give the LangSpan arm its skill as system prompt text, not the Skill tool ([#624](https://github.com/Langspan/LangSpan.dev/issues/624)) ([#634](https://github.com/Langspan/LangSpan.dev/issues/634)) ([1289a43](https://github.com/Langspan/LangSpan.dev/commit/1289a43fcadca43ccee3ca16f9081bad75775424))
+
 ## [0.11.0](https://github.com/Langspan/LangSpan.dev/compare/v0.10.0...v0.11.0) (2026-11-28)
 
 
