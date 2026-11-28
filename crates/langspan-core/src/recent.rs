@@ -49,7 +49,6 @@ pub const MAX_PATH_REFUSALS: usize = 64;
 
 /// What changed recently in the asking session's repository.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct RecentChanges {
     /// How far back this looked, on the daemon's clock, within the current
     /// daemon run.
@@ -83,7 +82,6 @@ impl RecentChanges {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct ChangedPath {
     pub path: String,
     /// Distinct sessions that edited it within the window.
@@ -97,7 +95,6 @@ pub struct ChangedPath {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct RecentInterfaceChange {
     pub path: String,
     /// The session that last reported editing `path`: a correlation.
@@ -109,7 +106,6 @@ pub struct RecentInterfaceChange {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct ContestedPath {
     pub path: String,
     /// Writes or commits of it refused within the window.
@@ -119,7 +115,6 @@ pub struct ContestedPath {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct LeftUncommitted {
     pub session_id: String,
     /// Files it edited within the window, newest first: from the core every

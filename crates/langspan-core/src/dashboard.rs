@@ -66,7 +66,6 @@ impl AgentState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct RecentFile {
     pub path: String,
     /// Absent where no comparable time exists: a teammate's file, or one
@@ -76,7 +75,6 @@ pub struct RecentFile {
 
 /// One agent session, local or a teammate's.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct AgentRow {
     /// An opaque identity, stable across views: the same session on every
     /// row that shows it, and never shared by two sessions. Overlap
@@ -127,7 +125,6 @@ pub const ADOPTED_SHOWN: usize = 4;
 
 /// A file a local session holds a current admission for.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct EditRow {
     pub workspace_id: String,
     pub path: String,
@@ -139,7 +136,6 @@ pub struct EditRow {
 
 /// A file that two or more agents, local or remote, touched recently.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct OverlapRow {
     pub workspace_id: String,
     pub path: String,
@@ -163,7 +159,6 @@ pub struct OverlapRow {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct ChangeRow {
     pub name: String,
     pub kind: String,
@@ -171,7 +166,6 @@ pub struct ChangeRow {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct NoticeRow {
     pub workspace_id: String,
     pub path: String,
@@ -185,7 +179,6 @@ pub struct NoticeRow {
 
 /// One recorded refusal.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct DenialRow {
     pub session_id: String,
     pub paths: Vec<String>,
@@ -210,7 +203,6 @@ pub struct DenialRecord {
 /// Recent refusals, newest first, from the last `window` recorded events
 /// (stale-source refusals) and receipts (conflicts).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct Denials {
     pub conflicts: Vec<DenialRow>,
     pub more_conflicts: bool,
@@ -220,7 +212,6 @@ pub struct Denials {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct CheckRow {
     pub workspace_id: String,
     pub name: String,
@@ -236,7 +227,6 @@ pub struct CheckRow {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct LandingRow {
     pub workspace_id: String,
     pub onto: String,
@@ -248,7 +238,6 @@ pub struct LandingRow {
 
 /// One target's push turn: who holds it and who waits for it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct PushTurnRow {
     pub workspace_id: String,
     pub onto: String,
@@ -263,7 +252,6 @@ pub struct PushTurnRow {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct MessageRow {
     pub workspace_id: String,
     /// Absent for the owner.
@@ -278,7 +266,6 @@ pub struct MessageRow {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct NoteRow {
     pub workspace_id: String,
     pub author: Option<String>,
@@ -287,14 +274,12 @@ pub struct NoteRow {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct ScanRow {
     pub detail: String,
     pub age_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct PublishRow {
     pub remote: String,
     pub name: String,
@@ -306,7 +291,6 @@ pub struct PublishRow {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct WorkspaceRow {
     pub workspace_id: String,
     /// The overlap group, as on the agent rows. Absent from an older
@@ -328,7 +312,6 @@ pub struct WorkspaceRow {
 
 /// The whole view. Every list is bounded, with the number left out.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct Dashboard {
     pub generation: u64,
     /// Filled by the daemon.

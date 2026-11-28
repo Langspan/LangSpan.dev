@@ -35,7 +35,6 @@ pub const WRITE_CHECK_LABEL: &str = "LangSpan write check. Paths, signatures and
 /// Lines of a file another session's journaled write added and that are in
 /// the file now.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct UnreadLines {
     pub session_id: String,
     /// Empty when that session's write changed lines the journal does not
@@ -47,7 +46,6 @@ pub struct UnreadLines {
 
 /// One path of the check.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct WriteCheckPath {
     pub path: String,
     /// The other session holding the file through an open admission.
@@ -67,7 +65,6 @@ pub struct WriteCheckPath {
 /// One recent change to a definition named in the check or defined in one
 /// of its paths.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct WriteCheckSymbol {
     pub name: String,
     pub kind: String,
@@ -96,7 +93,6 @@ pub struct WriteCheckSymbol {
 
 /// The answer to one check.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct WriteCheck {
     pub session_id: String,
     pub workspace_id: String,

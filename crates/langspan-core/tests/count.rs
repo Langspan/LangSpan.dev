@@ -274,14 +274,16 @@ fn the_days_are_checked() {
 }
 
 #[test]
-fn the_answer_round_trips_and_refuses_unknown_fields() {
+fn the_answer_round_trips_and_ignores_unknown_fields() {
     let mut log = Log::new(MARCH_1);
     log.refused("s", RefusalKind::Conflict, &["a.rs"], HOUR);
     let count = log.count(&march());
     let json = serde_json::to_string(&count).unwrap();
     assert_eq!(serde_json::from_str::<RefusalCount>(&json).unwrap(), count);
+    // Only responses carry a count, so a later daemon's field is ignored
+    // (issue #414).
     let extra = json.replacen('{', r#"{"saved":1,"#, 1);
-    assert!(serde_json::from_str::<RefusalCount>(&extra).is_err());
+    assert_eq!(serde_json::from_str::<RefusalCount>(&extra).unwrap(), count);
 }
 
 #[test]

@@ -155,7 +155,6 @@ pub struct TestFailure {
 
 /// One line of `check flaky`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct FlakyTest {
     pub test: String,
     pub check_name: String,
