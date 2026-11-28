@@ -200,9 +200,9 @@ SHARED_PREAMBLE = (
 # push_contention in an arm with a checkout per session (issue #611).
 PUSH_PREAMBLE = (
     "You are session {index} of {total}. You work alone in your own checkout of a small Python package, on "
-    "branch `main`, while other sessions work at the same time in checkouts of their own and push to the same "
+    "branch `{branch}`, while other sessions work at the same time in checkouts of their own and push to the same "
     "`origin main`. Make the change below. Run the tests with `python3 -m unittest discover -s tests`. When you "
-    "are done, commit your work and push to `origin main`; if the push is rejected, fetch and merge `origin "
+    "are done, commit your work and push to `origin main`{push_with}; if the push is rejected, fetch and merge `origin "
     "main` and push again. No person will answer questions during this session.\n"
     "Task: {task}\n"
     "{details}\n\n"
@@ -242,12 +242,20 @@ def workspace_id(index):
     return "bench-s%d" % index
 
 
+def session_branch(arm, family, index):
+    """Session INDEX's branch: `main` in a clone that lands by pushing, and
+    its own otherwise; a worktree cannot check out `main` beside its peers."""
+    pushing = shared_checkout.lands_by_pushing(isolation(arm), family)
+    return "main" if pushing and isolation(arm) != "worktree" else branch(index)
+
+
 def prompt_for(arm, family, assigned, index):
     task = assigned[index - 1]
     pushing = shared_checkout.lands_by_pushing(isolation(arm), family)
     text = (SHARED_PREAMBLE if arm in SHARED_ARMS else PUSH_PREAMBLE if pushing else PREAMBLE).format(
-        index=index, total=len(assigned), branch=branch(index), task=task["task"], details=task["details"],
-        success=families.SUCCESS[family])
+        index=index, total=len(assigned), branch=session_branch(arm, family, index), task=task["task"],
+        details=task["details"], success=families.SUCCESS[family],
+        push_with=" with `git push origin HEAD:main`" if isolation(arm) == "worktree" else "")
     if arm == "awareness_only":
         peers = "\n".join("- Session %d (branch `%s`): %s %s" % (i, branch(i), peer["task"], peer["details"])
                           for i, peer in enumerate(assigned, 1) if i != index)
@@ -309,10 +317,6 @@ def make_plan(arm, family, sessions, seed, agent="standin", standin_mode=None, t
     if stagger and families.leader(assigned) is None:
         raise ValueError("--stagger needs a family with a task that changes an interface its peers use; "
                          "%s has none" % family)
-    if arm == "langspan" and family == "push_contention":
-        raise ValueError("the langspan arm does not run push_contention yet: its sessions would land through "
-                         "LangSpan's landing, which the stand-in does not drive (issue #611); use --arm shared, "
-                         "worktrees or awareness_only")
     return {
         "schema_version": SCHEMA_VERSION, "arm": arm, "family": family, "sessions": sessions, "seed": seed,
         "agent": agent, "standin_mode": (standin_mode or "follow") if agent == "standin" else None,
@@ -324,8 +328,7 @@ def make_plan(arm, family, sessions, seed, agent="standin", standin_mode=None, t
         "success": families.SUCCESS[family],
         "config_users": list(families.CONFIG_USERS),
         "tasks": assigned,
-        "branches": ["main" if shared_checkout.lands_by_pushing(isolation(arm), family) else branch(i)
-                     for i in range(1, sessions + 1)],
+        "branches": [session_branch(arm, family, i) for i in range(1, sessions + 1)],
         "prompts": [prompt_for(arm, family, assigned, i) for i in range(1, sessions + 1)],
     }
 
@@ -358,7 +361,19 @@ def repair_argv(executable, prompt, plan):
                        repair_denied_paths(plan["work"], plan["sessions"]))
 
 
-def claude_argv(executable, prompt, arm, model=None, denied_paths=(), push=False):
+def land_tools(plan):
+    """The landing command LangSpan's hook names when it routes a session's
+    push to `origin main` (src/hook/push_route.rs), allowed by its prefix:
+    the binary and state directory quoted as the hook quotes them. Only in
+    the LangSpan arm's sessions that land by pushing."""
+    if plan.get("arm") != "langspan" or not lands_by_pushing(plan) or not plan.get("langspan"):
+        return ()
+    quote = lambda text: "'%s'" % str(text).replace("'", "'\\''")  # noqa: E731
+    return ("Bash(%s --state-dir %s land:*)" % (quote(plan["langspan"]), quote(plan["state_dir"])),
+            "Bash(langspan land:*)")
+
+
+def claude_argv(executable, prompt, arm, model=None, denied_paths=(), push=False, land=()):
     """The exact Claude Code command line for one session. Permission
     prompts stay on (`--permission-mode default`), and nobody answers them
     (`--permission-prompts none`), so a call outside the allowed list is
@@ -366,7 +381,8 @@ def claude_argv(executable, prompt, arm, model=None, denied_paths=(), push=False
     --verbose. The tool and MCP options are the same in every arm but for
     LangSpan's own skill and commands. DENIED_PATHS are denied to every
     file tool (Claude Code's `//` marks an absolute path). A session that
-    lands by pushing (PUSH, or the shared arm) may push, pull, fetch and merge."""
+    lands by pushing (PUSH, or the shared arm) may push, pull, fetch and merge,
+    and run LAND, the rules of land_tools."""
     argv = [executable, "-p", prompt, "--permission-mode", "default", "--permission-prompts", "none",
             "--output-format", "stream-json", "--verbose", "--tools", ",".join(session_tools(arm)),
             "--strict-mcp-config", "--mcp-config", MCP_CONFIG, "--settings", MEMORY_SETTINGS]
@@ -374,7 +390,8 @@ def claude_argv(executable, prompt, arm, model=None, denied_paths=(), push=False
         argv += ["--model", model]
     paths = [rule % ("/" + str(path).lstrip("/")) for path in denied_paths for rule in ("Read(/%s/**)", "Edit(/%s/**)")]
     argv += ["--disallowedTools", *DENIED_TOOLS, *PEER_GIT_RULES, *paths]
-    tools = CLAUDE_TOOLS + (LANGSPAN_TOOLS if arm == "langspan" else ()) + (PUSH_TOOLS if push or arm in SHARED_ARMS else ())
+    tools = CLAUDE_TOOLS + (LANGSPAN_TOOLS if arm == "langspan" else ()) + (PUSH_TOOLS if push or arm in SHARED_ARMS else ()) \
+        + tuple(land)
     argv += ["--allowedTools", *tools]
     assert not set(argv) & set(FORBIDDEN_CLAUDE_FLAGS)
     return argv
@@ -541,7 +558,8 @@ def prepare_fixture(work, sessions, arm, family=None):
     branch, and the session's permission rules deny it (PEER_GIT_RULES),
     as they do in every arm. In `shared` every session uses WORK/trunk, a
     clone of the bare remote WORK/origin.git (shared_checkout.py). In
-    FAMILY push_contention each clone is one of that remote, on `main`.
+    FAMILY push_contention each clone is one of that remote, on `main`; in
+    `langspan` WORK/shared is, and each worktree pushes its branch to it.
     """
     repo = work / "repo"
     shutil.copytree(HERE / "fixture", repo, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
@@ -554,15 +572,21 @@ def prepare_fixture(work, sessions, arm, family=None):
         trunk, = shared_checkout.prepare(work, repo)
         exclude_claude(trunk)
         return repo, base, [trunk] * sessions
-    if shared_checkout.lands_by_pushing(isolation(arm), family):
+    pushing = shared_checkout.lands_by_pushing(isolation(arm), family)
+    if pushing and isolation(arm) != "worktree":
         checkouts = shared_checkout.prepare(work, repo, ["s%d" % index for index in range(1, sessions + 1)])
         for path in checkouts:
             exclude_claude(path)
         return repo, base, checkouts
     if isolation(arm) == "worktree":
         shared = work / "shared"
-        git("clone", "-q", "--no-hardlinks", str(repo), str(shared), cwd=work)
-        git("remote", "remove", "origin", cwd=shared)
+        if pushing:
+            # A clone of that remote, whose `origin/HEAD` names `main`, the
+            # default branch LangSpan's hook routes a push to landing for.
+            shared_checkout.prepare(work, repo, ["shared"])
+        else:
+            git("clone", "-q", "--no-hardlinks", str(repo), str(shared), cwd=work)
+            git("remote", "remove", "origin", cwd=shared)
         exclude_claude(shared)
         for index in range(1, sessions + 1):
             path = work / ("s%d" % index)
@@ -780,7 +804,7 @@ def session_main(plan_path, index):
     else:
         argv = claude_argv(os.environ.get(CLAUDE_BIN_ENV, "claude"), plan["prompts"][index - 1], plan["arm"],
                            plan.get("model"), peer_paths(plan["work"], plan["sessions"], index),
-                           push=lands_by_pushing(plan))
+                           push=lands_by_pushing(plan), land=land_tools(plan))
         argv[0] = shutil.which(argv[0], path=env["PATH"]) or argv[0]
     return guard_session(argv, env, session_tools(plan["arm"]), sys.stdout.buffer)
 
@@ -1856,7 +1880,7 @@ def build_record(plan, final, runner_dir, run_dir, events, started_at, total_ela
         hook_log = output / ("hooks-s%d.jsonl" % index)
         informed = (result.get("standin") or {}).get("informed") if result else None
         tasks.append({
-            "session": index, "task_id": task["id"], "role": task["role"], "branch": "main" if pushing else branch(index),
+            "session": index, "task_id": task["id"], "role": task["role"], "branch": session_branch(plan["arm"], plan["family"], index),
             "process_status": session["process_status"], "merged": bool(integration.get(index, {}).get("merged")),
             "completed": verdict.get("completed"), "accepted": verdict.get("accepted"),
             "detail": verdict.get("detail"), "stopped": session["stopped"], "asked_question": session["asked_question"],
@@ -2222,24 +2246,25 @@ def run(args):
         (output / "record.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
         return record
     work.mkdir(mode=0o700)
+    coordinator, state, events, final, error, run_dir = None, None, None, None, None, None
     if langspan:
         plan.update(langspan=str(langspan), langspan_sha256=sha256_file(langspan))
+        # One coordinator for the repository whose worktrees the sessions
+        # use. A Unix socket path holds about 100 bytes: keep it short.
+        state = Path(tempfile.mkdtemp(prefix="lsb-", dir="/tmp"))
+        plan["state_dir"] = str(state)
     if args.agent == "claude":
         # The exact command each session runs, with its prompt from `prompts`.
         plan["agent_commands"] = [
             claude_argv(os.environ.get(CLAUDE_BIN_ENV, "claude"), "<prompts[%d]>" % (index - 1), plan["arm"],
-                        plan["model"], peer_paths(work, plan["sessions"], index), push=lands_by_pushing(plan))
+                        plan["model"], peer_paths(work, plan["sessions"], index), push=lands_by_pushing(plan),
+                        land=land_tools(plan))
             for index in range(1, plan["sessions"] + 1)]
-    coordinator, state, events, final, error, run_dir = None, None, None, None, None, None
     coordinator_state = None
     try:
         repo, base, checkouts = prepare_fixture(work, plan["sessions"], plan["arm"], plan["family"])
         plan.update(repo=str(repo), base=base)
         if langspan:
-            # One coordinator for the repository whose worktrees the sessions
-            # use. A Unix socket path holds about 100 bytes: keep it short.
-            state = Path(tempfile.mkdtemp(prefix="lsb-", dir="/tmp"))
-            plan["state_dir"] = str(state)
             for index, checkout in enumerate(checkouts, 1):
                 install_hooks(langspan, state, index, checkout, output / ("hooks-s%d.jsonl" % index))
             install_skill(langspan, state, checkouts, work)

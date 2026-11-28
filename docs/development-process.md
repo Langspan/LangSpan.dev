@@ -616,6 +616,10 @@ Flow:
 - **CI feedback time:** the median and 90th percentile time from push to
   result for the fast lane on pull requests, against its 3-minute target,
   and for the full lane in the merge queue, against its 8-minute target.
+- **Person-touches per merged change:** the named people's merges, reviews,
+  comments, manual commits and `needs-owner` decisions, divided by merged
+  pull requests, by week, from
+  [`scripts/evidence-report.py`](usage/person-touches-per-merged-change.md).
 
 Quality:
 

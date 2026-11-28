@@ -83,12 +83,29 @@ In `shared` they share `work/trunk` as above; in `worktrees` and
 again after a rejection, with the same Git commands allowed. The combined
 result is what `origin main` holds. The stand-in tries at most as many
 pushes as there are sessions, at least three: each refusal means a peer
-landed, so that many always land. `matrix.py run --families push_contention
---arms shared worktrees` runs it live.
+landed, so that many always land. `matrix.py run --families push_contention`
+runs it live in the three compared arms, and `--arms shared worktrees
+langspan` picks others.
 
-Not built yet: the `langspan` arm with landing on, where a push to `main` is
-routed to `langspan land`. The stand-in does not drive landing, so the driver
-refuses `--arm langspan --family push_contention` with that reason.
+In `langspan` the sessions keep their worktrees of `work/shared`, which is a
+clone of `work/origin.git` here, each on its own branch `bench/sN`, and its
+prompt asks it to push with `git push origin HEAD:main`. With landing on
+([#576](https://github.com/Langspan/LangSpan.dev/pull/576)), LangSpan's hook
+refuses that push and names the landing command instead:
+`langspan land` with `--apply --rebase --check-again`, which rebases onto the
+current `origin main`, runs the check and pushes only on a pass. The
+stand-in runs its Bash calls through LangSpan's hooks as a host does, and
+when the push is routed it runs the named command with the package's tests
+as the check, again after a landing that did not land, at most as many
+times as there are sessions. A real session may run that command (the
+binary and state directory as the hook names them) and `langspan land`. A
+routed push never ran, so it is no push attempt; each `langspan land
+--apply` call is one, rejected when its result says the remote refused the
+push under each of its attempts (`moved under each of`, `refused the
+push`). The pushes a landing retries inside one call are not counted.
+Landing's push turn is per workspace, so the sessions' landings do not wait
+for each other; each fetches, combines and pushes again when `main` moved.
+MCP is off in every arm, so the MCP landing tool is not used.
 
 Not built yet: the `langspan_shared` arm (the same checkout with LangSpan's
 hooks). In one checkout every session has the same LangSpan workspace, and
