@@ -95,6 +95,32 @@ cat "$file" > "$out"
                 served = served.display()
             ),
         );
+        // A stand-in GitHub CLI, signed out unless the fixture writes a
+        // `gh-mode` of `verifies` or `rejects`, or `other-expired`: signed in
+        // to github.com, with another account's sign-in expired, so only a
+        // status check scoped to the active github.com account passes, as
+        // with the real gh. It needs the archive to exist. Like the real gh,
+        // it fails a verify without --hostname when GH_HOST is set.
+        write_executable(
+            &fixture.base.join("stubs/gh"),
+            r#"#!/bin/sh
+echo "$*" >> "$HOME/../gh.log"
+mode=$(cat "$HOME/../gh-mode" 2>/dev/null || echo signed-out)
+case " $* " in " attestation "*" --hostname github.com "*) ;; " attestation "*)
+	[ -n "$GH_HOST" ] && { echo "An unsupported host was detected." >&2; exit 1; } ;;
+esac
+case "$1 $mode" in
+"auth signed-out") echo "You are not logged into any GitHub hosts." >&2; exit 1 ;;
+"auth other-expired")
+	[ "$*" = "auth status --active --hostname github.com" ] && exit 0
+	echo "X Failed to log in to github.example.com account old-login" >&2; exit 1 ;;
+"auth "*) exit 0 ;;
+"attestation verifies" | "attestation other-expired") [ -f "$3" ] && echo "Verification succeeded!" ;;
+"attestation "*) echo "stub gh: no attestation matched" >&2; exit 1 ;;
+*) exit 2 ;;
+esac
+"#,
+        );
         write_executable(
             &fixture.base.join("stubs/uname"),
             "#!/bin/sh\ncase \"$1\" in -s) echo \"$FAKE_OS\" ;; -m) echo \"$FAKE_ARCH\" ;; esac\n",
@@ -155,7 +181,12 @@ cat "$file" > "$out"
     }
 
     fn run_args_path(&self, os: &str, arch: &str, args: &[&str], path: &str) -> Output {
-        Command::new("/bin/sh")
+        self.command(os, arch, args, path).output().unwrap()
+    }
+
+    fn command(&self, os: &str, arch: &str, args: &[&str], path: &str) -> Command {
+        let mut command = Command::new("/bin/sh");
+        command
             .arg(repo("scripts/install.sh"))
             .args(args)
             .env_clear()
@@ -164,9 +195,16 @@ cat "$file" > "$out"
             .env("PATH", path)
             .env("TMPDIR", self.base.join("tmp"))
             .env("FAKE_OS", os)
-            .env("FAKE_ARCH", arch)
-            .output()
-            .unwrap()
+            .env("FAKE_ARCH", arch);
+        command
+    }
+
+    fn gh_calls(&self) -> Vec<String> {
+        fs::read_to_string(self.base.join("gh.log"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
     }
 
     fn installed(&self) -> String {
@@ -291,6 +329,177 @@ fn a_checksum_mismatch_installs_nothing() {
     let output = fixture.run("Linux", "x86_64", &[], false);
     fixture.assert_nothing_changed(&output, "does not match SHA256SUMS; nothing was installed");
     assert!(String::from_utf8_lossy(&output.stderr).contains("Run the installer again"));
+}
+
+const SIGNER: &str = "Langspan/LangSpan.dev/.github/workflows/release.yml";
+
+#[test]
+fn a_signed_in_gh_verifies_the_archive_before_it_is_installed() {
+    let fixture = Fixture::new("gh-verifies");
+    fs::write(fixture.base.join("gh-mode"), "verifies").unwrap();
+    let output = fixture.run("Linux", "x86_64", &[], false);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let calls = fixture.gh_calls();
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert_eq!(calls[0], "auth status --active --hostname github.com");
+    // The downloaded copy in the script's temporary folder (macOS's mktemp
+    // ignores TMPDIR, so only its absolute path and name are checked).
+    let verify = &calls[1];
+    assert!(verify.starts_with("attestation verify /"), "{verify}");
+    assert!(
+        verify.ends_with(&format!(
+            "/langspan-v9.9.9-x86_64-unknown-linux-gnu.tar.gz -R Langspan/LangSpan.dev --signer-workflow {SIGNER} --hostname github.com"
+        )),
+        "{verify}"
+    );
+    assert!(
+        stdout.contains(&format!(
+            "Provenance verified by gh attestation verify: built by {SIGNER}"
+        )),
+        "{stdout}"
+    );
+    let digest = sha256(&fixture.release("latest/langspan-v9.9.9-x86_64-unknown-linux-gnu.tar.gz"));
+    assert!(
+        stdout.contains(&format!("SHA-256 matches SHA256SUMS: {digest}")),
+        "{stdout}"
+    );
+    fixture.assert_clean();
+}
+
+#[test]
+fn another_accounts_expired_sign_in_does_not_skip_the_check() {
+    let fixture = Fixture::new("gh-other-expired");
+    fs::write(fixture.base.join("gh-mode"), "other-expired").unwrap();
+    let output = fixture.run("Linux", "x86_64", &[], false);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let calls = fixture.gh_calls();
+    assert_eq!(calls.len(), 2, "the attestation is checked: {calls:?}");
+    assert!(calls[1].starts_with("attestation verify /"), "{calls:?}");
+    assert!(
+        stdout.contains(&format!(
+            "Provenance verified by gh attestation verify: built by {SIGNER}"
+        )),
+        "{stdout}"
+    );
+    fixture.assert_clean();
+}
+
+#[test]
+fn an_enterprise_gh_host_does_not_redirect_the_check() {
+    let fixture = Fixture::new("gh-enterprise-host");
+    fs::write(fixture.base.join("gh-mode"), "verifies").unwrap();
+    let path = format!("{}:/usr/bin:/bin", fixture.base.join("stubs").display());
+    let output = fixture
+        .command("Linux", "x86_64", &[], &path)
+        .env("GH_HOST", "enterprise.example.com")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains(&format!(
+            "Provenance verified by gh attestation verify: built by {SIGNER}"
+        )),
+        "{stdout}"
+    );
+    fixture.assert_clean();
+}
+
+#[test]
+fn an_attestation_gh_rejects_installs_nothing() {
+    let fixture = Fixture::new("gh-rejects");
+    fs::write(fixture.base.join("gh-mode"), "rejects").unwrap();
+    let output = fixture.run("Linux", "x86_64", &[], false);
+    fixture.assert_nothing_changed(
+        &output,
+        &format!("gh attestation verify did not confirm that {SIGNER} built langspan-v9.9.9-x86_64-unknown-linux-gnu.tar.gz; nothing was installed."),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("stub gh: no attestation matched"),
+        "gh's reason is shown: {stderr}"
+    );
+    assert!(stderr.contains("update it"), "{stderr}");
+}
+
+#[test]
+fn without_a_signed_in_gh_the_install_says_provenance_was_not_checked() {
+    let fixture = Fixture::new("gh-signed-out");
+    let output = fixture.run("Linux", "x86_64", &[], false);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert_eq!(
+        fixture.gh_calls(),
+        ["auth status --active --hostname github.com"],
+        "no verify when signed out"
+    );
+    assert!(
+        stdout.contains("Provenance not checked: gh is not signed in to github.com, or is older than 2.49 (run gh auth login, or update gh)"),
+        "{stdout}"
+    );
+
+    // No gh on PATH at all: a folder of links to the tools the script and
+    // the stand-ins use, so a gh in /usr/bin isn't found either.
+    let fixture = Fixture::new("gh-absent");
+    let tools = fixture.base.join("no-gh");
+    fs::create_dir_all(&tools).unwrap();
+    for stub in ["curl", "uname"] {
+        std::os::unix::fs::symlink(fixture.base.join("stubs").join(stub), tools.join(stub))
+            .unwrap();
+    }
+    for tool in [
+        "awk",
+        "tar",
+        "gzip",
+        "mktemp",
+        "dirname",
+        "basename",
+        "sha256sum",
+        "shasum",
+        "rm",
+        "mkdir",
+        "cp",
+        "chmod",
+        "mv",
+        "cat",
+        "head",
+        "sleep",
+    ] {
+        if let Some(found) = ["/usr/bin", "/bin"]
+            .iter()
+            .map(|dir| Path::new(dir).join(tool))
+            .find(|path| path.exists())
+        {
+            std::os::unix::fs::symlink(found, tools.join(tool)).unwrap();
+        }
+    }
+    let output = fixture.run_with_path("Linux", "x86_64", &tools.display().to_string());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(fixture.gh_calls().is_empty());
+    assert!(
+        stdout.contains("Provenance not checked: the GitHub CLI (gh) is not installed"),
+        "{stdout}"
+    );
+    fixture.assert_clean();
 }
 
 #[test]

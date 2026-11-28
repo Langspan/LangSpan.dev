@@ -821,6 +821,12 @@ fn inflight_mentioned(
                     langspan_core::INFLIGHT_MENTIONS,
                 )?);
             }
+            // The session's copy of the changed file itself: a new caller
+            // reads the definition before its own file mentions the name
+            // (issue #194).
+            if among.is_some_and(|among| among.contains(&path)) {
+                mentioned_in.insert(path.clone());
+            }
             let mentioned_in: Vec<String> = mentioned_in
                 .into_iter()
                 .take(langspan_core::INFLIGHT_MENTIONS)

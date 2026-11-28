@@ -137,9 +137,27 @@ pub fn authority(command: &Command) -> Authority {
     }
 }
 
+/// What an owner-grant command does with the owner's authority, for the
+/// refusal that tells the owner how to allow it; `None` for coordination.
+pub fn owner_grant_effect(command: &Command) -> Option<&'static str> {
+    if authority(command) != Authority::OwnerGrant {
+        return None;
+    }
+    Some(match command {
+        Command::AutoCheckEnable { .. } => "runs a program after a session's writes",
+        Command::RemoteEnable { .. } => "sends work metadata to a remote",
+        Command::GraphExport { .. } => "writes a file at the path it names",
+        Command::GraphImport { .. } => "reads a file at the path it names",
+        Command::SetPolicy { .. } => "changes the policy every session's admission meets",
+        Command::WorkspaceRemove { .. } => "ends a workspace's sessions, notes and messages",
+        Command::Compact { .. } => "deletes events and receipts",
+        _ => "acts with the owner's authority",
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::{Authority, Command, authority};
+    use crate::{Authority, Command, authority, owner_grant_effect};
 
     fn command(json: &str) -> Command {
         serde_json::from_str(json).unwrap_or_else(|error| panic!("{json}: {error}"))
@@ -157,8 +175,14 @@ mod tests {
             r#"{"op":"compact","keep_days":30}"#,
         ] {
             assert_eq!(authority(&command(json)), Authority::OwnerGrant, "{json}");
+            let effect = owner_grant_effect(&command(json));
+            assert!(
+                effect.is_some_and(|effect| effect != "acts with the owner's authority"),
+                "{json}: {effect:?}"
+            );
         }
         assert_eq!(authority(&Command::Status), Authority::Coordination);
+        assert_eq!(owner_grant_effect(&Command::Status), None);
         let disable = Command::AutoCheckDisable {
             workspace_id: "w".into(),
         };

@@ -45,7 +45,8 @@ Every release has one, `store-0.1.0/` through `store-0.8.0/`; each was made
 by `scripts/golden-stores.sh VERSION`, which builds `langspan` from tag
 `vVERSION` with its lockfile and runs that tag's own demonstration with it.
 `every_release_has_a_golden_store_directory` fails for a changelog version
-without a directory.
+older than the current one without a directory; the release workflow opens
+the pull request that adds it (issue #566).
 Event types the demonstration does not produce (for example `scan_failed`,
 `message_sent`, `checkout_changed`) are not covered by these fixtures.
 Each store's events, folded by the core's `apply`, must also give the state
@@ -75,8 +76,10 @@ not know in a response, in its outcome and in the 43 objects of the core's
 `lib.rs` that only responses carry (a briefing, a recap, the graph and
 impact reads, and the like), and names `tolerant_responses` to say so
 ([ADR 0037](0037-protocol-capabilities.md)). The response objects of the
-core's other modules (a report, `today`, a recall, a definition's history,
-and the like) are still strict; they follow in a later change.
+core's other modules followed (issue #414): the dashboard, a report,
+`today`, a count, a definition's history, a recall, the workspace list, a
+write check, the recent changes a briefing carries, the status line, a
+policy row, a trail as listed, a flaky test and a `status --all` record.
 No wire-only mirror type is added: those core types simply no longer carry
 `deny_unknown_fields`. What stays strict:
 
@@ -85,6 +88,12 @@ No wire-only mirror type is added: those core types simply no longer carry
   derived state carries, including in a response, since the same types are
   stored. A response holding one of them with a field this build lacks still
   fails to read.
+
+Tests (`tests/tolerant_responses.rs`): every response vector, with a field
+added to each of its objects in turn, still reads, except at the places its
+list of stored objects names; a type made strict or tolerant without
+changing that list fails it. Every request and event vector rejects a field
+added at any level.
 
 When an addition needs what:
 

@@ -26,8 +26,9 @@ The script does the following:
 1. Finds your target from `uname -sm`. On another platform it stops and points to [Build from source](#build-from-source).
 2. Downloads `SHA256SUMS` and your target's archive over HTTPS.
 3. Checks the archive's SHA-256 against `SHA256SUMS` before it extracts anything.
-4. Copies `langspan` to `~/.local/bin`. It doesn't use root or change your shell startup files.
-5. Prints the next steps: add `~/.local/bin` to `PATH` if it isn't there, or put it first if an earlier `langspan` elsewhere on `PATH` would run instead (the script names that file), run `langspan setup`, then run `langspan demo`.
+4. If the [GitHub CLI](https://cli.github.com/) is installed and signed in to github.com, runs `gh attestation verify` on the archive for this repository's `release.yml` ([verify where the archive was built](#verify-a-download)); a failed check installs nothing. gh uses its own sign-in, which the script doesn't read. Only the active github.com account counts, so another account's expired sign-in doesn't skip the check. Without gh, signed out, or with gh older than 2.49, the script says the check was skipped.
+5. Copies `langspan` to `~/.local/bin`. It doesn't use root or change your shell startup files.
+6. Prints what it downloaded, the checksum and provenance results and where it installed `langspan`, then the next steps: add `~/.local/bin` to `PATH` if it isn't there, or put it first if an earlier `langspan` elsewhere on `PATH` would run instead (the script names that file), run `langspan setup`, then run `langspan demo`.
 
 The script doesn't run `langspan setup` itself. A failed download, a checksum that doesn't match or an unknown platform stops it with a message that says what failed and what to do; nothing is installed. Each release attaches the script as `install.sh`, and `SHA256SUMS` lists it.
 

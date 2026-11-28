@@ -54,13 +54,17 @@ connection whose effective user isn't its own, or whose user it can't read,
 logging `peer_refused`. The owner-only directory already keeps other users out;
 this holds if that directory is ever opened.
 
-**An owner grant needs the owner's setting** (proposed, not yet in force:
-[issue #427](https://github.com/Langspan/LangSpan.dev/issues/427) waits on the
-owner's decision; until then no command's behavior changes). The coordinator
-carries one out only while `"owner_grants": true` is in `config.json` in the
-state directory, read again for each owner-grant request, so the owner turns it
-on and off without a restart. Otherwise it refuses with an error that names the
-setting. The setting is not on the wire, in a hook or in an MCP tool: a
+**An owner grant needs the owner's setting** (in force since
+[issue #335](https://github.com/Langspan/LangSpan.dev/issues/335), the owner's
+choice of this mechanism). The coordinator carries one out only while
+`"owner_grants": true` is in `config.json` in the state directory, read again
+for each owner-grant request before it is queued, so the owner turns it on and
+off without a restart. Otherwise, or when the file can't be read or isn't
+valid, it refuses with the error `owner_grant_off`, which says what the command
+does and names the setting, and logs `owner_grant_refused` with the request ID
+on stderr. A refusal records no event or receipt, so the owner retries with the
+same request ID. The error is an ordinary error reply, so no protocol version
+changes. The setting is not on the wire, in a hook or in an MCP tool: a
 confined caller that can reach the socket but can't write the state directory
 can't turn it on. Confirmation on a terminal was the other choice; the
 coordinator can't tell whether its client has a person at a terminal, so it
@@ -89,3 +93,8 @@ would be the client's own claim.
   unconfined processes.
 - Which host sandboxes can reach the socket is open evidence in the
   [threat model](../security/threat-model.md).
+- `tests/owner_grants.rs` sends every owner grant's command vector to a real
+  coordinator as a plain socket client: refused without the setting, carried
+  through with it, refused again once it is off. A new owner grant is tried
+  through its vector, and the test fails until its list, like this ADR's table
+  and the usage page, names it.

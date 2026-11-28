@@ -230,6 +230,29 @@ pub fn settles<T: PartialEq + std::fmt::Debug>(
     }
 }
 
+/// Sets `"owner_grants"` to `on` in `state_dir/config.json`, keeping its
+/// other keys, as the owner does around an owner-grant command (issue #335).
+/// The coordinator reads it again for each one, so this works while it runs.
+#[allow(dead_code)]
+pub fn owner_grants(state_dir: &std::path::Path, on: bool) {
+    use std::os::unix::fs::OpenOptionsExt;
+    let path = state_dir.join("config.json");
+    let mut config = match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap(),
+        Err(_) => serde_json::json!({}),
+    };
+    config["owner_grants"] = serde_json::Value::Bool(on);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&path)
+        .unwrap()
+        .write_all(config.to_string().as_bytes())
+        .unwrap();
+}
+
 /// Waits up to 10 s for the coordinator at `state_dir` to answer a status
 /// request. A socket file alone isn't enough: a killed coordinator leaves
 /// one behind.
@@ -246,6 +269,76 @@ pub fn daemon_ready(state_dir: &std::path::Path) {
                 .map_err(|error| error.to_string())
         },
     );
+}
+
+/// Runs `git -C root ARGS` as user `t`, without the machine's system or
+/// global Git configuration, and returns its stdout. Fails the test, with
+/// Git's output, unless it succeeds.
+#[allow(dead_code)]
+#[track_caller]
+pub fn git(root: &std::path::Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+        .args(args)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "git {args:?}: {output:?}");
+    String::from_utf8(output.stdout).unwrap()
+}
+
+/// Starts `langspan daemon` for `state_dir` with autostart off and its
+/// output discarded, and returns it once it answers a status request. It is
+/// killed when dropped.
+#[allow(dead_code)]
+#[track_caller]
+pub fn coordinator(state_dir: &std::path::Path) -> Owned {
+    let daemon = Owned::spawn(
+        std::process::Command::new(env!("CARGO_BIN_EXE_langspan"))
+            .env("LANGSPAN_AUTOSTART", "off")
+            .args(["daemon", "--state-dir"])
+            .arg(state_dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    );
+    daemon_ready(state_dir);
+    daemon
+}
+
+/// Runs one `langspan hook VENDOR --state-dir STATE --workspace WORKSPACE
+/// --root ROOT EXTRA` with autostart off and `event` as JSON on stdin, and
+/// returns its exit status, stdout and stderr.
+#[allow(dead_code)]
+pub fn hook_call(
+    state_dir: &std::path::Path,
+    vendor: &str,
+    workspace: &str,
+    root: &std::path::Path,
+    extra: &[&str],
+    event: &serde_json::Value,
+) -> std::process::Output {
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_langspan"))
+        .env("LANGSPAN_AUTOSTART", "off")
+        .args(["hook", vendor, "--state-dir"])
+        .arg(state_dir)
+        .args(["--workspace", workspace, "--root"])
+        .arg(root)
+        .args(extra)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(event.to_string().as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
 }
 
 /// Waits up to 30 s for the coordinator at `state_dir` to record an event

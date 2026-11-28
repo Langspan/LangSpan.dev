@@ -3,12 +3,15 @@
 //! Git repository, with each command really run between its two hook calls
 //! (ADR 0011).
 
+mod support;
+use support::git;
+
 use serde_json::{Value, json};
 use std::{
     fs,
     io::Write,
     os::unix::fs::PermissionsExt,
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::{Child, Command as Process, Stdio},
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
@@ -30,18 +33,6 @@ struct Run {
     detail: String,
     reason: Option<String>,
     context: Option<String>,
-}
-
-fn git(root: &Path, arguments: &[&str]) {
-    let output = Process::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(arguments)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "git {arguments:?}: {output:?}");
 }
 
 impl Fixture {

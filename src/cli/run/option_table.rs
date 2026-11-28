@@ -13,7 +13,27 @@ pub(crate) fn normalized(text: &str, dir: &Path) -> String {
     for form in [std::fs::canonicalize(dir).unwrap(), dir.to_path_buf()] {
         text = text.replace(form.to_str().unwrap(), "$TMP");
     }
-    text
+    git_reason_hidden(&text)
+}
+
+/// `text` with the reason Git gives after "not a git repository" written
+/// `{reason}`. Git names the parent directories, or, when the temporary
+/// directory is on its own filesystem, the mount point it stopped at, so the
+/// reason depends on the machine. It runs to the end of the JSON string or
+/// line it is in.
+fn git_reason_hidden(text: &str) -> String {
+    const SAID: &str = "not a git repository";
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(at) = rest.find(SAID) {
+        let (before, after) = rest.split_at(at + SAID.len());
+        out.push_str(before);
+        let end = after.find(['"', '\n']).unwrap_or(after.len());
+        out.push_str(" {reason}");
+        rest = &after[end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Each command form in the help, as a complete command line: a mutation
@@ -317,4 +337,21 @@ pub(crate) fn table(results: &[String]) -> String {
         }
     }
     text
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn git_reason_is_the_same_on_every_filesystem() {
+        let shown = r#"Git said: fatal: not a git repository {reason}"}"#;
+        for reason in [
+            " (or any of the parent directories): .git",
+            " (or any parent up to mount point /) | Stopping at filesystem boundary \
+             (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).",
+        ] {
+            let text = format!(r#"Git said: fatal: not a git repository{reason}"}}"#);
+            assert_eq!(super::git_reason_hidden(&text), shown);
+        }
+        assert_eq!(super::git_reason_hidden("no git here\n"), "no git here\n");
+    }
 }

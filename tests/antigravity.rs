@@ -4,6 +4,9 @@
 //! `fixtures/antigravity-constructed`: built from Antigravity's documentation,
 //! not captured from an Antigravity run (see their README).
 
+mod support;
+use support::git;
+
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -40,18 +43,6 @@ struct Run {
     coverage: String,
     stdout: String,
     reply: Value,
-}
-
-fn git(root: &Path, arguments: &[&str]) {
-    let output = Process::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(arguments)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "git {arguments:?}: {output:?}");
 }
 
 /// An event captured from Antigravity 1.5.14, with its root replaced by

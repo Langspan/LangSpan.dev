@@ -21,8 +21,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[allow(dead_code)] // Only `running` is used here.
+#[allow(dead_code)] // Only `running` and `git` are used here.
 mod support;
+use support::git;
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 const ALICE: &str = "00000000-0000-4000-8000-0000000000a1";
@@ -50,26 +51,6 @@ impl Run {
     }
 }
 
-fn git(root: &Path, args: &[&str]) {
-    let output = Process::new("git")
-        .arg("-C")
-        .arg(root)
-        .args([
-            "-c",
-            "user.name=Dev",
-            "-c",
-            "user.email=dev@example.invalid",
-        ])
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
 impl Fixture {
     /// A checkout with one commit and a daemon that waits `debounce_ms`
     /// after a session's last batch of writes before it starts the check.
@@ -82,7 +63,9 @@ impl Fixture {
     }
     /// As `with_config`, with a debug build's idle limit in milliseconds
     /// (`LANGSPAN_TEST_IDLE_EXIT_MS`) and the daemon's log in `daemon.log`.
-    fn with_idle_exit(config_json: Value, idle_ms: Option<u64>) -> Self {
+    fn with_idle_exit(mut config_json: Value, idle_ms: Option<u64>) -> Self {
+        // Turning a check on is an owner grant: allowed as its owner would.
+        config_json["owner_grants"] = json!(true);
         let base = fs::canonicalize(std::env::temp_dir())
             .unwrap()
             .join(format!(

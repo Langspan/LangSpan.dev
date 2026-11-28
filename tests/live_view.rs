@@ -1,7 +1,9 @@
-//! The Live view's model, `src/dashboard-live.js` (issue #491), is tested
-//! by `tests/live-view-model.test.mjs` under `node --test`. This spawns a
-//! process only because node is the one runner for the page's script; the
-//! model itself is pure, with no DOM, clock or network.
+//! The Live view's model, `src/dashboard-live.js`, and its renderer's pure
+//! part, `src/dashboard-live-view.js` (issue #491), are tested by
+//! `tests/live-view-model.test.mjs` and `tests/live-view-render.test.mjs`
+//! under `node --test`. This spawns a process only because node is the one
+//! runner for the page's scripts; what they test is pure, with no DOM,
+//! clock or network.
 
 use std::path::Path;
 use std::process::Command;
@@ -48,6 +50,7 @@ fn the_live_view_model_passes_its_node_tests() {
     let out = Command::new("node")
         .arg("--test")
         .arg(root.join("tests/live-view-model.test.mjs"))
+        .arg(root.join("tests/live-view-render.test.mjs"))
         .current_dir(root)
         .output()
         .unwrap();

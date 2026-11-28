@@ -44,7 +44,11 @@ hunks and followed file renames ([ADR 0007](adr/0007-check-evidence-integration-
 the source index; notes, messages and handoffs; user-level installation;
 partial [shell-write coverage](adr/0011-shell-writes.md);
 [region admission](adr/0012-region-admission.md); the read-only
-[dashboard](adr/0013-dashboard.md); the [observation spool](adr/0014-observation-spool.md);
+[dashboard](adr/0013-dashboard.md), with its Live view (issue #491: the
+homepage hero's renderer drawing `/api/events`, geometry-tested under
+`node --test` and served by a real coordinator in `tests/dashboard.rs`; no
+browser capture retained yet, [evidence](evidence/dashboard-live/README.md));
+the [observation spool](adr/0014-observation-spool.md);
 [version tolerance](adr/0015-version-tolerance.md); the
 [release pipeline](adr/0031-releases.md); the
 [LangSpan skill](adr/0034-langspan-skill.md) (`install --skill`, off by
@@ -365,6 +369,21 @@ between check and landing, two concurrent landings, a target moved by a
 teammate's push during the owner's push (refused without a new check, landed
 with `--check-again`), a hook refusal that is not retried, and an agent's check
 and landing over MCP. No native-agent run uses these commands yet.
+
+Push routing (issue #536, first slice): in a hooked shell call, an agent's
+`git push` to the remote's default branch, forced or not, is refused every
+time with the exact `land --apply --rebase --check-again` command;
+`langspan.defaultBranchPush direct` lets it through. Where a push goes is
+Git's answer: the hook runs a dry run of the same lone push, and it refuses a
+push combined with another command, one with an option outside a short
+allowlist, or one whose dry run fails. Tests: the push
+reader's forms (pure), and the shell hook's routing and refusals against real
+temporary repositories with a local bare remote. These include mirror remotes,
+wildcard refspecs, `push.default`, `remote.pushDefault`, compound commands, and
+refused options (`--repo`, `--no-dry-run`, `git -c`) leaving the remote
+unchanged. Not yet retained: a native
+session whose push lands in one step after main moved, and push retries per
+benchmark arm.
 
 ### Source index and interface notices (branch `feat/source-graph`)
 

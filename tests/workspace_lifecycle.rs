@@ -4,6 +4,8 @@
 //! hooks find it again from the new directory, a move to the wrong place
 //! changes nothing, and a removed workspace leaves every view but the log.
 
+mod support;
+
 use langspan::hook::user_workspace_id;
 use serde_json::{Value, json};
 use std::{
@@ -702,6 +704,8 @@ fn removal_is_a_dry_run_until_applied_and_waits_for_admissions_and_sharing() {
         .unwrap_or_else(|| panic!("{admitted}"))
         .to_owned();
 
+    // Removal is an owner grant; the owner allows it.
+    support::owner_grants(&home.state_dir(), true);
     // Held: refused, with or without --apply.
     for args in [
         &[

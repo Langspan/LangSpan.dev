@@ -472,6 +472,7 @@ known_sessions
 live_sessions
 message_status
 open_intents
+owner_grant_effect
 rank_definitions
 rank_dependents
 rank_inputs

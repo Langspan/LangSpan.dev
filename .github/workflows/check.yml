@@ -41,7 +41,8 @@ on:
   schedule:
     - cron: "23 3 * * *"
 # No token permission unless a job asks for it; each job reads only, except
-# the reports flaky-report, nightly-report and main-red, which write issues.
+# the reports flaky-report, nightly-report and main-red, which write issues
+# (main-red also starts rerun-failed.yml).
 permissions: {}
 env:
   # Line numbers in backtraces and no other debug info. Measured on an
@@ -689,10 +690,15 @@ jobs:
   # platform, scripts/ci-main-red.py opens the issue "main-red: <platform>
   # checks failing on main" when that platform's check failed or was
   # cancelled, or comments on it while it is open, and closes it with the
-  # green run's link once the check passes. Nothing is reverted. The token
-  # writes only issues; it reads the run's jobs, logs and JUnit reports and
-  # the commits since the last green run as public data. Log lines and test
-  # names reach the issue capped and quoted as data. A manual run with
+  # green run's link once the check passes. Nothing is reverted. When every
+  # test passed and each failing job failed on GitHub's runner or services
+  # (an artifact upload timeout, a cache error, a lost runner), the first
+  # attempt opens no issue: it starts rerun-failed.yml, which reruns the
+  # failed jobs once after this run ends, and the rerun reports again. The
+  # token writes issues and starts that workflow (actions: write); it reads
+  # the run's jobs, logs and JUnit reports and the commits since the last
+  # green run as public data. Log lines and test names reach the issue
+  # capped and quoted as data. A manual run with
   # main_red_dry_run reports a failure of the run main_red_run names and
   # prints the issue instead of filing it.
   main-red:
@@ -702,6 +708,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
+      actions: write
       issues: write
     concurrency:
       group: main-red-${{ github.event_name }}-${{ matrix.platform }}

@@ -6,6 +6,7 @@
 //! that the order of runs and their arguments can be read back.
 
 mod support;
+use support::git;
 
 use langspan::{client, protocol::Request};
 use langspan_core::{CheckRecord, CheckResult, Command, Outcome, State};
@@ -14,7 +15,7 @@ use std::{
     fs,
     io::Write,
     os::unix::fs::PermissionsExt,
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::{Child, Command as Process, Stdio},
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
@@ -77,26 +78,6 @@ impl Run {
     }
 }
 
-fn git(root: &Path, args: &[&str]) {
-    let output = Process::new("git")
-        .arg("-C")
-        .arg(root)
-        .args([
-            "-c",
-            "user.name=Dev",
-            "-c",
-            "user.email=dev@example.invalid",
-        ])
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
 fn status() -> Request {
     Request::new("read", Command::Status)
 }
@@ -128,7 +109,9 @@ impl Fixture {
         fs::create_dir(&state).unwrap();
         fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
         let config = state.join("config.json");
-        fs::write(&config, json!({"auto_check_debounce_ms": 100}).to_string()).unwrap();
+        // Turning a check on is an owner grant; the owner allows it.
+        let config_json = json!({"auto_check_debounce_ms": 100, "owner_grants": true});
+        fs::write(&config, config_json.to_string()).unwrap();
         fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
         let daemon = Process::new(env!("CARGO_BIN_EXE_langspan"))
             .env("LANGSPAN_TEST_SCAN_EVERY_MS", "200")
