@@ -195,6 +195,7 @@ pub(crate) const OPTIONS: &[(&str, Option<&str>)] = &[
     ("--before", Some("5")),
     ("--keep-days", Some("90")),
     ("--month", Some("2026-01")),
+    ("--days", Some("3")),
     ("--format", Some("agents")),
     ("--file", Some("AGENTS.md")),
     ("--tools", Some("all")),

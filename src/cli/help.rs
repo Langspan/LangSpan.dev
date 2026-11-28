@@ -200,7 +200,7 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  in CLAUDE_CONFIG_DIR or ~/.claude, first-parent
                                  commits of BRANCH, process changes marked, and the
                                  confounders. No daemon. Reads only
-  policy WORKSPACE              The coordination policy table in effect: each kind
+  policy WORKSPACE               The coordination policy table in effect: each kind
                                  of case, advisory, wait or refuse, and whether it can
                                  be set. Reads only
   policy set WORKSPACE conflict refuse|wait [--wait-ms N] --request-id ID
