@@ -19,8 +19,9 @@ import uuid
 
 # The three K1 conditions come first. `no_tool` and `coarse_claims` are the
 # v0 arm names, still accepted so earlier manifests keep validating; they are
-# no longer part of the required comparison (see README.md, "Arms").
-ARMS = ("worktrees", "awareness_only", "langspan", "no_tool", "coarse_claims", "comparable_tool")
+# no longer part of the required comparison (see README.md, "Arms"). `shared`
+# puts every session in one checkout (issue #543).
+ARMS = ("worktrees", "awareness_only", "langspan", "no_tool", "coarse_claims", "comparable_tool", "shared")
 REQUIRED_ARMS = set(ARMS[:3])
 COVERAGE_STATES = (
     "admitted", "denied", "unavailable", "timeout", "unsupported",

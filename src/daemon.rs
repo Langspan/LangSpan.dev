@@ -27,7 +27,7 @@ mod unix {
         graph_path, graph_query, observe_elsewhere, outline_read, prepare_anchors, prepare_brief,
     };
     use super::index_worker::{
-        IndexJob, TRANSFER_WAIT, Transfer, forward_transfer, index_worker, is_transfer,
+        IndexJob, TRANSFER_WAIT, Transfer, forward_transfer, index_worker, is_transfer, open_index,
     };
     use super::prepare::{prepare, prepare_move};
     use super::remote_worker::{host_worker, remote_worker};
@@ -550,12 +550,12 @@ mod unix {
         let (transfer_sender, transfer_receiver) = mpsc::sync_channel::<Transfer>(1);
         {
             let sender = sender.clone();
-            let graph_path = graph_path.clone();
+            // Opened here, before the owner thread answers anything, so no
+            // request's reader finds the file without its tables.
+            let index = open_index(&graph_path);
             std::thread::Builder::new()
                 .name("langspan-indexer".into())
-                .spawn(move || {
-                    index_worker(index_receiver, transfer_receiver, sender, graph_path)
-                })?;
+                .spawn(move || index_worker(index_receiver, transfer_receiver, sender, index))?;
         }
         let (check_sender, check_receiver) = mpsc::sync_channel::<auto_check::Message>(256);
         let write_counts = auto_check::WriteCounts::default();

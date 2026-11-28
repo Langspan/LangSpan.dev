@@ -106,7 +106,8 @@
             "no_tool",
             "coarse_claims",
             "langspan",
-            "comparable_tool"
+            "comparable_tool",
+            "shared"
           ]
         },
         "repetition": {
