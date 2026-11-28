@@ -1,13 +1,15 @@
-// The Live view's story model (issue #491, ADR 0013): pure functions over
-// `/api/events` version 2 rows. No DOM, clock or network; the page draws
-// what `story` returns. Path text is data and is never interpreted here.
+// The Live view's model (issue #491, ADR 0013): pure functions from
+// `/api/state` and `/api/events` version 2 rows to the lanes, cards and wires
+// the homepage hero's renderer draws. No DOM, clock or network. Every card is
+// one recorded step (or a run of them, merged only for legibility); every
+// wire is one held write. Paths and task lines are data, never interpreted.
 "use strict";
 var LangSpanLive = (function () {
-  const EDIT_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
-  // Other steps this near the hold, either side, are the scene around it.
-  const WINDOW_MS = 60 * 1000;
-  // Cards per agent, the folded card included.
-  const MAX_CARDS = 5;
+  const EDIT_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit", "apply_patch"]);
+  // The hero's `group_edits_within_s` and `idle_after_s`.
+  const MERGE_MS = 20 * 1000;
+  const IDLE_MS = 30 * 1000;
+  const TASK_CHARS = 32;
   const HOSTS = {
     "claude-code": "Claude Code",
     codex: "Codex",
@@ -15,180 +17,162 @@ var LangSpanLive = (function () {
     antigravity: "Antigravity",
     "gemini-cli": "Gemini CLI",
   };
-  const CAPTIONS = {
-    stale_base: "{B} tried to edit {file} after {A} changed it.",
-    unread_lines: "{B} tried to edit lines of {file} it hadn't read.",
-    conflict: "{B} tried to edit {file} while {A} held it.",
+  const WHY = {
+    stale_base: "changed since this agent read it",
+    unread_lines: "lines another agent wrote, not read yet",
+    conflict: "another agent is editing it",
+    commit_held: "the commit would take another agent's changes",
   };
-  const NEXT = { stale_base: "re-read it and saved.", unread_lines: "read them and saved.", conflict: "re-read it and saved." };
 
-  const base = (path) => String(path).split("/").pop();
+  const localTime = (ms) => new Date(ms).toTimeString().slice(0, 8);
 
-  // Each session's parent, from its registration.
-  function parents(events) {
-    const of = new Map();
-    for (const e of events) if (e.type === "session_registered" && e.parent) of.set(e.session_id, e.parent);
-    return of;
-  }
-
-  // The agent a session belongs to: a subagent's work counts as its parent's.
-  function root(of, id) {
-    const seen = new Set();
-    while (of.has(id) && !seen.has(id)) {
-      seen.add(id);
-      id = of.get(id);
-    }
-    return id;
-  }
-
-  // Wall time of a daemon time, from the newest clock anchor; null without one.
-  function wall(events) {
+  // A daemon time as wall-clock text, from the newest clock anchor; null
+  // without one.
+  function clock(events, format) {
     const anchor = events.filter((e) => e.type === "clock_anchored").pop();
-    return (at) => (anchor && at != null ? anchor.wall_ms + (at - anchor.clock_ms) : null);
+    return (at) => (anchor && at != null ? format(anchor.wall_ms + (at - anchor.clock_ms)) : null);
   }
 
-  const saves = (e, path, agent, of) =>
-    e.type === "operation_observed" &&
-    EDIT_TOOLS.has(e.tool) &&
-    e.result === "succeeded" &&
-    e.paths.includes(path) &&
-    root(of, e.session_id) === agent;
-
-  // Holds a story can tell, oldest first: a refusal naming a peer of another
-  // agent, followed by the held agent's successful edit of the held path.
-  function candidates(events) {
-    const of = parents(events);
-    const out = [];
-    for (const e of events) {
-      if (e.type !== "write_refused" || !e.peer_session_id || !e.paths.length) continue;
-      const b = root(of, e.session_id);
-      if (root(of, e.peer_session_id) === b) continue;
-      const save = events.find((x) => x.seq > e.seq && saves(x, e.paths[0], b, of));
-      if (save) out.push({ seq: e.seq, save: save.seq });
-    }
-    return out;
+  // What a timed row of a local session draws as, or null.
+  function kindOf(e) {
+    if (e.at_ms == null || !e.session_id) return null;
+    if (e.type === "write_refused") return "held";
+    if (e.type === "source_observed" && e.origin === "read") return "read";
+    if (e.type === "operation_observed" && e.result === "succeeded") return EDIT_TOOLS.has(e.tool) ? "edit" : "command";
+    return null;
   }
 
-  // The newest candidate, or null.
-  function best(events) {
-    return candidates(events).pop() || null;
-  }
-
-  function step(agent, e, kind, path) {
-    return { agent, at_ms: e.at_ms, kind, path, seqs: [e.seq] };
-  }
-
-  // The other steps of one agent around the hold, merged by kind and file.
-  function others(events, of, agent, keys, lo, hi) {
-    const groups = new Map();
-    for (const e of events) {
-      if (e.at_ms == null || e.at_ms < lo || e.at_ms > hi || keys.has(e.seq)) continue;
-      if (root(of, e.session_id) !== agent) continue;
-      let kind = null;
-      if (e.type === "source_observed" && e.origin === "read") kind = "read";
-      else if (e.type === "operation_observed" && e.result === "succeeded") kind = EDIT_TOOLS.has(e.tool) ? "edit" : "command";
-      if (!kind) continue;
-      const paths = kind === "command" ? [null] : e.paths;
-      for (const path of paths) {
-        const key = kind === "command" ? "command " + e.seq : kind + " " + path;
-        const group = groups.get(key) || { agent, kind, path, steps: [] };
-        group.steps.push(e);
-        groups.set(key, group);
-      }
-    }
-    return [...groups.values()];
-  }
-
-  function fold(agent, rest) {
-    const n = { read: 0, edit: 0, command: 0 };
-    for (const g of rest) n[g.kind] += 1;
-    const plural = (k, one, word) => `${one} ${n[k]} ${word}${n[k] === 1 ? "" : "s"}`;
-    const parts = [];
-    if (n.read) parts.push(plural("read", "read", "file"));
-    if (n.edit) parts.push(plural("edit", "edited", "file"));
-    if (n.command) parts.push(plural("command", "ran", "command"));
-    const text = parts.length === 1 ? parts[0] : parts.slice(0, -1).join(", ") + " and " + parts.at(-1);
-    const steps = rest.flatMap((g) => g.steps);
+  function laneOf(row, session, index, shared) {
+    const name = row && row.task ? String(row.task).slice(0, TASK_CHARS) : "Agent " + (index < 26 ? String.fromCharCode(65 + index) : index + 1);
+    const host = (row && row.host) || String(session).split(".")[0];
     return {
-      agent,
-      at_ms: Math.min(...steps.map((e) => e.at_ms)),
-      kind: "summary",
-      verb: text[0].toUpperCase() + text.slice(1),
-      path: null,
-      seqs: [...new Set(steps.map((e) => e.seq))],
+      label: "Agent · " + name,
+      short: name.split(" ").slice(0, 2).join(" "),
+      agent: HOSTS[host] || host,
+      checkout: shared ? "shared checkout" : "own checkout",
+      branch: row && row.branch_ref ? String(row.branch_ref).replace(/^refs\/heads\//, "") : "",
     };
   }
 
-  // The scene for the hold at `seq`: two agents, their cards in time order,
-  // exactly one connector, a caption, and the untimed rows for the
-  // inspector. Null when `seq` is not a story `candidates` finds.
-  function story(events, seq) {
-    const found = candidates(events).find((c) => c.seq === seq);
-    if (!found) return null;
-    const of = parents(events);
-    const hold = events.find((e) => e.seq === seq);
-    const save = events.find((e) => e.seq === found.save);
-    const [a, b, path] = [root(of, hold.peer_session_id), root(of, hold.session_id), hold.paths[0]];
-    const changed = events.filter((e) => e.seq < seq && saves(e, path, a, of)).pop();
-    const reread = events.find(
-      (e) => e.seq > seq && e.seq < save.seq && e.type === "source_observed" && e.origin === "read" &&
-        e.paths.includes(path) && root(of, e.session_id) === b,
+  // The hero's card for one merged run of steps.
+  function draw(c, id, time) {
+    const first = c.steps[0];
+    const n = c.steps.length;
+    const path = first.paths[0];
+    const [t0, t1] = [time(first.at_ms), time(c.steps[n - 1].at_ms)];
+    const span = n > 1 && t0 !== null ? t0 + "–" + t1 : t0;
+    const out = { id, lane: c.lane, kind: c.kind, seq: c.steps.map((e) => e.seq), time: t0 };
+    const rows = [];
+    const set = (key, value) => value !== undefined && (out[key] = value);
+    if (c.kind === "edit") {
+      Object.assign(out, { verb: "Edited", code: path });
+      set("sub", n > 1 ? n + " edits" : undefined);
+      rows.push(["File", path]);
+      if (span !== null) rows.push(["Time", n > 1 ? span + ", " + n + " edits" : span]);
+    } else if (c.kind === "read") {
+      const files = [...new Set(c.steps.flatMap((e) => e.paths))];
+      Object.assign(out, { verb: "Read", code: files[0] });
+      set("sub", files.length > 1 ? files.length + " files" : undefined);
+      rows.push(["File", files.join(", ")]);
+      if (span !== null) rows.push(["Time", span]);
+    } else if (c.kind === "command") {
+      out.verb = "Ran a command";
+      const files = first.paths.length;
+      set("sub", files ? "changed " + files + (files === 1 ? " file" : " files") : undefined);
+      if (files) rows.push(["Changed", first.paths.join(", ")]);
+      if (t0 !== null) rows.push(["Time", t0]);
+    } else if (c.kind === "held") {
+      const why = WHY[first.refusal] || "held by LangSpan";
+      Object.assign(out, { verb: "Write held", code: path, sub: why, who: "LangSpan" });
+      rows.push(["File", path]);
+      if (t0 !== null) rows.push(["Time", t0]);
+      rows.push(["Why", why]);
+    } else {
+      Object.assign(out, { verb: c.reread ? "Saved after re-reading" : "Saved on retry", code: path });
+      rows.push(["File", path]);
+      if (t0 !== null) rows.push(["Time", t0]);
+      if (c.reread) rows.push(["Started from", "the current file"]);
+    }
+    out.title = c.kind === "read" && c.again ? "Read again" : c.kind === "held" ? "Write held" : out.verb;
+    out.rows = rows;
+    out.next = null;
+    return out;
+  }
+
+  // `{lanes, cards, wires, status, untimed}` in the hero's shape, without
+  // its playback fields. `opts.time` formats a wall time (default: local).
+  function model(state, events, opts = {}) {
+    const time = clock(events, opts.time || localTime);
+    const rows = new Map(
+      ((state && state.agents) || []).filter((a) => a.local && a.session_id).map((a) => [a.session_id, a]),
     );
-    const key = [];
-    if (changed) key.push(step("A", changed, "changed", path));
-    key.push(step("B", hold, "held", path));
-    if (reread) key.push(step("B", reread, "read", path));
-    key.push(step("B", save, "saved", path));
-    const keys = new Set(key.map((c) => c.seqs[0]));
-    const lo = hold.at_ms - WINDOW_MS;
-    const hi = Math.max(hold.at_ms + WINDOW_MS, save.at_ms);
-    const cards = [];
-    for (const [label, agent] of [["A", a], ["B", b]]) {
-      const mine = key.filter((c) => c.agent === label);
-      const groups = others(events, of, agent, keys, lo, hi);
-      const distance = (g) => Math.min(...g.steps.map((e) => Math.abs(e.at_ms - hold.at_ms)));
-      groups.sort((x, y) => distance(x) - distance(y));
-      const free = MAX_CARDS - mine.length;
-      const room = groups.length > free ? Math.max(0, free - 1) : free;
-      cards.push(...mine);
-      for (const g of groups.slice(0, room)) {
-        cards.push({
-          agent: label,
-          at_ms: Math.min(...g.steps.map((e) => e.at_ms)),
-          kind: g.kind,
-          path: g.path,
-          seqs: g.steps.map((e) => e.seq),
-        });
+    const lane = new Map();
+    const sessions = [];
+    const work = [];
+    const runs = [];
+    const last = [];
+    const open = []; // per lane: held path -> its run, until saved
+    for (const e of events) {
+      let kind = kindOf(e);
+      if (!kind) continue;
+      if (!lane.has(e.session_id)) {
+        lane.set(e.session_id, sessions.length);
+        sessions.push(e.session_id);
+        work.push(e.workspace_id || (rows.get(e.session_id) || {}).workspace_id);
+        open.push(new Map());
       }
-      if (groups.length > room) cards.push(fold(label, groups.slice(room)));
+      const l = lane.get(e.session_id);
+      const path = e.paths[0];
+      const prev = last[l];
+      let again = false;
+      if (kind === "read") {
+        for (const p of e.paths) {
+          if (!open[l].has(p)) continue;
+          open[l].get(p).reread = true;
+          again = true;
+        }
+      }
+      let hold = null;
+      if (kind === "edit" && open[l].has(path)) {
+        hold = open[l].get(path);
+        open[l].delete(path);
+        kind = "saved";
+      }
+      const near = prev && prev.kind === kind && e.at_ms - prev.steps[prev.steps.length - 1].at_ms <= MERGE_MS;
+      if (near && (kind === "read" || (kind === "edit" && prev.steps[0].paths[0] === path))) {
+        prev.steps.push(e);
+        prev.again = prev.again || again;
+        continue;
+      }
+      const run = { lane: l, kind, steps: [e], again, reread: hold ? hold.reread : false };
+      if (kind === "held" && path !== undefined) open[l].set(path, run);
+      runs.push(run);
+      last[l] = run;
     }
-    cards.sort((x, y) => x.at_ms - y.at_ms || x.seqs[0] - y.seqs[0]);
-    for (const c of cards) {
-      c.file = c.path == null ? null : base(c.path);
-      c.tone = c.kind === "held" ? "red" : c.kind === "saved" ? "green" : "neutral";
+    const cards = runs.map((r, i) => draw(r, "c" + i, time));
+    for (let i = 0; i < runs.length; i++) {
+      const j = runs.findIndex((r, k) => k > i && r.lane === runs[i].lane);
+      if (j < 0) continue;
+      cards[i].next = cards[j].id;
+      const gap = runs[j].steps[0].at_ms - runs[i].steps[runs[i].steps.length - 1].at_ms;
+      if (gap > IDLE_MS) cards[i].idle_after = true;
     }
-    const index = (kind) => cards.findIndex((c) => c.kind === kind);
-    const ends = [a, b].map((id) => [id, a === id ? "A" : "B"]);
-    const caption =
-      (CAPTIONS[hold.refusal] || CAPTIONS.stale_base) +
-      " LangSpan held it. {B} " +
-      (reread ? NEXT[hold.refusal] || NEXT.stale_base : "saved on retry.");
+    const wires = [];
+    runs.forEach((r, i) => {
+      const e = r.steps[0];
+      if (r.kind !== "held" || !lane.has(e.peer_session_id)) return;
+      const peer = lane.get(e.peer_session_id);
+      const changed = (x) => x.lane === peer && ["edit", "saved", "command"].includes(x.kind) && x.steps.some((s) => s.seq < e.seq && s.paths.includes(e.paths[0]));
+      const from = runs.findLastIndex(changed);
+      wires.push({ kind: "held", label: "Held", from: from < 0 ? null : cards[from].id, from_lane: peer, to: cards[i].id, seq: [e.seq] });
+    });
+    const shared = (i) => work[i] !== undefined && work.filter((w) => w === work[i]).length > 1;
     return {
-      seq,
-      at: wall(events)(hold.at_ms),
-      agents: ends.map(([id, label]) => ({ key: label, session: id, host: HOSTS[id.split(".")[0]] || id.split(".")[0] })),
+      lanes: sessions.map((s, i) => laneOf(rows.get(s), s, i, shared(i))),
       cards,
-      connector: { from: changed ? index("changed") : null, to: index("held"), tone: "red" },
-      caption: caption
-        .replaceAll("{A}", "Agent A")
-        .replaceAll("{B}", "Agent B")
-        .replace("{file}", "`" + base(path) + "`"),
-      // Rows without a time that name either agent or the held file.
-      untimed: events.filter(
-        (e) =>
-          e.at_ms == null &&
-          ((e.session_id && [a, b].includes(root(of, e.session_id))) || e.paths.includes(path)),
-      ),
+      wires,
+      status: { agents: sessions.length, held: runs.filter((r) => r.kind === "held").length },
+      untimed: events.filter((e) => e.at_ms == null && e.type !== "clock_anchored"),
     };
   }
 
@@ -207,5 +191,5 @@ var LangSpanLive = (function () {
     return { events, next: after, complete: false };
   }
 
-  return { root, parents, wall, candidates, best, story, readFeed };
+  return { model, readFeed };
 })();

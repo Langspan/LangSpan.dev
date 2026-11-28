@@ -1190,7 +1190,8 @@ pub fn dashboard_denials(
 }
 
 /// The version of the `/api/events` page; a breaking change bumps it.
-/// Version 2 added the story facts (issue #491); a version 1 row still reads.
+/// Version 2 added the Live view's facts (issue #491); a version 1 row still
+/// reads.
 const DASHBOARD_EVENTS_VERSION: u32 = 2;
 
 /// One page of the dashboard's event feed (issue #500, ADR 0013).
@@ -1221,7 +1222,7 @@ pub struct DashboardEvent {
     /// At most `DASHBOARD_PATHS`, each clipped.
     pub paths: Vec<String>,
     pub more_paths: u32,
-    /// Version 2, the facts the Live view's story rule reads: IDs, enums and
+    /// Version 2, the facts the Live view's cards and wires read: IDs, enums and
     /// numbers only, each from one event type (`detail`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer_session_id: Option<String>,
@@ -1234,9 +1235,6 @@ pub struct DashboardEvent {
     pub result: Option<ToolResult>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<SourceOrigin>,
-    /// The session that started this one, for a subagent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent: Option<String>,
     /// A clock anchor: the wall time at the daemon's `clock_ms`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wall_ms: Option<u64>,
@@ -1280,7 +1278,6 @@ impl DashboardEvent {
             tool: None,
             result: None,
             origin: None,
-            parent: None,
             wall_ms: None,
             clock_ms: None,
         }
@@ -1288,7 +1285,7 @@ impl DashboardEvent {
 
     /// The row with the version 2 facts `event` carries: a refusal's kind
     /// and peer, an operation's tool and result, a source observation's
-    /// origin, a session's parent and a clock anchor. Every other field,
+    /// origin and a clock anchor. Every other field,
     /// such as an input digest, stays out.
     pub fn detail(mut self, event: &Event) -> Self {
         match event {
@@ -1305,7 +1302,6 @@ impl DashboardEvent {
                 self.result = Some(observation.result);
             }
             Event::SourceObserved { origin, .. } => self.origin = Some(*origin),
-            Event::SessionRegistered { session } => self.parent = clip_opt(session.parent.as_ref()),
             Event::ClockAnchored { anchor } => {
                 self.wall_ms = Some(anchor.wall_ms);
                 self.clock_ms = Some(anchor.clock_ms);

@@ -52,8 +52,8 @@ to 0, `limit` to 100 (at most 1000), and the next poll asks after the reply's
 empty. Each row carries only the event's seq, type, session, workspace,
 time and file paths, never prompt summaries or message text. Version 2 adds,
 where the event records them, a refusal's `peer_session_id` and `refusal`
-kind, an operation's `tool` and `result`, a read or write's `origin`, a
-subagent's `parent`, and a clock anchor's `wall_ms` and `clock_ms`. It needs the
+kind, an operation's `tool` and `result`, a read or write's `origin`, and a
+clock anchor's `wall_ms` and `clock_ms`. It needs the
 same token and `Host` as `/api/state` ([ADR 0013](../adr/0013-dashboard.md)).
 
 `scripts/dashboard-browser-check.mjs` drives the real binary and a headless

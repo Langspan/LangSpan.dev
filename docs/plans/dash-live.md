@@ -1,133 +1,186 @@
-# Plan: dash-live (issue #491, first slice)
+# Plan: dash-live (issue #491), re-planned 27 Nov
 
-## Why a slice
+## What changed
 
-Issue #491 asks for a new page view: lanes, cards, one wire per incident, a
-dark inspector, a camera with keys, reduced motion, phone width, a replay
-fixture and screenshots. Built in full that is well over 1,000 changed lines,
-and the limit is about 300. This pull request lands the first independent
-slice. It says "Refs #491" and lists what is left under "Not done yet".
+The owner's later decisions replace the first plan:
 
-The feed from #500 can't yet tell the story the issue asks for. Today an
-`/api/events` row keeps only `seq`, `type`, the first `session_id`,
-`workspace_id`, `at_ms` and the paths. The selection rule needs more than
-that. It needs to know:
+- The dashboard has no story mode. There is no best-story selection, scene
+  tour, narration caption, scene-driven card folding or inspector that opens
+  on its own.
+- The Live view matches the approved homepage hero (site PR
+  Langspan/langspan.github.io#41, final head), as listed in #491's latest
+  comment: card style B, lane chains, a solid gutter, the lateral flow, a
+  coral Held wire through the lane gaps, past wires fading to 25%, framing
+  for off-screen sources, and the hero's interactions.
+- There is one renderer, shared by the site's hero (which passes a fixture)
+  and the dashboard (which passes `/api/state` plus `/api/events`).
 
-- that a `write_refused` names another session (`peer_session_id`) and why
-  (`kind`: stale_base, unread_lines and so on);
-- that a later `operation_observed` was a successful `Edit` or `Write`
-  (`tool`, `result`). Its time is `observed_at_ms`, which the feed drops
-  today because it isn't named `at_ms`;
-- whether a `source_observed` was a read or a write (`origin`);
-- which session started a subagent (`session_registered` → `session.parent`),
-  so a subagent's work counts as its parent's;
-- how the daemon's clock maps to the wall clock (`clock_anchored` →
-  `anchor.clock_ms`, `anchor.wall_ms`).
+The earlier slice 1 is on this branch as one WIP commit, uncommitted until
+now. Its feed version 2 stays, without `parent`: lanes are per session, so
+nothing folds a subagent into its parent any more. Its story model
+(`candidates`, `best`, `story`, captions, folding to five cards) is
+deleted. Its tests that still apply move to the new model: one wire per
+held write, untimed rows to the inspector, the feed reader, and path text
+as data.
 
-So slice 1 is the data and the model. Slice 2 is the view. Slice 3 is the
-replay.
+## The shared contract
 
-## Slice 1 (this pull request)
+The hero's renderer (`assets/product-first.js`) draws a single object,
+`TIMING`, made of:
 
-1. **Feed version 2** (`crates/langspan-core/src/dashboard.rs`,
-   `src/dashboard.rs` `feed_page`). Each new field is optional and is
-   added to the allowlist:
-   - `peer_session_id`: an ID;
-   - `refusal`: the `WriteRefused` kind, an enum;
-   - `tool`: a host tool name, clipped;
-   - `result`: an enum;
-   - `origin`: an enum;
-   - `parent`: an ID;
-   - `wall_ms` and `clock_ms`: numbers, on `clock_anchored` only.
+- `lanes`: `label`, `short`, `agent`, `checkout`, `branch`;
+- `cards`: `id`, `lane`, `kind` (`edit`, `read`, `command`, `held`,
+  `saved`, `sent`, `got`), `seq`, `time`, `verb`, `code`, `sub`, `title`,
+  `rows`, `next`, `idle_after`, plus the playback `at` and `flow`;
+- `wires`: `kind`, `label`, `from`, `from_lane`, `to`, `seq`, plus the
+  playback `at`, `ms`, `stop` and `emphasis_at`;
+- `status`;
+- `pacing`.
 
-   `at_ms` also takes `observed_at_ms`. None of these fields is free text, so
-   prompt summaries, message text, notes and payloads stay out.
-   `DASHBOARD_EVENTS_VERSION` goes from 1 to 2. A version 1 reader still
-   decodes every row, because the fields are `serde(default)` and skipped
-   when absent.
-2. **Golden vector**: `fixtures/dashboard-events-v2.json` holds one page
-   with a refusal, an admitted edit, a read, a subagent registration and a
-   clock anchor. It is checked in `crates/langspan-core/tests/dashboard.rs`
-   in both directions: what the page encodes to, and that a version 1 page
-   still decodes.
-3. **Story model**, pure JS in a new file `src/dashboard-live.js` with no
-   DOM and no clock:
-   - `root(sessions, id)` folds subagents into their parent;
-   - `wall(anchors, generation, at)`;
-   - `candidates(events)` applies the rule: a `write_refused` with a peer
-     whose root differs from the held session's root, followed by that
-     agent's successful Edit or Write of the held path;
-   - `best(events)` returns the newest candidate;
-   - `story(events, seq)` returns lanes, cards and exactly one connector:
-     - its tone is red for the hold and green for the save;
-     - each agent gets at most 5 cards, with other steps merged by file and
-       the rest folded into one card, "Read N files…";
-     - the caption is at most 20 words.
+The site's `build-hero-timeline.py` produces it from a recorded slice. The
+shared component takes this shape: the site passes its fixture as it does
+today, and the dashboard passes what `LangSpanLive.model(state, events)`
+returns, after pacing. The model owns everything except the playback
+fields; `pace` (slice 2) adds them. The model emits nothing the hero
+doesn't already read.
 
-   Events without a timestamp, such as `session_registered`, `message_sent`
-   and lease events, never become a card; they are returned as inspector
-   rows. The page doesn't include the file yet; slice 2 adds the marker that
-   inlines it. That keeps this slice free of CSP-hash and golden-page churn.
-4. **Tests, written first**:
-   - `src/dashboard.rs` unit tests: `feed_page` carries each new field from
-     a real `Event` value, and still drops message text and summaries (the
-     existing test, extended).
-   - `tests/dashboard_live.rs`: runs `node --test
-     tests/dashboard-live.test.mjs`. It spawns a process only because node
-     is the one runner for the page's JS. It prints `skipped:` when node is
-     missing, and fails then under `LANGSPAN_REQUIRE_TOOLS=1`, like the go
-     and pytest tests. The tests cover:
-     - the selection rule: a same-root peer is rejected, a refusal without a
-       peer is rejected, a refusal without a later save is rejected, and the
-       newest candidate wins;
-     - the card cap and the fold;
-     - a caption of at most 20 words;
-     - untimed events going to the inspector only;
-     - hostile path text kept as data;
-     - feed pages shorter than the limit, read until empty.
+## Slices
 
-     I'll break the rule once to confirm the tests catch it.
-5. **Docs**:
-   - ADR 0013 gets the version 2 row fields and the plan for the Live view.
-   - The threat model gets a review note: the allowlist grows by IDs, enums
-     and numbers only, with no new boundary.
-   - `docs/usage/the-live-dashboard.md` gets the field list.
-   - Ratchet baselines go in for the new Rust test file, and the API
-     baseline is updated for the new pub fields.
+The whole of #491 is well over 1,000 changed lines: the hero's renderer is
+about 500 lines of JS and 300 CSS rules, plus the page, the view switch,
+screenshots and the real-coordinator test. The limit is about 300, so this
+PR is slice 1 and says "Refs #491".
 
-### What changed from this plan while building it
+1. **This PR: the feed and the model.** It is independent, because nothing
+   on the page reads the model yet.
+2. **The shared renderer.** Port the hero block of `product-first.js` and
+   its CSS into one shared script and stylesheet (not a new `src/`
+   directory unless `namespaces.tsv` lists it). Drive it from a
+   model plus a clock: replay loops a fixture, while live follows the
+   newest work and has no loop copies. Add `pace(model, pacing)`. Copy the
+   hero's TIMING into `fixtures/live-view-hero.json` and check that it
+   renders exactly as the site does. Port the hero's QA checks (no wire
+   through a card, no clipped label, a chain between consecutive cards,
+   both ends of a held wire on screen while it draws) as geometry tests
+   on the layout.
+3. **The dashboard.** Inline the renderer through markers in
+   `src/dashboard.html`, keeping one script block and one style block, so
+   the CSP stays two hashes. Add a Live and Files switch. Poll
+   `/api/events` from the last `next`. Test against a real coordinator at
+   1440 and 390 px, light and dark, and with reduced motion. Attach the
+   screenshots. Update ADR 0013. "Fixes #491".
+4. **The site repo.** The hero loads the shared file. That is a separate
+   PR in Langspan/langspan.github.io.
 
-- The facts come from the typed `Event` (`DashboardEvent::detail`), not from
-  key names, so a `kind` or `result` nested in another event's free text can
-  never be picked up.
-- An operation's `concurrent_holders` are other sessions' holdings. The
-  breadth-first walk had added their paths to the operation's own; it now
-  skips them, and the test checks that.
-- In the feed, a `message_sent` row names no session (its sender is `from`),
-  so the inspector also takes untimed rows that name the held file.
-- No ratchet baseline was needed for the new test file; the core baseline
-  grew by one pub item, `detail`, which the daemon crate calls.
+## Slice 1 in detail
 
-## Later slices (not in this pull request)
+### Files
 
-- **Slice 2, the view**:
-  - Live and Files toggle; the file matrix stays as the second view.
-  - SVG tracks and wires, with cards as HTML buttons.
-  - Camera with +, −, Fit and Follow newest; arrow keys, +/−, 0 and L.
-  - The dark inspector overlay, about 40% wide.
-  - Reduced motion and 390 px.
-  - `dashboard-browser-check.mjs` cases.
-  - Screenshots, light and dark, at 1440 and 390 px.
-- **Slice 3, the replay**: the billing/invoices "Demo replay" fixture, with
-  Pause and Replay, rendered by the same code; homepage embedding.
-- Recorded +/− counts are a separate issue. The view shows line ranges only.
+- `crates/langspan-core/src/dashboard.rs`: feed version 2 rows. Keep
+  `peer_session_id`, `refusal`, `tool`, `result`, `origin`, `wall_ms` and
+  `clock_ms`, and drop `parent`. All of them are `serde(default)` and
+  skipped when absent.
+- `src/dashboard.rs` `feed_page`: fill those fields. Drop `parent`.
+- `fixtures/dashboard-events-v2.json`: the golden page, without `parent`.
+- `crates/langspan-core/tests/dashboard.rs`: the golden page in both
+  directions. A version 1 page still decodes.
+- `tests/dashboard.rs`: the real-process feed test asserts version 2
+  (one line).
+- `src/dashboard-live.js`, rewritten: pure, with no DOM, clock or network.
+  (The plan named `src/live-view/model.js`, but every directory under
+  `src/` must be a listed Rust namespace, `tests/ratchets.rs`
+  `the_top_level_modules_are_the_listed_namespaces`, and
+  `scripts/ratchets/namespaces.tsv` is outside this reservation. Slice 2
+  chooses where the renderer's files live.)
+  - `model(state, events)` returns `{lanes, cards, wires, status,
+    untimed}` in the hero's shape.
+  - **Lanes.** There is one lane for each local session that has a timed
+    event. The lane takes its label, harness and checkout (`workspace_id`
+    and branch) from the matching `/api/state` `agents` row. Lane
+    reference text uses no IDs: a short session label, then the harness
+    name.
+  - **Cards.** Each card comes from one recorded step:
+    - `source_observed` with origin `read` is "Read";
+    - a successful `operation_observed` with an Edit-family tool is
+      "Edited". Consecutive edits of one file within 20 s merge into one
+      card with "N edits", as the hero groups them;
+    - another successful operation is "Ran a command";
+    - `write_refused` is a `held` card: "Write held" over the file, with
+      the reason in words from the `refusal` kind ("changed since this
+      agent read it", and so on);
+    - the next successful edit of the held path by the held session is
+      `saved`: "Saved after re-reading" if a read of that path came
+      between the hold and the edit, "Saved on retry" if not.
+  - **Time.** `time` is the wall time from the newest `clock_anchored`
+    row. `rows` holds recorded fields only: file, time, why. `next` links
+    each card to its lane's next card. `idle_after` marks a gap of more
+    than 30 s before the lane's next card.
+  - **Wires.** There is exactly one wire for each held write that names a
+    peer (`peer_session_id`) with a lane: kind `held`, label "Held",
+    `from` set to that peer's newest card on the held path before the
+    hold, otherwise `null` with `from_lane`. A hold without a recorded
+    peer gets no wire. Nothing else gets a wire. Remote sessions are never
+    in the local log, so a remote edit never becomes a held card or a
+    wire.
+  - **Inspector rows.** Rows without a time (`session_registered`,
+    `message_sent` and lease events) are never cards. They are returned
+    in `untimed` for the inspector, in seq order, without an invented
+    time.
+  - **Status.** `status` is the number of agents and the number of writes
+    held.
+  - **`readFeed`.** Carried over from the first slice: it reads until a
+    page comes back empty, within a page bound, and stops when a page
+    doesn't advance.
+- `tests/live-view-model.test.mjs` (new; replaces
+  `tests/dashboard-live.test.mjs`, which is deleted) and
+  `tests/live_view.rs` (new; replaces `tests/dashboard_live.rs`, which
+  is deleted). The runner starts `node --test` only because node is the
+  one runner for the page's JS. It prints `skipped:` without node, and
+  fails then under `LANGSPAN_REQUIRE_TOOLS=1`.
+- `fixtures/live-view-model.json` (new): the golden model output for the
+  golden events page plus a small state.
+- `docs/adr/0013-dashboard.md`: replace the "story" paragraph with the
+  shared renderer and the model contract, and record the slices.
+- `docs/security/threat-model.md`: no new boundary. Fix the sentence that
+  names the story model.
+- `docs/usage/the-live-dashboard.md`: the version 2 fields, without
+  `parent`.
+- The ratchet baselines for the two `dashboard.rs` files and for
+  `crates/langspan-core/api.txt`, recorded or tightened.
 
-## Shared contracts touched
+### Test-first order
 
-- **The `/api/events` wire format** goes to version 2. It is additive, and a
-  golden vector covers it.
-- **`src/dashboard.rs`**: the briefing shows session 6bfebfe8 (`lay-b-hosts`)
-  editing this file now. My change is confined to `feed_page` and its tests,
-  but the orchestrator should order the two.
-- `crates/langspan-core/src/dashboard.rs`: only `DashboardEvent` and its
-  constructor change.
+1. Rust. The golden page no longer has `parent`, and `feed_page` keeps
+   every version 2 field from a real `Event` while it still drops message
+   text and summaries. Watch it fail on `parent`, then remove the field.
+2. Node, with each test written failing first:
+   - one lane per session with a timed event, labelled from the state row
+     and showing no IDs;
+   - reads, edits, commands, holds and saves map to the hero's card kinds;
+   - same-file edits within 20 s merge, and ones further apart don't;
+   - exactly one held wire per held write with a peer that has a lane,
+     none for a hold without a peer, and none for reads, commands or
+     saves;
+   - a wire's `from` is the peer's last card on the held path, otherwise
+     `null` with `from_lane`;
+   - "Saved after re-reading" only when a read came between the hold and
+     the edit;
+   - untimed rows are never cards and appear in `untimed` in seq order;
+   - `time` comes from the clock anchor;
+   - path text is kept as given;
+   - every card and wire field is one of the hero's keys;
+   - the model equals `fixtures/live-view-model.json`;
+   - `readFeed` reads until a page comes back empty, within the bound, and
+     stops on a page that doesn't advance.
+3. Break the wire rule once (draw a wire for a hold without a peer) and
+   confirm the test catches it.
+
+### Shared contracts touched
+
+- The `/api/events` wire format: version 1 goes to 2. New fields are
+  optional, a version 1 page still decodes, and
+  `fixtures/dashboard-events-v2.json` is the golden vector.
+- The model shape is a new contract with the site hero, pinned by
+  `fixtures/live-view-model.json`. No CLI output, `Outcome`, protocol
+  command or daemon code changes, and the page itself is unchanged in
+  this slice.

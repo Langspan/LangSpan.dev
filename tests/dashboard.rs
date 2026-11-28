@@ -583,7 +583,7 @@ fn drain_feed(port: u16, header: &str, after: &mut u64, seen: &mut Vec<(u64, Str
         assert!(!reply.body.contains("FEED-PROMPT-TEXT"), "{}", reply.body);
         let page: Value = serde_json::from_str(&reply.body).unwrap();
         assert_eq!(page["available"], true, "{page}");
-        assert_eq!(page["version"], 1, "{page}");
+        assert_eq!(page["version"], 2, "{page}");
         let events = page["events"].as_array().unwrap();
         assert!(events.len() <= 2, "{page}");
         let next = page["next"].as_u64().unwrap();

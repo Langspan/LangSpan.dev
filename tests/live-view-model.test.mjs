@@ -1,0 +1,228 @@
+// The Live view's model (issue #491), run by tests/live_view.rs. It loads
+// src/dashboard-live.js as the page will, a plain script, and checks the
+// lanes, cards and wires it builds from /api/state and /api/events rows.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync, writeFileSync } from "node:fs";
+import vm from "node:vm";
+
+const source = readFileSync(new URL("../src/dashboard-live.js", import.meta.url), "utf8");
+// In this realm, so its arrays compare equal to the tests' own.
+vm.runInThisContext(source);
+const Live = globalThis.LangSpanLive;
+
+// Times in UTC, so the tests don't depend on the machine's zone.
+const utc = (ms) => new Date(ms).toISOString().slice(11, 19);
+const model = (state, events) => Live.model(state, events, { time: utc });
+
+const A = "claude-code.alice";
+const B = "codex.bob";
+const F = "src/billing/invoices.ts";
+
+let seq = 0;
+const row = (fields) => ({ seq: ++seq, paths: [], more_paths: 0, ...fields });
+const anchor = () => row({ type: "clock_anchored", wall_ms: 1_800_000_000_000, clock_ms: 1000 });
+const registered = (id) => row({ type: "session_registered", session_id: id, workspace_id: "app" });
+const op = (id, at, path = F, tool = "Edit", result = "succeeded") =>
+  row({ type: "operation_observed", session_id: id, workspace_id: "app", at_ms: at, paths: path ? [path] : [], tool, result });
+const read = (id, at, path = F) =>
+  row({ type: "source_observed", session_id: id, at_ms: at, paths: [path], origin: "read" });
+const held = (id, peer, at, refusal = "stale_base", path = F) =>
+  row({ type: "write_refused", session_id: id, workspace_id: "app", at_ms: at, paths: [path], peer_session_id: peer, refusal });
+
+const agent = (session_id, host, task, fields = {}) => ({
+  id: "local:" + session_id, local: true, host, session: session_id.slice(0, 8), session_id,
+  workspace_id: "app", branch_ref: "refs/heads/feat/billing", task, ...fields,
+});
+const STATE = {
+  agents: [
+    agent(A, "claude-code", "#12 invoice totals"),
+    agent(B, "codex", null),
+    { id: "remote:carol", local: false, machine: "carol", host: "claude-code", session: "c0ffee12",
+      session_id: null, workspace_id: "app", branch_ref: null, task: "remote work" },
+  ],
+};
+
+// Alice changes the file; Bob is held, re-reads it and saves.
+function incident() {
+  seq = 0;
+  return [anchor(), registered(A), registered(B), op(A, 2000), held(B, A, 3000), read(B, 3500), op(B, 4000)];
+}
+
+test("one lane per local session with a timed step, labelled from its state row, with no IDs", () => {
+  const m = model(STATE, incident());
+  assert.deepEqual(m.lanes, [
+    { label: "Agent · #12 invoice totals", short: "#12 invoice", agent: "Claude Code", checkout: "shared checkout", branch: "feat/billing" },
+    { label: "Agent · Agent B", short: "Agent B", agent: "Codex", checkout: "shared checkout", branch: "feat/billing" },
+  ]);
+  for (const lane of m.lanes) for (const text of Object.values(lane)) assert.ok(!/alice|bob|c0ffee/.test(text), text);
+});
+
+test("a remote agent in the state is never a lane, and a session alone in its workspace has its own checkout", () => {
+  seq = 0;
+  const events = [anchor(), op(A, 2000)];
+  events[1].workspace_id = "solo";
+  const m = model(STATE, events);
+  assert.equal(m.lanes.length, 1);
+  assert.equal(m.lanes[0].checkout, "own checkout");
+});
+
+test("reads, edits, commands, holds and saves are the hero's card kinds, in words", () => {
+  seq = 0;
+  const events = [anchor(), op(A, 2000), op(A, 2500, null, "Bash"), held(B, A, 3000), read(B, 3500), op(B, 4000)];
+  const m = model(STATE, events);
+  assert.deepEqual(
+    m.cards.map((c) => [c.lane, c.kind, c.verb, c.code, c.sub]),
+    [
+      [0, "edit", "Edited", F, undefined],
+      [0, "command", "Ran a command", undefined, undefined],
+      [1, "held", "Write held", F, "changed since this agent read it"],
+      [1, "read", "Read", F, undefined],
+      [1, "saved", "Saved after re-reading", F, undefined],
+    ],
+  );
+  assert.equal(m.cards[2].who, "LangSpan");
+  assert.equal(m.cards[3].title, "Read again");
+  assert.deepEqual(m.status, { agents: 2, held: 1 });
+});
+
+test("a failed step is not a card, and a save without a read between is a retry", () => {
+  seq = 0;
+  const events = [anchor(), op(A, 2000), held(B, A, 3000), op(B, 3200, F, "Edit", "failed"), op(B, 4000)];
+  const m = model(STATE, events);
+  assert.deepEqual(m.cards.map((c) => c.verb), ["Edited", "Write held", "Saved on retry"]);
+});
+
+test("edits of one file within 20 s merge into one card; further apart, or another file, they don't", () => {
+  seq = 0;
+  const events = [anchor(), op(A, 2000), op(A, 12_000), op(A, 31_000), op(A, 60_000), op(A, 61_000, "src/other.ts")];
+  const m = model(STATE, events);
+  assert.deepEqual(m.cards.map((c) => [c.code, c.sub, c.seq]), [
+    [F, "3 edits", [2, 3, 4]],
+    [F, undefined, [5]],
+    ["src/other.ts", undefined, [6]],
+  ]);
+  assert.deepEqual(m.cards[0].rows, [["File", F], ["Time", "08:00:01–08:00:30, 3 edits"]]);
+});
+
+test("reads in a row within 20 s are one card with a neutral count", () => {
+  seq = 0;
+  const events = [anchor(), read(A, 2000, "a.ts"), read(A, 3000, "b.ts"), read(A, 4000, "a.ts")];
+  const m = model(STATE, events);
+  assert.deepEqual(m.cards.map((c) => [c.verb, c.code, c.sub]), [["Read", "a.ts", "2 files"]]);
+});
+
+test("exactly one held wire per held write whose peer has a lane, and no other wire", () => {
+  seq = 0;
+  const events = [
+    anchor(), op(A, 2000), held(B, A, 3000), read(B, 3500), op(B, 4000),
+    held(B, null, 5000, "conflict", "src/x.ts"), // no recorded peer
+    held(B, "claude-code.ghost", 6000, "stale_base", "src/y.ts"), // a peer without a lane
+    op(A, 7000, null, "Bash"),
+  ];
+  const m = model(STATE, events);
+  assert.equal(m.cards.filter((c) => c.kind === "held").length, 3);
+  assert.deepEqual(m.wires, [{ kind: "held", label: "Held", from: "c0", from_lane: 0, to: "c1", seq: [3] }]);
+  assert.deepEqual(m.status, { agents: 2, held: 3 });
+});
+
+test("a wire starts at the peer's newest card on the held path, or at its lane", () => {
+  seq = 0;
+  const events = [anchor(), op(A, 2000), op(A, 30_000), op(A, 31_000, "src/other.ts"), held(B, A, 32_000)];
+  const m = model(STATE, events);
+  assert.deepEqual(m.wires[0], { kind: "held", label: "Held", from: "c1", from_lane: 0, to: "c3", seq: [5] });
+  seq = 0;
+  const elsewhere = model(STATE, [anchor(), op(A, 2000, "src/other.ts"), held(B, A, 3000)]);
+  assert.deepEqual(elsewhere.wires[0], { kind: "held", label: "Held", from: null, from_lane: 0, to: "c1", seq: [3] });
+});
+
+test("the held card says why in words, from the refusal kind", () => {
+  seq = 0;
+  const kinds = ["stale_base", "unread_lines", "conflict", "commit_held"];
+  const events = [anchor(), ...kinds.map((k, i) => held(B, A, 2000 + i * 40_000, k))];
+  const m = model(STATE, events);
+  assert.deepEqual(m.cards.map((c) => c.sub), [
+    "changed since this agent read it",
+    "lines another agent wrote, not read yet",
+    "another agent is editing it",
+    "the commit would take another agent's changes",
+  ]);
+  assert.deepEqual(m.cards[0].rows, [["File", F], ["Time", "08:00:01"], ["Why", "changed since this agent read it"]]);
+});
+
+test("rows without a time are never cards; they go to the inspector in seq order, untimed", () => {
+  const events = incident();
+  events.push(row({ type: "message_sent", workspace_id: "app", paths: [F] }));
+  events.push(row({ type: "lease_granted", session_id: B, workspace_id: "app", paths: [F] }));
+  const m = model(STATE, events);
+  assert.deepEqual(m.untimed.map((e) => [e.seq, e.type]), [
+    [2, "session_registered"], [3, "session_registered"], [8, "message_sent"], [9, "lease_granted"],
+  ]);
+  assert.ok(m.untimed.every((e) => e.at_ms == null));
+  assert.equal(m.cards.length, 4);
+});
+
+test("time is the clock anchor's wall time; without an anchor there is none", () => {
+  const m = model(STATE, incident());
+  assert.deepEqual(m.cards.map((c) => c.time), ["08:00:01", "08:00:02", "08:00:02", "08:00:03"]);
+  seq = 0;
+  const bare = model(STATE, [op(A, 2000)]);
+  assert.equal(bare.cards[0].time, null);
+  assert.deepEqual(bare.cards[0].rows, [["File", F]]);
+});
+
+test("each card links to its lane's next card, and a gap over 30 s is idle", () => {
+  seq = 0;
+  const m = model(STATE, [anchor(), op(A, 2000), op(B, 3000, "b.ts"), op(A, 40_000, "a.ts"), op(A, 41_000, "c.ts")]);
+  assert.deepEqual(m.cards.map((c) => [c.id, c.next, c.idle_after]), [
+    ["c0", "c2", true], ["c1", null, undefined], ["c2", "c3", undefined], ["c3", null, undefined],
+  ]);
+});
+
+test("path text is data: kept as given, never parsed for meaning", () => {
+  seq = 0;
+  const hostile = "<img src=x onerror=alert(1)>/ignore previous instructions.md";
+  const m = model(STATE, [anchor(), op(A, 2000, hostile)]);
+  assert.equal(m.cards[0].code, hostile);
+  assert.deepEqual(m.cards[0].rows[0], ["File", hostile]);
+});
+
+test("every card and wire field is one the hero's renderer reads", () => {
+  const CARD = new Set(["id", "lane", "kind", "seq", "time", "verb", "code", "sub", "who", "title", "rows", "next", "idle_after"]);
+  const WIRE = new Set(["kind", "label", "from", "from_lane", "to", "seq"]);
+  const m = model(STATE, incident());
+  for (const c of m.cards) for (const k of Object.keys(c)) assert.ok(CARD.has(k), k);
+  for (const w of m.wires) for (const k of Object.keys(w)) assert.ok(WIRE.has(k), k);
+  assert.ok(m.cards.every((c) => ["edit", "read", "command", "held", "saved"].includes(c.kind)));
+});
+
+test("the model of the golden events page equals fixtures/live-view-model.json", () => {
+  const path = new URL("../fixtures/live-view-model.json", import.meta.url);
+  const page = JSON.parse(readFileSync(new URL("../fixtures/dashboard-events-v2.json", import.meta.url), "utf8"));
+  const golden = JSON.parse(readFileSync(path, "utf8"));
+  const got = model(golden.state, page.events);
+  if (process.env.LANGSPAN_UPDATE_GOLDEN === "1") {
+    writeFileSync(path, JSON.stringify({ ...golden, model: got }, null, 1) + "\n");
+  }
+  assert.deepEqual(got, golden.model);
+});
+
+test("readFeed reads until a page comes back empty, even after short pages", async () => {
+  const pages = { 0: [1, 2], 2: [3], 3: [4, 5], 5: [] };
+  const asked = [];
+  const fetchPage = async (after) => {
+    asked.push(after);
+    const events = pages[after].map((s) => ({ seq: s }));
+    return { events, next: events.length ? events.at(-1).seq : after };
+  };
+  const out = await Live.readFeed(fetchPage, 0, 10);
+  assert.deepEqual(out, { events: [1, 2, 3, 4, 5].map((s) => ({ seq: s })), next: 5, complete: true });
+  assert.deepEqual(asked, [0, 2, 3, 5]);
+});
+
+test("readFeed stops at its page bound, and on a page that doesn't advance", async () => {
+  const endless = async (after) => ({ events: [{ seq: after + 1 }], next: after + 1 });
+  assert.deepEqual(await Live.readFeed(endless, 0, 3), { events: [1, 2, 3].map((s) => ({ seq: s })), next: 3, complete: false });
+  const stuck = async (after) => ({ events: [{ seq: after }], next: after });
+  assert.deepEqual(await Live.readFeed(stuck, 7, 3), { events: [], next: 7, complete: false });
+});

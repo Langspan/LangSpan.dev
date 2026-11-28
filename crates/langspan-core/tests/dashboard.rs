@@ -874,10 +874,10 @@ fn a_parent_and_its_subagents_on_one_file_are_an_overlap_with_distinct_labels() 
 }
 
 /// The `/api/events` page, version 2 (issue #491): each row also carries the
-/// typed facts the Live view's story rule reads, and nothing free-form. The
-/// golden vector pins the wire; a version 1 page still decodes.
+/// typed facts the Live view's cards and wires read, and nothing free-form.
+/// The golden vector pins the wire; a version 1 page still decodes.
 #[test]
-fn an_event_page_carries_the_story_facts_as_ids_enums_and_numbers() {
+fn an_event_page_carries_the_live_view_facts_as_ids_enums_and_numbers() {
     use langspan_core::{DashboardEvent, DashboardEvents};
     let events = [
         r#"{"type":"clock_anchored","anchor":{"generation":2,"clock_ms":5000,"wall_ms":1800000000000}}"#,
@@ -915,7 +915,10 @@ fn an_event_page_carries_the_story_facts_as_ids_enums_and_numbers() {
     let golden: serde_json::Value = serde_json::from_str(wire).unwrap();
     assert_eq!(serde_json::to_value(&page).unwrap(), golden);
     assert_eq!(serde_json::from_str::<DashboardEvents>(wire).unwrap(), page);
-    assert!(!wire.contains("SECRET"), "the digest is not a story fact");
+    assert!(
+        !wire.contains("SECRET"),
+        "the digest is not a Live view fact"
+    );
     // A version 1 page, without the new fields, still decodes.
     let old: DashboardEvents = serde_json::from_str(
         r#"{"version":1,"next":3,"events":[{"seq":3,"type":"write_refused","session_id":"s1","at_ms":5,"paths":["a.rs"],"more_paths":0}]}"#,

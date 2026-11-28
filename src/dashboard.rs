@@ -540,7 +540,7 @@ fn feed_query(query: &str) -> Result<(u64, u32), String> {
 /// One row per recorded event, reduced to an allowlist: its type, the first
 /// session, workspace and time it names (breadth first, so a field of the
 /// event wins over one nested in it), every `path` and `paths` it carries,
-/// and the typed story facts of `DashboardEvent::detail`. Nothing else, so
+/// and the typed Live view facts of `DashboardEvent::detail`. Nothing else, so
 /// prompt summaries, message and note text, task lines, payloads and any
 /// field added later are never served.
 fn feed_page(after: u64, events: &[langspan_core::RecordedEvent]) -> DashboardEvents {
