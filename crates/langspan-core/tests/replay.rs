@@ -14,9 +14,17 @@
 //!
 //! `covering_line` matches every `Event` variant with no wildcard, so a new
 //! variant does not compile until it names the log line that applies it.
+//! Every type in a release's frozen list (`fixtures/event-types/` at the
+//! workspace root) must be in the log too, so a type a released store
+//! holds keeps applying.
+//!
+//! `fixtures/replay/refused.jsonl` changes one field of a log line so that
+//! `apply` must refuse it, which covers the refusals the log never takes;
+//! `fixtures/replay/refused.txt` is the error each one gets.
 //!
 //! A change to what a command writes or to what an event does to the state
-//! fails here with the lines that differ. To accept one, run
+//! fails here with the lines that differ, as does a changed refusal. To
+//! accept one, run
 //! `LANGSPAN_UPDATE_GOLDEN=1 cargo nextest run -p langspan-core --test replay`,
 //! review `git diff`, and explain in the pull request why the log or the
 //! state changed.
@@ -26,6 +34,7 @@ mod snapshot;
 
 use langspan_core::{Command, Event, Outcome, State, apply, decide, expiry_events};
 use serde::Deserialize;
+use serde_json::Value;
 use std::mem::discriminant;
 use std::path::{Path, PathBuf};
 
@@ -170,12 +179,85 @@ fn every_event_type_is_in_the_log_at_the_line_the_match_names() {
     }
     let missing: Vec<String> = every_type()
         .into_iter()
+        .chain(frozen_types())
         .filter(|name| !log.iter().any(|event| type_of(event) == *name))
         .collect();
     assert!(
         missing.is_empty(),
         "the log applies no {missing:?}: add a command to commands.jsonl that writes it"
     );
+}
+
+/// Every event type a release reads, from each frozen list.
+fn frozen_types() -> Vec<String> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/event-types");
+    let lists = std::fs::read_dir(&dir).expect("read fixtures/event-types");
+    let mut names = Vec::new();
+    for list in lists {
+        let path = list.expect("list fixtures/event-types").path();
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        names.extend(text.lines().map(str::to_string));
+    }
+    assert!(names.len() > 1, "fixtures/event-types holds no list");
+    names
+}
+
+/// One line of `refused.jsonl`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Refusal {
+    /// The line of `events.jsonl` to change.
+    line: usize,
+    /// The fields to change, by JSON pointer, and their new values.
+    set: serde_json::Map<String, Value>,
+}
+
+/// `event` with the field at `pointer` set to `value`, added if absent.
+fn set_field(event: &mut Value, pointer: &str, value: Value) {
+    let (parent, key) = pointer
+        .rsplit_once('/')
+        .unwrap_or_else(|| panic!("`{pointer}` is not a JSON pointer"));
+    event
+        .pointer_mut(parent)
+        .and_then(Value::as_object_mut)
+        .unwrap_or_else(|| panic!("`{parent}` names no object"))
+        .insert(key.to_string(), value);
+}
+
+#[test]
+fn each_changed_event_is_refused_with_the_committed_error() {
+    let log = read_log();
+    let script = std::fs::read_to_string(fixture("refused.jsonl")).expect("read the refusals");
+    let mut errors = String::new();
+    for (index, text) in script.lines().enumerate() {
+        let n = index + 1;
+        if text.trim().is_empty() || text.starts_with('#') {
+            continue;
+        }
+        let case: Refusal = serde_json::from_str(text)
+            .unwrap_or_else(|e| panic!("refused.jsonl line {n} does not parse: {e}"));
+        let original = case
+            .line
+            .checked_sub(1)
+            .and_then(|at| log.get(at))
+            .unwrap_or_else(|| panic!("refused.jsonl line {n} names no line of events.jsonl"));
+        let mut changed = serde_json::to_value(original).expect("an event serializes");
+        for (pointer, value) in case.set {
+            set_field(&mut changed, &pointer, value);
+        }
+        let changed: Event = serde_json::from_value(changed)
+            .unwrap_or_else(|e| panic!("refused.jsonl line {n} is no event: {e}"));
+        let mut state = State::default();
+        for event in &log[..case.line - 1] {
+            apply(&mut state, event).expect("the log applies");
+        }
+        match apply(&mut state, &changed) {
+            Ok(()) => panic!("refused.jsonl line {n} was applied: {changed:?}"),
+            Err(e) => errors += &format!("{n}: events.jsonl line {}: {e}\n", case.line),
+        }
+    }
+    snapshot::check(&fixture("refused.txt"), &errors);
 }
 
 /// The line of `events.jsonl` that applies an event of this type. A new
