@@ -10,10 +10,11 @@
 #            the commit checked out, so the list is the event types it reads.
 #
 # Writes tests/fixtures/store-VERSION/ and fixtures/event-types/VERSION.txt,
-# and rewrites the generated docs tables. The row in RELEASES
-# (tests/protocol.rs), with the capabilities the release's requests name, is
-# left to the pull request's author: until it is added, the protocol tests
-# fail naming it.
+# rewrites the generated docs tables, and last adds the release's row to
+# RELEASES in tests/protocol.rs (issue #590): a copy of the newest row, when
+# the release reads the same event types, speaks the same protocol version
+# and names the same capabilities. Otherwise it fails saying what differs,
+# with everything else written, and the row is added by hand.
 set -euo pipefail
 
 [ $# -eq 1 ] || { echo "usage: $0 VERSION" >&2; exit 2; }
@@ -45,4 +46,15 @@ with open(sys.argv[1], "x") as out:
     out.write("".join(f"{name}\n" for name in types))
 EOF
 python3 -I -B scripts/gen-docs.py
-echo "wrote tests/fixtures/store-$version and $list; add the $version row to RELEASES in tests/protocol.rs"
+echo "wrote tests/fixtures/store-$version and $list"
+
+by_hand="add the $version row to RELEASES in tests/protocol.rs by hand, with the protocol version and the capabilities its requests name"
+cargo test --locked --test protocol write_the_release_row -- --ignored --exact || {
+  echo "the $version row was not written: $by_hand" >&2
+  exit 1
+}
+grep -qF "include_str!(\"../fixtures/event-types/$version.txt\")" tests/protocol.rs || {
+  echo "v$version's tests/protocol.rs has no write_the_release_row: $by_hand" >&2
+  exit 1
+}
+echo "added the $version row to RELEASES in tests/protocol.rs"

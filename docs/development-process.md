@@ -530,10 +530,15 @@ the tag with `--locked` and runs that tag's demonstration with it; writes the
 stores' state snapshots with `LANGSPAN_UPDATE_GOLDEN=1` on
 `tests/golden_stores.rs`; copies the sorted `type` of each
 `fixtures/*-event-v10.json` into `fixtures/event-types/VERSION.txt`; and runs
-`python3 scripts/gen-docs.py`. To finish the pull request, add the release's
-row to `RELEASES` in `tests/protocol.rs` with the capabilities its requests
-name, review the new snapshots, and mark it ready. If the job fails, run the
-script by hand at the tag (`git checkout vVERSION`) and open the pull request
+`python3 scripts/gen-docs.py`. Last, the ignored test `write_the_release_row`
+adds the release's row to `RELEASES` in `tests/protocol.rs`, a copy of the
+newest row, when the release reads the same event types, speaks the same
+protocol version and names the same capabilities; otherwise it fails saying
+which differ (issue #590). To finish the pull request, review the new
+snapshots and mark it ready. If the job fails, run the script by hand at the
+tag (`git checkout vVERSION`). When only the row is missing, the script has
+written everything else: add the row with the protocol version and the
+capabilities the release's requests name. Then open the pull request
 yourself, saying how the stores were made.
 
 `every_release_has_a_golden_store_directory` fails for a release older than
