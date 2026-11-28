@@ -28,7 +28,8 @@ const SCRIPT: [&str; 8] = ["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"]
 ///   importer, nearest first. A module is `NAME.py`, `NAME.pyi` or
 ///   `NAME/__init__.py`.
 /// - Rust: a `use` path starting `crate::` (from the nearest directory above
-///   the importer that holds `lib.rs` or `main.rs`), `super::` or `self::`,
+///   the importer that holds `lib.rs` or `main.rs`, and from `main.rs` itself
+///   when it is the importer, whose crate is the binary), `super::` or `self::`,
 ///   or a bare path, which is taken as relative to the importer's module.
 ///   The longest prefix of the path that names a module file (`NAME.rs` or
 ///   `NAME/mod.rs`) wins, so `crate::store::save` is `src/store.rs`. A
@@ -190,8 +191,14 @@ fn rust(importer: &str, target: &str, exists: &mut impl FnMut(&str) -> bool) -> 
         Some("crate") => {
             segments.remove(0);
             let mut parts = directory(importer);
+            // `main.rs` is the binary crate's own root, beside any `lib.rs`.
+            let first = if importer.rsplit('/').next() == Some("main.rs") {
+                ["main.rs", "lib.rs"]
+            } else {
+                ["lib.rs", "main.rs"]
+            };
             loop {
-                let root = ["lib.rs", "main.rs"].into_iter().find_map(|name| {
+                let root = first.into_iter().find_map(|name| {
                     let mut path = parts.clone();
                     path.push(name);
                     let path = path.join("/");
