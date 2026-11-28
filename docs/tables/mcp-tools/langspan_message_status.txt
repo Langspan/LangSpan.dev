@@ -1,0 +1,1 @@
+Ask which sessions were given a message, by ID or `"last"`: `delivered` (with `via` and age), `pending` or `ended`; read-only

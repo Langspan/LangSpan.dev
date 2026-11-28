@@ -1,7 +1,7 @@
 //! `doctor` called as a library function, without spawning the binary
 //! (issue #355).
 
-use langspan::{cli::doctor::doctor, hosts::UserHome};
+use langspan::{cli::doctor::doctor, install::detect::UserHome};
 
 #[test]
 fn doctor_runs_as_a_function_and_needs_attention_without_a_coordinator() {

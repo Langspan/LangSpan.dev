@@ -2646,40 +2646,264 @@ fn two_new_capabilities_are_added_on_lines_of_their_own() {
     );
 }
 
-/// Each release, the protocol version it speaks, and the event types it
-/// reads, frozen from that release's tag (issue #331).
-const RELEASES: [(&str, u16, &str); 6] = [
+/// The capabilities 0.5.0 and 0.5.1 name in a request: each one that has a
+/// version.
+const NAMED_0_5: &[&str] = &[
+    "anchored_notes",
+    "briefing_memory",
+    "inflight_partial",
+    "interface_notices",
+    "landing_rewrites",
+    "outline_reads",
+    "refusal_outcomes",
+    "renames",
+    "symbol_findings",
+    "trails",
+];
+
+/// The capabilities 0.6.0 and 0.7.0 name: 0.5.1's and three without one.
+const NAMED_0_6: &[&str] = &[
+    "anchored_notes",
+    "briefing_memory",
+    "inflight_partial",
+    "interface_notices",
+    "landing_rewrites",
+    "outline_reads",
+    "recap_since",
+    "refusal_outcomes",
+    "renames",
+    "symbol_findings",
+    "tolerant_responses",
+    "trails",
+    "withheld_events",
+];
+
+/// The capabilities 0.8.0 names: 0.7.0's and `rename_holds`.
+const NAMED_0_8: &[&str] = &[
+    "anchored_notes",
+    "briefing_memory",
+    "inflight_partial",
+    "interface_notices",
+    "landing_rewrites",
+    "outline_reads",
+    "recap_since",
+    "refusal_outcomes",
+    "rename_holds",
+    "renames",
+    "symbol_findings",
+    "tolerant_responses",
+    "trails",
+    "withheld_events",
+];
+
+/// Each release, the protocol version it speaks, the capabilities it names
+/// (none before 0.5.0), and the event types it reads, frozen from that
+/// release's tag (issue #331).
+const RELEASES: [(&str, u16, Option<&[&str]>, &str); 9] = [
     (
         "0.1.0",
         3,
+        None,
         include_str!("../fixtures/event-types/0.1.0.txt"),
     ),
     (
         "0.2.0",
         3,
+        None,
         include_str!("../fixtures/event-types/0.2.0.txt"),
     ),
     (
         "0.3.0",
         8,
+        None,
         include_str!("../fixtures/event-types/0.3.0.txt"),
     ),
     (
         "0.4.0",
         9,
+        None,
         include_str!("../fixtures/event-types/0.4.0.txt"),
     ),
     (
         "0.5.0",
         10,
+        Some(NAMED_0_5),
         include_str!("../fixtures/event-types/0.5.0.txt"),
     ),
     (
         "0.5.1",
         10,
+        Some(NAMED_0_5),
         include_str!("../fixtures/event-types/0.5.1.txt"),
     ),
+    (
+        "0.6.0",
+        10,
+        Some(NAMED_0_6),
+        include_str!("../fixtures/event-types/0.6.0.txt"),
+    ),
+    (
+        "0.7.0",
+        10,
+        Some(NAMED_0_6),
+        include_str!("../fixtures/event-types/0.7.0.txt"),
+    ),
+    (
+        "0.8.0",
+        10,
+        Some(NAMED_0_8),
+        include_str!("../fixtures/event-types/0.8.0.txt"),
+    ),
 ];
+
+/// What a release's requests are granted: the capabilities it names, or
+/// its version's set when it names none.
+fn release_grant(version: u16, named: Option<&[&str]>) -> (Capabilities, Option<Vec<String>>) {
+    let named: Option<Vec<String>> =
+        named.map(|names| names.iter().map(|name| (*name).to_string()).collect());
+    (Capabilities::negotiate(version, named.as_deref()), named)
+}
+
+/// The releases `changelog` names that are published. A release PR adds the
+/// heading of the version it creates and bumps `current` to it, so that
+/// heading is published only once `tagged` finds its tag; every other
+/// heading is a release that has been tagged (issue #518).
+fn published_releases<'a>(
+    changelog: &'a str,
+    current: &str,
+    tagged: impl Fn(&str) -> bool,
+) -> Vec<&'a str> {
+    changelog
+        .lines()
+        .filter_map(|line| line.strip_prefix("## ["))
+        .filter_map(|line| line.split(']').next())
+        .filter(|release| *release != current || tagged(release))
+        .collect()
+}
+
+/// The published releases of `changelog`, after checking that the parse
+/// found the eight bracketed headings the repository already has, so a
+/// change of heading format cannot leave the test checking nothing. The
+/// check counts every heading, published or not: a run without tags drops
+/// the version this build carries from the published list (issue #518).
+fn published_releases_checked<'a>(
+    changelog: &'a str,
+    current: &str,
+    tagged: impl Fn(&str) -> bool,
+) -> Vec<&'a str> {
+    let headings = published_releases(changelog, current, |_| true);
+    assert!(headings.len() >= 8, "{headings:?}");
+    published_releases(changelog, current, tagged)
+}
+
+/// Whether the repository has the tag `v<release>`. A failing `git` fails
+/// the test: it never counts as untagged.
+fn has_release_tag(root: &std::path::Path, release: &str) -> bool {
+    let output = std::process::Command::new("git")
+        .args([
+            "--no-optional-locks",
+            "tag",
+            "--list",
+            &format!("v{release}"),
+        ])
+        .current_dir(root)
+        .output()
+        .unwrap_or_else(|error| panic!("cannot run git to list the tags: {error}; install git"));
+    assert!(
+        output.status.success(),
+        "git tag --list v{release} failed in {}: {}; run the test in a Git checkout",
+        root.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    !output.stdout.trim_ascii().is_empty()
+}
+
+const RELEASE_PR_CHANGELOG: &str = "# Changelog\n\n## [0.9.0](link) (2026-11-27)\n\n### Features\n\n## [0.8.0](link) (2026-11-01)\n";
+
+/// Issue #518: on a release PR the version is bumped and the changelog
+/// names it, but there is no tag yet, so it is not published; older
+/// headings are published without looking for their tags.
+#[test]
+fn a_release_pr_version_without_its_tag_is_not_published() {
+    let published = published_releases(RELEASE_PR_CHANGELOG, "0.9.0", |_| false);
+    assert_eq!(published, ["0.8.0"]);
+}
+
+/// Issue #518: once the version being released is tagged it is published,
+/// so a tagged release without a frozen list still fails.
+#[test]
+fn a_tagged_release_is_published() {
+    let published = published_releases(RELEASE_PR_CHANGELOG, "0.9.0", |release| release == "0.9.0");
+    assert_eq!(published, ["0.9.0", "0.8.0"]);
+}
+
+/// A pull request run has no tags, so the version this build carries is
+/// not published. The repository's changelog still passes the parse check,
+/// and every other heading is published.
+#[test]
+fn a_tagless_run_of_the_repository_changelog_passes_the_parse_check() {
+    let changelog = include_str!("../CHANGELOG.md");
+    let current = env!("CARGO_PKG_VERSION");
+    let published = published_releases_checked(changelog, current, |_| false);
+    let others: Vec<&str> = published_releases(changelog, current, |_| true)
+        .into_iter()
+        .filter(|release| *release != current)
+        .collect();
+    assert_eq!(published, others);
+}
+
+/// With every tag present, the repository's changelog passes the parse
+/// check and every heading is published, the current version's too.
+#[test]
+fn a_tagged_run_of_the_repository_changelog_publishes_every_heading() {
+    let changelog = include_str!("../CHANGELOG.md");
+    let current = env!("CARGO_PKG_VERSION");
+    let published = published_releases_checked(changelog, current, |_| true);
+    assert!(published.contains(&current), "{published:?}");
+}
+
+/// The parse check counts the headings the changelog names, not the ones
+/// published, so a release PR's untagged version does not count against it.
+#[test]
+fn the_parse_check_does_not_count_the_untagged_version_against_it() {
+    let changelog: String = (1..=8)
+        .rev()
+        .map(|minor| format!("## [0.{minor}.0](link) (2026-11-01)\n\n"))
+        .collect();
+    let published = published_releases_checked(&changelog, "0.8.0", |_| false);
+    assert_eq!(published.len(), 7, "{published:?}");
+}
+
+/// Issue #331: every published release `CHANGELOG.md` names has a frozen
+/// list in `fixtures/event-types/` and a row in `RELEASES`, and every list
+/// has a row, so a release cannot ship without the test of its pages. The
+/// version this build carries counts once its `v` tag exists (issue #518):
+/// locally and in the merge queue, which fetches the tags; a pull request
+/// run has no tags and checks it from the next release on. This test runs
+/// `git` because what it checks is the repository's tags.
+#[test]
+fn every_published_release_has_a_frozen_list() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let rows: std::collections::BTreeSet<&str> = RELEASES.iter().map(|row| row.0).collect();
+    let changelog = std::fs::read_to_string(root.join("CHANGELOG.md")).unwrap();
+    let published = published_releases_checked(&changelog, env!("CARGO_PKG_VERSION"), |release| {
+        has_release_tag(root, release)
+    });
+    for release in published {
+        assert!(
+            root.join(format!("fixtures/event-types/{release}.txt"))
+                .is_file(),
+            "{release} is published and has no fixtures/event-types/{release}.txt: \
+             write the event types its tag reads there"
+        );
+        assert!(rows.contains(release), "{release}: add it to RELEASES");
+    }
+    for entry in std::fs::read_dir(root.join("fixtures/event-types")).unwrap() {
+        let name = entry.unwrap().file_name().to_string_lossy().to_string();
+        let release = name.strip_suffix(".txt").unwrap_or(&name);
+        assert!(rows.contains(release), "{name} has no row in RELEASES");
+    }
+}
 
 /// One event of each type this build has: the event vectors, one per type
 /// (`tests/event_vectors.rs`).
@@ -2720,10 +2944,11 @@ fn answer(outcome: langspan_core::Outcome) -> Response {
     }
 }
 
-/// Issue #331: a page holding every current event type, encoded for the
-/// version a release speaks, holds only types of that release's frozen
-/// list, and every current type all releases of that version read. 0.1.0
-/// and 0.2.0 both speak version 3, which gets what 0.1.0 reads.
+/// Issue #331: a page holding every current event type, encoded for what a
+/// release's requests are granted, holds only types of that release's
+/// frozen list, and every current type all releases granted the same read.
+/// 0.1.0 and 0.2.0 both speak version 3, which gets what 0.1.0 reads. A
+/// release that reads `withheld` is told how many were left out.
 #[test]
 fn each_release_is_sent_only_the_event_types_it_reads() {
     use langspan_core::Outcome;
@@ -2734,16 +2959,17 @@ fn each_release_is_sent_only_the_event_types_it_reads() {
         }))
         .unwrap(),
     );
-    let reads = |version: u16| {
+    let reads = |granted: Capabilities| {
         RELEASES
             .iter()
-            .filter(|(_, speaks, _)| *speaks == version)
-            .map(|(_, _, list)| list.lines().map(str::to_string).collect())
+            .filter(|(_, version, named, _)| release_grant(*version, *named).0 == granted)
+            .map(|(_, _, _, list)| list.lines().map(str::to_string).collect())
             .reduce(|both: std::collections::BTreeSet<String>, next| &both & &next)
             .unwrap()
     };
-    for (release, version, _) in RELEASES {
-        let expected = &reads(version) & &current;
+    for (release, version, named, _) in RELEASES {
+        let (granted, named) = release_grant(version, named);
+        let expected = &reads(granted) & &current;
         for outcome in [
             Outcome::Events {
                 events: events.clone(),
@@ -2753,10 +2979,15 @@ fn each_release_is_sent_only_the_event_types_it_reads() {
                 scan: None,
             },
         ] {
-            let wire = encode_for(version, &answer(outcome)).unwrap();
+            let wire = encode_with(granted, named.as_deref(), &answer(outcome)).unwrap();
             let page: serde_json::Value = serde_json::from_slice(&wire).unwrap();
             assert_eq!(event_types(&page), expected, "{release}");
-            assert!(page.get("withheld").is_none(), "{release} cannot read it");
+            let left_out = events.len() - expected.len();
+            if granted.has("withheld_events") && left_out > 0 {
+                assert_eq!(page["withheld"], left_out, "{release}");
+            } else {
+                assert!(page.get("withheld").is_none(), "{release}: {page}");
+            }
         }
     }
 }

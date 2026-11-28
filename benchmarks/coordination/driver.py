@@ -1685,6 +1685,11 @@ def cost_section(record, repair):
             "cost_per_accepted_task": per_task(total["cost_usd"], accepted)}
 
 
+def record_agent(agent):
+    """The record's name for AGENT, one of AGENTS."""
+    return "standin" if agent == "standin" else "claude-code"
+
+
 def build_record(plan, final, runner_dir, run_dir, events, started_at, total_elapsed, error=None, status=None,
                  repair=None, coordinator_state=None):
     """EVENTS is the coordinator's event log (LangSpan arm), or None when
@@ -1753,7 +1758,7 @@ def build_record(plan, final, runner_dir, run_dir, events, started_at, total_ela
         "schema_version": SCHEMA_VERSION, "record_type": "coordination_run",
         "run_id": final["run_id"] if final else plan["run_id"],
         "arm": plan["arm"], "family": plan["family"], "sessions": plan["sessions"], "seed": plan["seed"],
-        "agent": "standin" if plan["agent"] == "standin" else "claude-code",
+        "agent": record_agent(plan["agent"]),
         "dry_run": plan["agent"] == "standin",
         "status": status or (final["status"] if final else "setup_failed"),
         "started_at": started_at,

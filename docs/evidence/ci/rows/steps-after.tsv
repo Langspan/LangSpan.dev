@@ -1,3 +1,5 @@
 run	event	sha	job	conclusion	wait_s	job_s	cache_s	tools_s	check_s
 46035930668	workflow_dispatch	07b956a2	macOS	success	3	755	6	0	714
 46035930668	workflow_dispatch	07b956a2	Linux	success	3	505	2	1	472
+46035934855	workflow_dispatch	07b956a2	Linux	success	758	783	0	300	457
+46035934855	workflow_dispatch	07b956a2	macOS	success	760	1394	0	334	1016

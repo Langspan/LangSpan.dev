@@ -1,0 +1,7 @@
+0running 4 tests
+test tests::a ... ok
+test tests::b ... FAILED
+test tests::c ... ignored, slow
+test tests::d - should panic ... ok
+
+test result: FAILED. 2 passed; 1 failed; 1 ignored

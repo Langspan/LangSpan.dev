@@ -245,6 +245,7 @@ pub(super) fn index_worker(
     sender: mpsc::SyncSender<Job>,
     path: PathBuf,
 ) {
+    super::remote_worker::panic_in_thread_for_test();
     let mut index = match crate::graph::Index::open(&path) {
         Ok(index) => index,
         Err(error) => {
@@ -311,7 +312,7 @@ pub(super) fn index_worker(
                     ask_as(
                         &sender,
                         Some(of.clone()),
-                        crate::hook::wire_id(
+                        crate::ids::wire_id(
                             "interface",
                             &[
                                 &of.workspace_id,
@@ -339,7 +340,7 @@ pub(super) fn index_worker(
                 ask_as(
                     &sender,
                     Some(of.clone()),
-                    crate::hook::wire_id(
+                    crate::ids::wire_id(
                         "anchors",
                         &[
                             &of.workspace_id,

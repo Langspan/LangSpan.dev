@@ -1,0 +1,4 @@
+2tests/test_a.py::test_one PASSED
+tests/test_a.py::test_two SKIPPED (why)
+tests/test_a.py::test_three XFAIL
+FAILED tests/test_b.py::test_four - assert 1 == 2

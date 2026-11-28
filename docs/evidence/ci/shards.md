@@ -34,6 +34,13 @@ after. "Run" is creation to the run's last update.
 | [46039907276](https://github.com/Langspan/LangSpan.dev/actions/runs/46039907276) (merge queue) | before | warm | 9m08s | 16m15s | 16m15s |
 | [46044043275](https://github.com/Langspan/LangSpan.dev/actions/runs/46044043275) (manual) | after | warm | 6m28s | 9m40s | 9m51s |
 | [46042358881](https://github.com/Langspan/LangSpan.dev/actions/runs/46042358881) (manual) | before | cold | 13m17s | 23m33s | 23m34s |
+| [46045297428](https://github.com/Langspan/LangSpan.dev/actions/runs/46045297428) (manual) | after | cold | 14m07s | 20m38s | 20m48s |
+
+Cold, after: the build job took 9m23s on Linux and 15m04s on macOS, and the
+last shard ended 4m40s and 5m30s after it. The required `Linux` and `macOS`
+checks, which collect the shards, ended 14m17s and 20m47s after the run's
+creation. Against the cold run before, Linux took 50 s longer and macOS
+2m55s less; each is one sample.
 
 ### Where the warm time goes, after
 

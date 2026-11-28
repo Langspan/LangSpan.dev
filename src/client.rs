@@ -31,7 +31,7 @@ mod unix {
         remaining(deadline)?;
         // Owner and agent text is redacted here, before it leaves the client.
         let mut request = request.clone();
-        crate::redact::redact_command(&mut request.command);
+        crate::text::redact::redact_command(&mut request.command);
         let (mut response, granted) = exchange(state_dir, &request, deadline)?;
         // A daemon refuses a request it cannot read before it reads the
         // command (ADR 0037), so the same request asked again cannot take
@@ -839,7 +839,7 @@ fn read(
 pub fn full_state(state_dir: &std::path::Path) -> Result<langspan_core::State, crate::Error> {
     let mut generation = 0;
     let mut state = read_all(|command| read(state_dir, &mut generation, command))?;
-    state.generation = generation;
+    state.set_generation(generation);
     Ok(state)
 }
 

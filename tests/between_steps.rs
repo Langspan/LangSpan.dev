@@ -14,6 +14,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod support;
+
 static NEXT: AtomicU64 = AtomicU64::new(0);
 const WAIT: Duration = Duration::from_secs(60);
 /// How long the receiving session makes no hook call (issue #214).
@@ -127,10 +129,13 @@ impl World {
     fn hook_process(&self, options: &[&str]) -> Child {
         self.hook_command(options).spawn().unwrap()
     }
+    /// The hook as an interactive Claude Code session runs it (issue #534),
+    /// whatever session runs these tests.
     fn hook_command(&self, options: &[&str]) -> Process {
         let mut command = Process::new(env!("CARGO_BIN_EXE_langspan"));
         command
             .env("LANGSPAN_AUTOSTART", "off")
+            .env("CLAUDE_CODE_ENTRYPOINT", "cli")
             .args(["hook", "claude-code", "--state-dir"])
             .arg(self.base.join("state"))
             .args(["--workspace", "app", "--root"])
@@ -311,11 +316,9 @@ fn slow_a_notice_reaches_a_session_that_makes_no_hook_call_for_30_seconds() {
     let mut watcher = alice_starts_a_turn(&w);
     // Alice is waiting on a long command: no hook call of hers from here.
     let quiet_from = Instant::now();
-    std::thread::sleep(QUIET);
-    assert!(
-        watcher.try_wait().unwrap().is_none(),
-        "the watcher waits while the turn runs"
-    );
+    support::holds_for("the watcher waits while the turn runs", QUIET, || {
+        watcher.try_wait().unwrap().is_none()
+    });
     change_signature(&w);
     let (code, stderr) = finished(watcher, WAIT);
     assert!(quiet_from.elapsed() >= QUIET);
@@ -366,8 +369,12 @@ fn slow_a_notice_reaches_a_session_that_makes_no_hook_call_for_30_seconds() {
             .is_none_or(|context| !context.contains("Interface change")),
         "the briefing leaves out what was told between steps"
     );
-    let again = w.watcher(prompt_event(&w.work(), "alice"));
-    std::thread::sleep(Duration::from_secs(3));
+    let mut again = w.watcher(prompt_event(&w.work(), "alice"));
+    support::holds_for(
+        "the second watcher waits without telling it again",
+        Duration::from_secs(3),
+        || again.try_wait().unwrap().is_none(),
+    );
     w.hook(json!({"session_id": "alice", "cwd": w.work(), "hook_event_name": "Stop"}));
     let (code, stderr) = finished(again, WAIT);
     assert_eq!(code, 0, "{stderr}");
@@ -377,24 +384,22 @@ fn slow_a_notice_reaches_a_session_that_makes_no_hook_call_for_30_seconds() {
 #[test]
 fn a_watcher_stops_when_its_turn_ends_and_never_wakes_an_idle_session() {
     let w = World::new();
-    let watcher = alice_starts_a_turn(&w);
-    std::thread::sleep(Duration::from_secs(2));
+    let mut watcher = alice_starts_a_turn(&w);
+    support::holds_for(
+        "the watcher waits while the turn runs",
+        Duration::from_secs(2),
+        || watcher.try_wait().unwrap().is_none(),
+    );
     w.hook(json!({"session_id": "alice", "cwd": w.work(), "hook_event_name": "Stop"}));
     let (code, stderr) = finished(watcher, Duration::from_secs(10));
     assert_eq!(code, 0, "{stderr}");
     assert!(stderr.contains("the turn is over"), "{stderr}");
     // A change after the turn waits for the next prompt's briefing.
     change_signature(&w);
-    let deadline = Instant::now() + WAIT;
-    loop {
-        if w.prompt("alice")
+    support::wait_until("alice's next prompt to tell the change", WAIT, || {
+        w.prompt("alice")
             .is_some_and(|context| context.contains("Interface change in \"src/upload.rs\""))
-        {
-            break;
-        }
-        assert!(Instant::now() < deadline, "alice was never told");
-        std::thread::sleep(Duration::from_millis(200));
-    }
+    });
     assert!(
         !w.events()
             .iter()
@@ -433,10 +438,10 @@ fn a_watcher_started_before_the_coordinator_waits_for_it_and_still_tells() {
     w.stop_daemon();
     let event = prompt_event_for(&w.work(), "alice", "prompt-1");
     let mut watcher = w.watcher_with_grace(event, Duration::from_secs(5));
-    std::thread::sleep(Duration::from_secs(1));
-    assert!(
-        watcher.try_wait().unwrap().is_none(),
-        "an unreachable coordinator is retried within the startup grace"
+    support::holds_for(
+        "an unreachable coordinator is retried within the startup grace",
+        Duration::from_secs(1),
+        || watcher.try_wait().unwrap().is_none(),
     );
     // The prompt hook's coordinator is up; alice's turn goes on.
     w.start_daemon();
@@ -461,8 +466,11 @@ fn a_watcher_ends_quietly_when_the_coordinator_never_comes() {
     w.stop_daemon();
     let started = Instant::now();
     let mut watcher = w.watcher(prompt_event_for(&w.work(), "alice", "prompt-1"));
-    std::thread::sleep(Duration::from_millis(500));
-    assert!(watcher.try_wait().unwrap().is_none());
+    support::holds_for(
+        "the watcher keeps retrying within its grace",
+        Duration::from_millis(500),
+        || watcher.try_wait().unwrap().is_none(),
+    );
     let (code, stderr) = finished(watcher, WAIT);
     assert_eq!(code, 0, "{stderr}");
     assert!(stderr.contains("coordinator unavailable"), "{stderr}");
@@ -493,8 +501,12 @@ fn a_watcher_whose_prompt_already_finished_ends_and_never_wakes_the_session() {
     assert!(stderr.contains("the turn is over"), "{stderr}");
     // The watcher of alice's next prompt is open and tells the change.
     w.hook(prompt_event_for(&w.work(), "alice", "prompt-2"));
-    let next = w.watcher(prompt_event_for(&w.work(), "alice", "prompt-2"));
-    std::thread::sleep(Duration::from_secs(2));
+    let mut next = w.watcher(prompt_event_for(&w.work(), "alice", "prompt-2"));
+    support::holds_for(
+        "the next prompt's watcher waits while its turn runs",
+        Duration::from_secs(2),
+        || next.try_wait().unwrap().is_none(),
+    );
     change_signature(&w);
     let (code, stderr) = finished(next, WAIT);
     assert_eq!(code, 2, "{stderr}");
@@ -559,6 +571,42 @@ fn a_watcher_that_cannot_run_exits_0_and_says_why() {
     assert!(started.elapsed() < Duration::from_secs(10));
 }
 
+/// Issue #534: in a non-interactive Claude Code session the host runs the
+/// watcher in the foreground and the turn waits for it. A watcher started
+/// there, for a registered session with an open turn, ends at once with
+/// exit 0 and says why. A process test: what it checks is that the hook
+/// binary reads the entrypoint from its own environment.
+#[test]
+fn a_watcher_in_a_non_interactive_session_ends_at_once() {
+    let w = World::new();
+    w.edits("alice", "a1", "src/main.rs", &format!("{MAIN}// touched\n"));
+    w.hook(prompt_event_for(&w.work(), "alice", "prompt-1"));
+    for entrypoint in [Some("sdk-cli"), Some("sdk-ts"), None] {
+        let mut command = w.hook_command(&["--mode", "between-steps"]);
+        match entrypoint {
+            Some(value) => command.env("CLAUDE_CODE_ENTRYPOINT", value),
+            None => command.env_remove("CLAUDE_CODE_ENTRYPOINT"),
+        };
+        let started = Instant::now();
+        let mut child = command.spawn().unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(
+                prompt_event_for(&w.work(), "alice", "prompt-1")
+                    .to_string()
+                    .as_bytes(),
+            )
+            .unwrap();
+        let (code, stderr) = finished(child, Duration::from_secs(10));
+        assert_eq!(code, 0, "{entrypoint:?}: {stderr}");
+        assert!(stderr.contains("CLAUDE_CODE_ENTRYPOINT"), "{stderr}");
+        // Well under the 1 s poll, the shortest a watcher that asks can take.
+        assert!(started.elapsed() < GRACE, "{entrypoint:?} ended at once");
+    }
+}
+
 /// A coordinator that answers but does not know the session (the prompt
 /// hook never registered it) ends the watcher with exit 0 once the startup
 /// grace has passed, with the coordinator's error in the log line.
@@ -598,7 +646,8 @@ fn a_watcher_ends_quietly_at_its_bound() {
     let limit = Duration::from_secs(3);
     let event = prompt_event(&w.work(), "alice").to_string();
     let started = Instant::now();
-    let watched = langspan::between_steps::watch_within(event.as_bytes(), &config, limit);
+    let watched =
+        langspan::between_steps::watch_within(event.as_bytes(), &config, Some("cli"), limit);
     let elapsed = started.elapsed();
     assert_eq!(watched.exit, 0, "{watched:?}");
     assert_eq!(watched.detail, "watch limit reached");
@@ -619,14 +668,10 @@ fn a_notice_a_prompt_briefing_showed_is_recorded_and_not_told_again() {
         outcome["coverage"]["current_files"] == 2
     });
     change_signature(&w);
-    let deadline = Instant::now() + WAIT;
-    while !w
-        .prompt("alice")
-        .is_some_and(|context| context.contains(r#"Interface change in "src/upload.rs""#))
-    {
-        assert!(Instant::now() < deadline, "alice was never briefed");
-        std::thread::sleep(Duration::from_millis(200));
-    }
+    support::wait_until("alice to be briefed on the change", WAIT, || {
+        w.prompt("alice")
+            .is_some_and(|context| context.contains(r#"Interface change in "src/upload.rs""#))
+    });
     let told: Vec<Value> = w
         .events()
         .into_iter()
@@ -634,8 +679,12 @@ fn a_notice_a_prompt_briefing_showed_is_recorded_and_not_told_again() {
         .collect();
     assert_eq!(told.len(), 1, "{told:#?}");
     assert_eq!(told[0]["via"], "briefing");
-    let watcher = w.watcher(prompt_event_for(&w.work(), "alice", "prompt-3"));
-    std::thread::sleep(Duration::from_secs(3));
+    let mut watcher = w.watcher(prompt_event_for(&w.work(), "alice", "prompt-3"));
+    support::holds_for(
+        "the watcher waits without telling what the briefing showed",
+        Duration::from_secs(3),
+        || watcher.try_wait().unwrap().is_none(),
+    );
     assert_eq!(
         w.hook(stop_event(&w.work(), "alice", "prompt-3")).0,
         "stopped"

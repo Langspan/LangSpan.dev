@@ -1,0 +1,1 @@
+Find indexed definitions by name, with source digests and coverage; with `detail`, also body digest, calls, callers, notes and last check; with `rank` and `session_id`, in the code briefing's order with each one's ranked dependents; with `renamed`, under the newest name a recorded rename leads to

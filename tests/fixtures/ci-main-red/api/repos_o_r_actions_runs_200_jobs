@@ -1,0 +1,9 @@
+{"jobs": [
+  {"id": 1, "name": "macOS build", "conclusion": "success", "html_url": "https://github.com/o/r/actions/runs/200/job/1"},
+  {"id": 3, "name": "macOS", "conclusion": "failure", "html_url": "https://github.com/o/r/actions/runs/200/job/3"},
+  {"id": 2, "name": "macOS tests 2", "conclusion": "failure", "html_url": "https://github.com/o/r/actions/runs/200/job/2"},
+  {"id": 4, "name": "Linux build", "conclusion": "failure", "html_url": "https://github.com/o/r/actions/runs/200/job/4"},
+  {"id": 5, "name": "Linux", "conclusion": "failure", "html_url": "https://github.com/o/r/actions/runs/200/job/5"},
+  {"id": 6, "name": "macOSX lookalike", "conclusion": "failure", "html_url": "https://github.com/o/r/actions/runs/200/job/6"},
+  {"id": 7, "name": "main-red macOS", "conclusion": null, "html_url": "https://github.com/o/r/actions/runs/200/job/7"}
+]}

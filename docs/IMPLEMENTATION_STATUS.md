@@ -171,6 +171,14 @@ Fixed on `main` since the validation:
   a `commit --mine` afterwards, real Git and a real daemon
   (`tests/commit_guard.rs`); the Claude Code run calling it before
   `commit --mine` is pending.
+- Issue #534: the between-step watcher no longer holds a headless Claude
+  Code turn. In the #172 benchmark pilot, Claude Code 2.1.332 ran it in the
+  foreground under `claude -p` and both agents' turns waited 1,170 s; the
+  watcher now exits 0 at once unless `CLAUDE_CODE_ENTRYPOINT` is `cli`
+  ([ADR 0002](adr/0002-claude-code-adapter.md)). Tested with the real hook
+  binary against a real coordinator (`tests/between_steps.rs`); the live
+  headless run (`tests/live/claude_headless.rs`, run by the owner) and a
+  benchmark trial of the LangSpan arm are pending.
 
 **Observed on real hosts (retained on `main`):**
 
@@ -253,7 +261,9 @@ acceptance evidence above. No Homebrew tap has been published.
   real host.
 - Comparative evidence of reduced rework or manual relay is still open: no
   comparison arm of the [coordination benchmark](../benchmarks/coordination/README.md)
-  has been run on current `main`.
+  has been run on current `main`. `matrix.py` runs a whole comparison and
+  writes its results document; only its stand-in dry runs have run, and no
+  live matrix result is kept.
 - Windows transport is not available.
 
 For the current implementation and limits, start with the

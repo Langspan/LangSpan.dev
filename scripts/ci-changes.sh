@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Decides what a CI run's change touches (.github/workflows/check.yml), and
-# writes `code` and `dry_runs` to $GITHUB_OUTPUT. Each job runs it for
-# itself, so the Linux and macOS jobs start together.
+# Decides what a CI run's change touches, and writes `code` and `dry_runs`
+# to $GITHUB_OUTPUT. Each job runs it for itself, so the Linux and macOS
+# jobs start together. check.yml reads `code`; bench.yml reads `dry_runs`.
 #
 # A pull request or merge-queue commit that changes only Markdown builds
 # nothing: no test or build step reads a .md file. Other files under docs/
@@ -11,7 +11,8 @@
 # main, manual runs and the nightly run always check.
 #
 # The benchmark harness's dry runs (tests/benchmark_harness.rs) took about
-# 11 minutes of macOS's 18 (issue #286). They run only when the change
+# 11 minutes of macOS's 18 (issue #286), so they run in bench.yml, outside
+# the merge queue, and only when the change
 # touches a path in BENCH_PATHS: the harness, the briefing, hook and daemon
 # code it drives, and what builds or runs the suite. The core, daemon,
 # hook, briefing and text entries name directories, so code moved into a
@@ -32,11 +33,11 @@ set -eu
 BENCH_PATHS='^benchmarks/
 |^tests/benchmark_harness\.rs$
 |^src/(daemon|hook|briefing|text)(/|\.rs$)
-|^src/(claude_code|recent)\.rs$
+|^src/claude_code\.rs$
 |^crates/langspan-core/src/
 |^(Cargo\.toml|Cargo\.lock|rust-toolchain\.toml)$
 |^\.config/nextest\.toml$
-|^\.github/workflows/check\.yml$
+|^\.github/workflows/(check|bench)\.yml$
 |^scripts/(check|test-foreign-home|ci-changes)\.sh$'
 
 code=true

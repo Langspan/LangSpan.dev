@@ -8,7 +8,7 @@ pub type Error = Box<dyn std::error::Error + Send + Sync>;
 // Utility layer.
 
 // text
-mod text;
+pub mod text;
 
 // ids
 mod ids;
@@ -26,8 +26,7 @@ pub mod breaks;
 pub mod regions;
 
 // hosts
-mod tool_names;
-mod vendor;
+mod hosts;
 
 // Infrastructure layer.
 
@@ -60,7 +59,6 @@ pub mod shell;
 // install
 pub mod binary_version;
 pub mod guidance;
-pub mod hosts;
 pub mod install;
 pub mod service;
 pub mod user_install;
@@ -84,9 +82,7 @@ pub mod rewrite;
 pub mod test_output;
 
 // briefing
-pub mod recent;
-pub mod since;
-pub mod trail;
+mod briefing;
 
 // person
 pub mod count;
@@ -121,9 +117,13 @@ pub mod demo;
 pub mod skill;
 
 // Compatibility aliases: old paths kept until importers are repointed.
+pub use briefing::recent;
+pub use briefing::since;
+pub use briefing::trail;
 use fs::file_state;
 use fs::input;
 use fs::local;
+use hosts::tool_names;
+use hosts::vendor;
 use ids::registration;
 use ids::sha256;
-use text::redact;

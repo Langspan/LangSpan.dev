@@ -30,13 +30,13 @@ const END: &str = "<!-- langspan-managed:skill:v1 end -->";
 /// The opening words of every message the skill quotes, from the code that
 /// writes them. A test requires the skill to quote exactly these.
 pub const MESSAGES: [&str; 9] = [
-    crate::hook::BRIEFING,
-    crate::hook::UNCOORDINATED,
-    crate::hook::STALE_SOURCE,
-    crate::hook::UNREAD_LINES,
-    crate::hook::CONFLICT,
+    crate::briefing::render::BRIEFING,
+    crate::briefing::render::UNCOORDINATED,
+    crate::briefing::render::STALE_SOURCE,
+    crate::briefing::render::UNREAD_LINES,
+    crate::briefing::render::CONFLICT,
     crate::breaks::ALERT,
-    crate::hook::CHECK_RESULT,
+    crate::briefing::render::CHECK_RESULT,
     crate::commit::HELD,
     crate::formatter::NOTICE,
 ];
@@ -520,9 +520,12 @@ mod tests {
     fn the_refusals_the_skill_quotes_begin_with_its_words() {
         use crate::hook::{deny, deny_stale, deny_unread};
         for (reply, words) in [
-            (deny_stale(&[], "", |_| None), crate::hook::STALE_SOURCE),
-            (deny_unread(&[]), crate::hook::UNREAD_LINES),
-            (deny(&[], &[]), crate::hook::CONFLICT),
+            (
+                deny_stale(&[], "", |_| None),
+                crate::briefing::render::STALE_SOURCE,
+            ),
+            (deny_unread(&[]), crate::briefing::render::UNREAD_LINES),
+            (deny(&[], &[]), crate::briefing::render::CONFLICT),
         ] {
             let stdout: serde_json::Value = serde_json::from_str(&reply.stdout).unwrap();
             let reason = stdout["hookSpecificOutput"]["permissionDecisionReason"]

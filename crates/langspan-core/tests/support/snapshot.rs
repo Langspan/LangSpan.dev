@@ -7,7 +7,7 @@
 //! `git diff` and say in the pull request why the state changed: a refresh
 //! nobody explains hides the regression this test exists to catch.
 
-use langspan_core::State;
+use langspan_core::{SnapshotRecord, State};
 use serde_json::{Value, json};
 use std::path::Path;
 
@@ -19,25 +19,10 @@ const SHOWN: usize = 40;
 
 /// `state` as pretty JSON with its derived fields, ending in a newline.
 pub fn state_json(state: &State) -> String {
-    let mut value = json!({
-        "state": state,
-        "clock_anchor": state.clock_anchor,
-        "refusals": state.refusals,
-        "path_refusals": state.path_refusals,
-        "workspace_revisions": state.workspace_revisions,
-        "kept_tests": state.kept_tests,
-        "first_writes": state.first_writes,
-        "write_runs": state.write_runs,
-        "conflict_waits": state.conflict_waits,
-        "unsettled": state.unsettled,
-        "renames": state.renames,
-        "trails": state.trails,
-    });
-    // A derived field left empty is left out, as the state's own empty
-    // fields are, so a snapshot lists only what the replay holds.
-    if let Value::Object(fields) = &mut value {
-        fields.retain(|_, field| !is_empty(field));
-    }
+    // As the store writes it: a derived field left empty is left out, as the
+    // state's own empty fields are, so a snapshot lists only what the
+    // replay holds.
+    let value = serde_json::to_value(SnapshotRecord::of(state)).expect("a state serializes");
     serde_json::to_string_pretty(&sorted(value)).expect("a state serializes") + "\n"
 }
 
@@ -54,15 +39,6 @@ fn sorted(value: Value) -> Value {
         }
         Value::Array(items) => Value::Array(items.into_iter().map(sorted).collect()),
         other => other,
-    }
-}
-
-fn is_empty(value: &Value) -> bool {
-    match value {
-        Value::Null => true,
-        Value::Array(items) => items.is_empty(),
-        Value::Object(fields) => fields.is_empty(),
-        _ => false,
     }
 }
 

@@ -520,7 +520,7 @@ fn shell_word(text: &str) -> String {
 /// of at most 120 characters. Redaction comes first, so the cut cannot leave
 /// part of a secret too short to be recognised.
 pub fn command_line(argv: &[String]) -> String {
-    crate::hook::redact(&argv.join(" "))
+    crate::text::redact::redact(&argv.join(" "))
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .take(120)

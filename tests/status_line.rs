@@ -18,6 +18,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod support;
+
 static NEXT: AtomicU64 = AtomicU64::new(0);
 const ALICE: &str = "00000000-0000-4000-8000-00000000000a";
 const BOB: &str = "00000000-0000-4000-8000-00000000000b";
@@ -343,17 +345,12 @@ fn the_command_writes_nothing_to_the_state_directory() {
     fixture.prompt(ALICE);
     // The daemon's own work after the prompt (its first scan of the
     // workspace) writes for a moment; wait until the directory is quiet.
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let mut before = listing(&fixture.state());
-    loop {
-        std::thread::sleep(Duration::from_millis(500));
-        let now = listing(&fixture.state());
-        if now == before {
-            break;
-        }
-        assert!(Instant::now() < deadline, "the daemon never went quiet");
-        before = now;
-    }
+    support::settles(
+        "the state directory",
+        Duration::from_millis(500),
+        Duration::from_secs(20),
+        || listing(&fixture.state()),
+    );
     let events = fixture.refusals();
     let before = listing(&fixture.state());
     for _ in 0..3 {

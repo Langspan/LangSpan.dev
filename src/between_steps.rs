@@ -14,7 +14,8 @@
 //! finished), the session ended, the coordinator cannot be reached or does
 //! not know the session once `START_GRACE` has passed (the prompt hook
 //! beside it may still be starting the coordinator or registering the
-//! session), or `WATCH_LIMIT` passed.
+//! session), or `WATCH_LIMIT` passed. Outside an interactive session it
+//! does not watch at all (issue #534, `foreground`).
 //!
 //! The delivery is advisory. Claude Code gives a background hook's
 //! decision fields no effect, and the watcher writes none: it can hold,
@@ -22,7 +23,9 @@
 //! (`interface_notices_told`, via `between_steps`), so a briefing leaves it
 //! out and no second watcher tells it again.
 use crate::client;
-use crate::hook::{BRIEFING, Config, wire_id};
+use crate::hook::BRIEFING;
+use crate::hosts::port::Config;
+use crate::ids::wire_id;
 use crate::protocol::Request;
 use langspan_core::{Command, Outcome};
 use serde::Deserialize;
@@ -33,12 +36,7 @@ pub const MODE: &str = "between-steps";
 /// How often the watcher asks. Each ask with nothing to tell writes
 /// nothing to the store.
 pub const POLL: Duration = Duration::from_secs(1);
-/// How long one watcher runs at most. A longer turn falls back to the next
-/// hook's briefing for what changes after this.
-pub const WATCH_LIMIT: Duration = Duration::from_secs(20 * 60);
-/// The hook entry's `timeout`, in seconds: past `WATCH_LIMIT`, so the host
-/// never stops a watcher that is about to stop itself.
-pub const HOST_TIMEOUT_SECONDS: u64 = WATCH_LIMIT.as_secs() + 60;
+pub use crate::hosts::{WATCH_LIMIT, WATCHER_TIMEOUT_SECONDS};
 /// How long the watcher keeps asking a coordinator it cannot reach, or one
 /// that does not know the session yet: the prompt hook that starts the
 /// coordinator and registers the session runs at the same time.
@@ -102,13 +100,37 @@ fn grace_of(text: Option<&str>) -> Duration {
         })
 }
 
-/// Watch for one prompt's turn, with the production bounds.
+/// Watch for one prompt's turn, with the production bounds, in an
+/// interactive session only.
 pub fn watch(bytes: &[u8], config: &Config) -> Watched {
-    watch_within(bytes, config, WATCH_LIMIT)
+    let entrypoint = std::env::var("CLAUDE_CODE_ENTRYPOINT").ok();
+    watch_within(bytes, config, entrypoint.as_deref(), WATCH_LIMIT)
 }
 
-/// Watch for at most `limit`.
-pub fn watch_within(bytes: &[u8], config: &Config, limit: Duration) -> Watched {
+/// Issue #534: Claude Code 2.1.332 backgrounds an `asyncRewake` hook only
+/// when the session is interactive or has streaming input; otherwise it
+/// runs the hook in the foreground and the turn waits for it. Hooks inherit
+/// `CLAUDE_CODE_ENTRYPOINT`, which the host sets to `cli` only when
+/// interactive (`sdk-cli` otherwise, and an inherited value such as
+/// `sdk-ts` may reach a nested `claude -p`). So the watcher watches only
+/// for `cli`, and for any other value ends at once: no between-step
+/// notices there, and the prompt and tool hooks still brief the session.
+fn foreground(entrypoint: Option<&str>) -> Option<Watched> {
+    (entrypoint != Some("cli")).then(|| {
+        Watched::quiet(format!(
+            "CLAUDE_CODE_ENTRYPOINT is {entrypoint:?}, not \"cli\": the host may run this hook in the foreground, so the watcher does not watch"
+        ))
+    })
+}
+
+/// Watch for at most `limit`, in a session whose `CLAUDE_CODE_ENTRYPOINT`
+/// is `entrypoint`.
+pub fn watch_within(
+    bytes: &[u8],
+    config: &Config,
+    entrypoint: Option<&str>,
+    limit: Duration,
+) -> Watched {
     let started = Instant::now();
     let grace = start_grace();
     let event: HostEvent = match serde_json::from_slice(bytes) {
@@ -121,9 +143,12 @@ pub fn watch_within(bytes: &[u8], config: &Config, limit: Duration) -> Watched {
     if event.hook_event_name != "UserPromptSubmit" || event.agent_id.is_some() {
         return Watched::quiet("the watcher runs for a session's own prompt only");
     }
-    let Some(host_session) = event.session_id.filter(|id| crate::hook::valid_host_id(id)) else {
+    let Some(host_session) = event.session_id.filter(|id| crate::ids::valid_host_id(id)) else {
         return Watched::quiet("event lacks a usable session identity");
     };
+    if let Some(quiet) = foreground(entrypoint) {
+        return quiet;
+    }
     // Where the main checkout's install steps aside for a worktree's own,
     // so does its watcher: one watcher per session is enough.
     let config =
@@ -244,7 +269,7 @@ mod tests {
     #[test]
     fn the_watcher_ends_itself_well_before_its_host_timeout() {
         let overrun = Duration::from_secs(4) + CALL_BUDGET * 2 + POLL;
-        assert!(WATCH_LIMIT + overrun < Duration::from_secs(HOST_TIMEOUT_SECONDS));
+        assert!(WATCH_LIMIT + overrun < Duration::from_secs(WATCHER_TIMEOUT_SECONDS));
         assert!(START_GRACE < WATCH_LIMIT);
     }
 
@@ -332,6 +357,7 @@ mod tests {
         let watched = watch_within(
             br#"{"hook_event_name":"UserPromptSubmit","session_id":"alice"}"#,
             &config,
+            Some("cli"),
             Duration::from_secs(5),
         );
         let ids = peer.join().unwrap();
@@ -382,12 +408,60 @@ mod tests {
             ),
         ] {
             let started = Instant::now();
-            let watched = watch_within(event.to_string().as_bytes(), &config, WATCH_LIMIT);
+            let watched = watch_within(
+                event.to_string().as_bytes(),
+                &config,
+                Some("cli"),
+                WATCH_LIMIT,
+            );
             assert_eq!(watched.exit, 0, "{event}: {watched:?}");
             assert!(watched.stderr.is_empty(), "{event}: {watched:?}");
             assert!(watched.detail.contains(why), "{event}: {watched:?}");
             assert!(started.elapsed() < POLL, "{event}: asked no coordinator");
         }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Issue #534: Claude Code runs an `asyncRewake` hook in the foreground,
+    /// and the turn waits for it, in a non-interactive session. Only
+    /// `CLAUDE_CODE_ENTRYPOINT=cli` proves an interactive session, so every
+    /// other value ends the watcher at once, with exit 0 and the reason.
+    #[test]
+    fn only_an_interactive_entrypoint_lets_the_watcher_watch() {
+        assert_eq!(foreground(Some("cli")), None);
+        for entrypoint in [
+            None,
+            Some("sdk-cli"),
+            Some("sdk-ts"),
+            Some("sdk-py"),
+            Some(""),
+            Some("CLI"),
+        ] {
+            let watched = foreground(entrypoint).expect("ends at once");
+            assert_eq!(
+                (watched.exit, watched.stderr.as_str()),
+                (0, ""),
+                "{entrypoint:?}"
+            );
+            assert!(
+                watched.detail.contains("CLAUDE_CODE_ENTRYPOINT"),
+                "{watched:?}"
+            );
+            assert!(
+                watched.detail.contains(&format!("{entrypoint:?}")),
+                "{watched:?}"
+            );
+        }
+        // A prompt it would serve ends before any ask (no coordinator
+        // listens here); input it cannot read says so in any session.
+        let (dir, config) = scratch("entrypoint");
+        let prompt = br#"{"hook_event_name":"UserPromptSubmit","session_id":"alice"}"#;
+        let started = Instant::now();
+        let watched = watch_within(prompt, &config, Some("sdk-cli"), WATCH_LIMIT);
+        assert!(started.elapsed() < POLL, "asked no coordinator");
+        assert_eq!(Some(watched), foreground(Some("sdk-cli")));
+        let watched = watch_within(b"[]", &config, None, WATCH_LIMIT);
+        assert_eq!(watched.detail, "malformed host event");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -400,6 +474,7 @@ mod tests {
         let watched = watch_within(
             br#"{"hook_event_name":"UserPromptSubmit","session_id":"alice"}"#,
             &config,
+            Some("cli"),
             Duration::from_secs(5),
         );
         peer.join().unwrap();

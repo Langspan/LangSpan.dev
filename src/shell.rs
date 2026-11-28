@@ -1310,7 +1310,7 @@ pub struct ChangeNote {
 /// secrets redacted, deceptive characters replaced, at most
 /// `NOTE_COMMAND_BYTES` bytes.
 pub fn kept_command(command: &str) -> String {
-    crate::text::clean(&crate::redact::redact(command), NOTE_COMMAND_BYTES)
+    crate::text::clean(&crate::text::redact::redact(command), NOTE_COMMAND_BYTES)
 }
 
 fn notes_dir(state_dir: &Path, root: &Path) -> PathBuf {

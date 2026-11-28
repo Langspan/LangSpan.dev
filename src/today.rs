@@ -15,7 +15,7 @@ use crate::local_day;
 /// Lines the text shows at most, its last saying what was left out.
 pub const TEXT_LINES: usize = 40;
 /// The MCP result's size, the same cap as a hook briefing.
-pub const MCP_BYTES: usize = crate::hook::BRIEFING_LIMIT;
+pub const MCP_BYTES: usize = crate::briefing::BRIEFING_LIMIT;
 /// One line's size at most, so no single path can fill the result.
 const LINE_BYTES: usize = 240;
 

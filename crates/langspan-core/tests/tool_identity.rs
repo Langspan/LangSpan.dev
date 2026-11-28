@@ -1,7 +1,17 @@
 use langspan_core::{
-    Command, Event, Lease, LeaseRelation, Outcome, State, ToolResult, apply, decide,
+    Command, Event, Lease, LeaseRelation, Outcome, SnapshotRecord, State, ToolResult, apply, decide,
 };
 use serde_json::{Value, json};
+
+/// `state` as the stored snapshot holds it, without the named derived fields.
+fn without(state: &State, derived: &[&str]) -> Value {
+    let mut record = serde_json::to_value(SnapshotRecord::of(state)).unwrap();
+    let fields = record.as_object_mut().unwrap();
+    for field in derived {
+        fields.remove(*field);
+    }
+    record
+}
 
 fn run(state: &mut State, id: &str, command: Command, now: u64) -> Outcome {
     let before = state.clone();
@@ -113,12 +123,16 @@ fn tool_admission_uses_the_same_all_or_none_conflict_rules() {
     // Nothing is reserved; only the refusal is remembered, for a starting
     // session's recent section (roadmap C3) and until what followed it
     // settles it (roadmap B28).
-    assert_eq!(state.path_refusals.len(), 1);
-    assert_eq!(state.path_refusals[0].paths, ["src/api.rs", "src/other.rs"]);
-    state.path_refusals.clear();
-    assert_eq!(state.unsettled["alice"].len(), 1);
-    state.unsettled.clear();
-    assert_eq!(state, before);
+    assert_eq!(state.path_refusals().len(), 1);
+    assert_eq!(
+        state.path_refusals()[0].paths,
+        ["src/api.rs", "src/other.rs"]
+    );
+    assert_eq!(state.unsettled()["alice"].len(), 1);
+    assert_eq!(
+        without(&state, &["path_refusals", "unsettled"]),
+        without(&before, &["path_refusals", "unsettled"])
+    );
 }
 
 #[test]
@@ -147,9 +161,12 @@ fn every_changed_identity_field_is_an_input_mismatch_without_changing_authority(
         // Counted writes mark automatic-check reruns, and who wrote when
         // marks a check's comparison with its baseline; they grant nothing.
         authority.writes = before.writes.clone();
-        authority.first_writes = before.first_writes.clone();
-        authority.write_runs = before.write_runs.clone();
-        assert_eq!(authority, before, "a mismatch is evidence, never authority");
+        let derived = ["first_writes", "write_runs"];
+        assert_eq!(
+            without(&authority, &derived),
+            without(&before, &derived),
+            "a mismatch is evidence, never authority"
+        );
     }
 }
 

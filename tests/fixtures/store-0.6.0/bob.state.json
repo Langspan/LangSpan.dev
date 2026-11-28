@@ -1,0 +1,167 @@
+{
+  "clock_anchor": {
+    "clock_ms": 2165897980,
+    "generation": 2,
+    "wall_ms": 1795816561442
+  },
+  "first_writes": {
+    "codex.codex-9": 0
+  },
+  "state": {
+    "activity": {
+      "codex.codex-9": {
+        "generation": 2,
+        "known": [
+          {
+            "at_ms": 2165898428,
+            "path": "NOTES.md",
+            "state": {
+              "digest": "444e0fffbd825e9610ff5b199485707a0c895339ae80c15cc8a8aee41b106fda",
+              "type": "present"
+            }
+          },
+          {
+            "at_ms": 0,
+            "path": "src/upload.rs",
+            "state": {
+              "digest": "8c3a59b1cd63d8b0b828dc43823ef2d1f24297fd7759543fb64fd2162f029a06",
+              "type": "present"
+            }
+          },
+          {
+            "at_ms": 0,
+            "path": "CHANGELOG.md",
+            "state": {
+              "digest": "cd353b18f96566cc64af67c41bb334ff0f39441d1355702c752e919b04c516b0",
+              "type": "present"
+            }
+          }
+        ],
+        "last_hook_ms": 2165898427,
+        "last_ms": 0,
+        "session_id": "codex.codex-9"
+      }
+    },
+    "generation": 2,
+    "intents": {},
+    "leases": {
+      "lsh1-admit-43d2ed9a827f689f7fd17295829415fa": {
+        "base_unknown": [
+          "NOTES.md"
+        ],
+        "expires_at_ms": 2165928427,
+        "generation": 2,
+        "lease_id": "lsh1-admit-43d2ed9a827f689f7fd17295829415fa",
+        "operation": {
+          "input_digest": "03f36a87c814ad298ecbe07125c56e4fa02f96673394efe3bc4098adf0fd010e",
+          "operation_id": "lsh1-op-fd25396d0e5aef379f6e409212e37a17",
+          "source": "codex",
+          "tool": "apply_patch"
+        },
+        "paths": [
+          "NOTES.md"
+        ],
+        "session_id": "codex.codex-9",
+        "status": "active",
+        "workspace_id": "app"
+      },
+      "lsh1-admit-b5f27289f8f38f8b75d0eb6286f4692b": {
+        "base_unknown": [
+          "CHANGELOG.md"
+        ],
+        "expires_at_ms": 2165925669,
+        "generation": 1,
+        "lease_id": "lsh1-admit-b5f27289f8f38f8b75d0eb6286f4692b",
+        "operation": {
+          "input_digest": "4fc2af8bca1823e4f65d91da1a4e125fd76ec9c4dbb69ff5b24fde76712aa941",
+          "operation_id": "lsh1-op-01a979f1578d289e133a353e41e26b96",
+          "source": "codex",
+          "tool": "apply_patch"
+        },
+        "paths": [
+          "CHANGELOG.md"
+        ],
+        "session_id": "codex.codex-9",
+        "status": "completed",
+        "workspace_id": "app"
+      },
+      "lsh1-admit-e0740e4c78c2f178432f0d52d10acbda": {
+        "base_unknown": [
+          "src/upload.rs"
+        ],
+        "expires_at_ms": 2165926393,
+        "generation": 1,
+        "lease_id": "lsh1-admit-e0740e4c78c2f178432f0d52d10acbda",
+        "operation": {
+          "input_digest": "3f82fffcd643ac7ce710ce3659469a8950c45090211595db4a5541e0a8dff052",
+          "operation_id": "lsh1-op-a71e36bb3c3c3b7c00d39bca1499c053",
+          "source": "codex",
+          "tool": "apply_patch"
+        },
+        "paths": [
+          "src/upload.rs"
+        ],
+        "session_id": "codex.codex-9",
+        "status": "invalidated",
+        "workspace_id": "app"
+      }
+    },
+    "remote_links": {
+      "app": {
+        "enabled": true,
+        "name": "Bob",
+        "participant": "84ff2c49c5815aa5bfe480761ddc3fbd",
+        "remote": "origin",
+        "sequence": 4,
+        "share_task": false,
+        "signature": "ca92b560a0d6c452",
+        "withdrawn": false,
+        "workspace_id": "app"
+      }
+    },
+    "sessions": {
+      "codex.codex-9": {
+        "generation": 2,
+        "session_id": "codex.codex-9",
+        "workspace_id": "app"
+      }
+    },
+    "uninstalled_hosts": {
+      "codex": {
+        "at_ms": 2165893076,
+        "generation": 1,
+        "host": "codex"
+      },
+      "cursor": {
+        "at_ms": 2165893076,
+        "generation": 1,
+        "host": "cursor"
+      }
+    },
+    "workspace_git": {
+      "app": {
+        "branch_ref": "refs/heads/bob/changelog",
+        "repository_id": "local-8a875e794a7e1d4c1765013b8fa8a188",
+        "workspace_id": "app"
+      }
+    },
+    "workspaces": {
+      "app": {
+        "root": "/private/tmp/ls-demo.QJ37ZT/bob",
+        "workspace_id": "app"
+      }
+    },
+    "writes": {
+      "app": 2
+    }
+  },
+  "write_runs": {
+    "app": [
+      {
+        "first": 1,
+        "last": 1,
+        "session_id": "codex.codex-9"
+      }
+    ]
+  }
+}

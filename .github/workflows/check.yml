@@ -16,13 +16,25 @@ on:
         description: Restore no build cache
         type: boolean
         default: false
-  # Every night on main (schedules run on the default branch), with the
-  # benchmark harness's dry runs whatever changed. A failure opens or
-  # updates one issue (job nightly-report).
+      # A dry run of job main-red: it reports the run below (or this one)
+      # as a failure of the platform named, and prints the issue instead
+      # of filing it.
+      main_red_dry_run:
+        description: Print the main-red issue for this platform instead of filing it
+        type: choice
+        options: ["off", Linux, macOS]
+        default: "off"
+      main_red_run:
+        description: The run id the dry run reports on (default this run)
+        type: string
+        default: ""
+  # Every night on main (schedules run on the default branch). A failure
+  # opens or updates one issue (job nightly-report). The benchmark
+  # harness's dry runs run in bench.yml, never in this workflow.
   schedule:
     - cron: "23 3 * * *"
 # No token permission unless a job asks for it; each job reads only, except
-# nightly-report, which writes issues.
+# the reports flaky-report, nightly-report and main-red, which write issues.
 permissions: {}
 env:
   # Line numbers in backtraces and no other debug info. Measured on an
@@ -98,24 +110,27 @@ concurrency:
 # so the owner can move a job to a larger (billed) runner without a code
 # change; unset, each job takes GitHub's standard runner.
 #
-# Time limits by lane: a build job gets 35 minutes in the merge queue and
-# 30 on main and nightly (the nightly run also builds the release binary;
-# a cold run compiles cargo-nextest and cargo-audit too), and a shard 15.
-# The targets are far lower (docs/development-process.md); these limits
-# only stop a hung run. The fast
-# lane gets 10, not the 6 its 3-minute target suggests, because building
-# cargo-nextest or cargo-audit when its cache misses takes minutes on a
-# standard runner (scripts/install-ci-tools.sh).
+# Time limits by lane: a build job gets 6 minutes on a pull request and 15
+# in the merge queue, a shard 15, and a build job 30 on main and nightly
+# (the nightly run also builds the release binary, and main's run saves the
+# cache the others restore). With the cache restored, the slowest pull
+# request build took 4.5 minutes, the slowest merge-queue build 6.8 and the
+# slowest shard 11.2, retries included (docs/evidence/ci/lanes.md). A build
+# that restores nothing took 9 to 15 minutes (docs/evidence/ci/shards.md),
+# and compiling a new cargo-audit adds minutes. A pull
+# request that changes rust-toolchain.toml, or a tool version in
+# scripts/install-ci-tools.sh, therefore raises these two limits, and the
+# next one lowers them once main has saved the new cache. A job's limit
+# can't read what the change touches, so the workflow can't do it alone.
 jobs:
   linux:
     name: Linux build
     runs-on: ${{ vars.LINUX_RUNNER || 'ubuntu-24.04' }}
-    timeout-minutes: ${{ github.event_name == 'pull_request' && 10 || github.event_name == 'merge_group' && 35 || 30 }}
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 6 || github.event_name == 'merge_group' && 15 || 30 }}
     permissions:
       contents: read
     outputs:
       code: ${{ steps.changes.outputs.code }}
-      dry_runs: ${{ steps.changes.outputs.dry_runs }}
     steps:
       # Two commits deep: a pull request's run checks out the merge commit,
       # whose first parent is the base, so the change is HEAD^1..HEAD with
@@ -126,8 +141,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: ${{ github.event_name != 'merge_group' && 2 || 0 }}
-      # Whether the change is code at all, and whether the benchmark dry
-      # runs are needed: the script says why.
+      # Whether the change is code at all: the script says why.
       - name: Decide what the change touches
         id: changes
         env:
@@ -203,8 +217,9 @@ jobs:
       - name: Check formatting, dependencies, lint, real integration tests and the demonstration
         if: steps.changes.outputs.code == 'true'
         env:
-          # `skip` or `run`; tests/benchmark_harness.rs skips on `skip` only.
-          LANGSPAN_BENCH_DRY_RUNS: ${{ steps.changes.outputs.dry_runs }}
+          # The benchmark dry runs (92 to 132 s each on macOS) run in
+          # bench.yml, never here, so they are off the merge queue's path.
+          LANGSPAN_BENCH_DRY_RUNS: skip
           LANGSPAN_TEST_ARCHIVE: ${{ runner.temp }}/tests.tar.zst
         run: sh scripts/check.sh
       # The fast lane ran its tests here; the full lane's run in the shards.
@@ -261,8 +276,10 @@ jobs:
           path: ~/.cache/langspan-ci-tools/cargo-audit
           key: ${{ steps.keys.outputs.audit }}
   # The full lane's tests, in shards of the archive the build job made:
-  # nextest's `hash` partition gives each test to one shard by its name, so
-  # every test runs exactly once. Four shards, from the measured test time
+  # scripts/ci-shards.py gives each test to one shard by the measured times
+  # in scripts/ci-test-times.tsv, so every test runs exactly once and each
+  # shard gets an even share of the measured test time
+  # (docs/evidence/ci/balance.md). Four shards, from the measured test time
   # (docs/evidence/ci/shards.md); a fifth would mostly wait on the slowest
   # benchmark dry run. Each shard runs on its own standard runner, under the
   # foreign home, with retries and reports as the unsharded run had.
@@ -319,8 +336,8 @@ jobs:
         env:
           LANGSPAN_CHECK_LANE: shard
           LANGSPAN_TEST_ARCHIVE: ${{ runner.temp }}/tests.tar.zst
-          LANGSPAN_TEST_PARTITION: hash:${{ matrix.shard }}/${{ strategy.job-total }}
-          LANGSPAN_BENCH_DRY_RUNS: ${{ needs.linux.outputs.dry_runs }}
+          LANGSPAN_TEST_PARTITION: time:${{ matrix.shard }}/${{ strategy.job-total }}
+          LANGSPAN_BENCH_DRY_RUNS: skip
         run: sh scripts/check.sh
       # No test took over 10 s unless it is named `slow_…` (issue #311,
       # docs/development-process.md#slow-tests). It reports without failing
@@ -389,12 +406,11 @@ jobs:
   macos:
     name: macOS build
     runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-24.04' || vars.MACOS_RUNNER || 'macos-26' }}
-    timeout-minutes: ${{ github.event_name == 'pull_request' && 10 || github.event_name == 'merge_group' && 35 || 30 }}
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 6 || github.event_name == 'merge_group' && 15 || 30 }}
     permissions:
       contents: read
     outputs:
       code: ${{ steps.changes.outputs.code }}
-      dry_runs: ${{ steps.changes.outputs.dry_runs }}
     steps:
       - name: Pass a pull request at once
         if: github.event_name == 'pull_request'
@@ -458,7 +474,7 @@ jobs:
       - name: Check formatting, dependencies, lint, real integration tests and the demonstration
         if: steps.changes.outputs.code == 'true'
         env:
-          LANGSPAN_BENCH_DRY_RUNS: ${{ steps.changes.outputs.dry_runs }}
+          LANGSPAN_BENCH_DRY_RUNS: skip
           LANGSPAN_TEST_ARCHIVE: ${{ runner.temp }}/tests.tar.zst
           LANGSPAN_CHECK_PORTABLE: "false"
         run: sh scripts/check.sh
@@ -538,8 +554,8 @@ jobs:
         env:
           LANGSPAN_CHECK_LANE: shard
           LANGSPAN_TEST_ARCHIVE: ${{ runner.temp }}/tests.tar.zst
-          LANGSPAN_TEST_PARTITION: hash:${{ matrix.shard }}/${{ strategy.job-total }}
-          LANGSPAN_BENCH_DRY_RUNS: ${{ needs.macos.outputs.dry_runs }}
+          LANGSPAN_TEST_PARTITION: time:${{ matrix.shard }}/${{ strategy.job-total }}
+          LANGSPAN_BENCH_DRY_RUNS: skip
         run: sh scripts/check.sh
       - name: Name the tests that passed only on retry
         if: always()
@@ -552,8 +568,7 @@ jobs:
           path: target/nextest/${{ env.NEXTEST_PROFILE }}/junit.xml
           if-no-files-found: warn
           retention-days: 14
-  # The check `macOS`, as `Linux` is made. It also names the shards' failed
-  # tests for macos-report.
+  # The check `macOS`, as `Linux` is made.
   macos-result:
     name: macOS
     needs: [macos, macos-tests]
@@ -564,7 +579,6 @@ jobs:
       contents: read
     outputs:
       flaky: ${{ steps.result.outputs.flaky }}
-      failed: ${{ steps.result.outputs.failed }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -641,7 +655,7 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           SHA: ${{ github.sha }}
         run: |
-          body=$(printf 'The nightly Rust checks failed on main at %s.\n\nRun: %s\n\nThe nightly run includes the benchmark harness dry runs, which pull requests skip when they touch no benchmark, briefing, hook or daemon code, and checks the unchanged lockfile against the latest RustSec advisories with cargo-deny and cargo-audit; the job log names any new advisory. Fix the failure the same day (docs/development-process.md).' "$SHA" "$RUN_URL")
+          body=$(printf 'The nightly Rust checks failed on main at %s.\n\nRun: %s\n\nThe nightly run checks the unchanged lockfile against the latest RustSec advisories with cargo-deny and cargo-audit; the job log names any new advisory. Fix the failure the same day (docs/development-process.md).' "$SHA" "$RUN_URL")
           number=$(gh issue list --state open --search "\"$TITLE\" in:title" --json number,title \
             --jq 'map(select(.title == env.TITLE)) | .[0].number // empty')
           if [ -n "$number" ]; then
@@ -651,46 +665,49 @@ jobs:
             # the report.
             gh issue create --title "$TITLE" --body "$body"
           fi
-  # Until the ruleset requires macOS, a macOS failure can reach main without
-  # stopping the queue. When the macOS check fails or times out on a push to
-  # main, this opens one issue, or comments on it while it is open, naming
-  # the commit and the tests that failed. As in nightly-report: only this
-  # job can write, and only issues; it checks out nothing and runs no
-  # repository code, and the names reach it through the environment.
-  macos-report:
-    name: macOS failure report
-    needs: [macos-result]
-    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && (needs.macos-result.result == 'failure' || needs.macos-result.result == 'cancelled')
+  # macOS is optional in the merge queue (owner decision on #487), so a
+  # macOS failure can reach main; a Linux one can too, as a flaky test or a
+  # change the queue didn't see. After every push to main, for each
+  # platform, scripts/ci-main-red.py opens the issue "main-red: <platform>
+  # checks failing on main" when that platform's check failed or was
+  # cancelled, or comments on it while it is open, and closes it with the
+  # green run's link once the check passes. Nothing is reverted. The token
+  # writes only issues; it reads the run's jobs, logs and JUnit reports and
+  # the commits since the last green run as public data. Log lines and test
+  # names reach the issue capped and quoted as data. A manual run with
+  # main_red_dry_run reports a failure of the run main_red_run names and
+  # prints the issue instead of filing it.
+  main-red:
+    name: main-red ${{ matrix.platform }}
+    needs: [linux-result, macos-result]
+    if: always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && (inputs.main_red_dry_run == 'Linux' || inputs.main_red_dry_run == 'macOS')))
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     permissions:
       issues: write
+    concurrency:
+      group: main-red-${{ github.event_name }}-${{ matrix.platform }}
+      cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [Linux, macOS]
     steps:
-      - name: Open or update the macOS failure issue
+      - if: github.event_name == 'push' || inputs.main_red_dry_run == matrix.platform
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Open, update or close the platform's main-red issue
+        if: github.event_name == 'push' || inputs.main_red_dry_run == matrix.platform
         env:
           GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          TITLE: macOS Rust checks on main failed
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          SHA: ${{ github.sha }}
-          RESULT: ${{ needs.macos-result.result }}
-          FAILED: ${{ needs.macos-result.outputs.failed }}
-        run: |
-          tests=$(printf '%s\n' "$FAILED" | while IFS= read -r name; do
-            if [ -n "$name" ]; then printf -- '- `%s`\n' "$name"; fi
-          done)
-          if [ -z "$tests" ]; then
-            tests="No failed test was recorded: the job failed outside the tests, or stopped before their report. The run's log says where."
-          fi
-          body=$(printf 'The macOS job of the Rust checks ended with %s on main at %s.\n\nFailed tests:\n\n%s\n\nRun: %s\n\nmacOS is not a required check, so the merge queue did not stop on this. Fix it the same day (docs/development-process.md).' \
-            "$RESULT" "$SHA" "$tests" "$RUN_URL")
-          number=$(gh issue list --state open --search "\"$TITLE\" in:title" --json number,title \
-            --jq 'map(select(.title == env.TITLE)) | .[0].number // empty')
-          if [ -n "$number" ]; then
-            gh issue comment "$number" --body "$body"
-          else
-            gh issue create --title "$TITLE" --body "$body"
-          fi
+          PLATFORM: ${{ matrix.platform }}
+          RESULT: ${{ github.event_name == 'workflow_dispatch' && 'failure' || (matrix.platform == 'Linux' && needs.linux-result.result || needs.macos-result.result) }}
+          RUN_ID: ${{ inputs.main_red_run || github.run_id }}
+          REPO: ${{ github.repository }}
+          SERVER_URL: ${{ github.server_url }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' }}
+        run: python3 -I -B scripts/ci-main-red.py
   # zizmor audits the workflows and dependabot.yml: injection, over-broad
   # permissions, credential persistence, unpinned or impostor action
   # commits. Its online audits read public GitHub data with this job's

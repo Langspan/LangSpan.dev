@@ -1,0 +1,1 @@
+List this session's own uncommitted files and hunks in a shared checkout, as `langspan_commit_mine` would split them; changes nothing

@@ -7,12 +7,15 @@
 //! so the host's own permission flow governs. Admission is cooperative and does
 //! not fence the write that the host performs afterwards.
 
-pub use crate::hook::{Config, Identities, MAX_EVENT_BYTES, Reply, wire_id, workspace_request_id};
-use crate::hook::{file_key, valid_host_id};
+pub use crate::hosts::CLAUDE_CODE_SOURCE as SOURCE;
+use crate::hosts::port::Phase;
+pub use crate::hosts::port::{Config, Identities, Reply};
+use crate::ids::{file_key, valid_host_id};
+pub use crate::ids::{wire_id, workspace_request_id};
+pub use crate::input::MAX_EVENT_BYTES;
 use langspan_core::ToolResult;
 use serde::Deserialize;
 use std::{io::Read, time::Instant};
-pub const SOURCE: &str = langspan_core::CLAUDE_CODE_HOST;
 pub const SUPPORTED_TOOLS: [&str; 4] = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
 /// A completed `Read` is recorded as the version the session saw. It is
 /// never admitted or denied.
@@ -36,7 +39,7 @@ struct HostEvent {
     /// teammate (Claude Code hooks reference, "Common input fields").
     agent_id: Option<String>,
 }
-/// In-memory parser entry point. CLI stdin is bounded by hook::read_stdin_until.
+/// In-memory parser entry point. CLI stdin is bounded by input::read_stdin_until.
 pub fn run(input: impl Read, config: &Config) -> Reply {
     let Some(deadline) = Instant::now().checked_add(config.budget) else {
         return Reply::none("unknown", "invalid hook deadline");
@@ -66,9 +69,9 @@ pub fn run_until(input: impl Read, config: &Config, deadline: Instant) -> Reply 
         Err(_) => return Reply::none("unknown", "malformed host event"),
     };
     let phase = match event.hook_event_name.as_str() {
-        "PreToolUse" => crate::hook::Phase::Pre,
-        "PostToolUse" => crate::hook::Phase::Post(ToolResult::Succeeded),
-        "PostToolUseFailure" => crate::hook::Phase::Post(if event.is_interrupt == Some(true) {
+        "PreToolUse" => Phase::Pre,
+        "PostToolUse" => Phase::Post(ToolResult::Succeeded),
+        "PostToolUseFailure" => Phase::Post(if event.is_interrupt == Some(true) {
             ToolResult::Interrupted
         } else {
             ToolResult::Failed
@@ -79,7 +82,7 @@ pub fn run_until(input: impl Read, config: &Config, deadline: Instant) -> Reply 
         return shell(event, phase, config, deadline, started);
     }
     if event.tool_name.as_deref() == Some(SEARCH_TOOL) {
-        if !matches!(phase, crate::hook::Phase::Post(ToolResult::Succeeded)) {
+        if !matches!(phase, Phase::Post(ToolResult::Succeeded)) {
             return Reply::none("unsupported", "only a completed Grep is recorded");
         }
         let (Some(host_session), Some(tool_use_id)) =
@@ -121,10 +124,8 @@ pub fn run_until(input: impl Read, config: &Config, deadline: Instant) -> Reply 
         };
     }
     let phase = match (event.tool_name.as_deref(), phase) {
-        (Some(READ_TOOL), crate::hook::Phase::Post(ToolResult::Succeeded)) => {
-            crate::hook::Phase::Read
-        }
-        (Some(READ_TOOL), crate::hook::Phase::Pre) => {
+        (Some(READ_TOOL), Phase::Post(ToolResult::Succeeded)) => Phase::Read,
+        (Some(READ_TOOL), Phase::Pre) => {
             let reply = pre_read(event, config, deadline);
             return Reply {
                 detail: format!("{} ({} ms)", reply.detail, started.elapsed().as_millis()),
@@ -326,7 +327,7 @@ fn replacements(tool: &str, input: &serde_json::Value) -> Option<crate::regions:
 /// it, success or failure, what it changed ([ADR 0011](../docs/adr/0011-shell-writes.md)).
 fn shell(
     event: HostEvent,
-    phase: crate::hook::Phase,
+    phase: Phase,
     config: &Config,
     deadline: Instant,
     started: Instant,
@@ -368,7 +369,7 @@ fn shell(
         tool_use_id,
         command,
         event.cwd.as_deref(),
-        matches!(phase, crate::hook::Phase::Pre),
+        matches!(phase, Phase::Pre),
         // The command keeps running after the call returns.
         event
             .tool_input

@@ -234,6 +234,23 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual((output.stat().st_mode & 0o777), 0o700)
         self.assertEqual(((output / "runs.jsonl").stat().st_mode & 0o777), 0o600)
 
+    def test_the_three_benchmark_arms_run_real_children_in_a_rotating_order(self):
+        arms = {}
+        for name in ("worktrees", "awareness_only", "langspan"):
+            arms[name] = {"agents": [self.command("agent", "import os; print(os.environ['LANGSPAN_BENCH_ARM'])")]}
+        path = self.root / "manifest.json"
+        path.write_text(json.dumps({"schema_version": 1, "benchmark_id": "k1-arms", "items": [
+            {"id": "three-arms", "description": "Runner behavior only; no agent-quality evidence.", "arms": arms}]}))
+        output, rows, finals = self.run_benchmark(path, repetitions=3)
+        self.assertEqual(len(finals), 9)
+        self.assertTrue(all(row["missing_comparison_arms"] == [] for row in rows))
+        self.assertTrue(all(row["status"] == "succeeded" for row in finals))
+        for row in finals:
+            # Each arm's child ran and saw its own arm.
+            self.assertEqual((output / row["commands"][0]["stdout_path"]).read_text(), row["arm"] + "\n")
+        firsts = [row["arm"] for row in finals if row["arm_order"] == 1]
+        self.assertEqual(firsts, ["worktrees", "awareness_only", "langspan"])
+
 
 if __name__ == "__main__":
     unittest.main()

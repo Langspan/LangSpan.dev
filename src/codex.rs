@@ -1,15 +1,16 @@
 //! Native Codex apply_patch hook adapter. Protocol fixtures are source-derived;
 //! see fixtures/codex-contract/README.md for the live-host evidence boundary.
 
-use crate::hook::{self, Config, Operation, Phase, Reply};
+use crate::hook::{self, Operation};
+use crate::hosts::port::{Config, Phase, Reply};
+use crate::ids::{file_key, valid_host_id};
 use langspan_core::ToolResult;
 use serde::Deserialize;
 use serde_json::Value;
 use std::{collections::BTreeSet, io::Read, time::Instant};
 
-/// The core names a Codex session by this prefix of its ID (issue #129).
-pub const SOURCE: &str = langspan_core::CODEX_HOST;
-pub use crate::hook::MAX_EVENT_BYTES;
+pub use crate::hosts::CODEX_SOURCE as SOURCE;
+pub use crate::input::MAX_EVENT_BYTES;
 
 const MAX_PATCH_BYTES: usize = 4 * 1024 * 1024;
 const MAX_PATCH_PATHS: usize = 64;
@@ -28,7 +29,7 @@ struct HostEvent {
 
 fn host_identity(value: Option<String>) -> Result<String, Reply> {
     match value {
-        Some(value) if hook::valid_host_id(&value) => Ok(value),
+        Some(value) if valid_host_id(&value) => Ok(value),
         _ => Err(Reply::none(
             "unsupported",
             "Codex event lacks a usable session or tool-call identity",
@@ -120,15 +121,13 @@ fn parse_event(
     let config = hook::resolve_workspace(config, Some(cwd), deadline)?;
     let paths: Result<BTreeSet<_>, _> = raw_paths
         .iter()
-        .map(|path| hook::file_key(&config.root, Some(cwd), path))
+        .map(|path| file_key(&config.root, Some(cwd), path))
         .collect();
     let paths = paths.map_err(|detail| Reply::none("unsupported", detail))?;
     // A hunk set whose file cannot be keyed is simply held whole.
     let edits = patch_edits(command)
         .into_iter()
-        .filter_map(|(path, edit)| {
-            Some((hook::file_key(&config.root, Some(cwd), &path).ok()?, edit))
-        })
+        .filter_map(|(path, edit)| Some((file_key(&config.root, Some(cwd), &path).ok()?, edit)))
         .collect();
     Ok((
         Operation {
@@ -153,10 +152,7 @@ fn parse_event(
             contents: whole_files(command)
                 .into_iter()
                 .filter_map(|(path, content)| {
-                    Some((
-                        hook::file_key(&config.root, Some(cwd), &path).ok()?,
-                        content,
-                    ))
+                    Some((file_key(&config.root, Some(cwd), &path).ok()?, content))
                 })
                 .collect(),
             pre_tool_context: true,
@@ -583,7 +579,7 @@ mod tests {
             "lsh1-complete-6713294b883bf67b1150745f2070132a"
         );
         assert_eq!(
-            hook::wire_id(
+            crate::ids::wire_id(
                 "observe-post_tool_use",
                 &[SOURCE, &ids.session_id, &ids.operation_id]
             ),

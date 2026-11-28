@@ -1,0 +1,1 @@
+Combine branches onto the remote's target and run a command (an argument list, no shell, 1 to 3600 s) on exactly that tree; record the result. With `symbols`, also name definitions the branches changed in ways that disagree (advisory)

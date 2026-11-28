@@ -936,7 +936,7 @@ fn a_removed_workspace_forgets_its_trails() {
         6,
     );
     assert!(matches!(ended, Outcome::SessionEnded { .. }), "{ended:?}");
-    assert!(state.trails.contains_key("work"), "no trail was left");
+    assert!(state.trails().contains_key("work"), "no trail was left");
     run(&mut state, "rm", remove(true), 10);
-    assert!(!state.trails.contains_key("work"), "{:?}", state.trails);
+    assert!(!state.trails().contains_key("work"), "{:?}", state.trails());
 }

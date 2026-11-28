@@ -466,7 +466,7 @@ fn state(context: &Context) -> Reply {
                     .map(|host| {
                         (
                             host.clone(),
-                            crate::hosts::preview_command(host, state_dir).into(),
+                            crate::install::detect::preview_command(host, state_dir).into(),
                         )
                     })
                     .collect();

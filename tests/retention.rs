@@ -2,12 +2,15 @@
 //! with real SQLite files, real daemons and the real CLI.
 
 use langspan::store::Store;
-use langspan_core::{Command, CompactionReport, Outcome, State};
+use langspan_core::{Command, CompactionReport, Outcome, SnapshotRecord, State};
 use rusqlite::Connection;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+#[cfg(unix)]
+mod support;
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -95,22 +98,27 @@ fn copy(from: &Path, to: &Path) {
 fn assert_same_state(left: &State, right: &State) {
     // Fields left out of every reply too. Each start anchors its own
     // generation on the real clocks, so two starts agree on its generation.
-    let generation = |state: &State| state.clock_anchor.map(|anchor| anchor.generation);
+    let generation = |state: &State| state.clock_anchor().map(|anchor| anchor.generation);
     assert_eq!(
         generation(left),
         generation(right),
         "state field clock_anchor differs"
     );
     assert_eq!(
-        left.refusals, right.refusals,
+        left.refusals(),
+        right.refusals(),
         "state field refusals differs"
     );
     assert_eq!(
-        left.path_refusals, right.path_refusals,
+        left.path_refusals(),
+        right.path_refusals(),
         "state field path_refusals differs"
     );
-    let mut unanchored = right.clone();
-    unanchored.clock_anchor = left.clock_anchor;
+    let mut unanchored = serde_json::to_value(SnapshotRecord::of(right)).unwrap();
+    unanchored["clock_anchor"] = serde_json::to_value(left.clock_anchor()).unwrap();
+    let unanchored = serde_json::from_value::<SnapshotRecord>(unanchored)
+        .unwrap()
+        .into_state();
     assert!(
         *left == unanchored,
         "the states differ in a field that is not serialised"
@@ -1021,7 +1029,11 @@ mod daemon {
         let before = daemon.events();
         daemon.start(&[]);
         // Several maintenance passes, with no retention configured.
-        std::thread::sleep(Duration::from_millis(1500));
+        support::holds_for(
+            "no event deleted and no snapshot taken without retention",
+            Duration::from_millis(1500),
+            || daemon.events() >= before && count(&daemon.database(), "snapshots") == 0,
+        );
         daemon.stop();
         assert!(daemon.events() >= before, "events were deleted");
         assert_eq!(count(&daemon.database(), "snapshots"), 0);
@@ -1279,18 +1291,18 @@ fn a_compaction_keeps_the_registration_revision_of_a_moved_workspace() {
         "{:?}",
         moved.outcome
     );
-    let revisions = store.state().workspace_revisions.clone();
+    let revisions = store.state().workspace_revisions().clone();
     assert_eq!(revisions.get("w"), Some(&1), "{revisions:?}");
 
     wall.set(START_MS + 100 * DAY_MS);
     let applied = report(store.compact(30, true).unwrap());
     assert!(applied.applied && applied.events > 0, "{applied:?}");
-    assert_eq!(store.state().workspace_revisions, revisions);
+    assert_eq!(store.state().workspace_revisions(), &revisions);
     drop(store);
     let store = wall.open(&path);
     assert_eq!(
-        store.state().workspace_revisions,
-        revisions,
+        store.state().workspace_revisions(),
+        &revisions,
         "a start from the snapshot lost the registration revision"
     );
 }
@@ -1430,7 +1442,7 @@ impl Days {
         let directory = Directory::new();
         let wall = Wall::at(START_MS);
         let store = wall.open(&directory.file("state.sqlite3"));
-        let anchor = store.state().clock_anchor.expect("the start is anchored");
+        let anchor = store.state().clock_anchor().expect("the start is anchored");
         assert_eq!(
             anchor.wall_ms, START_MS,
             "the generation is anchored on the store's wall clock"
@@ -1657,7 +1669,7 @@ fn a_start_after_compaction_keeps_both_generations_placed_and_the_cutoff_in_forc
     days.wall.set(START_MS + 11 * DAY_MS);
     let path = days.directory.file("state.sqlite3");
     days.store = days.wall.open(&path);
-    let anchor = days.store.state().clock_anchor.expect("anchored");
+    let anchor = days.store.state().clock_anchor().expect("anchored");
     assert_eq!(anchor.wall_ms, START_MS + 11 * DAY_MS);
     days.anchor = anchor;
     days.run(Command::SessionRegister {
@@ -1762,9 +1774,9 @@ fn a_compaction_keeps_the_retained_tests_and_write_history() {
         observed.outcome
     );
     let before = store.state().clone();
-    assert!(!before.kept_tests.is_empty(), "no test results were kept");
-    assert!(!before.first_writes.is_empty(), "no first write was kept");
-    assert!(!before.write_runs.is_empty(), "no write run was kept");
+    assert!(!before.kept_tests().is_empty(), "no test results were kept");
+    assert!(!before.first_writes().is_empty(), "no first write was kept");
+    assert!(!before.write_runs().is_empty(), "no write run was kept");
 
     wall.set(START_MS + 100 * DAY_MS);
     let applied = report(store.compact(30, true).unwrap());
@@ -1772,12 +1784,21 @@ fn a_compaction_keeps_the_retained_tests_and_write_history() {
     drop(store);
     let store = wall.open(&path);
     let after = store.state();
-    assert_eq!(after.kept_tests, before.kept_tests, "kept_tests was lost");
     assert_eq!(
-        after.first_writes, before.first_writes,
+        after.kept_tests(),
+        before.kept_tests(),
+        "kept_tests was lost"
+    );
+    assert_eq!(
+        after.first_writes(),
+        before.first_writes(),
         "first_writes was lost"
     );
-    assert_eq!(after.write_runs, before.write_runs, "write_runs was lost");
+    assert_eq!(
+        after.write_runs(),
+        before.write_runs(),
+        "write_runs was lost"
+    );
 }
 
 /// A rename remembered for `graph symbol --renamed` (roadmap D7) is derived
@@ -1832,14 +1853,18 @@ fn a_compaction_keeps_the_remembered_renames() {
         observed.outcome
     );
     let before = store.state().clone();
-    assert!(!before.renames.is_empty(), "no rename was remembered");
+    assert!(!before.renames().is_empty(), "no rename was remembered");
 
     wall.set(START_MS + 100 * DAY_MS);
     let applied = report(store.compact(30, true).unwrap());
     assert!(applied.applied && applied.events > 0, "{applied:?}");
     drop(store);
     let store = wall.open(&path);
-    assert_eq!(store.state().renames, before.renames, "renames was lost");
+    assert_eq!(
+        store.state().renames(),
+        before.renames(),
+        "renames was lost"
+    );
 }
 
 /// Review follow-up #253: the trails of ended sessions (roadmap C9) are in
@@ -1887,14 +1912,14 @@ fn a_compaction_keeps_the_trails_of_ended_sessions() {
         100,
     );
     let before = store.state().clone();
-    assert!(!before.trails.is_empty(), "no trail was left");
+    assert!(!before.trails().is_empty(), "no trail was left");
 
     wall.set(START_MS + 100 * DAY_MS);
     let applied = report(store.compact(30, true).unwrap());
     assert!(applied.applied && applied.events > 0, "{applied:?}");
     drop(store);
     let store = wall.open(&path);
-    assert_eq!(store.state().trails, before.trails, "trails were lost");
+    assert_eq!(store.state().trails(), before.trails(), "trails were lost");
 }
 
 /// Recap "since away" after retention removed the owner's last work: a
