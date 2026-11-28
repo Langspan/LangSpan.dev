@@ -327,6 +327,15 @@ mod tests {
             "git commit -F - <<EOF\n${x:-$(git push origin HEAD:main)}\nEOF",
             "git log --format=\"${x:-$(git push origin HEAD:main)}\"",
             "git log --format=${x:-`git push origin HEAD:main`}",
+            // Review of PR #613: Bash removes a backquote's escapes before
+            // it runs the text, and `\"` too inside double quotes.
+            "git log --format=`git log --format=\"\\$(git push origin main)\"`",
+            "git log --format=`echo \\`git push origin main\\``",
+            "git log --format=\"`g\\\"\\\"it push origin main`\"",
+            "git commit -F - <<EOF\n`git log --format=\"\\$(git push origin main)\"`\nEOF",
+            // Single quotes in a default are literal inside double quotes.
+            "git log --format=\"${x:-'`git push origin main`'}\"",
+            "git log --format=${x:-\"$(git push origin main)\"}",
         ] {
             let why = git_push(command).unwrap_err().0;
             assert!(why.contains("inside a substitution"), "{command:?}: {why}");
@@ -339,6 +348,10 @@ mod tests {
             "git commit -F - <<EOF\nan escaped \\$(git push) and \\`git push\\` in $USER's note\nEOF",
             "git commit -F - <<EOF\n'unbalanced \"quotes in $HOME: git push\nEOF",
             "git log --format=\"$(git config user.name)\" --grep push",
+            // Review of PR #613: a single-quoted default outside double
+            // quotes is literal.
+            "git log --format=${x:-'`git push origin main`'}",
+            "git log --format=${x:-'$(git push origin main)'}",
         ] {
             assert_eq!(git_push(command), Ok(None), "{command:?}");
         }

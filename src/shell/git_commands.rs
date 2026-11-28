@@ -449,6 +449,31 @@ impl Lexer {
         Ok(())
     }
 
+    /// Read the rest of a backquote substitution, keeping its text as Bash
+    /// runs it: without the backslash before `$`, a backquote or a
+    /// backslash, or before `"` when `quoted` (inside double quotes).
+    fn backquote(&mut self, quoted: bool) -> Result<(), &'static str> {
+        let kept = self.substituted.len();
+        self.substitute(Self::backquoted)?;
+        if let Some(text) = self.substituted.get_mut(kept) {
+            let mut decoded = String::with_capacity(text.len());
+            let mut chars = text.chars().peekable();
+            while let Some(c) = chars.next() {
+                if c == '\\'
+                    && let Some(&next) = chars.peek()
+                    && (matches!(next, '$' | '`' | '\\') || (quoted && next == '"'))
+                {
+                    decoded.push(next);
+                    chars.next();
+                } else {
+                    decoded.push(c);
+                }
+            }
+            *text = decoded;
+        }
+        Ok(())
+    }
+
     fn peek(&self, offset: usize) -> Option<char> {
         self.chars.get(self.at + offset).copied()
     }
@@ -566,11 +591,11 @@ impl Lexer {
             },
             '$' => {
                 word.expanded = true;
-                self.dollar()?;
+                self.dollar(false)?;
             }
             '`' => {
                 word.expanded = true;
-                self.substitute(Self::backquoted)?;
+                self.backquote(false)?;
             }
             '<' | '>' if self.peek(0) == Some('(') => {
                 word.expanded = true;
@@ -607,19 +632,20 @@ impl Lexer {
                 }
                 '$' => {
                     word.expanded = true;
-                    self.dollar()?;
+                    self.dollar(true)?;
                 }
                 '`' => {
                     word.expanded = true;
-                    self.substitute(Self::backquoted)?;
+                    self.backquote(true)?;
                 }
                 c => word.text.push(c),
             }
         }
     }
 
-    /// After a `$`: a substitution, a parameter or a lone dollar sign.
-    fn dollar(&mut self) -> Result<(), &'static str> {
+    /// After a `$`: a substitution, a parameter or a lone dollar sign;
+    /// `quoted` inside double quotes.
+    fn dollar(&mut self, quoted: bool) -> Result<(), &'static str> {
         match self.peek(0) {
             Some('(') => {
                 self.at += 1;
@@ -627,7 +653,7 @@ impl Lexer {
             }
             Some('{') => {
                 self.at += 1;
-                self.parameter()
+                self.parameter(quoted)
             }
             Some('\'') => {
                 // `$'…'`: skip to the closing quote, honouring escapes.
@@ -655,13 +681,25 @@ impl Lexer {
     }
 
     /// After `${`: to the closing brace, keeping the substitutions in it
-    /// (`${x:-$(cmd)}` runs `cmd`).
-    fn parameter(&mut self) -> Result<(), &'static str> {
+    /// (`${x:-$(cmd)}` runs `cmd`). Outside double quotes (`quoted` false),
+    /// single quotes in it make their text literal, as Bash reads them.
+    fn parameter(&mut self, quoted: bool) -> Result<(), &'static str> {
         let mut depth = 1_usize;
+        let mut double = false;
         while let Some(c) = self.peek(0) {
             self.at += 1;
             match c {
                 '\\' => self.at += 1,
+                '\'' if !quoted && !double => {
+                    while self.peek(0).is_some_and(|c| c != '\'') {
+                        self.at += 1;
+                    }
+                    if self.peek(0).is_none() {
+                        return Err("an unterminated quote");
+                    }
+                    self.at += 1;
+                }
+                '"' => double = !double,
                 '$' if self.peek(0) == Some('{') => {
                     self.at += 1;
                     depth += 1;
@@ -670,7 +708,7 @@ impl Lexer {
                     self.at += 1;
                     self.substitute(Self::substitution)?;
                 }
-                '`' => self.substitute(Self::backquoted)?,
+                '`' => self.backquote(quoted || double)?,
                 '}' => {
                     depth -= 1;
                     if depth == 0 {
@@ -698,9 +736,9 @@ impl Lexer {
                 }
                 '$' if lexer.peek(0) == Some('{') => {
                     lexer.at += 1;
-                    lexer.parameter()?;
+                    lexer.parameter(true)?;
                 }
-                '`' => lexer.substitute(Self::backquoted)?,
+                '`' => lexer.backquote(false)?,
                 _ => {}
             }
         }
@@ -942,6 +980,18 @@ mod tests {
         assert_eq!(steps(command), [commit(true, &[])]);
         let unquoted = "git commit -F - <<EOF\nmessage; git add -A\nEOF\ngit status";
         assert_eq!(steps(unquoted), [commit(false, &[])]);
+    }
+
+    /// Review of PR #613: a single-quoted parameter default is literal, so
+    /// an unpaired backquote in it does not hide the commit.
+    #[test]
+    fn a_single_quoted_parameter_default_is_literal() {
+        for command in [
+            "git commit -m ${msg:-'fix: `example'}",
+            "git commit -m ${msg:-'a } and $(x'}",
+        ] {
+            assert_eq!(steps(command), [commit(false, &[])], "{command}");
+        }
     }
 
     #[test]
