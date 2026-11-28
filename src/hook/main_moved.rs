@@ -186,8 +186,8 @@ fn section(
 
 /// The changes in one file the session edited and the target changed or
 /// deleted (`tip` empty): each symbol whose body the session changed since
-/// `base` that the target also changed, moved (`moved_to` names where) or
-/// removed. A file without a complete parse at every version, where the
+/// `base` (renamed or deleted included) that the target also changed, moved
+/// (`moved_to` names where) or removed. A file without a complete parse at every version, where the
 /// session changed code outside every symbol or no symbol's body, or where a
 /// symbol it changed shares its name and kind with another, is told whole.
 fn compare(
@@ -204,8 +204,14 @@ fn compare(
     let mut items = Vec::new();
     let mut mine = 0;
     let mut whole = outside(base, &base_graph) != outside(now, &now_graph);
-    for symbol in &now_graph.symbols {
+    // A base symbol the session renamed or deleted is one it changed too.
+    let mut seen = Vec::new();
+    for symbol in now_graph.symbols.iter().chain(&base_graph.symbols) {
         let (name, kind) = (symbol.name.as_str(), symbol.kind);
+        if seen.contains(&(name, kind)) {
+            continue;
+        }
+        seen.push((name, kind));
         let mut before = bodies(base, &base_graph, name, kind);
         if before.is_empty() {
             continue;
@@ -227,12 +233,15 @@ fn compare(
             continue;
         };
         mine += 1;
+        let gone = edited.is_empty();
         let name = symbol.name.clone();
         items.push(match find(&tip_graph, &symbol.name, symbol.kind) {
             Some(after) if body(tip, after) == body(base, before) => continue,
             Some(after) => Item::Changed(name, digest(body(tip, after).unwrap_or_default())),
             None => match moved_to(&symbol.name, symbol.kind) {
                 Some(to) => Item::MovedTo(name, to),
+                // Both removed it: nothing to reconcile.
+                None if gone => continue,
                 None => Item::Removed(name),
             },
         });
@@ -431,6 +440,19 @@ mod tests {
         let now = BASE.replace("pub a: u32,", "pub a: u32,\n    pub b: u32,");
         let tip = BASE.replace("    1\n", "    2\n");
         assert_eq!(items(&now, &tip, None), []);
+    }
+
+    #[test]
+    fn a_symbol_the_session_renamed_is_still_compared_with_the_target() {
+        let now = BASE
+            .replace("pub a: u32,", "pub a: u32,\n    pub b: u32,")
+            .replace("fn other()", "fn renamed()");
+        let tip = BASE.replace("    1\n", "    2\n");
+        assert!(
+            matches!(items(&now, &tip, None).as_slice(), [Item::Changed(name, _)] if name == "other")
+        );
+        let gone = "pub struct State {\n    pub a: u32,\n}\n";
+        assert_eq!(items(&now, gone, None), []);
     }
 
     #[test]
