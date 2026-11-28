@@ -148,6 +148,42 @@ if [ "$actual" != "$expected" ]; then
 		"if it fails the same way, report it at $repo_url/issues"
 fi
 
+
+# Runs a command, its output in $tmp/gh.out, and stops it after $1 seconds.
+bounded() {
+	limit=$1
+	shift
+	"$@" >"$tmp/gh.out" 2>&1 &
+	pid=$!
+	(
+		sleep "$limit"
+		kill "$pid"
+	) >/dev/null 2>&1 &
+	watcher=$!
+	status=0
+	wait "$pid" || status=$?
+	kill "$watcher" 2>/dev/null || true
+	return "$status"
+}
+
+# With the GitHub CLI signed in, also check that this repository's release
+# workflow built the archive. gh uses its own sign-in, which the script
+# never reads; without gh, or signed out, the check is reported as skipped.
+signer=Langspan/LangSpan.dev/.github/workflows/release.yml
+if ! command -v gh >/dev/null 2>&1; then
+	provenance="not checked: the GitHub CLI (gh) is not installed"
+elif ! bounded 30 gh auth status; then
+	provenance="not checked: gh is not signed in (run gh auth login)"
+elif bounded 120 gh attestation verify "$tmp/$archive" -R Langspan/LangSpan.dev \
+	--signer-workflow "$signer"; then
+	provenance="verified by gh attestation verify: built by $signer"
+else
+	head -c 2000 "$tmp/gh.out" >&2
+	fail "gh attestation verify did not confirm that $signer built $archive; nothing was installed." \
+		"If gh is older than 2.49 it has no attestation command; update it and run the installer again." \
+		"If it failed for another reason, report it at $repo_url/issues"
+fi
+
 stem=${archive%.tar.gz}
 mkdir "$tmp/unpacked"
 tar -xzf "$tmp/$archive" -C "$tmp/unpacked" "$stem/langspan" ||
@@ -166,6 +202,9 @@ cp "$binary" "$bin_dir/.langspan.install.$$"
 chmod 0755 "$bin_dir/.langspan.install.$$"
 mv -f "$bin_dir/.langspan.install.$$" "$bin_dir/langspan"
 
+printf 'Downloaded %s/%s\n' "$base" "$archive"
+printf 'SHA-256 matches SHA256SUMS: %s\n' "$actual"
+printf 'Provenance %s\n' "$provenance"
 printf 'Installed %s to %s/langspan\n\nNext steps:\n' "$stem" "$bin_dir"
 # The langspan this shell would run is the first one on PATH. Folders are
 # compared after resolving symlinks, so a trailing slash or a linked folder
