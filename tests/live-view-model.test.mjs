@@ -485,7 +485,7 @@ test("the view's clock anchor times a tail that holds none, and replaces an olde
   const tail = log.slice(-601);
   assert.ok(!tail.some((e) => e.type === "clock_anchored"));
   const given = { generation: 1, clock_ms: 0, wall_ms: 1_800_000_000_000 };
-  const events = Live.withAnchor(tail, given);
+  const events = Live.withAnchor(tail, given, 1);
   // Every row of the tail is after the boot's anchor, so the anchor leads.
   assert.deepEqual(events.slice(1), tail);
   assert.deepEqual(events[0], { seq: 0, type: "clock_anchored", paths: [], more_paths: 0, clock_ms: 0, wall_ms: 1_800_000_000_000 });
@@ -499,11 +499,24 @@ test("the view's clock anchor times a tail that holds none, and replaces an olde
   // The tail's own anchor stands when it is the view's; an older one gives
   // way; without either the tail is untimed.
   const own = [{ seq: 5, type: "clock_anchored", clock_ms: 0, wall_ms: given.wall_ms, paths: [], more_paths: 0 }, ...tail];
-  assert.equal(Live.withAnchor(own, given), own);
+  assert.equal(Live.withAnchor(own, given, 1), own);
   const old = [{ ...own[0], clock_ms: -5 }, ...tail];
-  assert.deepEqual(Live.withAnchor(old, given).at(-1), { seq: tail.at(-1).seq, type: "clock_anchored", paths: [], more_paths: 0, clock_ms: 0, wall_ms: given.wall_ms });
-  assert.equal(Live.withAnchor(tail, undefined), tail);
+  assert.deepEqual(Live.withAnchor(old, given, 1).at(-1), { seq: tail.at(-1).seq, type: "clock_anchored", paths: [], more_paths: 0, clock_ms: 0, wall_ms: given.wall_ms });
+  assert.equal(Live.withAnchor(tail, undefined, 1), tail);
   assert.equal(Live.daemonNow(tail, 1), undefined);
+});
+
+test("a tail last read in another generation stays untimed under the view's anchor", () => {
+  // The daemon restarted (generation 2) and the events read failed, so the
+  // cached tail is generation 1's; the new clock must not time its rows.
+  const tail = longLog(900, 1000).slice(-601);
+  const after = { generation: 2, clock_ms: 0, wall_ms: 1_800_000_000_000 };
+  assert.equal(Live.withAnchor(tail, after, 1), tail);
+  assert.ok(Live.pace(model(STATE, tail), tail).cards.every((c) => c.time === null), "every card is untimed");
+  // Nor before any read has succeeded.
+  assert.equal(Live.withAnchor(tail, after, undefined), tail);
+  // Read again in generation 2, the anchor leads them.
+  assert.equal(Live.withAnchor(tail, after, 2)[0].wall_ms, after.wall_ms);
 });
 
 test("a busy tail stops at its row bound, a short log is read whole with its anchor, and an empty one is empty", async () => {
