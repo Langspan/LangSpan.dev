@@ -198,6 +198,20 @@ class StaleCallers(unittest.TestCase):
         self.assertIn("sessions 1 and 2", found["reason"])
         self.assertIn("shelf/features/gone.py", found["reason"])
 
+    def test_a_shared_checkout_s_caller_is_fixed_by_whichever_session_writes_it(self):
+        # In one checkout a file is one file: session 1's write that leaves
+        # session 2's stale caller in the new form fixes it.
+        trial = shared(recorded("langspan-follow"))
+        fix = trial["transcripts"][1][4:7]
+        del trial["transcripts"][1][4:7]
+        trial["transcripts"][0][-2:-2] = fix
+        found = measure(trial)
+        fixed = (2152111981911375 - CHANGE["langspan-follow"]) / 1e9
+        self.assertEqual((found["status"], found["writes_admitted"], found["stale_files"], found["unfixed"],
+                          found["fixed_after_s"]), ("reported", 1, 1, 0, fixed), found)
+        self.assertEqual(found["items"][-1], {"session": 1, "path": "shelf/features/gone.py", "after_s": fixed,
+                                              "kind": "fixed"})
+
     def test_the_input_is_not_changed(self):
         trial = recorded("langspan-follow")
         before = copy.deepcopy(trial)
