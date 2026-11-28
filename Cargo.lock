@@ -413,7 +413,7 @@ dependencies = [
 
 [[package]]
 name = "langspan"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "langspan-core",
  "langspan-graph",
@@ -428,7 +428,7 @@ dependencies = [
 
 [[package]]
 name = "langspan-core"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "proptest",
  "serde",
@@ -437,7 +437,7 @@ dependencies = [
 
 [[package]]
 name = "langspan-graph"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "tree-sitter",
  "tree-sitter-c-sharp",

@@ -9,7 +9,7 @@ homepage = "https://langspan.dev"
 
 [package]
 name = "langspan"
-version = "0.11.0"
+version = "0.11.1"
 edition = "2024"
 rust-version = "1.100"
 publish = false
