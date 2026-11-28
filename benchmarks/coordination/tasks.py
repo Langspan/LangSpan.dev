@@ -29,7 +29,7 @@ import json
 import random
 import re
 
-FAMILIES = ("rename_vs_new_caller", "contradictory_defaults", "discovered_change")
+FAMILIES = ("rename_vs_new_caller", "contradictory_defaults", "discovered_change", "push_contention")
 SESSION_COUNTS = (2, 5, 10)
 
 # A configuration every feature check parses: three items, one owner.
@@ -124,6 +124,16 @@ def feature_task(module, function, parameters, returns, body, checks):
             "follow": [{"op": "write", "path": path, "content": feature_source(function, parameters, body, NEW_NAME)}],
         },
     }
+
+
+def independent_task(*feature):
+    """push_contention (issue #611): a feature module that no peer's change
+    touches, so the only contention is for `origin main` itself."""
+    task = feature_task(*feature)
+    del task["trigger"], task["notice"]
+    task["details"] = ("Parse the configuration text with `parse_config` in `shelf/config.py`; do not write a "
+                       "second parser. Add a unit test for it in `tests/test_%s.py`." % feature[0])
+    return dict(task, standin={mode: task["standin"]["ignore"] for mode in ("ignore", "follow", "hedge")})
 
 
 # (key, old default, side A: module, function, value, why; side B: same)
@@ -389,6 +399,7 @@ SUCCESS = {
         "every call in the package, every new module included, uses the changed form; and the package's "
         "tests pass"
     ),
+    "push_contention": "every task's function returns what its task asked for, and the package's tests pass",
 }
 
 
@@ -429,6 +440,9 @@ def assign(family, sessions, seed):
     elif family == "discovered_change":
         features = chooser.sample(DATED_FEATURES, sessions - 1)
         tasks = [dict(CHANGER, role="changer")] + [dict(dependent_task(*f), role="dependent") for f in features]
+    elif family == "push_contention":
+        features = chooser.sample(FEATURES, sessions - 1)
+        tasks = [dict(independent_task(*f), role="independent") for f in features] + [dict(CONTROL, role="control")]
     else:
         pairs, alone, controls = chooser.choice(layouts(sessions))
         chosen = chooser.sample(CONTRADICTIONS, pairs + alone)

@@ -36,7 +36,8 @@ SHELLS = {"sh", "bash", "zsh"}
 SHELL_COMMAND = re.compile(r"-[a-z]*c[a-z]*")
 # Git's own words for a push the remote refused.
 REJECTED = re.compile(r"\[(?:remote )?rejected\]|failed to push")
-LOCKED = re.compile(r"index\.lock|cannot lock ref|Unable to create")
+# A lock a peer holds, or a merge a peer's pull has not concluded yet.
+LOCKED = re.compile(r"index\.lock|cannot lock ref|Unable to create|during a merge|not concluded your merge")
 IDENTITY = (("user.name", "Benchmark"), ("user.email", "benchmark@example.invalid"), ("commit.gpgsign", "false"))
 
 
@@ -53,14 +54,36 @@ def identify(checkout):
         git(checkout, "config", key, value)
 
 
-def prepare(work, repo):
-    """The bare remote WORK/origin.git holding REPO's `main`, and the one
-    checkout WORK/trunk every session works in. Returns the checkout."""
-    origin, trunk = work / "origin.git", work / "trunk"
+def lands_by_pushing(isolation, family):
+    """Whether sessions land their work by pushing to `origin main`: in the
+    shared checkout, and in every arm for the push-contention family
+    (issue #611). Otherwise each commits on its own branch, merged later."""
+    return isolation == "shared" or family == "push_contention"
+
+
+def prepare(work, repo, names=("trunk",)):
+    """The bare remote WORK/origin.git holding REPO's `main`, whose reflog
+    times each update of it, and a clone of it on `main` under WORK for each
+    of NAMES: the one checkout every session works in, or one per session.
+    Returns the clones."""
+    origin = work / "origin.git"
     git(work, "clone", "-q", "--bare", "--no-hardlinks", str(repo), str(origin))
-    git(work, "clone", "-q", str(origin), str(trunk))
-    identify(trunk)
-    return trunk
+    git(origin, "config", "core.logAllRefUpdates", "always")
+    for name in names:
+        git(work, "clone", "-q", str(origin), str(work / name))
+        identify(work / name)
+    return [work / name for name in names]
+
+
+def landing_times(origin):
+    """When each push updated `main` in the bare remote ORIGIN, in whole
+    seconds since the epoch, from its reflog; none when it has no reflog."""
+    try:
+        lines = (origin / "logs" / "refs" / "heads" / "main").read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return []
+    found = [re.search(r"> (\d+) [+-]\d{4}\t", line) for line in lines]
+    return [int(match.group(1)) for match in found if match]
 
 
 def blocks(event):
@@ -139,20 +162,25 @@ def runs_git_push(command):
 def push_counts(events):
     """Push attempts and rejections in a transcript's EVENTS: every Bash
     call whose command runs `git push`, a compound command's too, and each
-    of those whose result shows Git refusing the push."""
-    pushes, attempts, rejections = set(), 0, 0
+    of those whose result shows Git refusing the push. A retry is an attempt
+    made after a rejected one; a push landed when its result is neither a
+    rejection nor an error."""
+    pushes, counts, rejected = set(), {"attempts": 0, "rejections": 0, "retries": 0, "landed": 0}, False
     for event in events:
         for block in blocks(event):
             tool_input = block.get("input") if isinstance(block.get("input"), dict) else {}
             command = tool_input.get("command")
             if block.get("type") == "tool_use" and block.get("name") == "Bash" and isinstance(command, str) \
                     and runs_git_push(command):
-                attempts += 1
+                counts["attempts"] += 1
+                counts["retries"] += rejected
                 pushes.add(block.get("id"))
             elif block.get("type") == "tool_result" and block.get("tool_use_id") in pushes:
                 pushes.discard(block.get("tool_use_id"))
-                rejections += REJECTED.search(result_text(block.get("content"))) is not None
-    return {"attempts": attempts, "rejections": rejections}
+                rejected = REJECTED.search(result_text(block.get("content"))) is not None
+                counts["rejections"] += rejected
+                counts["landed"] += not rejected and block.get("is_error") is not True
+    return counts
 
 
 def bash(command, cwd):
@@ -174,23 +202,31 @@ def bash(command, cwd):
     return ok, output
 
 
-def commit_and_push(paths, index, cwd=None):
-    """The stand-in's landing in a shared checkout: commit only PATHS, then
-    push to `origin main`, fetching and merging after a rejection, at most
-    MAX_PUSH_ATTEMPTS times. Returns whether a push landed."""
-    named = " ".join(shlex.quote(str(path)) for path in paths)
+def unlocked(commands, cwd):
+    """Run COMMANDS in order as Bash calls, all again while one fails on
+    a lock a peer in the same checkout holds. Returns the last result."""
     for _ in range(LOCK_RETRIES):
-        ok, output = bash("git add -- " + named, cwd)
-        if ok:
-            ok, output = bash("git commit -q -m %s -- %s" % (shlex.quote("Session %d" % index), named), cwd)
+        for command in commands:
+            ok, output = bash(command, cwd)
+            if not ok:
+                break
         if ok or not LOCKED.search(output):
             break
         time.sleep(LOCK_WAIT_SECONDS)
-    if not ok:
+    return ok, output
+
+
+def commit_and_push(paths, index, cwd=None, attempts=MAX_PUSH_ATTEMPTS):
+    """The stand-in's landing by pushing: commit only PATHS, then push to
+    `origin main`, fetching and merging after a rejection, at most ATTEMPTS
+    times. Returns whether a push landed."""
+    named = " ".join(shlex.quote(str(path)) for path in paths)
+    if not unlocked(["git add -- " + named,
+                     "git commit -q -m %s -- %s" % (shlex.quote("Session %d" % index), named)], cwd)[0]:
         return False
-    for attempt in range(1, MAX_PUSH_ATTEMPTS + 1):
+    for attempt in range(1, attempts + 1):
         if bash("git push origin main", cwd)[0]:
             return True
-        if attempt < MAX_PUSH_ATTEMPTS:
-            bash("git pull --no-rebase --no-edit origin main", cwd)
+        if attempt < attempts:
+            unlocked(["git pull --no-rebase --no-edit origin main"], cwd)
     return False
