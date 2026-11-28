@@ -96,13 +96,6 @@ pub(crate) fn decide_reserve(
     })?;
     let counters = state.reservations.get(&scope);
     let counter = counters.and_then(|counters| counters.get(key));
-    // A Git checkout whose first scans failed counted on its own; its
-    // repository's counter starts above what it handed out.
-    let own = state
-        .reservations
-        .get(&session.workspace_id)
-        .and_then(|counters| counters.get(key))
-        .map_or(0, |counter| counter.highest);
     if counter.is_none() && counters.is_some_and(|counters| counters.len() >= MAX_RESERVATION_KEYS)
     {
         return Err(error(
@@ -112,7 +105,6 @@ pub(crate) fn decide_reserve(
     }
     let number = after
         .max(counter.map_or(0, |counter| counter.highest))
-        .max(own)
         .checked_add(1)
         .ok_or_else(|| {
             error(
@@ -179,6 +171,40 @@ pub(crate) fn apply_reserved(
     counter.claims.insert(0, reservation.clone());
     counter.claims.truncate(MAX_RESERVATION_CLAIMS);
     Ok(())
+}
+
+/// A Git checkout whose first scans failed counted on its own. Once a scan
+/// names its repository, its counters join the repository's, so that no
+/// worktree of the repository takes a number it already handed out. A key
+/// past the repository's bound stays behind; reserving it there is refused.
+pub(crate) fn join_repository(state: &mut State, workspace_id: &str, repository_id: &str) {
+    if workspace_id == repository_id {
+        return;
+    }
+    let Some(alone) = state.reservations.remove(workspace_id) else {
+        return;
+    };
+    let counters = state
+        .reservations
+        .entry(repository_id.to_owned())
+        .or_default();
+    let mut left = BTreeMap::new();
+    for (key, own) in alone {
+        if !counters.contains_key(&key) && counters.len() >= MAX_RESERVATION_KEYS {
+            left.insert(key, own);
+            continue;
+        }
+        let counter = counters.entry(key).or_default();
+        counter.highest = counter.highest.max(own.highest);
+        counter.claims.extend(own.claims);
+        counter
+            .claims
+            .sort_by_key(|claim| core::cmp::Reverse((claim.at_ms, claim.number)));
+        counter.claims.truncate(MAX_RESERVATION_CLAIMS);
+    }
+    if !left.is_empty() {
+        state.reservations.insert(workspace_id.to_owned(), left);
+    }
 }
 
 /// The live claims of sessions other than `session_id` in its scope, newest

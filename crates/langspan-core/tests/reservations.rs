@@ -326,6 +326,41 @@ fn a_checkout_that_counted_alone_joins_its_repository_above_its_own_numbers() {
 }
 
 #[test]
+fn another_worktree_counts_above_a_checkout_that_counted_alone() {
+    let mut state = State::default();
+    apply(&mut state, &Event::Booted { generation: 1 }).unwrap();
+    register(&mut state, "one", "alice");
+    register(&mut state, "two", "bob");
+    scanned(&mut state, "f1", "one", Some("git timed out"));
+    for id in ["a1", "a2", "a3"] {
+        reserve(&mut state, id, "alice", "adr", 0);
+    }
+    // The other worktree counts in the repository before the first joins it.
+    git(&mut state, "g2", "two", "repo-app");
+    let early = reserve(&mut state, "b1", "bob", "adr", 0);
+    assert_eq!(reserved(&early).0.number, 1);
+    // Once the first checkout's repository is known, the other worktree is
+    // the next to reserve, and takes a number above all of the first's.
+    git(&mut state, "g1", "one", "repo-app");
+    let outcome = reserve(&mut state, "b2", "bob", "adr", 0);
+    let (claim, held) = reserved(&outcome);
+    assert_eq!((claim.scope.as_str(), claim.number), ("repo-app", 4));
+    let holders: Vec<(u64, &str)> = held
+        .iter()
+        .map(|claim| (claim.number, claim.session_id.as_str()))
+        .collect();
+    assert_eq!(holders, [(3, "alice"), (2, "alice"), (1, "alice")]);
+    assert_eq!(
+        claims(&brief(&state, "bob")),
+        [
+            ("adr", 3, "alice"),
+            ("adr", 2, "alice"),
+            ("adr", 1, "alice")
+        ]
+    );
+}
+
+#[test]
 fn a_session_whose_process_exited_is_neither_held_nor_briefed() {
     let mut state = ready();
     reserve(&mut state, "r1", "bob", "adr", 0);

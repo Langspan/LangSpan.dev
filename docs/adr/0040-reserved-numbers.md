@@ -36,7 +36,9 @@ adds no trust boundary.
   reservation there is refused with `scope_unknown`: counting it alone would
   let two new worktrees of one repository take the same number. A Git
   checkout that counted alone because its scans failed joins its
-  repository's counter above every number it handed out.
+  repository's counter, with its claims, as soon as a scan names the
+  repository, so every worktree of it counts above every number the checkout
+  handed out.
 - **Release.** A claim is shown to other sessions while its session runs:
   until the session ends or its process is known to have exited.
   The highest number of each key is kept after its holder ends, so no number

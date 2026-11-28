@@ -909,6 +909,7 @@ pub(crate) fn apply_workspace_git_observed(
     state
         .workspace_git
         .insert(git.workspace_id.clone(), git.clone());
+    crate::reservations::join_repository(state, &git.workspace_id, &git.repository_id);
     Ok(())
 }
 
