@@ -338,6 +338,9 @@ fn lifecycle(
     let room = since_section
         .as_ref()
         .map_or(room, |text| room.saturating_sub(text.len() + 2));
+    // The target branch's changes to code this session edited (issue #558).
+    let (upstream, since_section, room) =
+        super::main_moved::after(since_section, config, &ids.session_id, room, deadline);
     // The code section is looked up before the briefing, so that the files
     // this prompt points at are compared with other sessions' in it.
     let code = session.code_context(&ids, ask);
@@ -506,6 +509,7 @@ fn lifecycle(
             placed,
         );
     }
+    upstream.inspect(|up| up.told(&config.state_dir));
     let stdout = json!({
         "hookSpecificOutput": {
             "hookEventName": event_name,
