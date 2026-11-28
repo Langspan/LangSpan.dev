@@ -91,7 +91,7 @@ fn a_hanging_credential_helper_is_killed_with_its_process_group_at_the_deadline(
     );
     let elapsed = started.elapsed();
     let error = result.expect_err("the fetch must fail at its deadline");
-    assert!(error.contains("deadline"), "{error}");
+    assert_eq!(error, langspan::git::GitError::TimedOut, "{error}");
     assert!(elapsed < Duration::from_secs(30), "took {elapsed:?}");
     let pid: i32 = fs::read_to_string(&pid_file)
         .expect("the helper ran")

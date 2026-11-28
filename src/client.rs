@@ -384,7 +384,8 @@ mod unix {
         #[test]
         fn a_past_deadline_is_timed_out_before_anything_is_sent() {
             let request = crate::protocol::Request::new("read", langspan_core::Command::Dashboard);
-            let error = call_until(Path::new("/nonexistent"), &request, Instant::now()).unwrap_err();
+            let error =
+                call_until(Path::new("/nonexistent"), &request, Instant::now()).unwrap_err();
             assert!(matches!(error, ClientError::TimedOut(_)), "{error:?}");
             assert_eq!(
                 error.to_string(),
@@ -917,11 +918,9 @@ pub fn read_all(
                     record
                 }
             };
-            record
-                .apply(&mut state)
-                .map_err(|error| {
-                    ClientError::Refused(format!("{}: {}", error.code, error.message))
-                })?;
+            record.apply(&mut state).map_err(|error| {
+                ClientError::Refused(format!("{}: {}", error.code, error.message))
+            })?;
         }
         match next {
             Some(cursor) => after = Some(cursor),

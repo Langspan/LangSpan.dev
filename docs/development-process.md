@@ -436,6 +436,14 @@ the pull request that moved the code. `--tighten` never raises a number,
 and it deletes a baseline that has nothing left to record. The checker's
 own tests are in `scripts/ratchets/test_*.py`.
 
+One more number is kept per crate rather than per file: the count of
+production function and closure signatures that return
+`Result<_, String>`, in `scripts/ratchets/string-errors.tsv` (rows
+`CRATE<TAB>N`). A crate may not go above its row. When the count falls,
+the check prints the new number; lower the row by hand in the same pull
+request. Return a typed error instead, as `client::ClientError` and
+`git::GitError` do (issue #368).
+
 ### Repository settings
 
 [`.github/desired-settings.json`](../.github/desired-settings.json) records

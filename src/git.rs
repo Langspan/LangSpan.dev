@@ -67,7 +67,8 @@ pub fn identity(cwd: &Path, deadline: Instant) -> Result<Identity, GitError> {
     let path = |bytes: Vec<u8>| -> Result<PathBuf, GitError> {
         let text = String::from_utf8(bytes).map_err(|_| corrupt("Git path is not UTF-8"))?;
         let text = text.strip_suffix('\n').unwrap_or(&text);
-        fs::canonicalize(text).map_err(|e| GitError::Io(format!("cannot resolve Git identity: {e}")))
+        fs::canonicalize(text)
+            .map_err(|e| GitError::Io(format!("cannot resolve Git identity: {e}")))
     };
     Ok(Identity {
         root: path(root)?,
@@ -778,7 +779,10 @@ mod tests {
         assert_eq!(error, super::GitError::TimedOut);
         assert_eq!(error.to_string(), "Git operation deadline elapsed");
         let invalid = standing(Path::new("."), "-a", Path::new("."), Instant::now()).unwrap_err();
-        assert!(matches!(&invalid, super::GitError::Invalid(_)), "{invalid:?}");
+        assert!(
+            matches!(&invalid, super::GitError::Invalid(_)),
+            "{invalid:?}"
+        );
         assert_eq!(invalid.to_string(), "not a worktree-relative path");
     }
 }
