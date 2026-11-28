@@ -110,6 +110,13 @@ if [ "$portable" = true ]; then
   audit_flags=$(python3 -I -B scripts/advisory-ignores.py --audit-flags)
   # shellcheck disable=SC2086 # each flag and id is one word
   cargo audit --deny warnings $audit_flags
+  # The advisory dry run (check.yml's advisory_dry_run input): the same
+  # audit on a lockfile with a known advisory, so the lane fails here as it
+  # would on a new one, without one on main.
+  if [ "${LANGSPAN_ADVISORY_DRY_RUN:-}" = 1 ]; then
+    # shellcheck disable=SC2086 # each flag and id is one word
+    cargo audit --deny warnings $audit_flags --file tests/fixtures/advisory-dry-run/known-advisory.lock
+  fi
   cargo machete
 fi
 cargo clippy --workspace --all-targets --locked -- -D warnings

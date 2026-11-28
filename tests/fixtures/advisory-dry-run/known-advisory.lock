@@ -1,0 +1,11 @@
+# The advisory dry run's lockfile (issue #312): scripts/check.sh audits it
+# when LANGSPAN_ADVISORY_DRY_RUN=1. smallvec 1.6.0 has RUSTSEC-2021-0003
+# (fixed in 1.6.1), so cargo-audit fails on it. No manifest names it and
+# nothing builds it; it is not called Cargo.lock, so no dependency scanner
+# reads it as this repository's.
+version = 3
+
+[[package]]
+name = "smallvec"
+version = "1.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
