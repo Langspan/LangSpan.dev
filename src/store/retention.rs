@@ -10,8 +10,8 @@
 
 use super::{Store, StoreResult, redact_event};
 use langspan_core::{
-    CompactionReport, Event, LeaseStatus, MAX_RETENTION_DAYS, MIN_RETENTION_DAYS, Outcome,
-    SnapshotRecord, State, apply,
+    CompactionReport, ErrorCode, Event, LeaseStatus, MAX_RETENTION_DAYS, MIN_RETENTION_DAYS,
+    Outcome, SnapshotRecord, State, apply,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::collections::BTreeMap;
@@ -204,7 +204,7 @@ impl Store {
     pub fn compact(&mut self, keep_days: u32, apply: bool) -> StoreResult<Outcome> {
         if !(MIN_RETENTION_DAYS..=MAX_RETENTION_DAYS).contains(&keep_days) {
             return Ok(Outcome::Error {
-                code: "invalid_retention".into(),
+                code: ErrorCode::InvalidRetention.into(),
                 message: format!(
                     "keep_days must be between {MIN_RETENTION_DAYS} and {MAX_RETENTION_DAYS}: a retry whose receipt was removed is answered as a new request"
                 ),
@@ -258,7 +258,7 @@ impl Store {
                         })
                     );
                     return Ok(Outcome::Error {
-                        code: "snapshot_mismatch".into(),
+                        code: ErrorCode::SnapshotMismatch.into(),
                         message: format!(
                             "the snapshot at event {target} and the events after it do not give the state the daemon holds (it differs in {}); nothing was deleted",
                             fields.join(", ")

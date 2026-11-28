@@ -4,7 +4,7 @@
 use super::Registration;
 use super::unix::{Job, ask_as, error, now_ms, unsupported_version};
 use crate::protocol::{self, PROTOCOL_VERSION, Response};
-use langspan_core::{Command, Outcome, State, validate_request_id};
+use langspan_core::{Command, ErrorCode, Outcome, State, validate_request_id};
 use std::{
     fs,
     io::{self, Read},
@@ -67,8 +67,9 @@ pub(super) fn forward_transfer(state: &State, transfers: &mpsc::SyncSender<Trans
     let version = job.request.version;
     let request_id = job.request.request_id;
     let command = job.request.command;
-    let refuse =
-        |code: &str, message: String| error(request_id.clone(), state.generation, code, message);
+    let refuse = |code: ErrorCode, message: String| {
+        error(request_id.clone(), state.generation, code, message)
+    };
     let (Command::GraphExport { workspace_id, path }
     | Command::GraphImport {
         workspace_id, path, ..
@@ -77,12 +78,12 @@ pub(super) fn forward_transfer(state: &State, transfers: &mpsc::SyncSender<Trans
         return;
     };
     let refused = if !protocol::answers(version) {
-        Some(refuse("unsupported_version", unsupported_version()))
+        Some(refuse(ErrorCode::UnsupportedVersion, unsupported_version()))
     } else if let Err(e) = validate_request_id(&request_id) {
-        Some(refuse(&e.code, e.message))
+        Some(refuse(ErrorCode::InvalidRequestId, e.message))
     } else if !Path::new(path).is_absolute() || path.len() > 4096 || path.contains('\0') {
         Some(refuse(
-            "invalid_path",
+            ErrorCode::InvalidPath,
             "the file must be named by an absolute path of at most 4096 bytes".into(),
         ))
     } else {
@@ -94,7 +95,7 @@ pub(super) fn forward_transfer(state: &State, transfers: &mpsc::SyncSender<Trans
     }
     let Some(of) = Registration::of(state, workspace_id) else {
         let _ = job.reply.send(refuse(
-            "unknown_workspace",
+            ErrorCode::UnknownWorkspace,
             format!("workspace {workspace_id} is not registered; run `langspan workspace list`"),
         ));
         return;
@@ -119,7 +120,7 @@ pub(super) fn forward_transfer(state: &State, transfers: &mpsc::SyncSender<Trans
         };
         let _ = transfer
             .reply
-            .send(refuse("index_unavailable", message.into()));
+            .send(refuse(ErrorCode::IndexUnavailable, message.into()));
     }
 }
 
@@ -128,7 +129,7 @@ fn transfer(
     index: &mut crate::graph::Index,
     scans: &std::collections::HashMap<String, (Registration, crate::graph::ScanView)>,
     transfer: &Transfer,
-) -> Result<Outcome, (&'static str, String)> {
+) -> Result<Outcome, (ErrorCode, String)> {
     let deadline = Instant::now() + TRANSFER_BUDGET;
     let of = &transfer.of;
     match &transfer.command {
@@ -147,7 +148,7 @@ fn transfer(
                         ""
                     };
                     (
-                        "index_export_failed",
+                        ErrorCode::IndexExportFailed,
                         format!("cannot create {}: {error}{hint}", path.display()),
                     )
                 })?;
@@ -170,12 +171,12 @@ fn transfer(
                 Err(error) => {
                     drop(out);
                     let _ = fs::remove_file(path);
-                    Err(("index_export_failed", error.to_string()))
+                    Err((ErrorCode::IndexExportFailed, error.to_string()))
                 }
             }
         }
         Command::GraphImport { path, apply, .. } => {
-            let refused = |message: String| ("index_import_refused", message);
+            let refused = |message: String| (ErrorCode::IndexImportRefused, message);
             let Some((_, scan)) = scans
                 .get(&of.workspace_id)
                 .filter(|(scanned, _)| scanned == of)
@@ -221,7 +222,7 @@ fn transfer(
                 malformed: imported.malformed,
             })
         }
-        _ => Err(("internal", "not an index transfer".into())),
+        _ => Err((ErrorCode::Internal, "not an index transfer".into())),
     }
 }
 

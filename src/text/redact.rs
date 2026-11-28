@@ -62,7 +62,7 @@ pub fn refuse_secret(command: &Command) -> Option<langspan_core::Outcome> {
             if contains_secret(test) || name.as_deref().is_some_and(contains_secret) =>
         {
             Some(langspan_core::Outcome::Error {
-                code: "secret_in_test_name".into(),
+                code: langspan_core::ErrorCode::SecretInTestName.into(),
                 message: "The test or check name looks like a secret, so it was not recorded; a test whose name looks like a secret is never learned about, so there is nothing to forget".into(),
             })
         }
