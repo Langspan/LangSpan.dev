@@ -628,6 +628,81 @@ fn a_pull_request_runs_the_fast_lane_and_a_queued_commit_every_test() {
     }
 }
 
+/// The fast lane builds only what the `ci-fast` filter can select: every
+/// library and binary, every test target of the two pure crates and each
+/// langspan test the filter names. The targets come from `cargo metadata`,
+/// which is Cargo's own target discovery, so a test added in a subfolder or
+/// by a `[[test]]` entry that the script would miss fails here.
+#[test]
+fn the_fast_lane_builds_every_test_target_its_filter_selects() {
+    let out = Command::new("sh")
+        .arg("scripts/ci-fast-targets.sh")
+        .current_dir(root())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let printed = String::from_utf8(out.stdout).unwrap();
+    let args: Vec<&str> = printed.lines().collect();
+    assert_eq!(args[..2], ["--lib", "--bins"], "{printed}");
+    let built: Vec<&str> = args[2..]
+        .chunks(2)
+        .map(|pair| match pair {
+            ["--test", name] => *name,
+            _ => panic!("not a --test NAME pair: {pair:?} in {printed}"),
+        })
+        .collect();
+
+    let out = Command::new(env!("CARGO"))
+        .args([
+            "metadata",
+            "--no-deps",
+            "--format-version",
+            "1",
+            "--offline",
+        ])
+        .current_dir(root())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let metadata: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let mut langspan_tests = Vec::new();
+    for package in metadata["packages"].as_array().unwrap() {
+        let name = package["name"].as_str().unwrap();
+        for target in package["targets"].as_array().unwrap() {
+            if target["kind"] != serde_json::json!(["test"]) {
+                continue;
+            }
+            let test = target["name"].as_str().unwrap();
+            if name == "langspan" {
+                langspan_tests.push(test.to_owned());
+            } else {
+                assert!(
+                    built.contains(&test),
+                    "the fast lane doesn't build {name}'s test {test}, so the ci-fast filter can't run it"
+                );
+            }
+        }
+    }
+
+    let fast = profile(&read(".config/nextest.toml"), "ci-fast");
+    let named: Vec<&str> = fast
+        .split("binary_id(langspan::")
+        .skip(1)
+        .map(|rest| rest.split(')').next().unwrap())
+        .collect();
+    assert!(named.contains(&"cli_transcript"), "{fast}");
+    for name in named {
+        assert!(
+            langspan_tests.iter().any(|test| test == name),
+            "the ci-fast filter names binary_id(langspan::{name}), which isn't a test target"
+        );
+        assert!(
+            built.contains(&name),
+            "the fast lane doesn't build langspan's test {name}"
+        );
+    }
+}
+
 #[test]
 fn check_sh_refuses_an_unknown_lane_before_it_runs_anything() {
     // Outside the repository, so a check that started would fail otherwise.
