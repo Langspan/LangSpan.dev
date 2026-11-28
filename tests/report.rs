@@ -687,10 +687,12 @@ fn a_report_still_reading_never_delays_an_admission() {
             (outcome, started.elapsed())
         })
     };
-    // The report reaches the daemon first. Were the order reversed, the
-    // admission would pass without showing anything; the report's own time
-    // below shows it was held.
-    std::thread::sleep(Duration::from_millis(200));
+    // The report is inside its read before the admission is sent: the
+    // paused reader writes `report-reading` first. Were the order reversed,
+    // the admission would pass without showing anything.
+    support::wait_until("the report to begin its read", PAUSE, || {
+        state.join("report-reading").is_file()
+    });
     let started = Instant::now();
     let outcome = call(
         &state,
@@ -710,6 +712,70 @@ fn a_report_still_reading_never_delays_an_admission() {
         admission < ADMISSION_LIMIT,
         "an admission took {admission:?} while a report was reading ({took:?})"
     );
+}
+
+/// Issue #581: a session that starts while a report is still reading gets
+/// its briefing of a peer's recent edit, at once. The reader holds its read
+/// for `PAUSE`, twice the hook's 4 s budget: an owner that waited for the
+/// read would leave the hook with no briefing. The briefing is read from
+/// the owner's state, which must neither wait for the report nor miss the
+/// peer's writes. A real daemon process, real SQLite and real hook
+/// processes, because the owner, the reader's connection and the hook's
+/// reply are what this verifies.
+#[test]
+fn a_session_gets_its_briefing_while_a_report_is_reading() {
+    const PAUSE: Duration = Duration::from_secs(8);
+    let mut w = World::new();
+    let pause = PAUSE.as_millis().to_string();
+    w.start_with(
+        Duration::from_secs(10),
+        &[("LANGSPAN_TEST_REPORT_PAUSE_MS", &pause)],
+    );
+    let mut start = recorded(include_str!("../fixtures/codex-0.171.0/session-start.json"));
+    start["session_id"] = json!(CODEX);
+    w.hook("codex", start);
+    let (reply, _) = w.hook(
+        "codex",
+        codex_patch("PreToolUse", "p1", "src/api.rs", "old", "new"),
+    );
+    assert!(!denied(&reply), "{reply:#}");
+    fs::write(w.work().join("src/api.rs"), "new\n").unwrap();
+    w.hook(
+        "codex",
+        codex_patch("PostToolUse", "p1", "src/api.rs", "old", "new"),
+    );
+    let state = w.state();
+    // Only starts the read: the client gives up after 5 s, inside the
+    // pause, so its own answer is not asserted here. The test above checks
+    // a held report's answer.
+    {
+        let state = state.clone();
+        std::thread::spawn(move || {
+            let report = Command::Report {
+                workspace_id: "demo".into(),
+                from_ms: 0,
+            };
+            let _ = langspan::client::call(&state, &Request::new("r", report));
+        });
+    }
+    support::wait_until("the report to begin its read", PAUSE, || {
+        state.join("report-reading").is_file()
+    });
+    let started = Instant::now();
+    let (reply, diagnostic) = w.hook(
+        "claude-code",
+        json!({"session_id": CLAUDE, "hook_event_name": "SessionStart", "source": "startup"}),
+    );
+    let took = started.elapsed();
+    let context = reply["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        context.contains("src/api.rs"),
+        "no briefing of the peer's edit: {reply:#} {diagnostic:#}"
+    );
+    assert_ne!(diagnostic["coverage"], "no_briefing", "{diagnostic:#}");
+    assert!(took < PAUSE, "the briefing waited for the report: {took:?}");
 }
 
 /// Issue #581: reports wait for the reader in a queue of four, beside the
