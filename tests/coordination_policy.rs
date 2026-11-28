@@ -409,6 +409,35 @@ fn a_pre_tool_event_delivered_again_after_a_wait_keeps_its_admission() {
     assert_eq!(f.events(&["write_waited"]).len(), 1);
 }
 
+/// Review follow-up #244: while Bob waits, `a.txt` becomes a symlink, which
+/// has no version to compare. The edit was planned against a version that
+/// can no longer be read, so the wait decides nothing (`unknown`) instead of
+/// admitting it as unchanged. A real daemon and hook: what is verified is
+/// the file read after a concurrent holder lets go.
+#[test]
+fn a_wait_whose_file_can_no_longer_be_read_decides_nothing() {
+    let f = Fixture::new();
+    f.wait_policy(&["--wait-ms", "2000"]);
+    f.alice_holds("alice-1");
+    let bob = std::thread::scope(|scope| {
+        let bob = scope.spawn(|| f.codex(BOB, "bob-1", "PreToolUse", Some(4000)));
+        f.waits(&format!("codex.{BOB}"), &bob);
+        let file = f.work().join("a.txt");
+        fs::write(f.work().join("elsewhere.txt"), "other\n").unwrap();
+        fs::remove_file(&file).unwrap();
+        std::os::unix::fs::symlink("elsewhere.txt", &file).unwrap();
+        // Alice's write fails; her report sees the symlink too, so it is not
+        // `observed`, but it ends her admission all the same.
+        let input = f.write_input("a.txt", "alice\n");
+        let event = f.claude_event(ALICE, "alice-1", "PostToolUseFailure", "Write", input);
+        f.hook("claude-code", None, &event);
+        bob.join().unwrap()
+    });
+    assert_eq!(bob.coverage, "unknown", "{bob:?}");
+    assert!(bob.detail.contains("a.txt"), "{}", bob.detail);
+    assert!(f.events(&["write_waited"]).is_empty());
+}
+
 /// A holder that never lets go: the wait ends with today's conflict
 /// refusal, saying how long it waited, before the hook's deadline.
 #[test]

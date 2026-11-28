@@ -310,18 +310,10 @@ impl Session<'_> {
         }
         // The holder is gone. An edit planned against a version that is no
         // longer on disk is refused, naming what changed.
-        let changed: Vec<langspan_core::StaleFile> = base
-            .iter()
-            .filter_map(|file| {
-                let now = file_state(self.root, &file.path)?;
-                (now != file.state).then(|| langspan_core::StaleFile {
-                    path: file.path.clone(),
-                    read: file.state.clone(),
-                    current: now,
-                    changed_by: wait.holder.clone(),
-                })
-            })
-            .collect();
+        let changed = match changed_while_waiting(self.root, base, &wait) {
+            Ok(changed) => changed,
+            Err(reply) => return WaitEnd::Decided(reply),
+        };
         let wait = Waited {
             holder: wait.holder,
             waited: started.elapsed(),
@@ -551,6 +543,39 @@ pub(super) fn add_alert(reply: &mut Reply, event: &str, (context, note): (Option
         }
     })
     .to_string();
+}
+
+/// The files of `base` whose version on disk changed while the edit waited.
+/// A file that can no longer be read (now a symlink, a directory or over
+/// the size bound) is not known to be unchanged, so the wait decides
+/// nothing: the reply says which (review follow-up #244).
+fn changed_while_waiting(
+    root: &Path,
+    base: &[langspan_core::ObservedFile],
+    wait: &Waited,
+) -> Result<Vec<langspan_core::StaleFile>, Reply> {
+    let mut changed = Vec::new();
+    for file in base {
+        let Some(now) = file_state(root, &file.path) else {
+            return Err(Reply::none(
+                "unknown",
+                format!(
+                    "{} could not be read again after waiting {} ms for its holder, so whether it changed is unknown; read it again, then retry the edit",
+                    file.path,
+                    wait.waited.as_millis()
+                ),
+            ));
+        };
+        if now != file.state {
+            changed.push(langspan_core::StaleFile {
+                path: file.path.clone(),
+                read: file.state.clone(),
+                current: now,
+                changed_by: wait.holder.clone(),
+            });
+        }
+    }
+    Ok(changed)
 }
 
 type Located = (

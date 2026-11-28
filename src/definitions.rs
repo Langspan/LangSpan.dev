@@ -88,9 +88,9 @@ struct Branch {
     name: String,
     changed: Vec<Definition>,
     uses: Vec<Use>,
-    /// Names of definitions the branch added or renamed something to: its
-    /// own lines may mean them.
-    added: BTreeSet<String>,
+    /// Names of definitions the branch added or renamed something to, with
+    /// their language family: its own lines in that family may mean them.
+    added: BTreeSet<(Language, String)>,
 }
 
 /// TypeScript and TSX files call each other.
@@ -345,7 +345,7 @@ fn index(
                     && langspan_graph::same_signature(&was.signature, &symbol.signature)
             });
             if !kept {
-                branch.added.insert(symbol.name.clone());
+                branch.added.insert((family(language), symbol.name.clone()));
             }
         }
         Vec::new()
@@ -372,7 +372,7 @@ fn index(
             Change::Renamed { to, before, .. } => {
                 // The new name is the branch's own definition, as an
                 // addition is.
-                branch.added.insert(to.clone());
+                branch.added.insert((family(language), to.clone()));
                 (
                     line_of(&old, &change.name, change.kind),
                     before,
@@ -381,7 +381,7 @@ fn index(
                 )
             }
             Change::Added => {
-                branch.added.insert(change.name);
+                branch.added.insert((family(language), change.name));
                 continue;
             }
             // Several definitions share the name: which one a call means
@@ -483,8 +483,12 @@ fn compare(branches: &[Branch], deadline: Instant) -> (Vec<SymbolFinding>, u32, 
             if i == j {
                 continue;
             }
-            let touches = |name: &str| {
-                b.added.contains(name) || b.changed.iter().any(|other| other.name == name)
+            // Only a definition in the same language family is the branch's own.
+            let touches = |d: &Definition| {
+                b.added.contains(&(family(d.language), d.name.clone()))
+                    || b.changed.iter().any(|other| {
+                        other.name == d.name && family(other.language) == family(d.language)
+                    })
             };
             for d in a.changed.iter().filter(|d| !d.before.is_empty()) {
                 if Instant::now() >= deadline {
@@ -527,7 +531,7 @@ fn compare(branches: &[Branch], deadline: Instant) -> (Vec<SymbolFinding>, u32, 
                         else {
                             continue;
                         };
-                        if touches(&d.name) {
+                        if touches(d) {
                             continue;
                         }
                         for used in uses {
@@ -553,7 +557,7 @@ fn compare(branches: &[Branch], deadline: Instant) -> (Vec<SymbolFinding>, u32, 
                         }
                     }
                     None => {
-                        if touches(&d.name) {
+                        if touches(d) {
                             continue;
                         }
                         for used in uses {
@@ -763,6 +767,35 @@ mod tests {
             ],
         );
         assert_eq!(found(&[sync, own]).0, Vec::new());
+    }
+
+    // Review follow-up on #279 (#285).
+    #[test]
+    fn a_definition_of_the_name_in_another_language_is_not_the_branch_own() {
+        let base = "pub fn save(x: u32) {}\n";
+        let sync = || {
+            branch(
+                "sync",
+                &[("src/s.rs", base, "pub fn save(x: u32, y: u32) {}\n")],
+            )
+        };
+        // It adds a TypeScript `save`, or changes a Python one, then calls
+        // the Rust `save` the way `sync` no longer takes.
+        let elsewhere = [
+            ("web/save.ts", "", "export function save() {}\n"),
+            (
+                "app/s.py",
+                "def save(a):\n    pass\n",
+                "def save(a, b):\n    pass\n",
+            ),
+        ];
+        for other in elsewhere {
+            let mixed = branch("mixed", &[other, ("src/i.rs", "", "fn c() { save(1); }\n")]);
+            let (findings, _) = found(&[sync(), mixed]);
+            assert_eq!(findings.len(), 1, "{}: {findings:?}", other.0);
+            assert_eq!(findings[0].finding, SymbolFindingKind::ChangedAndCalled);
+            assert_eq!(findings[0].other_path, "src/i.rs");
+        }
     }
 
     #[test]

@@ -475,28 +475,34 @@ release. While its checks run, hold other merges so they don't restart the
 checks. The project's release app opens the release pull request, so its
 checks run like any other pull request's.
 
-After a release, add its golden stores (ADR 0015): run
-`bash scripts/golden-stores.sh VERSION`, which builds `langspan` from the new
-tag with `--locked` and runs that tag's demonstration with it, then write
-the stores' state snapshots with `LANGSPAN_UPDATE_GOLDEN=1` on
-`tests/golden_stores.rs`, and say in the pull request how the stores were
-made. `every_release_has_a_golden_store_directory` fails for a changelog
-version with no `tests/fixtures/store-VERSION/`, whether or not the release
-changed the event set or the schema. As for the frozen list below, the
-version being released counts only once its `v` tag exists, since its stores
-are built from the tag.
+Each release adds its golden stores (ADR 0015) and its frozen event-type
+list to the tests. Both are made from the tag, so the release pull request
+can't hold them, and the tests never ask them of the version `main` carries
+(`.release-please-manifest.json`, `Cargo.toml`): only of older releases.
+Publishing a release changes no commit, so it turns no pull request red
+(issue #566). The next release pull request raises the version, and from
+then on it fails until the previous release's stores and list are in.
 
-Add its frozen event-type list in the first pull request after the tag,
-since the release pull request can't hold it: copy the sorted `type` of each
-`fixtures/*-event-v10.json` at the new tag into
-`fixtures/event-types/VERSION.txt`, add its row to `RELEASES` in
-`tests/protocol.rs` with the capabilities its requests name, and run
-`python3 scripts/gen-docs.py`. `every_published_release_has_a_frozen_list`
-fails for a changelog version without one. The version being released counts
-only once its `v` tag exists, so the release pull request passes; from the
-tag on, the test fails locally and in the merge queue, which fetch the tags,
-until the list lands. A pull request run has no tags, and checks that version
-from the next release on.
+After publishing, the release workflow's `release-fixtures` job runs
+`bash scripts/release-fixtures.sh VERSION` on the tag, and
+`release-fixtures-pr` opens a draft pull request with the result. The
+script runs `scripts/golden-stores.sh VERSION`, which builds `langspan` from
+the tag with `--locked` and runs that tag's demonstration with it; writes the
+stores' state snapshots with `LANGSPAN_UPDATE_GOLDEN=1` on
+`tests/golden_stores.rs`; copies the sorted `type` of each
+`fixtures/*-event-v10.json` into `fixtures/event-types/VERSION.txt`; and runs
+`python3 scripts/gen-docs.py`. To finish the pull request, add the release's
+row to `RELEASES` in `tests/protocol.rs` with the capabilities its requests
+name, review the new snapshots, and mark it ready. If the job fails, run the
+script by hand at the tag (`git checkout vVERSION`) and open the pull request
+yourself, saying how the stores were made.
+
+`every_release_has_a_golden_store_directory` fails for a release older than
+the current version with no `tests/fixtures/store-VERSION/`, whether or not
+it changed the event set or the schema. `every_published_release_has_a_frozen_list`
+fails for one without `fixtures/event-types/VERSION.txt` or a `RELEASES`
+row, and for a list without a row. Neither reads the tags, so a run gives the
+same result with or without them.
 
 Before 1.0, a breaking change (`feat!:`) raises the minor version.
 [CONTRIBUTING.md](../CONTRIBUTING.md) lists how each title type affects the
