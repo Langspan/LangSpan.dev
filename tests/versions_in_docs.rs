@@ -6,7 +6,9 @@
 //! documents fails here. A document split into pages (`docs/usage.md` and the
 //! pages under `docs/usage/`) is read as one. The threat model also names
 //! releases (`vX.Y.Z`); each must be a release in `CHANGELOG.md`, which must
-//! list the crate's own version.
+//! list the crate's own version. The status page's current summary names the
+//! crate's version (`CARGO_PKG_VERSION`, from `Cargo.toml`), and every release
+//! it names is in `CHANGELOG.md`.
 
 use std::fs;
 use std::path::Path;
@@ -263,6 +265,81 @@ fn the_threat_model_names_only_published_releases() {
     assert!(
         problems.is_empty(),
         "Name only published releases:\n{}",
+        problems.join("\n")
+    );
+}
+
+const STATUS: &str = "docs/IMPLEMENTATION_STATUS.md";
+
+/// The version the status page's `## Current summary` heading names, as
+/// "## Current summary: version X.Y.Z, DATE"; `None` without that heading.
+fn summary_version(text: &str) -> Option<&str> {
+    let heading = text
+        .lines()
+        .find_map(|line| line.strip_prefix("## Current summary"))?;
+    let words: Vec<&str> = heading.split_whitespace().collect();
+    let at = words.iter().position(|word| *word == "version")?;
+    words
+        .get(at + 1)
+        .map(|word| word.trim_end_matches([',', '.']))
+}
+
+fn status_problems(text: &str, crate_version: &str, released: &[String]) -> Vec<String> {
+    let mut problems = match summary_version(text) {
+        Some(version) if version == crate_version => Vec::new(),
+        Some(version) => vec![format!(
+            "{STATUS} summarises version {version}; Cargo.toml is at {crate_version}"
+        )],
+        None => vec![format!(
+            "{STATUS} has no `## Current summary: version X.Y.Z, DATE` heading"
+        )],
+    };
+    problems.extend(release_problems(STATUS, text, released));
+    problems
+}
+
+#[test]
+fn the_status_check_refuses_another_version() {
+    let released = ["v0.9.0".to_string(), "v0.10.0".to_string()];
+    let current = "# Status\n\n## Current summary: version 0.10.0, 28 November 2026\n";
+    assert!(status_problems(current, "0.10.0", &released).is_empty());
+    assert_eq!(
+        status_problems(current, "0.11.0", &released),
+        [format!(
+            "{STATUS} summarises version 0.10.0; Cargo.toml is at 0.11.0"
+        )]
+    );
+    assert_eq!(
+        status_problems(
+            "## Current summary, 25 November 2026\n",
+            "0.10.0",
+            &released
+        ),
+        [format!(
+            "{STATUS} has no `## Current summary: version X.Y.Z, DATE` heading"
+        )]
+    );
+    assert_eq!(
+        status_problems(
+            &format!("{current}Published as v0.12.0.\n"),
+            "0.10.0",
+            &released
+        ),
+        [format!(
+            "{STATUS} names v0.12.0, which is not a release in CHANGELOG.md"
+        )]
+    );
+}
+
+#[test]
+fn the_status_page_summarises_the_crate_version() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let changelog = fs::read_to_string(root.join("CHANGELOG.md")).expect("read CHANGELOG.md");
+    let text = fs::read_to_string(root.join(STATUS)).expect("read the status page");
+    let problems = status_problems(&text, env!("CARGO_PKG_VERSION"), &released(&changelog));
+    assert!(
+        problems.is_empty(),
+        "Bring the status page up to date with the code:\n{}",
         problems.join("\n")
     );
 }

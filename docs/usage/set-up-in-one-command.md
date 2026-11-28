@@ -75,4 +75,4 @@ home as `HOME`. It takes no options. If you stop it with Ctrl-C, remove the
 directory it names on its second line.
 
 An install script and a Homebrew formula that run `langspan setup` for you
-are not published yet ([ADR 0035](../adr/0035-one-command-setup.md)).
+are not published yet ([ADR 0040](../adr/0040-one-command-setup.md)).

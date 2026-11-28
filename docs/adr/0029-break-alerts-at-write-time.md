@@ -330,7 +330,7 @@ Any failure is a note in the diagnostic, never a decision.
   `held_rename`), and the reason suggests a forwarding alias; repeating the
   write goes through. With no callers, or when the check fails, the write goes
   on to admission
-  ([ADR 0035's amendment](0035-semantic-layer.md)).
+  ([ADR 0042's amendment](0042-semantic-layer.md)).
 - Not observed on a host: the alert reaching a real Codex or Cursor model, or a model changing its call because of it. A Claude Code
   alert reaching the model has been seen once and is not yet in the
   repository's evidence.

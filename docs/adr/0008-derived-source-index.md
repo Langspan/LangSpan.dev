@@ -712,7 +712,7 @@ lags the scan by a pass, so a file written after the notice is listed a scan
 or two later, and one that mentioned the name before the notice is listed at
 the worktree's next scan. A replaced notice gains nothing. The paths are
 relative to the other worktree's root. Nothing of this leaves the machine
-([ADR 0035](0035-semantic-layer.md)). One command, one event, one outcome
+([ADR 0042](0042-semantic-layer.md)). One command, one event, one outcome
 (`interface_dependents_observed`) and the optional `elsewhere` field: a
 store written by this build does not open in an earlier one
 ([ADR 0015](0015-version-tolerance.md)), earlier stores open in this one, and

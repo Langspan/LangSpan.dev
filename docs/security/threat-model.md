@@ -16,15 +16,15 @@ been written down since this index was added.
 | --- | --- | --- |
 | CLI/MCP JSON → daemon, and the socket peer | [Data and boundaries](#data-and-boundaries), [Caller authority](#caller-authority) | 2026-11-27: protocol versions, against `src/protocol.rs`; `tests/versions_in_docs.rs` holds them. |
 | Persisted store → replay | [Data and boundaries](#data-and-boundaries), [Retention](#retention) | 2026-11-27: schema marker, against `src/store.rs`; the same test holds it. |
-| Native host → hooks and installed settings | [Native adapters and installation](#native-adapters-and-installation) to [A linked worktree's own install](#a-linked-worktrees-own-install), [Antigravity](#antigravity) | Not recorded. |
+| Native host → hooks and installed settings | [Native adapters and installation](#native-adapters-and-installation) to [A linked worktree's own install](#a-linked-worktrees-own-install), [Antigravity](#antigravity) | 2026-11-25: real-host runs of Codex 0.171.0 ([evidence](../evidence/codex-real-host/README.md)) and Antigravity 1.5.14 ([ADR 0035](../adr/0035-antigravity-adapter.md#evidence)), issue #110. Cursor has had no real-host run. |
 | Session events, shell commands and Git | [Session events and peer briefings](#session-events-and-peer-briefings) to [Removing an earlier Gemini CLI install](#removing-an-earlier-gemini-cli-install), [Worktrees, processes and passive observations](#worktrees-processes-and-passive-observations) | Not recorded. |
-| Another machine | [Cross-machine publication](#cross-machine-publication), [Messages to other machines (proposed)](#messages-to-other-machines-proposed) | Not recorded. |
-| Programs the coordinator runs | [Checks, combining and landing](#checks-combining-and-landing), [Automatic checks after a session's writes](#automatic-checks-after-a-sessions-writes) | Not recorded. |
+| Another machine | [Cross-machine publication](#cross-machine-publication), [Messages to other machines (proposed)](#messages-to-other-machines-proposed) | 2026-11-25: publication through Git refs, in two-machine run 3 ([evidence](../evidence/two-machine/README.md)). Messages to other machines: not recorded. |
+| Programs the coordinator runs | [Checks, combining and landing](#checks-combining-and-landing), [Automatic checks after a session's writes](#automatic-checks-after-a-sessions-writes) | 2026-11-28: time limits, process groups and stopping a running check with the coordinator, by `tests/auto_checks.rs` and `tests/landing.rs` in the full suite (issue #633). No real-host run. |
 | Notes, messages, index and stored history | [Remembered notes](#remembered-notes) to [Source index](#source-index), [Region admission](#region-admission) to [Retention](#retention) | Not recorded. |
-| Browser → dashboard, and desktop notices | [Dashboard](#dashboard), [Desktop notices](#desktop-notices) | Not recorded. |
+| Browser → dashboard, and desktop notices | [Dashboard](#dashboard), [Desktop notices](#desktop-notices) | 2026-11-28: the token, the refused network address and escaped file names (`tests/dashboard.rs`), and the notifier's 2-second limit (`tests/notify.rs`), in the full suite (issue #633). No browser run is retained. |
 | Benchmark driver → agent CLIs | [Coordination benchmark driver](#coordination-benchmark-driver) | Not recorded. |
 | GitHub Actions → published releases | [Release pipeline](#release-pipeline), [The install script](#the-install-script), [CI build cache](#ci-build-cache) | 2026-11-28: checksums and attestations observed on v0.9.0; immutability not yet observed (see the release pipeline). |
-| Mixed versions | [Mixed versions and `doctor`'s version check](#mixed-versions-and-doctors-version-check) | Not recorded. |
+| Mixed versions | [Mixed versions and `doctor`'s version check](#mixed-versions-and-doctors-version-check) | 2026-11-28: `doctor`'s comparison of the coordinator's and each hook's version, by `tests/binary_versions.rs` in the full suite (issue #633). |
 
 ## Data and boundaries
 
@@ -198,7 +198,7 @@ and per-project trust state.
 
 ## Setup, the login service and the on-demand start
 
-`langspan setup` ([ADR 0035](../adr/0035-one-command-setup.md)) runs the
+`langspan setup` ([ADR 0040](../adr/0040-one-command-setup.md)) runs the
 user-level install with the skill, writes a per-user login service (a
 LaunchAgent on macOS, a `systemd --user` unit on Linux) and runs the service
 manager. A hook or `langspan mcp` that finds no coordinator starts one as a
