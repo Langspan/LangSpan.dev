@@ -8,12 +8,15 @@
 //! fields (`file_path`, `offset`, `limit`) are those of Claude Code's
 //! documented `Read` tool. No `PreToolUse` `Read` has been captured yet.
 
+mod support;
+use support::git;
+
 use serde_json::{Value, json};
 use std::{
     fs,
     io::Write,
     os::unix::fs::PermissionsExt,
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::{Child, Command as Process, Stdio},
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
@@ -38,21 +41,6 @@ struct Run {
     stderr_lines: usize,
     stdout: String,
     reason: Option<String>,
-}
-
-fn git(root: &Path, args: &[&str]) {
-    let output = Process::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
 }
 
 /// A Rust file of exactly 2,000 lines: 100 public functions of 20 lines.

@@ -4,6 +4,9 @@
 //! daemon, with the file really changing on disk between each pre-tool and
 //! post-tool event.
 
+mod support;
+use support::git;
+
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -34,18 +37,6 @@ struct Run {
     coverage: String,
     reason: Option<String>,
     detail: String,
-}
-
-fn git(root: &std::path::Path, arguments: &[&str]) {
-    let output = Process::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(arguments)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "git {arguments:?}: {output:?}");
 }
 
 impl Fixture {

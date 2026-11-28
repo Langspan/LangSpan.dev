@@ -5,14 +5,14 @@
 //! and indexer, a real Git repository and the real hook executable.
 
 mod support;
+use support::git;
 
 use serde_json::{Value, json};
 use std::{
     fs,
-    io::Write,
     os::unix::fs::PermissionsExt,
-    path::{Path, PathBuf},
-    process::{Child, Command as Process, Stdio},
+    path::PathBuf,
+    process::Command as Process,
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
@@ -23,7 +23,7 @@ const HEADER: &str = "LangSpan: a call in this write";
 
 struct World {
     base: PathBuf,
-    daemon: Option<Child>,
+    daemon: Option<support::Owned>,
 }
 
 struct Run {
@@ -31,21 +31,6 @@ struct Run {
     detail: String,
     context: Option<String>,
     elapsed: Duration,
-}
-
-fn git(root: &Path, args: &[&str]) {
-    let output = Process::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
 }
 
 const FILES: &[(&str, &str)] = &[
@@ -122,21 +107,7 @@ impl World {
         fs::create_dir(&state).unwrap();
         fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
         let mut world = Self { base, daemon: None };
-        world.daemon = Some(
-            Process::new(env!("CARGO_BIN_EXE_langspan"))
-                .env("LANGSPAN_AUTOSTART", "off")
-                .args(["daemon", "--state-dir"])
-                .arg(&state)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap(),
-        );
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while world.cli(&["status"]).0 != 0 {
-            assert!(Instant::now() < deadline, "daemon did not become ready");
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        world.daemon = Some(support::coordinator(&state));
         let root = world.work();
         let added = world.cli(&[
             "workspace",
@@ -199,24 +170,14 @@ impl World {
     }
     fn hook(&self, vendor: &str, event: &Value) -> Run {
         let started = Instant::now();
-        let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
-            .env("LANGSPAN_AUTOSTART", "off")
-            .args(["hook", vendor, "--state-dir"])
-            .arg(self.base.join("state"))
-            .args(["--workspace", "app", "--root"])
-            .arg(self.work())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(event.to_string().as_bytes())
-            .unwrap();
-        let output = child.wait_with_output().unwrap();
+        let output = support::hook_call(
+            &self.base.join("state"),
+            vendor,
+            "app",
+            &self.work(),
+            &[],
+            event,
+        );
         let elapsed = started.elapsed();
         let stderr = String::from_utf8(output.stderr).unwrap();
         assert_eq!(output.status.code(), Some(0), "{stderr}");
@@ -286,10 +247,7 @@ impl World {
 
 impl Drop for World {
     fn drop(&mut self) {
-        if let Some(mut child) = self.daemon.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+        drop(self.daemon.take());
         let _ = fs::remove_dir_all(&self.base);
     }
 }

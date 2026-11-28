@@ -6,6 +6,7 @@
 //! that the order of runs and their arguments can be read back.
 
 mod support;
+use support::git;
 
 use langspan::{client, protocol::Request};
 use langspan_core::{CheckRecord, CheckResult, Command, Outcome, State};
@@ -14,7 +15,7 @@ use std::{
     fs,
     io::Write,
     os::unix::fs::PermissionsExt,
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::{Child, Command as Process, Stdio},
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
@@ -75,26 +76,6 @@ impl Run {
                 .to_owned(),
         )
     }
-}
-
-fn git(root: &Path, args: &[&str]) {
-    let output = Process::new("git")
-        .arg("-C")
-        .arg(root)
-        .args([
-            "-c",
-            "user.name=Dev",
-            "-c",
-            "user.email=dev@example.invalid",
-        ])
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
 }
 
 fn status() -> Request {

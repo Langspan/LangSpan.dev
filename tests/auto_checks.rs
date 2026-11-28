@@ -21,8 +21,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[allow(dead_code)] // Only `running` is used here.
+#[allow(dead_code)] // Only `running` and `git` are used here.
 mod support;
+use support::git;
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 const ALICE: &str = "00000000-0000-4000-8000-0000000000a1";
@@ -48,26 +49,6 @@ impl Run {
                 .to_owned(),
         )
     }
-}
-
-fn git(root: &Path, args: &[&str]) {
-    let output = Process::new("git")
-        .arg("-C")
-        .arg(root)
-        .args([
-            "-c",
-            "user.name=Dev",
-            "-c",
-            "user.email=dev@example.invalid",
-        ])
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
 }
 
 impl Fixture {

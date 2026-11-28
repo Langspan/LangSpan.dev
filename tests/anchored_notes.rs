@@ -3,12 +3,14 @@
 //! real observer and indexer, a real Git repository and the real Claude
 //! Code hook: a Rust and a Python definition change under their notes.
 
+mod support;
+use support::git;
+
 use serde_json::{Value, json};
 use std::{
     fs,
-    io::Write,
     os::unix::fs::PermissionsExt,
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::{Child, Command as Process, Stdio},
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
@@ -25,21 +27,6 @@ const CALLER: &str = "pub fn caller() -> usize {\n    parse_upload(\"x\")\n}\n";
 struct World {
     base: PathBuf,
     daemon: Option<Child>,
-}
-
-fn git(root: &Path, args: &[&str]) {
-    let output = Process::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
 }
 
 impl World {
@@ -180,24 +167,14 @@ impl World {
         }
     }
     fn hook(&self, event: &Value) -> Option<String> {
-        let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
-            .env("LANGSPAN_AUTOSTART", "off")
-            .args(["hook", "claude-code", "--state-dir"])
-            .arg(self.base.join("state"))
-            .args(["--workspace", "app", "--root"])
-            .arg(self.work())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(event.to_string().as_bytes())
-            .unwrap();
-        let output = child.wait_with_output().unwrap();
+        let output = support::hook_call(
+            &self.base.join("state"),
+            "claude-code",
+            "app",
+            &self.work(),
+            &[],
+            event,
+        );
         assert_eq!(
             output.status.code(),
             Some(0),
