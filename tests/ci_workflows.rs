@@ -252,7 +252,12 @@ fn linux_and_macos_start_together() {
 fn the_full_lane_builds_once_per_platform_and_tests_the_archive_in_every_shard() {
     let text = workflow("check.yml");
     for (build, tests, runner, platform) in [
-        ("linux", "linux-tests", TRUSTED_RUNNER, "linux"),
+        (
+            "linux",
+            "linux-tests",
+            "vars.LINUX_RUNNER || 'ubuntu-24.04'",
+            "linux",
+        ),
         (
             "macos",
             "macos-tests",
@@ -512,10 +517,15 @@ fn a_platform_check_passes_only_when_its_build_and_every_shard_passed() {
 const TRUSTED_RUNNER: &str = "(github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('[\"self-hosted\",\"langspan-trusted\"]') || 'ubuntu-24.04'";
 
 #[test]
-fn only_the_slow_linux_jobs_run_on_the_self_hosted_runner_and_never_for_a_fork() {
+fn only_coverage_and_the_linux_dry_runs_use_the_self_hosted_runner_and_never_for_a_fork() {
     let runs_on = format!("\n    runs-on: ${{{{ {TRUSTED_RUNNER} }}}}\n");
-    assert!(job(&workflow("check.yml"), "linux-tests").contains(&runs_on));
     assert!(job(&workflow("coverage.yml"), "coverage").contains(&runs_on));
+    // The four Linux shards stay on GitHub's runners: one self-hosted
+    // runner takes one job at a time, so they would wait for each other.
+    assert!(
+        job(&workflow("check.yml"), "linux-tests")
+            .contains("\n    runs-on: ${{ vars.LINUX_RUNNER || 'ubuntu-24.04' }}\n")
+    );
     let bench = job(&workflow("bench.yml"), "dry-runs");
     assert!(bench.contains(&format!(
         "          - platform: linux\n            runner: ${{{{ {TRUSTED_RUNNER} }}}}\n"
@@ -523,28 +533,32 @@ fn only_the_slow_linux_jobs_run_on_the_self_hosted_runner_and_never_for_a_fork()
     assert!(bench.contains(
         "          - platform: macos\n            runner: ${{ vars.MACOS_RUNNER || 'macos-26' }}\n"
     ));
-    // Nowhere else, and in no other form: a fork's pull request must never
-    // reach the runner, which keeps state from one job to the next.
-    for name in [
-        "bench.yml",
-        "check.yml",
-        "content.yml",
-        "coverage.yml",
-        "fuzz.yml",
-        "release.yml",
-        "scorecard.yml",
-        "agentic-wiki-writer.lock.yml",
-        "ci-doctor.lock.yml",
-    ] {
-        let text = workflow(name);
-        let expected = match name {
-            "check.yml" | "coverage.yml" | "bench.yml" => 1,
+    // Nowhere else, and in no other form, in any workflow: a fork's pull
+    // request must never reach the runner, which keeps state from one job
+    // to the next. Comments may name it.
+    let dir = root().join(".github/workflows");
+    let mut seen = Vec::new();
+    for entry in fs::read_dir(&dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display())) {
+        let name = entry.expect("workflow entry").file_name();
+        let name = name.to_str().expect("UTF-8 workflow name").to_owned();
+        if !(name.ends_with(".yml") || name.ends_with(".yaml")) {
+            continue;
+        }
+        let code: String = workflow(&name)
+            .lines()
+            .filter(|line| !line.trim_start().starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let expected = match name.as_str() {
+            "coverage.yml" | "bench.yml" => 1,
             _ => 0,
         };
-        assert_eq!(text.matches("\"self-hosted\"").count(), expected, "{name}");
-        assert_eq!(text.matches("langspan-trusted").count(), expected, "{name}");
-        assert_eq!(text.matches(TRUSTED_RUNNER).count(), expected, "{name}");
+        assert_eq!(code.matches("self-hosted").count(), expected, "{name}");
+        assert_eq!(code.matches("langspan-trusted").count(), expected, "{name}");
+        assert_eq!(code.matches(TRUSTED_RUNNER).count(), expected, "{name}");
+        seen.push(name);
     }
+    assert!(seen.iter().any(|name| name == "check.yml"), "{seen:?}");
 }
 
 #[test]

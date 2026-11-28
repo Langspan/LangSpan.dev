@@ -115,8 +115,7 @@ concurrency:
 #
 # Runners come from the repository variables LINUX_RUNNER and MACOS_RUNNER,
 # so the owner can move a job to a larger (billed) runner without a code
-# change; unset, each job takes GitHub's standard runner. The Linux test
-# shards are the exception: they run on the self-hosted runner.
+# change; unset, each job takes GitHub's standard runner.
 #
 # Time limits by lane: a build job gets 6 minutes on a pull request and 15
 # in the merge queue, a shard 15, and a build job 30 on main and nightly
@@ -290,16 +289,13 @@ jobs:
   # shard gets an even share of the measured test time
   # (docs/evidence/ci/balance.md). Four shards, from the measured test time
   # (docs/evidence/ci/shards.md); a fifth would mostly wait on the slowest
-  # benchmark dry run. Each shard runs under the foreign home, with retries
-  # and reports as the unsharded run had. Shards run only for trusted
-  # events, on the self-hosted runner; the expression still sends a fork's
-  # pull request to a standard runner, should the `if` ever let one through
-  # (docs/development-process.md#self-hosted-runner).
+  # benchmark dry run. Each shard runs on its own standard runner, under the
+  # foreign home, with retries and reports as the unsharded run had.
   linux-tests:
     name: Linux tests ${{ matrix.shard }}
     needs: [linux]
     if: needs.linux.outputs.code == 'true' && github.event_name != 'pull_request'
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","langspan-trusted"]') || 'ubuntu-24.04' }}
+    runs-on: ${{ vars.LINUX_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 15
     permissions:
       contents: read

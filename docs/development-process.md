@@ -302,8 +302,9 @@ target and what would close it are in
 Locally, `sh scripts/check.sh` runs the full lane, and
 `LANGSPAN_CHECK_LANE=fast sh scripts/check.sh` the fast one. The runners
 come from the repository variables `LINUX_RUNNER` and `MACOS_RUNNER`;
-unset, each job uses GitHub's standard runner. The slow Linux jobs use the
-[self-hosted runner](#self-hosted-runner) instead.
+unset, each job uses GitHub's standard runner. Coverage and the Linux
+benchmark dry runs use the [self-hosted runner](#self-hosted-runner)
+instead.
 
 When a dry run is skipped, the test log shows
 `skipped: no benchmark or briefing change`. A local `sh scripts/check.sh`
@@ -448,11 +449,12 @@ request. Return a typed error instead, as `client::ClientError` and
 ### Self-hosted runner
 
 The owner runs one Linux machine (8 cores, 16 GB) as a self-hosted runner
-with the labels `self-hosted` and `langspan-trusted`. Three slow Linux
-jobs use it: the full lane's test shards (`check.yml`, `linux-tests`),
-coverage (`coverage.yml`) and the Linux benchmark dry runs (`bench.yml`).
-macOS, the Linux build job, releases, fuzzing, Scorecard and the agentic
-workflows stay on GitHub's runners.
+with the labels `self-hosted` and `langspan-trusted`. Two slow Linux jobs
+use it: coverage (`coverage.yml`) and the Linux benchmark dry runs
+(`bench.yml`). Everything in `check.yml`, macOS, releases, fuzzing,
+Scorecard and the agentic workflows stay on GitHub's runners. A runner
+process takes one job at a time, so the four Linux test shards would wait
+for each other there; on GitHub's runners they run side by side.
 
 The runner is used only for a trusted event: any event except
 `pull_request`, or a pull request whose branch is in this repository
@@ -464,27 +466,21 @@ and tool installs from one job to the next. Code from a fork could leave
 something behind that a later run on `main` executes, or read what other
 jobs left on the machine. A GitHub runner is a fresh virtual machine for
 every job, so a fork's code can't reach anything after its own job.
-`tests/ci_workflows.rs` checks that only these three jobs name the runner,
-each with that expression.
+`tests/ci_workflows.rs` checks that only these two jobs name the runner,
+each with that expression, and that the `check.yml` shards don't.
 
-Because the machine keeps its state, none of these jobs assumes a fresh
-one. They install nothing with `sudo` or system-wide. The toolchain comes
+Because the machine keeps its state, neither job assumes a fresh one.
+They install nothing with `sudo` or system-wide. The toolchain comes
 from the runner user's `rustup` (`rustup toolchain install` reads
 `rust-toolchain.toml`). CI tools are downloaded and checked again on every
-run into `~/.cache/langspan-ci-tools`, and pytest goes into a virtual
-environment under `$RUNNER_TEMP`. `actions/checkout` removes untracked
-files, `target/` included, before each job. Cache keys are the same as on
-GitHub's runners. None of the three jobs saves a cache, so a trusted pull
-request's run on the machine can't write an entry that `main` restores.
-The runner needs `rustup`, `python3` with `venv`, `curl` and
-`sha256sum` for its user. It also needs a glibc at least as new as
-Ubuntu 24.04's, because the shards run test binaries that the build job
-compiled on `ubuntu-24.04`.
-
-A runner process takes one job at a time, so with a single process the
-four shards wait for each other. To run them side by side, register
-several runner processes, each under its own user so that they don't
-share `~/.cargo`, `~/.rustup` or `~/.cache`.
+run into `~/.cache/langspan-ci-tools`. `actions/checkout` removes untracked
+files, `target/` included, before each job. Coverage restores no cache; the
+dry runs restore `check.yml`'s Linux entry with the same key as on GitHub's
+runners. Neither job saves a cache, so a trusted pull request's run on the
+machine can't write an entry that `main` restores. The runner needs
+`rustup`, `python3`, `curl` and `sha256sum` for its user. It also needs a
+glibc at least as new as Ubuntu 24.04's, because the dry runs restore
+build scripts and dependencies compiled on `ubuntu-24.04`.
 
 ### Repository settings
 
