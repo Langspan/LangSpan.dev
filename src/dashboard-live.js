@@ -16,7 +16,6 @@ var LangSpanLive = (function () {
   // The hero's `group_edits_within_s` and `idle_after_s`.
   const MERGE_MS = 20 * 1000;
   const IDLE_MS = 30 * 1000;
-  const TASK_CHARS = 32;
   const HOSTS = {
     "claude-code": "Claude Code",
     codex: "Codex",
@@ -40,28 +39,33 @@ var LangSpanLive = (function () {
     return (at) => (anchor && at != null ? format(anchor.wall_ms + (at - anchor.clock_ms)) : null);
   }
 
-  // What a timed row of a local session draws as, or null.
+  // What a timed row of a local session draws as, or null. A read or edit
+  // left without paths (the feed drops those Git ignores) draws nothing.
   function kindOf(e) {
     if (e.at_ms == null || !e.session_id) return null;
     if (e.type === "write_refused") return "held";
-    if (e.type === "source_observed" && e.origin === "read") return "read";
-    if (e.type === "operation_observed" && e.result === "succeeded") return EDIT_TOOLS.has(e.tool) ? "edit" : "command";
+    if (e.type === "source_observed" && e.origin === "read") return e.paths.length ? "read" : null;
+    if (e.type === "operation_observed" && e.result === "succeeded") {
+      if (!EDIT_TOOLS.has(e.tool)) return "command";
+      return e.paths.length ? "edit" : null;
+    }
     return null;
   }
 
-  // A lane is named by its task, or else its workspace, with the harness and
-  // branch beneath: from the session's state row, or, for a session that
-  // has ended, its events' workspace and that workspace's branch.
+  // A lane is named by its branch, or else its workspace, with the harness
+  // beneath: from the session's state row, or, for a session that has
+  // ended, its events' workspace and that workspace's branch. Never by the
+  // session's task line: that is the agent's prompt, untrusted text.
   function laneOf(row, session, workspace, branches, shared) {
     const host = (row && row.host) || String(session).split(".")[0];
     const agent = HOSTS[host] || host;
-    const name = row && row.task ? String(row.task).slice(0, TASK_CHARS) : workspace || agent + " session";
     const ref = (row && row.branch_ref) || branches.get(workspace);
     const branch = ref ? String(ref).replace(/^refs\/heads\//, "") : "";
+    const name = branch || workspace || agent + " session";
     return {
       label: name,
-      short: name.split(" ").slice(0, 2).join(" "),
-      meta: branch ? agent + " · " + branch : agent,
+      short: name.split("/").pop(),
+      meta: agent,
       agent,
       checkout: shared ? "shared checkout" : "own checkout",
       branch,
@@ -203,8 +207,16 @@ var LangSpanLive = (function () {
     const shared = (i) => work[i] !== undefined && work.filter((w) => w === work[i]).length > 1;
     const branches = new Map(((state && state.workspaces) || []).map((w) => [w.workspace_id, w.branch_ref]));
     const newest = runs.length ? Math.max(...runs.map((r) => r.steps[r.steps.length - 1].at_ms)) : 0;
+    // Sessions on one branch are told apart by number, in lane order.
+    const lanes = sessions.map((s, i) => laneOf(rows.get(s), s, work[i], branches, shared(i)));
+    const seen = new Map();
+    for (const l of lanes) {
+      const n = (seen.get(l.label) || 0) + 1;
+      seen.set(l.label, n);
+      if (n > 1) Object.assign(l, { label: l.label + " (" + n + ")", short: l.short + " (" + n + ")" });
+    }
     return {
-      lanes: sessions.map((s, i) => laneOf(rows.get(s), s, work[i], branches, shared(i))),
+      lanes,
       cards,
       wires,
       status: { agents: activity(events)(newest).size, held: runs.filter((r) => r.kind === "held").length },

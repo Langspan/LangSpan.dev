@@ -49,23 +49,44 @@ function incident() {
   return [anchor(), registered(A), registered(B), op(A, 2000), held(B, A, 3000), read(B, 3500), op(B, 4000)];
 }
 
-test("one lane per local session with a timed step, named by its task or workspace, with harness and branch, and no IDs", () => {
+test("one lane per local session with a timed step, named by its branch with the harness beneath, and no IDs", () => {
   const m = model(STATE, incident());
   assert.deepEqual(m.lanes, [
-    { label: "#12 invoice totals", short: "#12 invoice", meta: "Claude Code · feat/billing", agent: "Claude Code",
+    { label: "feat/billing", short: "billing", meta: "Claude Code", agent: "Claude Code",
       checkout: "shared checkout", branch: "feat/billing", workspace: "app" },
-    { label: "app", short: "app", meta: "Codex · feat/billing", agent: "Codex", checkout: "shared checkout", branch: "feat/billing", workspace: "app" },
+    { label: "feat/billing (2)", short: "billing (2)", meta: "Codex", agent: "Codex", checkout: "shared checkout", branch: "feat/billing", workspace: "app" },
   ]);
   for (const lane of m.lanes) for (const text of Object.values(lane)) assert.ok(!/alice|bob|c0ffee|Agent [A-Z]\b/.test(text), text);
 });
 
-test("a session without a state row is named from its events' workspace and that workspace's branch, never a letter", () => {
+test("a session's prompt text never reaches a label, the details or anything else the view draws", () => {
+  // The state row's task line is the agent's first prompt: untrusted text.
+  // Each shorter than the 32 characters the lane names were once clipped to.
+  const prompts = ["answer the review findings", "<task-notification>", "<task-id>bthzp03gb</task-id>"];
+  const state = { agents: prompts.map((task, i) => agent(["claude-code.p" + i, "codex.q" + i, "cursor.r" + i][i], "claude-code", task, { branch_ref: i ? null : "refs/heads/feat/x" })),
+    workspaces: [{ workspace_id: "app", branch_ref: null }] };
+  seq = 0;
+  const events = [anchor(), ...state.agents.map((a, i) => op(a.session_id, 2000 + i * 1000))];
+  const drawn = JSON.stringify(Live.pace(model(state, events), events));
+  for (const text of prompts) assert.ok(!drawn.includes(text), text + " was drawn");
+  // Without a branch, the workspace names the lane.
+  assert.deepEqual(model(state, events).lanes.map((l) => [l.label, l.meta]), [["feat/x", "Claude Code"], ["app", "Claude Code"], ["app (2)", "Claude Code"]]);
+});
+
+test("a read or an edit left without paths (the feed drops those Git ignores) draws no card; a command still does", () => {
+  seq = 0;
+  const events = [anchor(), op(A, 2000, null), read(A, 2500), op(A, 3000, null, "Bash")];
+  events[2].paths = [];
+  assert.deepEqual(model(STATE, events).cards.map((c) => c.kind), ["command"]);
+});
+
+test("a session without a state row is named from its events' workspace's branch, never a letter", () => {
   seq = 0;
   const state = { agents: [], workspaces: [{ workspace_id: "lsd-a11", branch_ref: "refs/heads/feat/x" }] };
   const events = [anchor(), op("codex.gone", 2000, F), Object.assign(op("claude-code.bare", 3000, "b.ts"), { workspace_id: undefined })];
   events[1].workspace_id = "lsd-a11";
   assert.deepEqual(model(state, events).lanes.map((l) => [l.label, l.meta, l.workspace]), [
-    ["lsd-a11", "Codex · feat/x", "lsd-a11"], ["Claude Code session", "Claude Code", ""],
+    ["feat/x", "Codex", "lsd-a11"], ["Claude Code session", "Claude Code", ""],
   ]);
 });
 

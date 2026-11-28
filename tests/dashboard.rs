@@ -656,9 +656,15 @@ fn the_event_feed_pages_every_event_in_seq_order_without_gaps_or_prompt_text() {
 #[test]
 fn the_served_page_draws_the_live_view_from_a_real_hold() {
     let mut f = Fixture::new();
+    // A build output Git ignores, which the feed leaves out (and real Git
+    // decides what is ignored).
+    fs::write(f.root().join(".gitignore"), "target/\n").unwrap();
+    fs::create_dir(f.root().join("target")).unwrap();
+    fs::write(f.root().join("target/out.txt"), "hello\n").unwrap();
     f.start_daemon();
     assert_eq!(f.codex_admit(BOB, "call-1", "a.txt"), "admitted");
     assert_eq!(f.codex_admit(CAROL, "call-2", "a.txt"), "denied");
+    assert_eq!(f.codex_admit(BOB, "call-3", "target/out.txt"), "admitted");
     let (port, token) = f.start_dashboard();
 
     let page = get(port, &format!("/?t={token}"), "");
@@ -717,5 +723,10 @@ fn the_served_page_draws_the_live_view_from_a_real_hold() {
     assert!(
         rows.iter().any(|row| row["type"] == "clock_anchored"),
         "{rows:?}"
+    );
+    assert!(
+        !reply.body.contains("target/out.txt"),
+        "an ignored path was served: {}",
+        reply.body
     );
 }

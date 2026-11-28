@@ -54,6 +54,10 @@ a `source_observed` row's `origin`, and a `clock_anchored` row's `wall_ms`
 and `clock_ms`. They are IDs, enums and numbers; the input digest stays out.
 A version 1 reader ignores them, and a version 2 reader decodes a version 1
 row without them (`fixtures/dashboard-events-v2.json` is the golden page).
+The server then drops the paths Git ignores in each row's workspace (its own,
+or its session's), asking `git check-ignore` in the root `/api/state` names
+for it, within 2 s; the row's shape is unchanged, and a workspace whose Git
+doesn't answer keeps its paths, since this only tidies what is drawn.
 `--demo` answers it with 404, and an unreachable coordinator
 with 503 and `available: false`. It reads only a request head of at most
 8 KiB and 64 headers, within 2 s per read and 5 s in total; refuses every other
@@ -112,10 +116,11 @@ the dashboard passes the model of `/api/state` and `/api/events`. The model,
 tested under `node --test`, and returns the hero's data shape without its
 playback fields (`fixtures/live-view-model.json` pins it):
 
-- one lane per local session with a timed step, labelled from its
-  `/api/state` row (task line, harness, shared or own checkout, branch) and
-  never by an ID. Remote sessions are not in the local log, so a remote edit
-  is never a card or a wire;
+- one lane per local session with a timed step, titled by its branch (else
+  its workspace, numbered when several share one) with its harness beneath,
+  from its `/api/state` row, and never by an ID or its task line: that is the
+  agent's prompt, untrusted text. Remote sessions are not in the local log,
+  so a remote edit is never a card or a wire;
 - one card per recorded step: a read, a successful edit (`Edit`, `Write`,
   `MultiEdit`, `NotebookEdit` or `apply_patch`), another successful command,
   a held write with its reason in words, and the held session's next

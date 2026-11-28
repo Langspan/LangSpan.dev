@@ -165,3 +165,18 @@ The PR body will say which.
 - The site's hero loading the shared file, a separate PR in
   Langspan/langspan.github.io.
 - The fleet version of the homepage, langspan.github.io#42.
+
+## Review round 3 (orchestrator, 28 Nov)
+
+Done, uncommitted until admission: lane titles from the branch or workspace
+(never the task line), the view tabs without a background transition, the
+camera toolbar wrapping on a phone, Git-ignored paths dropped from
+`/api/events`, and the camera following again after a trim (Codex P2).
+Once admitted: `fixtures/live-view-model.json` (its golden lane names
+change), `docs/security/threat-model.md` (the dashboard now runs
+`git check-ignore`), and lanes 76 px apart card edge to card edge, set in
+`src/dashboard.html` only (`--row-h` 156 px wide, 176 px narrow) so the
+hero keeps its 154 px row. The renderer's QA checks draw live work at the
+dashboard's spacing. A held wire's details say the recorded refusal kind,
+not a stale read for every hold (Codex P2), from `heldWhy` in the
+renderer's pure part.

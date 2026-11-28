@@ -290,7 +290,14 @@ details.explain dl { margin-top: 10px; }
 }
 /* The Live and Files views (issue #491). */
 .views { display: flex; gap: 8px; margin-bottom: 16px; }
+/* A tab's text color changes at once but .button eases its background, so
+   mid-change each label is drawn in its own background's color. */
+.views .button { transition: none; }
 #live-view { margin-bottom: 24px; }
+/* Lanes 76 px apart, from one lane's card to the next lane's (the card is
+   80 px tall, or 100 px under 760 px); the hero keeps its own 154 px row. */
+#live-view .live-canvas { --row-h: 156px; }
+@media (max-width: 759px) { #live-view .live-canvas { --row-h: 176px; } }
 /*langspan:live-view-css*/
 </style>
 </head>

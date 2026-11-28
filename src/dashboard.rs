@@ -613,6 +613,99 @@ fn feed_page(after: u64, events: &[langspan_core::RecordedEvent]) -> DashboardEv
     DashboardEvents::new(after, rows.collect())
 }
 
+/// How long Git may take to say which of a page's paths it ignores.
+const IGNORE_DEADLINE: Duration = Duration::from_secs(2);
+
+/// Drops from a page the paths Git ignores in their workspace, such as a
+/// build output under `target/`, which the observer's
+/// `ls-files --exclude-standard` already leaves out of every other view. A
+/// workspace whose root the coordinator doesn't name, or whose Git doesn't
+/// answer, keeps its paths: this only tidies what is drawn.
+fn hide_ignored(state_dir: &Path, rows: &mut [DashboardEvent]) {
+    use std::collections::{BTreeSet, HashMap};
+    if rows.iter().all(|row| row.paths.is_empty()) {
+        return;
+    }
+    let request = Request::new("read", Command::Dashboard);
+    let Ok(Outcome::Dashboard { dashboard }) = client::call(state_dir, &request).map(|r| r.outcome)
+    else {
+        return;
+    };
+    let sessions: HashMap<&str, &str> = (dashboard.agents.iter())
+        .filter_map(|a| Some((a.session_id.as_deref()?, a.workspace_id.as_str())))
+        .collect();
+    let places = workspaces_of(rows, &sessions);
+    let mut asked: HashMap<&str, BTreeSet<&str>> = HashMap::new();
+    for (row, workspace) in rows.iter().zip(&places) {
+        let Some(workspace) = workspace else { continue };
+        // Only paths inside the root; Git refuses the whole call otherwise.
+        asked.entry(workspace).or_default().extend(
+            row.paths
+                .iter()
+                .map(String::as_str)
+                .filter(|p| !Path::new(p).is_absolute() && !p.split('/').any(|part| part == "..")),
+        );
+    }
+    let deadline = Instant::now() + IGNORE_DEADLINE;
+    let mut ignored: HashMap<String, BTreeSet<String>> = HashMap::new();
+    for workspace in &dashboard.workspaces {
+        let Some(paths) = asked.get(workspace.workspace_id.as_str()) else {
+            continue;
+        };
+        let mut found = BTreeSet::new();
+        for chunk in paths.iter().copied().collect::<Vec<_>>().chunks(256) {
+            // One path a line, as given; one Git still quotes (a control
+            // character) matches nothing and stays shown.
+            let args = [&["-c", "core.quotePath=false", "check-ignore", "--"], chunk].concat();
+            let root = Path::new(&workspace.root);
+            // Exit 0 names the ignored paths; 1 means none is.
+            if let Ok((status, out)) = crate::git::run_with_env(root, &args, &[], deadline, 1 << 20)
+                && status.success()
+            {
+                found.extend(String::from_utf8_lossy(&out).lines().map(str::to_owned));
+            }
+        }
+        ignored.insert(workspace.workspace_id.clone(), found);
+    }
+    drop_paths(rows, &places, &ignored);
+}
+
+/// Each row's workspace: its own, else its session's, from this page's rows
+/// or the coordinator's `sessions` (a read names no workspace).
+fn workspaces_of(
+    rows: &[DashboardEvent],
+    sessions: &std::collections::HashMap<&str, &str>,
+) -> Vec<Option<String>> {
+    let mut seen: std::collections::HashMap<&str, &str> = sessions.clone();
+    for row in rows {
+        if let (Some(session), Some(workspace)) = (&row.session_id, &row.workspace_id) {
+            seen.insert(session, workspace);
+        }
+    }
+    let session = |row: &DashboardEvent| row.session_id.as_deref().and_then(|s| seen.get(s));
+    (rows.iter())
+        .map(|row| {
+            row.workspace_id
+                .clone()
+                .or_else(|| session(row).map(|w| (*w).to_owned()))
+        })
+        .collect()
+}
+
+/// Removes each row's paths named for its workspace (`places`, row by row)
+/// in `ignored`.
+fn drop_paths(
+    rows: &mut [DashboardEvent],
+    places: &[Option<String>],
+    ignored: &std::collections::HashMap<String, std::collections::BTreeSet<String>>,
+) {
+    for (row, place) in rows.iter_mut().zip(places) {
+        if let Some(gone) = place.as_ref().and_then(|w| ignored.get(w)) {
+            row.paths.retain(|p| !gone.contains(p));
+        }
+    }
+}
+
 /// A page of the coordinator's event log, `/api/events` (issue #500).
 fn events(context: &Context, query: &str) -> Reply {
     let (after, limit) = match feed_query(query) {
@@ -623,7 +716,8 @@ fn events(context: &Context, query: &str) -> Reply {
     let (status, body) = match client::call(&context.state_dir, &request) {
         Ok(response) => match response.outcome {
             Outcome::Events { events } => {
-                let page = feed_page(after, &events);
+                let mut page = feed_page(after, &events);
+                hide_ignored(&context.state_dir, &mut page.events);
                 (
                     200,
                     serde_json::json!({"available": true, "version": page.version,
@@ -949,6 +1043,27 @@ mod tests {
         }
     }
 
+    /// The layout rules a review found missing, checked as text in the
+    /// composed style because no browser runs in the suite: the view tabs
+    /// change their background at once (eased, a label was drawn in its own
+    /// background's color mid-change at 1440 px), and at 390 px the view,
+    /// the title bar's names and the camera toolbar shrink or wrap instead
+    /// of scrolling the page sideways.
+    #[test]
+    fn the_page_keeps_tab_labels_visible_and_fits_a_phone_width() {
+        let composed = page(false).unwrap();
+        let style =
+            &composed[composed.find("<style>").unwrap()..composed.find("</style>").unwrap()];
+        for rule in [
+            ".views .button { transition: none; }",
+            ".live{width:min(1440px,100%);min-width:0;",
+            ".live-bar code{min-width:0;overflow-wrap:anywhere}",
+            ".live-tools{position:static;flex-wrap:wrap;",
+        ] {
+            assert!(style.contains(rule), "missing: {rule}");
+        }
+    }
+
     /// Quoted names the script passes to `call`, such as `byId('scope')`.
     fn quoted_arguments<'a>(script: &'a str, call: &str) -> Vec<&'a str> {
         script
@@ -1041,6 +1156,47 @@ mod tests {
         let lan: SocketAddr = "192.168.1.5:7311".parse().unwrap();
         assert!(host_allowed("192.168.1.5:7311", lan));
         assert!(!host_allowed("localhost:7311", lan));
+    }
+
+    /// Paths Git ignores leave only their own workspace's rows; a row that
+    /// names no workspace is its session's, from the page or the coordinator.
+    #[test]
+    fn ignored_paths_leave_only_their_workspaces_rows() {
+        let row = |session: &str, workspace: Option<&str>| {
+            DashboardEvent::new(
+                1,
+                "operation_observed",
+                Some(session),
+                workspace,
+                Some(5),
+                vec!["target/out.md".into(), "src/a.rs".into()],
+            )
+        };
+        let mut rows = [
+            row("s1", Some("work")),
+            row("s2", Some("other")),
+            row("s1", None),
+            row("s3", None),
+            row("s4", None),
+        ];
+        let known = [("s3", "work")].into();
+        let places = workspaces_of(&rows, &known);
+        assert_eq!(
+            places,
+            [
+                Some("work"),
+                Some("other"),
+                Some("work"),
+                Some("work"),
+                None
+            ]
+            .map(|w| w.map(str::to_owned))
+        );
+        let ignored = [("work".to_owned(), ["target/out.md".to_owned()].into())].into();
+        drop_paths(&mut rows, &places, &ignored);
+        let kept: Vec<usize> = rows.iter().map(|r| r.paths.len()).collect();
+        assert_eq!(kept, [1, 2, 1, 1, 2]);
+        assert_eq!(rows[0].paths, ["src/a.rs"]);
     }
 
     /// The `/api/events` page (issue #500), version 2 (issue #491): one row

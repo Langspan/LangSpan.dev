@@ -59,8 +59,18 @@ function liveEvents(lanes) {
 }
 const live = (lanes) => { const ev = liveEvents(lanes); return Live.pace(Live.model({ agents: [] }, ev), ev); };
 
+// The dashboard's own lane spacing (src/dashboard.html), wide then narrow.
+const PAGE = readFileSync(new URL("../src/dashboard.html", import.meta.url), "utf8");
+const [DASH_WIDE_ROW, DASH_NARROW_ROW] = [...PAGE.matchAll(/#live-view \.live-canvas \{ --row-h: (\d+)px; \}/g)].map((m) => +m[1]);
+const DASH = { "1440": { ...WIDE, row: DASH_WIDE_ROW }, "390": { ...NARROW, row: DASH_NARROW_ROW } };
+
 const SCENES = [["the hero's recording", HERO], ["live work in three lanes", live(3)], ["live work in four lanes", live(4)]];
-const SIZES = [["1440", WIDE], ["390", NARROW]];
+// The hero draws at its own sizes; live work draws at the dashboard's.
+const sizes = (timing) => (timing.live ? [["1440", DASH["1440"]], ["390", DASH["390"]]] : [["1440", WIDE], ["390", NARROW]]);
+
+test("the dashboard's lanes are 76 px apart, card edge to card edge, at 1440 and 390 px", () => {
+  for (const base of Object.values(DASH)) assert.equal(base.row - base.H, 76, JSON.stringify(base));
+});
 const samples = (timing) => { const out = []; for (let t = 0; t <= timing.duration_s; t += 1 / 15) out.push(t); return out; };
 
 // Axis-aligned segments of a route; the curve of a short route lies
@@ -86,7 +96,7 @@ function route(V, L, i) {
 }
 
 for (const [name, timing] of SCENES) {
-  for (const [size, base] of SIZES) {
+  for (const [size, base] of sizes(timing)) {
     const V = View.prepare(timing);
     const L = V.layout(dims(base, timing));
 
@@ -236,6 +246,25 @@ test("live: a hold between lanes too far apart to show together is framed with a
   const w = V.WIRES[0], st = V.frameState(w.at + 0.3), cam = V.flowView(L, st, 1, 0);
   const top = L.top + 9 * L.row + cam.y;
   assert.ok(top >= L.top - 1 && top + L.HH <= L.Hc + 1, `held lane at ${top}`);
+});
+
+test("a held wire says the recorded refusal, not a stale read, for every kind", () => {
+  const said = {
+    stale_base: "Changed since this agent read it.",
+    conflict: "Another agent is editing it.",
+    unread_lines: "Lines another agent wrote, not read yet.",
+    commit_held: "The commit would take another agent's changes.",
+  };
+  for (const [refusal, words] of Object.entries(said)) {
+    seq = 0;
+    const ev = [anchor(), read(S(1), 1000, "a.rs"), edit(S(0), 2000, "a.rs"), Object.assign(held(S(1), S(0), 3000, "a.rs"), { refusal })];
+    const V = View.prepare(Live.pace(Live.model({ agents: [] }, ev), ev));
+    assert.equal(V.WIRES.length, 1, refusal);
+    assert.equal(V.heldWhy(0), words, refusal);
+  }
+  // The hero's recording keeps its own sentence.
+  const hero = View.prepare(HERO), i = hero.WIRES.findIndex((w) => w.kind === "held");
+  assert.match(hero.heldWhy(i), / last read it\.$/);
 });
 
 test("the route of a hero wire is the hero's own path", () => {

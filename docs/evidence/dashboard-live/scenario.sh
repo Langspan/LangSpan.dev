@@ -18,7 +18,9 @@ STATE="$BASE/state" ROOT="$BASE/billing"
 mkdir -p "$STATE" "$ROOT/src" "$ROOT/tests" "$ROOT/docs"; chmod 700 "$STATE"
 g() { git -C "$ROOT" -c user.name=Demo -c user.email=demo@example.invalid "$@"; }
 for f in src/invoice.rs src/totals.rs src/refund.rs tests/totals.rs docs/billing.md; do printf 'start\n' > "$ROOT/$f"; done
+printf 'target/\n' > "$ROOT/.gitignore"
 g init -q --initial-branch=feat/billing && g add . && g commit -q -m init
+mkdir -p "$ROOT/target" && printf 'start\n' > "$ROOT/target/report.md"  # ignored: never drawn
 "$LANGSPAN" daemon --state-dir "$STATE" 2>>"$BASE/daemon.log" & PIDS+=("$!")
 for _ in $(seq 100); do "$LANGSPAN" status --state-dir "$STATE" >/dev/null 2>&1 && break; sleep 0.1; done
 
@@ -51,6 +53,7 @@ read_file "$A" src/invoice.rs
 edit "$A" src/invoice.rs   # saved after re-reading
 edit "$B" src/refund.rs
 command "$C" "cargo test"
+edit "$C" target/report.md
 edit "$A" tests/totals.rs
 read_file "$B" src/totals.rs
 edit "$C" docs/billing.md

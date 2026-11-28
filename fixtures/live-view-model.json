@@ -17,9 +17,9 @@
  "model": {
   "lanes": [
    {
-    "label": "#7 API errors",
-    "short": "#7 API",
-    "meta": "Codex · feat/api",
+    "label": "feat/api",
+    "short": "api",
+    "meta": "Codex",
     "agent": "Codex",
     "checkout": "own checkout",
     "branch": "feat/api",

@@ -13,9 +13,12 @@ has two views, switched by the Live and Files buttons under the header. Live
 opens first once any step is recorded.
 
 **Live** shows recorded work as it happens, in the homepage hero's design.
-Each local session is a lane, named by its task line or else its workspace,
-with its harness and branch beneath; a session that has ended takes its
-workspace's branch. The title bar names the workspaces and branches of the
+Each local session is a lane, named by its branch or else its workspace, with
+its harness beneath; a session that has ended takes its workspace's branch,
+and sessions on one branch are numbered, such as "feat/billing (2)". A lane
+never shows the session's prompt or task line. Paths Git ignores, such as
+build output under `target/`, are left out, as everywhere else in LangSpan.
+The title bar names the workspaces and branches of the
 agents working now. Each card is one recorded step in words:
 "Read", "Edited", "Ran a command", "Write held" with the reason, and "Saved
 after re-reading" or "Saved on retry". Edits of one file, or reads, in a row
@@ -39,8 +42,9 @@ started doesn't count), and the writes held in the same 10 minutes.
   wheel scrolls through the lanes, and **Follow newest** scrolls back. Ctrl
   or Cmd with the wheel zooms.
 - Click a card, a wire's label or a lane name for its recorded details: the
-  file, the time, why a write was held, which agent changed the file, and what
-  the held agent did next. Details never open on their own.
+  file, the time, why a write was held (the refusal LangSpan recorded, such
+  as "another agent is editing it"), the other agent, and what the held agent
+  did next. Details never open on their own.
 - With reduced motion, or `?motion=static` added to the URL, the view shows
   the newest work without motion.
 
@@ -90,7 +94,8 @@ order, for the Live view or a script: `after` defaults
 to 0, `limit` to 100 (at most 1000), and the next poll asks after the reply's
 `next`. A page can hold fewer rows than asked; read until one comes back
 empty. Each row carries only the event's seq, type, session, workspace,
-time and file paths, never prompt summaries or message text. Version 2 adds,
+time and file paths, never prompt summaries or message text, and leaves out
+the paths Git ignores in the row's workspace. Version 2 adds,
 where the event records them, a refusal's `peer_session_id` and `refusal`
 kind, an operation's `tool` and `result`, a read or write's `origin`, and a
 clock anchor's `wall_ms` and `clock_ms`. It needs the

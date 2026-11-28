@@ -289,7 +289,15 @@ var LangSpanLiveView = (function () {
       return d + " L " + f(z[0]) + " " + f(z[1]);
     }
 
-    return { T, P, live, LOOP, CARDS, WIRES, byId, order, flowAt, frameState, layout, copies, cardY, cardH, flowCamera, clampY, openingY, frameFor, flowView, wireRoute, pathD };
+    // Why a held wire's write waited. The hero's recording is a stale read;
+    // live work says the refusal LangSpan recorded, as its card does.
+    function heldWhy(i) {
+      const w = WIRES[i], to = byId[w.to], from = w.from ? byId[w.from] : null;
+      if (live) return to.sub.charAt(0).toUpperCase() + to.sub.slice(1) + ".";
+      return T.lanes[w.from_lane].label + " changed " + to.code + (from && from.time ? " (" + from.time + ")" : "") + " after " + T.lanes[to.lane].label + " last read it.";
+    }
+
+    return { T, P, live, LOOP, CARDS, WIRES, byId, order, flowAt, frameState, layout, copies, cardY, cardH, flowCamera, clampY, openingY, frameFor, flowView, wireRoute, pathD, heldWhy };
   }
 
   /* ---------- Drawing: the hero's markup, pools and interactions ---------- */
@@ -691,7 +699,7 @@ var LangSpanLiveView = (function () {
         if (c.kind === "held") {
           const w = V.WIRES.find((x) => x.to === c.id);
           const after = V.CARDS.filter((x) => x.lane === c.lane && x.at > c.at && (x.kind === "read" || x.kind === "saved") && x.code === c.code);
-          if (w) extra.push(["Changed by", T.lanes[w.from_lane].label]);
+          if (w) extra.push([V.live ? "Other agent" : "Changed by", T.lanes[w.from_lane].label]);
           // The hero's recording quotes LangSpan's reply; the live feed doesn't carry message text.
           if (!V.live) extra.push(["What LangSpan told the agent", "“… Read each file again, then make the edit against its current content.”"]);
           if (after.length) extra.push(["What happened next", after.map((x) => (x.time ? x.time + " · " : "") + (x.kind === "read" ? "read the file again" : "saved its edit")).join("; ")]);
@@ -702,7 +710,7 @@ var LangSpanLiveView = (function () {
         const w = V.WIRES[+id], to = V.byId[w.to], from = w.from ? V.byId[w.from] : null;
         kind.textContent = w.label + " · from " + plain(T.lanes[from ? from.lane : w.from_lane].label) + " to " + plain(T.lanes[to.lane].label);
         const list = w.kind === "held"
-          ? [["Why", T.lanes[w.from_lane].label + " changed " + to.code + (from && from.time ? " (" + from.time + ")" : "") + " after " + T.lanes[to.lane].label + " last read it."], ["Held at", to.time || "not recorded"]]
+          ? [["Why", V.heldWhy(+id)], ["Held at", to.time || "not recorded"]]
           : [["Sent", from.time], ["Got it", to.time + ", with its next prompt"]];
         return [kind, rows(list)];
       }
@@ -757,7 +765,14 @@ var LangSpanLiveView = (function () {
     function update(T) {
       const first = !V.CARDS.length;
       const lanesChanged = JSON.stringify(T.lanes) !== JSON.stringify(V.T.lanes);
+      const oldest = first ? null : V.CARDS[0].seq[0];
       V = prepare(T); P = V.P;
+      // Trimmed history renumbers every card and moves every place, so a
+      // free camera would rest where no work is: follow the newest again.
+      if (!first && (!V.CARDS.length || V.CARDS[0].seq[0] !== oldest)) {
+        for (const p of [pool, wirePool, labelPool, chipPool, markPool, chainPool]) { for (const el of p.values()) el.remove(); p.clear(); }
+        laneScrolled = false; cam.mode = "flow"; cam.fs = 1; syncFollow();
+      }
       for (const [key, el] of pool) {
         const c = V.byId[key.split(":")[1]];
         if (!c || el.dataset.sig !== sig(c)) { el.remove(); pool.delete(key); }
