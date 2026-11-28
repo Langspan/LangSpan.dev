@@ -144,16 +144,19 @@ LangSpan: push routed to landing. main is the default branch of the remote, and 
 Run `langspan --state-dir DIR land WORKSPACE --onto main --name CHECK feat --apply --rebase --check-again -- TEST_COMMAND` ...
 ```
 
-The agent fills in a check name and the project's test command. A forced
-push, a deletion of the default branch, and `--all`, `--mirror` or the
-matching refspec `:` are refused too, as is a wildcard refspec such as
-`refs/heads/*:refs/heads/*` or a configured `remote.origin.push` that would
-update the default branch; pushes to other branches, tags and dry
-runs pass. When the hook cannot tell where a push goes (an expansion in the
-remote or refspec, a URL instead of a remote name, a checkout other than the
-workspace's, or no `REMOTE/HEAD`), it lets the push run; set the remote's
-HEAD with `git remote set-head origin --auto`. Pushes from your own terminal
-are never touched. To let agents push the default branch directly, run
+The agent fills in a check name and the project's test command. To learn
+where a push goes, the hook runs it first as `git push --dry-run --porcelain`
+with the same arguments and `-c` settings. The push is routed when the dry
+run would update, force or delete the default branch, whether through a
+refspec, `--all`, `--mirror`, `--prune`, `push.default`, `remote.pushDefault`
+or a configured `remote.origin.push`. Pushes to other branches, tags and dry
+runs pass. The hook refuses a push it cannot check this way: one combined with
+another command (`git add -A && git push`), one with an expansion in its words,
+and one whose dry run fails or does not finish in the hook's time. The message
+says what to run instead. A push from another checkout, to a URL no remote has,
+or with no `REMOTE/HEAD` runs. Set the remote's HEAD with
+`git remote set-head origin --auto`. Pushes from your own terminal are never
+touched. To let agents push the default branch directly, run
 `git config langspan.defaultBranchPush direct` in the repository. See
 [ADR 0007](../adr/0007-check-evidence-integration-and-landing.md#routing-an-agents-push).
 

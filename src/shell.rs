@@ -17,7 +17,7 @@ mod parse;
 mod snapshot;
 pub use formatters::{Formatting, Reach, formatters};
 pub use git_commands::{GitStep, git_steps, moves_checkout};
-pub(crate) use git_push::{GitPush, git_pushes};
+pub(crate) use git_push::{GitPush, git_push};
 pub use parse::{
     MAX_COMMAND_BYTES, MAX_LOOKED_WORDS, MAX_TARGETS, heredoc_write, looked_at, write_targets,
 };

@@ -369,9 +369,13 @@ and landing over MCP. No native-agent run uses these commands yet.
 Push routing (issue #536, first slice): in a hooked shell call, an agent's
 `git push` to the remote's default branch, forced or not, is refused every
 time with the exact `land --apply --rebase --check-again` command;
-`langspan.defaultBranchPush direct` lets it through. Tests: the push reader's
-forms (pure), and the routing and the shell hook's refusal against real
-temporary repositories with a local bare remote. Not yet retained: a native
+`langspan.defaultBranchPush direct` lets it through. Where a push goes is
+Git's answer: the hook runs a dry run of the same lone push, and it refuses a
+push combined with another command or one whose dry run fails. Tests: the push
+reader's forms (pure), and the shell hook's routing and refusals against real
+temporary repositories with a local bare remote. These include mirror remotes,
+`--prune` globs, `-c` overrides, `push.default`, `remote.pushDefault` and
+compound commands. Not yet retained: a native
 session whose push lands in one step after main moved, and push retries per
 benchmark arm.
 

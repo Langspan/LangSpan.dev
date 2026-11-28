@@ -25,6 +25,11 @@ forces and never pushes on a failed check; the repository opts out with
 
 At `PreToolUse` for a shell call, before the commit guard:
 
+> Changed in review: steps 1 to 3 read the destination from the command, and
+> review kept finding pushes they misread. The hook now refuses a push combined
+> with another command. It asks Git with a dry run of a lone push, and refuses
+> one whose dry run fails. See ADR 0007, "Routing an agent's push".
+
 1. `crate::shell::git_pushes(command)` (new, pure, `src/shell/git_push.rs`)
    reads each `git push` in the line with the existing lenient lexer
    (`Lexer`, `command_words`): its directory (`cd`, `-C`), remote, refspecs,

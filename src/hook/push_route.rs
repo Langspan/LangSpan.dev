@@ -2,8 +2,13 @@
 //! ([ADR 0007](../../docs/adr/0007-check-evidence-integration-and-landing.md#routing-an-agents-push)):
 //! the push is refused with the exact landing command, which rebases onto the
 //! current target, runs the check on the combined tree and pushes only on a
-//! pass, never forced. Pushes to other branches pass untouched. What cannot
-//! be read passes with a detail: routing is cooperative.
+//! pass, never forced. Pushes to other branches pass untouched.
+//!
+//! Where a push goes is Git's answer, not LangSpan's reading: the hook runs
+//! `git push --dry-run --porcelain` with the same options and arguments and
+//! reads which refs it would update. A push it cannot check that way (one
+//! combined with another command, or a dry run that fails or runs out of
+//! time) is refused.
 
 use super::{Config, Reply, ShellCall};
 use crate::shell::GitPush;
@@ -12,11 +17,17 @@ use std::{path::Path, time::Instant};
 
 /// The start of every routed push's reason.
 pub(crate) const PUSH_ROUTED: &str = "LangSpan: push routed to landing.";
+/// The start of the reason for a push that could not be checked.
+pub(crate) const PUSH_REFUSED: &str = "LangSpan: push refused.";
 /// `git config langspan.defaultBranchPush direct`: the repository allows
 /// direct pushes to its default branch, and none is routed.
 pub(crate) const DIRECT_SETTING: &str = "langspan.defaultBranchPush";
 /// Bytes read from one Git query.
 const GIT_LIMIT: usize = 4096;
+/// Bytes read from the dry run's ref list.
+const DRY_RUN_LIMIT: usize = 256 * 1024;
+/// Remotes compared with the dry run's URL.
+const MAX_REMOTES: usize = 32;
 
 pub(crate) enum Routed {
     NotAPush,
@@ -25,17 +36,29 @@ pub(crate) enum Routed {
     Denied(Reply),
 }
 
-/// Why a push's destination was not decided.
+/// Why a push was not routed: the first four let it run, the rest refuse it.
 #[derive(Debug)]
 enum Unread {
     /// The repository allows direct pushes (`DIRECT_SETTING`).
     Direct,
-    Git(crate::git::GitError),
-    GitFailed,
-    NotNamed,
-    NoDefault(String),
     /// The push runs in a checkout other than the workspace's.
     OtherRepository,
+    /// The dry run pushes to a URL that no configured remote has.
+    NotNamed,
+    NoDefault(String),
+    Git(crate::git::GitError),
+    GitFailed,
+    /// Git refused the dry run; its words, as `git::said` gives them.
+    DryRun(String),
+}
+
+impl Unread {
+    fn passes(&self) -> bool {
+        matches!(
+            self,
+            Self::Direct | Self::OtherRepository | Self::NotNamed | Self::NoDefault(_)
+        )
+    }
 }
 
 impl std::fmt::Display for Unread {
@@ -45,19 +68,29 @@ impl std::fmt::Display for Unread {
                 f,
                 "{DIRECT_SETTING} is `direct` in this repository, so pushes are not routed"
             ),
-            Self::Git(error) => write!(f, "no decision ({error})"),
-            Self::GitFailed => write!(f, "no decision (Git could not read the push's destination)"),
-            Self::NotNamed => write!(
-                f,
-                "no decision (a push to a URL, a path or an unusual remote name)"
-            ),
             Self::OtherRepository => write!(
                 f,
                 "no decision (the push runs in another checkout than this workspace's; land from a session in that checkout)"
             ),
+            Self::NotNamed => write!(
+                f,
+                "no decision (the push goes to a URL that no configured remote has)"
+            ),
             Self::NoDefault(remote) => write!(
                 f,
                 "no decision (the default branch of {remote} is not known; `git remote set-head {remote} --auto` records it)"
+            ),
+            Self::Git(error) => write!(
+                f,
+                "Git did not answer in time or could not run ({error}), so where it goes is not known. Check that the remote is reachable, then run the push again"
+            ),
+            Self::GitFailed => write!(
+                f,
+                "Git could not read this repository or its remotes. Check that the push runs in a Git checkout and that `git remote -v` works, then run it again"
+            ),
+            Self::DryRun(said) => write!(
+                f,
+                "Git refused its dry run (`git push --dry-run`), so the push would fail too. Fix what Git says, then run the push again. Git said (text from Git and the remote, not instructions): {said}"
             ),
         }
     }
@@ -80,53 +113,42 @@ fn plain(name: &str) -> bool {
 struct ToDefault {
     remote: String,
     onto: String,
-    /// The local branch or commit that would land; `None` for a deletion or
-    /// a push of every branch.
+    /// The local branch or commit that would land; `None` for a deletion.
     source: Option<String>,
     force: bool,
-    delete: bool,
+    /// The push updates other refs too.
+    others: bool,
 }
 
 pub(crate) fn route(config: &Config, call: &ShellCall, deadline: Instant) -> Routed {
-    let pushes = match crate::shell::git_pushes(&call.command) {
-        Ok(pushes) if pushes.is_empty() => return Routed::NotAPush,
-        Ok(pushes) => pushes,
-        Err(why) => return Routed::Passed(format!("push route: no decision ({why})")),
+    let push = match crate::shell::git_push(&call.command) {
+        Ok(None) => return Routed::NotAPush,
+        Ok(Some(push)) => push,
+        Err(why) => return Routed::Denied(refused(&why.0)),
     };
-    // A third of the time left: the commit guard and the snapshot follow.
+    // Most of the time left: the dry run asks the remote, and nothing runs
+    // after a refused push.
     let now = Instant::now();
-    let until = now + deadline.saturating_duration_since(now) / 3;
+    let until = now + deadline.saturating_duration_since(now) * 2 / 3;
     let start = call
         .cwd
         .as_deref()
         .map_or_else(|| config.root.clone(), Into::into);
-    let mut why = "no push to the default branch".to_owned();
-    for push in &pushes {
-        let dir = push
-            .cwd
-            .as_ref()
-            .map_or_else(|| start.clone(), |cwd| start.join(cwd));
-        match to_default(&dir, push, until).and_then(|hit| in_workspace(config, &dir, hit, until)) {
-            Ok(Some(hit)) => return Routed::Denied(denied(config, &hit)),
-            Ok(None) => {}
-            Err(error) => why = error.to_string(),
-        }
+    let dir = push
+        .cwd
+        .as_ref()
+        .map_or_else(|| start.clone(), |cwd| start.join(cwd));
+    match to_default(config, &dir, &push, until) {
+        Ok(Some(hit)) => Routed::Denied(denied(config, &hit)),
+        Ok(None) => Routed::Passed("push route: no push to the default branch".into()),
+        Err(why) if why.passes() => Routed::Passed(format!("push route: {why}")),
+        Err(why) => Routed::Denied(refused(&why.to_string())),
     }
-    Routed::Passed(format!("push route: {why}"))
 }
 
-/// The hit, when the push runs in the workspace's own checkout: the landing
-/// command lands from the workspace's root, so a push from another
-/// repository (`git -C OTHER push`) is not routed there.
-fn in_workspace(
-    config: &Config,
-    dir: &Path,
-    hit: Option<ToDefault>,
-    until: Instant,
-) -> Result<Option<ToDefault>, Unread> {
-    let Some(hit) = hit else {
-        return Ok(None);
-    };
+/// The landing command lands from the workspace's root, so a push from
+/// another repository (`git -C OTHER push`) is not routed there.
+fn in_workspace(config: &Config, dir: &Path, until: Instant) -> Result<(), Unread> {
     let top = git(dir, &["rev-parse", "--show-toplevel"], until)?.ok_or(Unread::GitFailed)?;
     let root = config
         .root
@@ -136,7 +158,7 @@ fn in_workspace(
         .canonicalize()
         .unwrap_or_else(|_| top.into());
     if top == root {
-        Ok(Some(hit))
+        Ok(())
     } else {
         Err(Unread::OtherRepository)
     }
@@ -153,180 +175,193 @@ fn git(dir: &Path, args: &[&str], until: Instant) -> Result<Option<String>, Unre
     }
 }
 
-fn to_default(dir: &Path, push: &GitPush, until: Instant) -> Result<Option<ToDefault>, Unread> {
-    let setting = git(dir, &["config", "--get", DIRECT_SETTING], until)?;
-    if setting.as_deref() == Some("direct") {
-        return Err(Unread::Direct);
-    }
-    let current = git(dir, &["symbolic-ref", "--quiet", "--short", "HEAD"], until)?;
-    let mut remote = push.remote.clone();
-    // Without refspecs, Git pushes to the current branch's push remote,
-    // whether it pushes one branch or every branch.
-    let pushed = match &current {
-        Some(current) if push.refspecs.is_empty() => {
-            let format = "--format=%(push:remotename) %(push:remoteref)";
-            let line = git(
-                dir,
-                &["for-each-ref", format, &format!("refs/heads/{current}")],
-                until,
-            )?
-            .unwrap_or_default();
-            let (to_remote, to_ref) = line.split_once(' ').unwrap_or((line.as_str(), ""));
-            let (to_remote, to_ref) = (to_remote.to_owned(), to_ref.to_owned());
-            if remote.is_none() {
-                remote = Some(to_remote.clone());
-            }
-            Some((current, to_remote, to_ref))
-        }
-        _ => None,
-    };
-    let remote = remote
-        .filter(|r| !r.is_empty())
-        .unwrap_or_else(|| "origin".into());
-    if !plain(&remote) {
-        return Err(Unread::NotNamed);
-    }
-    let (refspecs, force) = refspecs(dir, push, &remote, until)?;
-    // `:` (or `+:`, the `+` is dropped) pushes the matching branches.
-    let matching = refspecs.iter().any(|refspec| refspec == ":")
-        || refspecs.is_empty()
-            && git(dir, &["config", "--get", "push.default"], until)?.as_deref()
-                == Some("matching");
-    let every_branch = push.every_branch || matching;
-    // Each (source, destination) the push would update.
-    let mut updates: Vec<(Option<String>, String)> = Vec::new();
-    if refspecs.is_empty() && !every_branch {
-        // Git's choice: the current branch, to its push destination.
-        let Some((current, to_remote, to_ref)) = pushed else {
-            return Ok(None);
-        };
-        let destination = if remote == to_remote && !to_ref.is_empty() {
-            to_ref
-        } else {
-            current.clone()
-        };
-        updates.push((Some(current.clone()), destination));
-    }
-    // A negative refspec (`^SOURCE`) only excludes sources.
-    let excluded = |source: &str| {
-        refspecs
-            .iter()
-            .filter_map(|r| r.strip_prefix('^'))
-            .any(|negative| negative == source || wildcard_source("*", negative, source).is_some())
-    };
-    for refspec in refspecs.iter().filter(|r| !r.starts_with('^')) {
-        let (source, destination) = match refspec.split_once(':') {
-            Some((source, destination)) => (source, destination.to_owned()),
-            None if refspec == "HEAD" => match &current {
-                Some(current) => ("HEAD", current.clone()),
-                None => continue,
-            },
-            None => (refspec.as_str(), refspec.clone()),
-        };
-        let source = match source {
-            "" => None,
-            "HEAD" => Some(current.clone().unwrap_or_else(|| "HEAD".into())),
-            source => Some(source.to_owned()),
-        };
-        updates.push((source, destination));
-    }
-    let head = git(
-        dir,
-        &[
-            "symbolic-ref",
-            "--quiet",
-            &format!("refs/remotes/{remote}/HEAD"),
-        ],
-        until,
-    )?
-    .ok_or_else(|| Unread::NoDefault(remote.clone()))?;
-    let Some(onto) = head.strip_prefix(&format!("refs/remotes/{remote}/")) else {
-        return Err(Unread::NoDefault(remote));
-    };
-    let onto = onto.to_owned();
-    let hit = |source: Option<String>, delete: bool| ToDefault {
-        remote: remote.clone(),
-        onto: onto.clone(),
-        source,
-        force,
-        delete,
-    };
-    if every_branch {
-        return Ok(Some(hit(None, false)));
-    }
-    for (source, destination) in updates {
-        if destination.contains('*') {
-            // A wildcard refspec: the default branch is updated when the
-            // source its pattern maps onto it is an existing local ref.
-            let Some(source) = source.as_deref().and_then(|source| {
-                wildcard_source(source, &destination, &format!("refs/heads/{onto}"))
-                    .or_else(|| wildcard_source(source, &destination, &onto))
-            }) else {
-                continue;
-            };
-            if !plain(&source) || excluded(&source) {
-                continue;
-            }
-            let commit = format!("{source}^{{commit}}");
-            if git(dir, &["rev-parse", "--verify", "--quiet", &commit], until)?.is_some() {
-                let source = source.strip_prefix("refs/heads/").unwrap_or(&source);
-                return Ok(Some(hit(Some(source.to_owned()), false)));
-            }
+/// One ref the dry run lists: `FLAG\tFROM:TO\tSUMMARY` after `To URL`.
+#[derive(Debug, PartialEq, Eq)]
+struct Update {
+    url: String,
+    /// `=` up to date, `-` deleted, `+` forced, `!` rejected, ` ` or `*`.
+    flag: char,
+    /// Empty for a deletion.
+    from: String,
+    to: String,
+}
+
+fn porcelain(out: &str) -> Vec<Update> {
+    let mut url: Option<&str> = None;
+    let mut updates = Vec::new();
+    for line in out.lines() {
+        if let Some(to) = line.strip_prefix("To ") {
+            url = Some(to);
             continue;
         }
-        let branch = match destination.strip_prefix("refs/heads/") {
-            Some(branch) => branch,
-            // A tag or another namespace.
-            None if destination.starts_with("refs/") => continue,
-            None => destination.as_str(),
+        let mut fields = line.split('\t');
+        let (Some(flag), Some(refs), Some(url)) = (fields.next(), fields.next(), url) else {
+            continue;
         };
-        if branch == onto {
-            let delete = source.is_none();
-            return Ok(Some(hit(source, delete)));
-        }
+        let mut letters = flag.chars();
+        let (Some(flag), None) = (letters.next(), letters.next()) else {
+            continue;
+        };
+        let (from, to) = refs.split_once(':').unwrap_or(("", refs));
+        updates.push(Update {
+            url: url.to_owned(),
+            flag,
+            from: from.to_owned(),
+            to: to.to_owned(),
+        });
     }
-    Ok(None)
+    updates
 }
 
-/// The push's refspecs, and whether it forces. Without refspecs on the
-/// command line, Git pushes every `remote.NAME.push` refspec the remote has.
-fn refspecs(
+fn to_default(
+    config: &Config,
     dir: &Path,
     push: &GitPush,
-    remote: &str,
     until: Instant,
-) -> Result<(Vec<String>, bool), Unread> {
-    if !push.refspecs.is_empty() {
-        return Ok((push.refspecs.clone(), push.force));
+) -> Result<Option<ToDefault>, Unread> {
+    // Read without the push's `-c`, which cannot set it.
+    if git(dir, &["config", "--get", DIRECT_SETTING], until)?.as_deref() == Some("direct") {
+        return Err(Unread::Direct);
     }
-    let key = format!("remote.{remote}.push");
-    let configured = git(dir, &["config", "--get-all", &key], until)?.unwrap_or_default();
-    let mut force = push.force;
-    let refspecs = configured
-        .lines()
-        .map(|line| {
-            let line = line.trim();
-            force |= line.starts_with('+');
-            line.trim_start_matches('+').to_owned()
-        })
-        .filter(|line| !line.is_empty())
-        .collect();
-    Ok((refspecs, force))
+    in_workspace(config, dir, until)?;
+    let mut args = Vec::new();
+    for setting in &push.config {
+        args.extend(["-c", setting.as_str()]);
+    }
+    // Git runs `pre-push` even for a dry run; only the push itself may.
+    args.extend([
+        "-c",
+        "core.hooksPath=/dev/null",
+        "push",
+        "--dry-run",
+        "--porcelain",
+    ]);
+    args.extend(push.args.iter().map(String::as_str));
+    let (status, out, said) =
+        crate::git::network_output(dir, &args, until, DRY_RUN_LIMIT).map_err(Unread::Git)?;
+    let updates = porcelain(&String::from_utf8_lossy(&out));
+    match onto_default(dir, &updates, until) {
+        Ok(None) if !status.success() => Err(Unread::DryRun(said)),
+        decided => decided,
+    }
 }
 
-/// The source a wildcard refspec `source:destination` pushes to `target`:
-/// the part of `target` that the destination's `*` matches, put in place of
-/// the source's `*`. `None` when the destination does not match `target`.
-fn wildcard_source(source: &str, destination: &str, target: &str) -> Option<String> {
-    let (before, after) = destination.split_once('*')?;
-    let star = target.strip_prefix(before)?.strip_suffix(after)?;
-    let (source_before, source_after) = source.split_once('*')?;
-    Some(format!("{source_before}{star}{source_after}"))
+/// The update of a remote's default branch among `updates`.
+fn onto_default(
+    dir: &Path,
+    updates: &[Update],
+    until: Instant,
+) -> Result<Option<ToDefault>, Unread> {
+    let changed: Vec<&Update> = updates.iter().filter(|u| u.flag != '=').collect();
+    if changed.is_empty() {
+        return Ok(None);
+    }
+    let names = git(dir, &["remote"], until)?.unwrap_or_default();
+    let mut unread = None;
+    let mut urls: Vec<&str> = changed.iter().map(|u| u.url.as_str()).collect();
+    urls.dedup();
+    for url in urls {
+        let mut named = false;
+        for name in names.lines().filter(|name| plain(name)).take(MAX_REMOTES) {
+            let pushes_to = git(dir, &["remote", "get-url", "--push", "--all", name], until)?;
+            if !pushes_to
+                .unwrap_or_default()
+                .lines()
+                .any(|pushed| anonymous(pushed) == anonymous(url))
+            {
+                continue;
+            }
+            named = true;
+            let Some(onto) = default_branch(dir, name, until)? else {
+                unread = Some(Unread::NoDefault(name.to_owned()));
+                continue;
+            };
+            let target = format!("refs/heads/{onto}");
+            if let Some(update) = changed.iter().find(|u| u.url == url && u.to == target) {
+                return Ok(Some(ToDefault {
+                    remote: name.to_owned(),
+                    onto,
+                    source: source(dir, update, until)?,
+                    force: update.flag == '+',
+                    others: changed.len() > 1,
+                }));
+            }
+        }
+        if !named {
+            unread.get_or_insert(Unread::NotNamed);
+        }
+    }
+    unread.map_or(Ok(None), Err)
+}
+
+/// The branch `refs/remotes/REMOTE/HEAD` names.
+fn default_branch(dir: &Path, remote: &str, until: Instant) -> Result<Option<String>, Unread> {
+    let head = format!("refs/remotes/{remote}/HEAD");
+    let named = git(dir, &["symbolic-ref", "--quiet", &head], until)?;
+    Ok(named.and_then(|named| {
+        named
+            .strip_prefix(&format!("refs/remotes/{remote}/"))
+            .map(str::to_owned)
+    }))
+}
+
+/// What would land: the local branch, the current one for `HEAD`.
+fn source(dir: &Path, update: &Update, until: Instant) -> Result<Option<String>, Unread> {
+    Ok(match update.from.as_str() {
+        "" => None,
+        "HEAD" => Some(
+            git(dir, &["symbolic-ref", "--quiet", "--short", "HEAD"], until)?
+                .unwrap_or_else(|| "HEAD".into()),
+        ),
+        from => Some(from.strip_prefix("refs/heads/").unwrap_or(from).to_owned()),
+    })
+}
+
+/// `url` as Git shows it after `To`: without a user or password.
+fn anonymous(url: &str) -> String {
+    if let Some((scheme, rest)) = url.split_once("://") {
+        let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
+        let host = host.rsplit_once('@').map_or(host, |(_, host)| host);
+        let slash = if rest.contains('/') { "/" } else { "" };
+        return format!("{scheme}://{host}{slash}{path}");
+    }
+    // `user@host:path`, as `scp` writes it; a local path stays as it is.
+    match url.split_once(':') {
+        Some((host, path)) if !host.contains('/') => {
+            let host = host.rsplit_once('@').map_or(host, |(_, host)| host);
+            format!("{host}:{path}")
+        }
+        _ => url.to_owned(),
+    }
 }
 
 /// `text` quoted for a POSIX shell.
 fn quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', r"'\''"))
+}
+
+fn deny(reason: String, detail: String) -> Reply {
+    Reply {
+        stdout: json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": reason,
+            }
+        })
+        .to_string(),
+        coverage: "denied_push",
+        detail,
+    }
+}
+
+fn refused(why: &str) -> Reply {
+    deny(
+        format!(
+            "{PUSH_REFUSED} LangSpan checks where an agent's push goes before it runs, and could not check this one: {why}."
+        ),
+        "a push that could not be checked, refused".into(),
+    )
 }
 
 fn denied(config: &Config, hit: &ToDefault) -> Reply {
@@ -350,7 +385,7 @@ fn denied(config: &Config, hit: &ToDefault) -> Reply {
         quote(&config.state_dir.to_string_lossy()),
         quote(&config.workspace_id),
     );
-    let reason = if hit.delete {
+    let reason = if hit.source.is_none() {
         format!(
             "{PUSH_ROUTED} This push would delete {onto}, the default branch of the remote. LangSpan does not delete it; ask the owner."
         )
@@ -360,36 +395,33 @@ fn denied(config: &Config, hit: &ToDefault) -> Reply {
         } else {
             ""
         };
-        let every = if hit.source.is_none() {
-            " This push would update every branch, the default branch too: push the other branches by name."
+        let others = if hit.others {
+            " This push updates other refs too: push the other branches by name."
         } else {
             ""
         };
         format!(
-            "{PUSH_ROUTED} {onto} is the default branch of the remote, and a push to it goes through landing: it fetches {onto}, rebases your commits onto it, runs the check on that exact combined tree and pushes only when it passes. A failing check pushes nothing and says why.{force}{every} Run `{command}`, with CHECK a name for the check and TEST_COMMAND the project's test command (MCP: langspan_integrate_check, then langspan_land, both with rebase). Push other branches with `git push` as before."
+            "{PUSH_ROUTED} {onto} is the default branch of the remote, and a push to it goes through landing: it fetches {onto}, rebases your commits onto it, runs the check on that exact combined tree and pushes only when it passes. A failing check pushes nothing and says why.{force}{others} Run `{command}`, with CHECK a name for the check and TEST_COMMAND the project's test command (MCP: langspan_integrate_check, then langspan_land, both with rebase). Push other branches with `git push` as before."
         )
     };
-    Reply {
-        stdout: json!({
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "deny",
-                "permissionDecisionReason": reason,
-            }
-        })
-        .to_string(),
-        coverage: "denied_push",
-        detail: format!("a push to the default branch {onto}, routed to landing"),
-    }
+    deny(
+        reason,
+        format!("a push to the default branch {onto}, routed to landing"),
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    //! Git's own resolution of a remote's default branch and of a plain
-    //! push's destination is what is verified, so these use real temporary
-    //! repositories with a local bare remote.
+    //! Git's own answer is what is verified, so most of these run the shell
+    //! hook against real temporary repositories with a local bare remote;
+    //! the ref list's and the URL's reading are pure.
     use super::*;
-    use std::{path::PathBuf, process::Command, time::Duration};
+    use std::{
+        path::PathBuf,
+        process::Command,
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Duration,
+    };
 
     struct Repo {
         base: PathBuf,
@@ -414,8 +446,13 @@ mod tests {
         assert!(status.success(), "git {args:?}");
     }
 
-    /// `work` on `feat`, with `main` and `feat` pushed to `origin` and
-    /// `origin/HEAD` naming `main`.
+    fn commit(dir: &Path, message: &str) {
+        git_ok(dir, &["commit", "-q", "--allow-empty", "-m", message]);
+    }
+
+    /// `work` on `feat`, one commit ahead of `origin/feat`; `origin/main`
+    /// has a commit `feat` lacks, so `feat:main` would be rejected without
+    /// a force. `origin/HEAD` names `main`.
     fn repo(name: &str) -> Repo {
         let base =
             std::env::temp_dir().join(format!("ls-push-route-{}-{name}", std::process::id()));
@@ -427,77 +464,150 @@ mod tests {
         git_ok(&base, &["init", "-q", "--bare", "-b", "main", "origin.git"]);
         git_ok(&base, &["init", "-q", "-b", "main", "work"]);
         git_ok(&work, &["remote", "add", "origin", "../origin.git"]);
-        git_ok(&work, &["commit", "-q", "--allow-empty", "-m", "one"]);
+        commit(&work, "one");
         git_ok(&work, &["push", "-q", "-u", "origin", "main"]);
         git_ok(&work, &["remote", "set-head", "origin", "main"]);
         git_ok(&work, &["switch", "-q", "-c", "feat"]);
         git_ok(&work, &["push", "-q", "-u", "origin", "feat"]);
+        git_ok(&work, &["switch", "-q", "main"]);
+        commit(&work, "two");
+        git_ok(&work, &["push", "-q"]);
+        git_ok(&work, &["switch", "-q", "feat"]);
+        commit(&work, "three");
         Repo { base, work }
     }
 
-    fn run(repo: &Repo, command: &str) -> Routed {
-        let config = Config::new(
+    /// `main` one commit ahead of `origin/main`, `feat` checked out.
+    fn main_ahead(repo: &Repo) {
+        git_ok(&repo.work, &["switch", "-q", "main"]);
+        commit(&repo.work, "four");
+        git_ok(&repo.work, &["switch", "-q", "feat"]);
+    }
+
+    fn config(repo: &Repo) -> Config {
+        Config::new(
             repo.base.join("state"),
             "app",
             repo.work.clone(),
             crate::vendor::Vendor::ClaudeCode,
-        );
+        )
+    }
+
+    /// The shell hook's reply to `command` run in `cwd`, and whether it
+    /// recorded a run.
+    fn hook_in(repo: &Repo, cwd: Option<&Path>, command: &str) -> (Reply, bool) {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let config = config(repo);
+        crate::local::private_directory(&config.state_dir).unwrap();
+        let id = format!("p{}", NEXT.fetch_add(1, Ordering::Relaxed));
+        let ids = super::super::identities_for("claude-code", "alice", &id);
+        let operation = langspan_core::ToolIdentity {
+            operation_id: ids.operation_id.clone(),
+            source: "claude-code".into(),
+            tool: "Bash".into(),
+            input_digest: "0".repeat(64),
+        };
         let call = ShellCall {
             command: command.into(),
-            cwd: None,
+            cwd: cwd.map(|cwd| cwd.to_string_lossy().into_owned()),
         };
-        route(&config, &call, Instant::now() + Duration::from_secs(20))
+        let mut session = super::super::Session {
+            config: &config,
+            deadline: Instant::now() + Duration::from_secs(20),
+            root: &repo.work,
+            source: "claude-code",
+            parent: None,
+            headless: false,
+            unreachable: Default::default(),
+            reached: Default::default(),
+        };
+        let reply = session.shell_pre(&ids, &operation, Vec::new(), None, false, Some(&call), true);
+        let recorded = crate::shell::load(&config.state_dir, &ids.operation_id).is_some();
+        (reply, recorded)
     }
 
-    fn reason(routed: Routed) -> String {
-        match routed {
-            Routed::Denied(reply) => {
-                assert_eq!(reply.coverage, "denied_push");
-                let stdout: serde_json::Value = serde_json::from_str(&reply.stdout).unwrap();
-                let output = &stdout["hookSpecificOutput"];
-                assert_eq!(output["permissionDecision"], "deny");
-                output["permissionDecisionReason"]
-                    .as_str()
-                    .unwrap()
-                    .to_owned()
-            }
-            Routed::Passed(detail) => panic!("passed: {detail}"),
-            Routed::NotAPush => panic!("not a push"),
-        }
+    fn hook(repo: &Repo, command: &str) -> (Reply, bool) {
+        hook_in(repo, None, command)
     }
 
-    fn passed(routed: Routed) -> String {
-        match routed {
-            Routed::Passed(detail) => detail,
-            Routed::Denied(reply) => panic!("denied: {}", reply.stdout),
-            Routed::NotAPush => panic!("not a push"),
-        }
+    /// The refusal's reason; a refused command records no run.
+    fn denial(command: &str, (reply, recorded): (Reply, bool)) -> String {
+        assert_eq!(reply.coverage, "denied_push", "{command}: {reply:?}");
+        assert!(!recorded, "{command}");
+        let stdout: serde_json::Value = serde_json::from_str(&reply.stdout).unwrap();
+        let output = &stdout["hookSpecificOutput"];
+        assert_eq!(output["permissionDecision"], "deny");
+        output["permissionDecisionReason"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    fn routed(repo: &Repo, command: &str) -> String {
+        let reason = denial(command, hook(repo, command));
+        assert!(reason.starts_with(PUSH_ROUTED), "{command}: {reason}");
+        reason
+    }
+
+    fn refused(repo: &Repo, command: &str) -> String {
+        let reason = denial(command, hook(repo, command));
+        assert!(reason.starts_with(PUSH_REFUSED), "{command}: {reason}");
+        reason
+    }
+
+    /// The route's detail of a command that runs.
+    fn passed(repo: &Repo, command: &str) -> String {
+        let (reply, recorded) = hook(repo, command);
+        assert_ne!(reply.coverage, "denied_push", "{command}: {reply:?}");
+        assert!(recorded, "{command}");
+        let at = reply.detail.find("push route: ").unwrap();
+        reply.detail.get(at..).unwrap().to_owned()
+    }
+
+    const NOT_DEFAULT: &str = "push route: no push to the default branch";
+
+    fn lands(source: &str) -> String {
+        format!(
+            "land 'app' --onto main --name CHECK {source} --apply --rebase --check-again -- TEST_COMMAND`"
+        )
     }
 
     #[test]
     fn a_push_to_the_default_branch_is_routed_to_the_landing_command() {
         let repo = repo("routed");
-        for (command, source) in [
-            ("git push origin feat:main", "feat"),
-            ("git push origin HEAD:refs/heads/main", "feat"),
-            ("git push origin main", "main"),
+        let marker = repo.base.join("pre-push-ran");
+        let pre_push = repo.work.join(".git/hooks/pre-push");
+        std::fs::write(
+            &pre_push,
+            format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            &pre_push,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+        for command in [
+            "git push origin feat:main",
+            "git push origin HEAD:refs/heads/main",
+            // The remote's URL is the remote.
+            "git push ../origin.git feat:main",
         ] {
-            let reason = reason(run(&repo, command));
-            assert!(reason.starts_with(PUSH_ROUTED), "{reason}");
-            assert!(
-                reason.contains(&format!(
-                    "land 'app' --onto main --name CHECK {source} --apply --rebase --check-again -- TEST_COMMAND`"
-                )),
-                "{command}: {reason}"
-            );
+            let reason = routed(&repo, command);
+            assert!(reason.contains(&lands("feat")), "{command}: {reason}");
             assert!(reason.contains("pushes only when it passes"), "{reason}");
             assert!(!reason.contains(DIRECT_SETTING), "{reason}");
+            assert!(!reason.contains("forces"), "{reason}");
             // The same push is refused every time.
-            assert_eq!(super::tests::reason(run(&repo, command)), reason);
+            assert_eq!(routed(&repo, command), reason);
         }
+        main_ahead(&repo);
         git_ok(&repo.work, &["switch", "-q", "main"]);
-        let reason = reason(run(&repo, "git push"));
-        assert!(reason.contains("--name CHECK main --apply"), "{reason}");
+        for command in ["git push", "git push -q", "git push origin main"] {
+            let reason = routed(&repo, command);
+            assert!(reason.contains(&lands("main")), "{command}: {reason}");
+        }
+        assert!(!marker.exists(), "the dry run ran the pre-push hook");
     }
 
     #[test]
@@ -509,158 +619,159 @@ mod tests {
             "git push origin HEAD",
             "git push -f origin feat",
             "git push origin feat:refs/tags/main",
+            // Up to date: the default branch is not updated.
+            "git push origin main",
         ] {
-            let detail = passed(run(&repo, command));
-            assert_eq!(
-                detail, "push route: no push to the default branch",
-                "{command}"
-            );
+            assert_eq!(passed(&repo, command), NOT_DEFAULT, "{command}");
         }
-        assert!(matches!(run(&repo, "git status"), Routed::NotAPush));
+        for command in ["git status", "git push -n origin feat:main"] {
+            let call = ShellCall {
+                command: command.into(),
+                cwd: None,
+            };
+            let routed = route(
+                &config(&repo),
+                &call,
+                Instant::now() + Duration::from_secs(20),
+            );
+            assert!(matches!(routed, Routed::NotAPush), "{command}");
+        }
     }
 
     #[test]
-    fn forcing_deleting_or_every_branch_is_routed_and_says_so() {
+    fn forcing_or_deleting_the_default_branch_is_routed_and_says_so() {
         let repo = repo("force");
-        let forced = reason(run(&repo, "git push --force-with-lease origin feat:main"));
-        assert!(forced.contains("landing never does"), "{forced}");
-        assert!(forced.contains("--name CHECK feat --apply"), "{forced}");
-        let every = reason(run(&repo, "git push --all origin"));
-        assert!(every.contains("push the other branches by name"), "{every}");
-        assert!(every.contains("--name CHECK BRANCH --apply"), "{every}");
-        let delete = reason(run(&repo, "git push origin --delete main"));
+        for command in [
+            "git push -f origin feat:main",
+            "git push --force-with-lease origin feat:main",
+            "git push origin +feat:main",
+        ] {
+            let forced = routed(&repo, command);
+            assert!(forced.contains("landing never does"), "{command}: {forced}");
+            assert!(forced.contains(&lands("feat")), "{command}: {forced}");
+        }
+        let delete = routed(&repo, "git push origin --delete main");
         assert!(delete.contains("would delete main"), "{delete}");
         assert!(!delete.contains("land "), "{delete}");
     }
 
+    /// Review of PR #576: a push combined with other commands was read in
+    /// part. Now any `git push` with another command is refused, even to a
+    /// feature branch, and runs nothing.
     #[test]
-    fn the_matching_refspec_is_routed_as_a_push_of_every_branch() {
-        let repo = repo("matching");
-        for command in ["git push origin :", "git push origin +:"] {
-            let every = reason(run(&repo, command));
-            assert!(
-                every.contains("push the other branches by name"),
-                "{command}: {every}"
-            );
-        }
-    }
-
-    /// A wildcard refspec updates the default branch when its source side
-    /// names an existing local branch that maps onto it.
-    #[test]
-    fn a_wildcard_refspec_onto_the_default_branch_is_routed() {
-        let repo = repo("wildcard");
+    fn a_push_combined_with_another_command_is_refused() {
+        let repo = repo("compound");
         for command in [
-            "git push origin 'refs/heads/*:refs/heads/*'",
-            "git push origin '+refs/heads/*:refs/heads/*'",
-            "git push origin 'refs/heads/ma*:refs/heads/ma*'",
+            "git add -A && git push origin feat:main",
+            "git push origin feat && echo done",
+            "git push origin feat; git status",
+            "git push origin feat | tee log",
+            "(cd . ; git push origin feat)",
+            "cd . && git push origin feat",
+            "env GIT_TRACE=1 git push origin feat",
         ] {
-            let reason = reason(run(&repo, command));
-            assert!(
-                reason.contains("--name CHECK main --apply"),
-                "{command}: {reason}"
-            );
+            let reason = refused(&repo, command);
+            assert!(reason.contains("command of its own"), "{command}: {reason}");
         }
+        assert_eq!(passed(&repo, "git push origin feat"), NOT_DEFAULT);
+    }
+
+    /// Review of PR #576: `remote.origin.mirror` makes a plain `git push`
+    /// update every ref, the default branch with them.
+    #[test]
+    fn a_mirror_remote_pushes_the_default_branch_too() {
+        let repo = repo("mirror");
+        main_ahead(&repo);
+        assert_eq!(passed(&repo, "git push origin"), NOT_DEFAULT);
+        git_ok(&repo.work, &["config", "remote.origin.mirror", "true"]);
+        for command in ["git push", "git push origin"] {
+            let reason = routed(&repo, command);
+            assert!(reason.contains(&lands("main")), "{command}: {reason}");
+            assert!(reason.contains("other refs too"), "{command}: {reason}");
+        }
+    }
+
+    /// Review of PR #576: `--prune` with a wildcard refspec deletes the
+    /// remote branches that have no local branch, the default one too.
+    #[test]
+    fn a_prune_with_a_wildcard_refspec_is_routed() {
+        let repo = repo("prune");
+        let glob = "git push --prune origin 'refs/heads/*:refs/heads/*'";
+        main_ahead(&repo);
+        assert!(routed(&repo, glob).contains(&lands("main")));
+        git_ok(&repo.work, &["branch", "-q", "-D", "main"]);
+        let reason = routed(&repo, glob);
+        assert!(reason.contains("would delete main"), "{reason}");
+        assert_eq!(
+            passed(
+                &repo,
+                "git push --prune origin 'refs/heads/feat:refs/heads/feat'"
+            ),
+            NOT_DEFAULT
+        );
+    }
+
+    /// Review of PR #576: `git -c` changes where a push goes. The dry run
+    /// carries the same settings; one that could run a program is refused.
+    #[test]
+    fn git_c_settings_are_carried_into_the_dry_run() {
+        let repo = repo("dash-c");
+        let command = "git -c remote.origin.push=refs/heads/feat:refs/heads/main push origin";
+        assert!(routed(&repo, command).contains(&lands("feat")));
+        main_ahead(&repo);
+        assert_eq!(passed(&repo, "git push"), NOT_DEFAULT);
+        let command = "git -c push.default=matching push";
+        assert!(routed(&repo, command).contains(&lands("main")));
         for command in [
-            "git push origin 'refs/heads/f*:refs/heads/f*'",
-            "git push origin 'refs/heads/*:refs/heads/x/*'",
-            "git push origin 'refs/heads/nope/*:refs/heads/*'",
-            "git push origin 'refs/heads/*:refs/tags/*'",
+            "git -c core.sshCommand=false push origin feat",
+            "git -c langspan.defaultBranchPush=direct push origin feat:main",
         ] {
-            let detail = passed(run(&repo, command));
-            assert_eq!(
-                detail, "push route: no push to the default branch",
-                "{command}"
-            );
+            let reason = refused(&repo, command);
+            assert!(reason.contains("git config"), "{command}: {reason}");
         }
     }
 
+    /// Review of PR #576: `push.default` and `remote.pushDefault` decide
+    /// where a plain `git push` goes, and Git applies them.
     #[test]
-    fn a_wildcard_source_is_the_destinations_match_put_in_the_sources_star() {
-        let main = "refs/heads/main";
-        assert_eq!(
-            wildcard_source("refs/heads/*", "refs/heads/*", main).as_deref(),
-            Some(main)
-        );
-        assert_eq!(
-            wildcard_source("refs/remotes/o/*-x", "refs/heads/m*", main).as_deref(),
-            Some("refs/remotes/o/ain-x")
-        );
-        assert_eq!(
-            wildcard_source("refs/heads/*", "refs/heads/x/*", main),
-            None
-        );
-        assert_eq!(wildcard_source("refs/heads/a", "refs/heads/*", main), None);
-    }
-
-    /// Without refspecs on the command line, Git pushes the remote's
-    /// configured `remote.NAME.push` refspecs, all of them.
-    #[test]
-    fn a_push_without_refspecs_uses_every_configured_push_refspec() {
-        let repo = repo("configured");
-        git_ok(
-            &repo.work,
-            &[
-                "config",
-                "remote.origin.push",
-                "refs/heads/feat:refs/heads/feat",
-            ],
-        );
-        for command in ["git push", "git push origin"] {
-            let detail = passed(run(&repo, command));
-            assert_eq!(
-                detail, "push route: no push to the default branch",
-                "{command}"
-            );
-        }
-        git_ok(
-            &repo.work,
-            &[
-                "config",
-                "--add",
-                "remote.origin.push",
-                "+refs/heads/*:refs/heads/*",
-            ],
-        );
-        for command in ["git push", "git push origin"] {
-            let reason = reason(run(&repo, command));
-            assert!(
-                reason.contains("--name CHECK main --apply"),
-                "{command}: {reason}"
-            );
-            assert!(reason.contains("landing never does"), "{command}: {reason}");
-        }
-        // A negative refspec excludes the default branch from the wildcard.
-        git_ok(
-            &repo.work,
-            &["config", "--add", "remote.origin.push", "^refs/heads/main"],
-        );
-        let detail = passed(run(&repo, "git push"));
-        assert_eq!(detail, "push route: no push to the default branch");
-        git_ok(&repo.work, &["config", "--unset-all", "remote.origin.push"]);
-        git_ok(&repo.work, &["config", "remote.origin.push", ":"]);
-        let every = reason(run(&repo, "git push"));
-        assert!(every.contains("push the other branches by name"), "{every}");
-    }
-
-    /// Git picks the current branch's push remote for a push without
-    /// refspecs, even of every branch; `origin` is not assumed.
-    #[test]
-    fn a_push_of_every_branch_goes_to_the_current_branchs_remote() {
-        let repo = repo("remote");
+    fn push_default_and_push_remote_settings_are_gits_to_apply() {
+        let repo = repo("push-default");
+        git_ok(&repo.work, &["config", "push.default", "upstream"]);
+        git_ok(&repo.work, &["branch", "-q", "-u", "origin/main"]);
+        assert!(routed(&repo, "git push").contains(&lands("feat")));
+        git_ok(&repo.work, &["config", "push.default", "current"]);
+        assert_eq!(passed(&repo, "git push"), NOT_DEFAULT);
         git_ok(&repo.work, &["remote", "add", "fork", "../origin.git"]);
         git_ok(&repo.work, &["fetch", "-q", "fork"]);
         git_ok(&repo.work, &["remote", "set-head", "fork", "main"]);
-        git_ok(&repo.work, &["branch", "-q", "-u", "fork/feat"]);
-        git_ok(&repo.work, &["remote", "set-head", "origin", "-d"]);
-        let every = reason(run(&repo, "git push --all"));
-        assert!(
-            every.contains("--onto main --remote fork --name CHECK BRANCH"),
-            "{every}"
-        );
+        git_ok(&repo.work, &["config", "remote.pushDefault", "fork"]);
         git_ok(&repo.work, &["config", "push.default", "matching"]);
-        let matching = reason(run(&repo, "git push"));
-        assert!(matching.contains("--remote fork"), "{matching}");
+        main_ahead(&repo);
+        let reason = routed(&repo, "git push");
+        assert!(
+            reason.contains("--onto main --remote fork --name CHECK main"),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn a_dry_run_that_fails_or_runs_out_of_time_refuses_the_push() {
+        let repo = repo("fails");
+        let reason = refused(&repo, "git push nowhere feat");
+        assert!(reason.contains("Git refused its dry run"), "{reason}");
+        assert!(reason.contains("not instructions"), "{reason}");
+        let call = ShellCall {
+            command: "git push origin feat".into(),
+            cwd: None,
+        };
+        let Routed::Denied(reply) = route(&config(&repo), &call, Instant::now()) else {
+            panic!("a push past its deadline ran");
+        };
+        assert!(
+            reply.stdout.contains("did not answer in time"),
+            "{}",
+            reply.stdout
+        );
     }
 
     /// The landing command lands from the workspace's root, so a push run in
@@ -669,92 +780,70 @@ mod tests {
     #[test]
     fn a_push_in_another_checkout_passes_and_one_in_a_subdirectory_is_routed() {
         let repo = repo("elsewhere");
-        let other = repo.base.join("other");
         git_ok(&repo.base, &["clone", "-q", "origin.git", "other"]);
-        git_ok(&other, &["switch", "-q", "feat"]);
-        let detail = passed(run(&repo, "git -C ../other push origin feat:main"));
+        git_ok(&repo.base.join("other"), &["switch", "-q", "feat"]);
+        let detail = passed(&repo, "git -C ../other push origin feat:main");
         assert!(detail.contains("another checkout"), "{detail}");
-        std::fs::create_dir(repo.work.join("sub")).unwrap();
-        let reason = reason(run(&repo, "cd sub && git push origin feat:main"));
-        assert!(reason.contains("land 'app' --onto main"), "{reason}");
-    }
-
-    /// The shell hook refuses before it records a run, and a push that
-    /// passes runs with the route's detail. No daemon is needed: neither
-    /// command writes a file by its parse, so nothing is admitted.
-    #[test]
-    fn the_shell_hook_refuses_a_routed_push_before_recording_a_run() {
-        let repo = repo("hook");
-        let config = Config::new(
-            repo.base.join("state"),
-            "app",
-            repo.work.clone(),
-            crate::vendor::Vendor::ClaudeCode,
-        );
-        crate::local::private_directory(&config.state_dir).unwrap();
-        let session = |deadline| super::super::Session {
-            config: &config,
-            deadline,
-            root: &repo.work,
-            source: "claude-code",
-            parent: None,
-            headless: false,
-            unreachable: Default::default(),
-            reached: Default::default(),
-        };
-        for (id, command, coverage) in [
-            ("p1", "git push origin feat:main", "denied_push"),
-            ("p2", "git push -u origin feat", "shell_observing"),
-        ] {
-            let ids = super::super::identities_for("claude-code", "alice", id);
-            let operation = langspan_core::ToolIdentity {
-                operation_id: ids.operation_id.clone(),
-                source: "claude-code".into(),
-                tool: "Bash".into(),
-                input_digest: "0".repeat(64),
-            };
-            let call = ShellCall {
-                command: command.into(),
-                cwd: None,
-            };
-            let deadline = Instant::now() + Duration::from_secs(20);
-            let reply = session(deadline).shell_pre(
-                &ids,
-                &operation,
-                Vec::new(),
-                None,
-                false,
-                Some(&call),
-                true,
-            );
-            assert_eq!(reply.coverage, coverage, "{command}: {reply:?}");
-            let recorded = crate::shell::load(&config.state_dir, &ids.operation_id);
-            assert_eq!(recorded.is_some(), coverage != "denied_push", "{command}");
-            if coverage != "denied_push" {
-                assert!(
-                    reply
-                        .detail
-                        .contains("push route: no push to the default branch"),
-                    "{reply:?}"
-                );
-            }
-        }
+        let sub = repo.work.join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let command = "git push origin feat:main";
+        let reason = denial(command, hook_in(&repo, Some(&sub), command));
+        assert!(reason.contains(&lands("feat")), "{reason}");
     }
 
     #[test]
-    fn the_repositorys_setting_or_an_unknown_default_branch_passes_with_a_detail() {
+    fn the_repositorys_setting_an_unknown_default_or_an_unknown_url_passes_with_a_detail() {
         let repo = repo("setting");
         git_ok(&repo.work, &["config", DIRECT_SETTING, "direct"]);
-        let detail = passed(run(&repo, "git push origin feat:main"));
+        let detail = passed(&repo, "git push origin feat:main");
         assert!(detail.contains("is `direct`"), "{detail}");
         git_ok(&repo.work, &["config", "--unset", DIRECT_SETTING]);
+        git_ok(
+            &repo.base,
+            &["clone", "-q", "--bare", "origin.git", "copy.git"],
+        );
+        let detail = passed(&repo, "git push ../copy.git feat:main");
+        assert!(detail.contains("no configured remote"), "{detail}");
         git_ok(&repo.work, &["remote", "set-head", "origin", "-d"]);
-        let detail = passed(run(&repo, "git push origin feat:main"));
+        let detail = passed(&repo, "git push origin feat:main");
         assert!(
             detail.contains("git remote set-head origin --auto"),
             "{detail}"
         );
-        let detail = passed(run(&repo, "git push ../origin.git feat:main"));
-        assert!(detail.contains("URL, a path"), "{detail}");
+    }
+
+    #[test]
+    fn the_ref_list_is_read_per_remote_url() {
+        let out = "To ../o.git\n!\trefs/heads/feat:refs/heads/main\t[rejected] (non-fast-forward)\n-\t:refs/heads/old\t[deleted]\n=\trefs/heads/x:refs/heads/x\t[up to date]\nDone\n";
+        let update = |flag, from: &str, to: &str| Update {
+            url: "../o.git".into(),
+            flag,
+            from: from.into(),
+            to: to.into(),
+        };
+        assert_eq!(
+            porcelain(out),
+            [
+                update('!', "refs/heads/feat", "refs/heads/main"),
+                update('-', "", "refs/heads/old"),
+                update('=', "refs/heads/x", "refs/heads/x"),
+            ]
+        );
+        assert_eq!(porcelain("Everything up-to-date\n"), []);
+    }
+
+    /// Git shows a push URL without its user or password.
+    #[test]
+    fn a_url_is_compared_without_its_user() {
+        for (url, shown) in [
+            ("git@github.com:o/r.git", "github.com:o/r.git"),
+            ("https://u:p@example.com/o/r", "https://example.com/o/r"),
+            ("ssh://git@example.com", "ssh://example.com"),
+            ("../origin.git", "../origin.git"),
+            ("/srv/a:b@c", "/srv/a:b@c"),
+        ] {
+            assert_eq!(anonymous(url), shown, "{url}");
+            assert_eq!(anonymous(shown), shown, "{shown}");
+        }
     }
 }

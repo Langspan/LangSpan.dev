@@ -326,24 +326,40 @@ landing command instead (below).
 **Routing an agent's push.** Issue
 [#536](https://github.com/Langspan/LangSpan.dev/issues/536): agents ran
 `git push`, met a rejection when the target had moved, and retried by hand.
-Before a hooked shell call runs, the hook reads each `git push` in it
-(`src/shell/git_push.rs`, the commit guard's lenient reader) and asks Git
-where it would go (`src/hook/push_route.rs`, `git --no-optional-locks`,
-within a third of the hook's time left): the remote's default branch is what
-`refs/remotes/REMOTE/HEAD` names, and a push without refspecs pushes every
-`remote.REMOTE.push` refspec when the remote has any, else goes where
-`%(push:remoteref)` of the current branch says. A wildcard refspec such as
-`refs/heads/*:refs/heads/*` updates the default branch when the source its
-pattern maps onto it is an existing local ref. A push that would update the
-default branch is refused, on every attempt, with the exact command:
+Before a hooked shell call runs, the hook asks Git which refs its push would
+update; it does not work that out from the command. Reading refspecs,
+`push.default`, `remote.pushDefault`, mirror remotes, `--prune` with globs and
+`-c` overrides ourselves kept producing pushes the reader got wrong (four
+rounds of review on PR #576), and Git already has the answer:
+
+- A `git push` combined with any other command (`&&`, `;`, `||`, a pipe, a
+  subshell holding another command, `cd` first, a prefix such as `env`) is
+  refused, whatever its destination, with a message to run the push on its own
+  (`src/shell/git_push.rs`, the commit guard's lenient reader). So is one with
+  an expansion in its words.
+- A lone `git push` is run first as `git push --dry-run --porcelain` with the
+  same arguments, in the same directory, with the same `git -C` and `-c`
+  options (`src/hook/push_route.rs`, with two thirds of the hook's remaining
+  time, no prompt, SSH in batch mode). It runs with `core.hooksPath=/dev/null`,
+  since Git runs `pre-push` even for a dry run. The hook drops `-q`, which
+  would hide the ref list. It refuses `-c` settings other than push
+  destinations, plus `--receive-pack` and `--exec`, so the dry run cannot run a
+  program the agent names ([threat model](../security/threat-model.md#checks-combining-and-landing)).
+  A dry run that fails or times out refuses the push with the reason and
+  Git's words, labelled as data.
+- The push is routed when any ref the dry run would update, force or delete
+  (any line but `=` up to date, a rejected one included) is
+  `refs/heads/MAIN` of a configured remote whose push URL is the dry run's
+  `To` URL, with MAIN what `refs/remotes/REMOTE/HEAD` names.
+
+A routed push is refused, on every attempt, with the exact command:
 `langspan --state-dir DIR land WORKSPACE --onto MAIN --name CHECK BRANCH --apply --rebase --check-again -- TEST_COMMAND`.
 That command is the only way the hook leaves to land an agent's commits on
 the default branch, and the safety rules are the landing's own:
 
-- It never force-pushes. A forced push to the default branch (`-f`,
-  `--force`, `--force-with-lease`, `--force-if-includes`, a `+` refspec) is
-  refused and says that landing never forces; a deletion of the default
-  branch is refused without a command.
+- It never force-pushes. A push that would force the default branch (the
+  dry run's `+`) is refused and says that landing never forces; a deletion
+  of the default branch is refused without a command.
 - It never lands on a failed check: `land` pushes only with a passing check
   of exactly the combined tree. With `--check-again` a failing check pushes
   nothing and the result is `check_failed` with the check's output (exit 1);
@@ -351,20 +367,21 @@ the default branch, and the safety rules are the landing's own:
 - It never pushes the default branch unless the repository configures that:
   `git config langspan.defaultBranchPush direct` lets every push through.
   The refusal does not mention the setting; the owner chooses it.
-- `--all`, `--branches`, `--mirror`, the matching refspec `:` and
-  `push.default=matching` are refused too, since they would update the
-  default branch with the rest. Without a named remote, the remote is the
-  one Git picks: the current branch's push remote, else `origin`.
+- A push that updates other refs with the default branch (`--all`,
+  `--mirror`, a matching or wildcard refspec) says to push the others by
+  name.
 
 Pushes to other branches, tags, dry runs and the owner's terminal pass
-untouched. What the hook cannot read passes with a detail in its log, as the
-commit guard does: an expansion where a remote or refspec is needed, another
-Git directory, a push run in a checkout other than the workspace's (the
-landing command lands from the workspace's root), a URL or path instead of a named remote, Git failing, or no
+untouched. Three cases pass with a detail in the hook's log: a push run in a
+checkout other than the workspace's (the landing command lands from the
+workspace's root), a dry run whose URL no configured remote has, and no
 `REMOTE/HEAD` (`git remote set-head REMOTE --auto` records it). Routing is
-cooperative: a push outside the hooks, or one written to escape the reader,
-is not refused. The check's name and command are placeholders in the
-refusal; the agent supplies the project's test command.
+cooperative. A push outside the hooks, through a Git alias, or inside a
+command substitution or `sh -c` string, which the reader does not look into,
+is not refused. The dry run costs one round trip to the remote before every
+hooked push, and a remote slower than the hook's budget refuses it. The
+check's name and command are placeholders in the refusal; the agent supplies
+the project's test command.
 
 **Choices in the land flow.** The turn is keyed by workspace and target, not
 by repository. A moved target needs a passing check on exactly the new combined tree before
