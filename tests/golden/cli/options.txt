@@ -566,7 +566,7 @@ every other option
   exit 1: {"level":"error","message":"option {option} is not valid for this command"}
 
 ## langspan tokens --onto main
-alone: exit 1: {"level":"error","message":"no Claude Code transcripts at $TMP/home/.claude/projects: set CLAUDE_CONFIG_DIR to the folder Claude Code signs in with"}
+alone: exit 1: {"level":"error","message":"no Claude Code transcripts at $TMP/owner/.claude/projects: set CLAUDE_CONFIG_DIR to the folder Claude Code signs in with"}
 same: --json --apply --state-dir --root --home --days
 --help -h
   exit 0: the help
