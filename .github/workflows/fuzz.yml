@@ -37,10 +37,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install the pinned nightly toolchain and cargo-fuzz
-        run: |
-          rustup toolchain install "$FUZZ_TOOLCHAIN" --profile minimal
-          cargo +"$FUZZ_TOOLCHAIN" install --locked cargo-fuzz --version 0.13.1
+      - name: Install the pinned nightly toolchain
+        run: rustup toolchain install "$FUZZ_TOOLCHAIN" --profile minimal
+      # cargo-fuzz itself needs no nightly, only the targets do. Built on the
+      # nightly, the rustix in its lockfile turns on rustc-internal
+      # attributes the nightly rejects, so it is built with its own lockfile
+      # on the repository's pinned stable toolchain (rust-toolchain.toml).
+      - name: Install cargo-fuzz
+        run: cargo install --locked cargo-fuzz --version 0.13.1
       # Fails when fuzz/Cargo.lock is not current, as --locked does for the
       # main build.
       - name: Check fuzz/Cargo.lock is current
