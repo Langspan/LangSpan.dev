@@ -8,6 +8,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -376,6 +377,28 @@ class Indexing(unittest.TestCase):
             "}\n"
         )
         self.assertEqual(ratchets.Source(src).indexing(), (0, 0))
+
+    def test_an_attribute_with_a_comment_inside_its_opening_is_not_an_operand(self):
+        # A comment may sit between `#`, `!` and `[`; the attribute still ends at its `]`.
+        src = (
+            "fn f(v: [u8; 2]) {\n"
+            "    #![allow(unused)]\n"
+            "    # /* c */ [rustfmt::skip] /* c */ [1, 2];\n"
+            "    match v { # /* c */ [allow(unused)] /* row */ [a, b] => {} }\n"
+            "    #! /* c */ [allow(unused)] /* c */ [1, 2];\n"
+            "    # /* c */ ! /* c */ [allow(unused)] /* c */ [1, 2];\n"
+            "}\n"
+        )
+        self.assertEqual(ratchets.Source(src).indexing(), (0, 0))
+
+    def test_a_long_comment_after_an_operand_is_read_in_linear_time(self):
+        # A timing bound: the backtracking form took minutes on this, the linear one milliseconds.
+        src = "fn f(a: u8) -> u8 {\n    a /* " + "c " * 50000 + "*/\n}\n"
+        started = time.monotonic()
+        self.assertEqual(ratchets.Source(src).indexing(), (0, 0))
+        self.assertLess(time.monotonic() - started, 5)
+        # A comment then `[` still counts, and spacing alone still does not.
+        self.assertEqual(ratchets.Source("fn f() { a /* c */ [0]; b [0]; }\n").indexing(), (1, 0))
 
     def test_a_bracket_that_closes_an_expression_before_a_comment_is_an_operand(self):
         # Only an attribute's `]` is excluded: an array or an index still gets indexed.
