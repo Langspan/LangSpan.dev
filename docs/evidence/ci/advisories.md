@@ -25,4 +25,17 @@ The command exits with status 1.
 
 ## In CI
 
-PENDING: the dispatched run.
+Not run yet. Dispatching a workflow needs the owner's approval, which the
+change's author didn't have. Run
+
+    gh workflow run check.yml --ref fix/v-312 -f advisory_dry_run=true
+
+then record here the run's link, the `Linux build` step that failed and the
+advisory it names, and the "Advisory dry run of the nightly report" issue
+`nightly-report` opened (close it afterwards).
+
+## The scheduled nightly run
+
+On 2026-11-27 no scheduled `Rust checks` run had completed: the only one,
+[46001221022](https://github.com/Langspan/LangSpan.dev/actions/runs/46001221022),
+was cancelled.
