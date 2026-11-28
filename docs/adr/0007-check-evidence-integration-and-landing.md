@@ -337,16 +337,20 @@ rounds of review on PR #576), and Git already has the answer:
   refused, whatever its destination, with a message to run the push on its own
   (`src/shell/git_push.rs`, the commit guard's lenient reader). So is one with
   an expansion in its words.
-- A lone `git push` is run first as `git push --dry-run --porcelain` with the
-  same arguments, in the same directory, with the same `git -C` and `-c`
+- A lone `git push` is run first as `git push ARGS --dry-run --porcelain`,
+  with the push's arguments and the dry run's options last so that none of
+  them can undo it, in the same directory, with the same `git -C` and `-c`
   options (`src/hook/push_route.rs`, with two thirds of the hook's remaining
   time, no prompt, SSH in batch mode). It runs with `core.hooksPath=/dev/null`,
   since Git runs `pre-push` even for a dry run. The hook drops `-q`, which
-  would hide the ref list. It refuses `-c` settings other than push
-  destinations, plus `--receive-pack` and `--exec`, so the dry run cannot run a
-  program the agent names ([threat model](../security/threat-model.md#checks-combining-and-landing)).
-  A dry run that fails or times out refuses the push with the reason and
-  Git's words, labelled as data.
+  would hide the ref list. It refuses `-n`, `--[no-]dry-run` and
+  `--[no-]porcelain` in any abbreviation, any word after `--`, a trailing
+  `-o` without its value, and `-c` settings other than push destinations
+  (of `push.*`, only `push.default`), plus `--receive-pack` and `--exec`, so
+  the dry run stays a dry run and cannot run a program the agent names
+  ([threat model](../security/threat-model.md#checks-combining-and-landing)).
+  A dry run that fails or times out, or passes without a readable, non-empty
+  ref list, refuses the push with the reason and Git's words, labelled as data.
 - The push is routed when any ref the dry run would update, force or delete
   (any line but `=` up to date, a rejected one included) is
   `refs/heads/MAIN` of a configured remote whose push URL is the dry run's
@@ -371,8 +375,8 @@ the default branch, and the safety rules are the landing's own:
   `--mirror`, a matching or wildcard refspec) says to push the others by
   name.
 
-Pushes to other branches, tags, dry runs and the owner's terminal pass
-untouched. Three cases pass with a detail in the hook's log: a push run in a
+Pushes to other branches and tags, and the owner's terminal, pass untouched;
+an agent's own `git push -n` is refused, since the hook's dry run answers it. Three cases pass with a detail in the hook's log: a push run in a
 checkout other than the workspace's (the landing command lands from the
 workspace's root), a dry run whose URL no configured remote has, and no
 `REMOTE/HEAD` (`git remote set-head REMOTE --auto` records it). Routing is

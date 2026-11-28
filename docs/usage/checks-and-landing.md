@@ -149,10 +149,12 @@ where a push goes, the hook runs it first as `git push --dry-run --porcelain`
 with the same arguments and `-c` settings. The push is routed when the dry
 run would update, force or delete the default branch, whether through a
 refspec, `--all`, `--mirror`, `--prune`, `push.default`, `remote.pushDefault`
-or a configured `remote.origin.push`. Pushes to other branches, tags and dry
-runs pass. The hook refuses a push it cannot check this way: one combined with
-another command (`git add -A && git push`), one with an expansion in its words,
-and one whose dry run fails or does not finish in the hook's time. The message
+or a configured `remote.origin.push`. Pushes to other branches and tags pass.
+The hook refuses a push it cannot check this way: one combined with another
+command (`git add -A && git push`), one with an expansion in its words, one
+with its own `-n`, `--[no-]dry-run`, `--[no-]porcelain` or words after `--`,
+and one whose dry run fails, lists no refs or does not finish in the hook's
+time. The message
 says what to run instead. A push from another checkout, to a URL no remote has,
 or with no `REMOTE/HEAD` runs. Set the remote's HEAD with
 `git remote set-head origin --auto`. Pushes from your own terminal are never

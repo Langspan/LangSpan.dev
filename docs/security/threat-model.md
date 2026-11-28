@@ -552,9 +552,14 @@ from an agent's command before the command itself runs: for a lone
 `git push`, the PreToolUse hook runs `git push --dry-run --porcelain` with the
 same arguments, which contacts the remote, before the host asks the owner to
 approve the call. Tampering and elevation: the dry run passes the agent's words
-to Git as an argument array, never through a shell. It refuses `--receive-pack`
-and `--exec`, and Git options other than `-C` and `-c` before `push`. It
-accepts `-c` only for `push.*`, `remote.pushDefault`,
+to Git as an argument array, never through a shell, with its own
+`--dry-run --porcelain` last. It refuses words that would turn the dry run
+into a push or change its ref list (`-n`, `--[no-]dry-run`,
+`--[no-]porcelain` in any abbreviation, words after `--`, a trailing `-o`),
+and a dry run that passes without a readable, non-empty ref list refuses the
+push. It refuses `--receive-pack` and `--exec`, and Git options other than
+`-C` and `-c` before `push`. It accepts `-c` only for `push.default`,
+`remote.pushDefault`,
 `remote.NAME.{push,mirror,url,pushurl}` and
 `branch.NAME.{remote,pushRemote,merge}`, so an agent's command cannot make it
 run a program (`core.sshCommand`, `credential.helper`, `include.path`,
