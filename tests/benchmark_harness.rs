@@ -220,6 +220,16 @@ fn dry_run_matrix_keeps_every_trial_and_resumes() {
 }
 
 #[test]
+fn shared_checkout_pushes_plan_and_report() {
+    python_suite("test_shared.py", Some("SharedUnit"));
+}
+
+#[test]
+fn dry_run_shared_arm() {
+    dry_run_suite("test_shared.py", "SharedDryRun");
+}
+
+#[test]
 fn holder_wait_comparison() {
     python_suite("test_holder_wait.py", None);
 }
