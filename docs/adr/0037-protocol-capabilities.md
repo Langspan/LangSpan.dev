@@ -39,6 +39,7 @@ order. The table below is generated: each row's fields are
 | --- | --- | --- |
 | `anchored_notes` | a note's `anchor`, `anchor_state` and `tags`; `remember`'s `symbol` and `tags`; `recap`'s `tag` (roadmap E1) | 9 |
 | `briefing_memory` | a session activity's `told`, `told_at_ms` and `context`; a briefing's `unchanged`; a delivery's `told` and `told_at_ms`; the `context_added` and `told_forgotten` events; `brief`'s `changes_only` (issue #222) | 7 |
+| `confirmed_briefings` | `brief`'s `confirm`; the `confirm_told` command and its `told_confirmed` outcome (issue #531) | none |
 | `inflight_partial` | a briefing's `inflight_partial` (issue #262) | 8 |
 | `interface_notices` | a briefing's `interface_notice_ids` (issue #214) | 5 |
 | `landing_rewrites` | a landing's `rebased` and `adapted`, in the landing and in `record_landing` (roadmap F5) | 6 |

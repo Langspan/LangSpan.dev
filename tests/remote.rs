@@ -19,24 +19,10 @@ use std::{
 mod secret_shape;
 mod support;
 use secret_shape::secret_shape;
+use support::git;
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 const WAIT: Duration = Duration::from_secs(60);
-
-fn git(root: &Path, args: &[&str]) {
-    let output = Process::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
 
 struct Developer {
     name: &'static str,
@@ -50,7 +36,8 @@ impl Developer {
         fs::create_dir_all(&self.state).unwrap();
         fs::set_permissions(&self.state, fs::Permissions::from_mode(0o700)).unwrap();
         let config = self.state.join("config.json");
-        fs::write(&config, r#"{"remote_pass_ms":200}"#).unwrap();
+        // Turning publication on is an owner grant; the owner allows it.
+        fs::write(&config, r#"{"remote_pass_ms":200,"owner_grants":true}"#).unwrap();
         fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
         self.daemon = Some(
             Process::new(env!("CARGO_BIN_EXE_langspan"))

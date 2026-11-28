@@ -69,6 +69,12 @@ pub enum Outcome {
         session_id: String,
         forgotten: u32,
     },
+    /// How many of the named items the hook placed are told now; zero when
+    /// all were already, and nothing is recorded (issue #531).
+    ToldConfirmed {
+        session_id: String,
+        confirmed: u32,
+    },
     // -----------------------------------------------------------------------
     // Intents and admissions
     // -----------------------------------------------------------------------

@@ -39,6 +39,7 @@ vectors! {
         SessionSeen => "session-seen-command-v10.json",
         RecordContext => "record-context-command-v10.json",
         ForgetTold => "forget-told-command-v10.json",
+        ConfirmTold => "confirm-told-command-v10.json",
         IntentSet => "intent-set-command-v10.json",
         IntentEnd => "intent-end-command-v10.json",
         Reserve => "reserve-command-v10.json",

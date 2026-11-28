@@ -319,12 +319,103 @@ command as an argument array, run without a shell, with a time limit of 1 to
 has no `--check-again`: an agent checks with `langspan_integrate_check` first.
 A retry of a landing that is still waiting keeps its place in line (the ticket
 is the request ID).
-LangSpan never rewrites or intercepts the owner's own `git push`.
+LangSpan never rewrites or intercepts the owner's own `git push`. An agent's
+push to the default branch through a hooked shell call is refused with the
+landing command instead (below).
+
+**Routing an agent's push.** Issue
+[#536](https://github.com/Langspan/LangSpan.dev/issues/536): agents ran
+`git push`, met a rejection when the target had moved, and retried by hand.
+Before a hooked shell call runs, the hook asks Git which refs its push would
+update; it does not work that out from the command. Reading refspecs,
+`push.default`, `remote.pushDefault`, mirror remotes, `--prune` with globs and
+`-c` overrides ourselves kept producing pushes the reader got wrong (four
+rounds of review on PR #576), and Git already has the answer:
+
+- A `git push` combined with any other command (`&&`, `;`, `||`, a pipe, a
+  subshell holding another command, `cd` first, a prefix such as `env`) is
+  refused, whatever its destination, with a message to run the push on its own
+  (`src/shell/git_push.rs`, the commit guard's lenient reader). So is one with
+  an expansion in its words.
+- A hooked `git push` may hold only remote names, refspecs (words that do
+  not start with `-`) and the options `-u`/`--set-upstream`, `-q`/`--quiet`,
+  `-v`/`--verbose`, `--tags`, `--follow-tags`, `--no-follow-tags`,
+  `--atomic`, `--progress` and `--no-progress`, spelled out in full; before
+  `push`, only `git -C DIR` and `--no-pager`. Anything else (any other
+  option, an abbreviation, `--`, `git -c`) is refused with a message naming
+  the word: forcing and deleting are written as refspecs (`+SRC:DST`,
+  `:DST`), and settings with `git config`. Refusing options one by one
+  missed some in every round of review (`--no-dry-run`, `--no-porcelain`, a
+  trailing `--repo` that took the dry run's `--dry-run` as its value), so
+  the list says what passes instead.
+- The push is run first as `git push --dry-run --porcelain ARGS`, the dry
+  run's options first and none of the allowed ones able to undo them or take
+  a value, in the same directory and with the same `git -C`
+  (`src/hook/push_route.rs`, with two thirds of the hook's remaining
+  time, no prompt, SSH in batch mode). It runs with `core.hooksPath=/dev/null`,
+  since Git runs `pre-push` even for a dry run. The hook drops `-q`, which
+  would hide the ref list. The agent's command cannot name a program for the
+  dry run to run
+  ([threat model](../security/threat-model.md#checks-combining-and-landing)).
+  A dry run that fails or times out, or passes without a readable, non-empty
+  ref list, refuses the push with the reason and Git's words, labelled as data.
+- The push is routed when any ref the dry run would update, force or delete
+  (any line but `=` up to date, a rejected one included) is
+  `refs/heads/MAIN` of the pushed remote, with MAIN what
+  `refs/remotes/REMOTE/HEAD` names. The pushed remote is the one the push
+  names, or the configured remote whose push URL is the URL it names (exactly,
+  or else once logins are left out).
+  A push that names none goes where Git's settings say
+  (`branch.NAME.pushRemote`, `remote.pushDefault`, `branch.NAME.remote`, then
+  `origin`), and the dry run's `To` URL must be that remote's. The remote is
+  never found from the `To` URL alone: Git shows it without a login, so
+  `alice@host:repo.git` and `bob@host:repo.git` can be different repositories
+  that look alike there. A push naming no remote, to a URL another remote
+  shares once logins are left out, is refused and says to name the remote, as
+  is a named URL that two remotes match.
+
+A routed push is refused, on every attempt, with the exact command:
+`langspan --state-dir DIR land WORKSPACE --onto MAIN --name CHECK BRANCH --apply --rebase --check-again -- TEST_COMMAND`.
+That command is the only way the hook leaves to land an agent's commits on
+the default branch, and the safety rules are the landing's own:
+
+- It never force-pushes. A push that would force the default branch (the
+  dry run's `+`) is refused and says that landing never forces; a deletion
+  of the default branch is refused without a command.
+- It never lands on a failed check: `land` pushes only with a passing check
+  of exactly the combined tree. With `--check-again` a failing check pushes
+  nothing and the result is `check_failed` with the check's output (exit 1);
+  with no passing record it exits 6.
+- It never pushes the default branch unless the repository configures that:
+  `git config langspan.defaultBranchPush direct` lets every push through.
+  The hook reads it before any refusal of a push's words, so a combined push
+  or one with `-f` runs too. The refusal does not mention the setting; the
+  owner chooses it.
+- A push that updates other refs with the default branch (a mirror remote,
+  `push.default=matching`, a wildcard refspec) says to push the others by
+  name.
+
+Pushes to other branches and tags, and the owner's terminal, pass untouched;
+an agent's own `git push -n` is refused, since the hook's dry run answers it. Three cases pass with a detail in the hook's log: a push run in a
+checkout other than the workspace's (the landing command lands from the
+workspace's root), a push to a URL no configured remote has, and no
+`REMOTE/HEAD` (`git remote set-head REMOTE --auto` records it). Routing is
+cooperative. The reader removes line continuations (`\` before a newline) as
+Bash does. It does not look into a command substitution or an `sh -c`
+string, so a command other than `git …` that names both `git` and `push`
+there or in its words (`bash -c 'git push'`, `xargs git push`) is refused
+with the reason. A push outside the hooks, through a Git alias, or in a
+substitution inside a `git …` command's own words is not refused. The dry run costs one round trip to the remote before every
+hooked push, and a remote slower than the hook's budget refuses it. The
+check's name and command are placeholders in the refusal; the agent supplies
+the project's test command.
 
 **Choices in the land flow.** The turn is keyed by workspace and target, not
 by repository. A moved target needs a passing check on exactly the new combined tree before
 it is pushed, not merely a test run. The owner's `git push` is never
-rewritten. Without the coordinator there is no turn and no landing, rather
+rewritten, and an agent's push to the default branch is refused rather than
+rewritten into a landing: the agent runs the landing itself, so its tool
+result shows the check and the push. Without the coordinator there is no turn and no landing, rather
 than a landing without a turn. The turn outlives a slow check because it is
 sized to the check's limit and renewed before each push; it is always
 fetched after it is taken; and only a refusal after which the target is found

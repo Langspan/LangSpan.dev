@@ -113,7 +113,13 @@ fn every_driver_test_is_run_by_a_test_here() {
 
 #[test]
 fn runner_mechanics() {
-    python_suite("test_runner.py", None);
+    python_suite("test_runner.py", Some("RunnerTests"));
+}
+
+// The runner's 5 s timeout, beside `runner_mechanics` rather than after it.
+#[test]
+fn runner_timeout() {
+    python_suite("test_runner.py", Some("RunnerTimeout"));
 }
 
 #[test]
@@ -157,6 +163,12 @@ fn a_pre_tool_hook_that_starts_late_refuses_nothing() {
 #[test]
 fn standin_hooks() {
     python_suite("test_driver.py", Some("StandinHooks"));
+}
+
+// The stand-in's hook bounds and SIGTERM grace, beside `standin_hooks`.
+#[test]
+fn a_hook_past_the_standin_bound() {
+    python_suite("test_driver.py", Some("StandinHookBound"));
 }
 
 #[test]
@@ -217,6 +229,16 @@ fn matrix_stops_a_trial_and_its_session_groups() {
 #[test]
 fn dry_run_matrix_keeps_every_trial_and_resumes() {
     dry_run_suite("test_matrix.py", "MatrixDryRun");
+}
+
+#[test]
+fn shared_checkout_pushes_plan_and_report() {
+    python_suite("test_shared.py", Some("SharedUnit"));
+}
+
+#[test]
+fn dry_run_shared_arm() {
+    dry_run_suite("test_shared.py", "SharedDryRun");
 }
 
 #[test]

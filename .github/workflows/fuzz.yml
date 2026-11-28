@@ -1,17 +1,11 @@
 name: Fuzz
 # Every cargo-fuzz target in fuzz/ for a few minutes each, every night on
-# main (fuzz/README.md). Not a required check. A pull request that changes
-# the targets, their seeds, this workflow or the main lockfile runs it too:
-# a dependency change can leave fuzz/Cargo.lock behind.
+# main (fuzz/README.md), or when started by hand. Not a required check, and
+# no pull request, merge queue or push runs it (the owner's decision).
 on:
   schedule:
     - cron: "17 5 * * *"
   workflow_dispatch:
-  pull_request:
-    paths:
-      - .github/workflows/fuzz.yml
-      - fuzz/**
-      - Cargo.lock
 # No token permission unless a job asks for it; only nightly-report writes,
 # and only issues.
 permissions: {}
@@ -23,8 +17,8 @@ env:
   # Seconds each target runs.
   FUZZ_SECONDS: 180
 concurrency:
-  group: fuzz-${{ github.event.pull_request.number || github.sha }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: fuzz-${{ github.sha }}
+  cancel-in-progress: false
 jobs:
   fuzz:
     name: Fuzz
@@ -33,14 +27,20 @@ jobs:
     timeout-minutes: 60
     permissions:
       contents: read
+    outputs:
+      artifact-url: ${{ steps.crashes.outputs.artifact-url }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install the pinned nightly toolchain and cargo-fuzz
-        run: |
-          rustup toolchain install "$FUZZ_TOOLCHAIN" --profile minimal
-          cargo +"$FUZZ_TOOLCHAIN" install --locked cargo-fuzz --version 0.13.1
+      - name: Install the pinned nightly toolchain
+        run: rustup toolchain install "$FUZZ_TOOLCHAIN" --profile minimal
+      # cargo-fuzz itself needs no nightly, only the targets do. Built on the
+      # nightly, the rustix in its lockfile turns on rustc-internal
+      # attributes the nightly rejects, so it is built with its own lockfile
+      # on the repository's pinned stable toolchain (rust-toolchain.toml).
+      - name: Install cargo-fuzz
+        run: cargo install --locked cargo-fuzz --version 0.13.1
       # Fails when fuzz/Cargo.lock is not current, as --locked does for the
       # main build.
       - name: Check fuzz/Cargo.lock is current
@@ -69,6 +69,7 @@ jobs:
           fi
           echo "Every fuzz target ran ${FUZZ_SECONDS}s without a crash." >> "$GITHUB_STEP_SUMMARY"
       - name: Keep the crashing inputs
+        id: crashes
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -76,10 +77,11 @@ jobs:
           path: fuzz/artifacts/
           if-no-files-found: warn
           retention-days: 30
-  # A failed nightly run opens the nightly issue check.yml and coverage.yml
-  # use, or comments on it while it is open. Only this job can write, and
-  # only issues; it checks out nothing and runs no repository code. The body
-  # is only the commit and the run's link.
+  # A failed nightly run opens one issue labelled bug, or comments on it while
+  # it is open, so a crash found night after night stays one issue. Only this
+  # job can write, and only issues; it checks out nothing and runs no
+  # repository code. The body is only the commit, the run's link and the
+  # crash artifact's link, never fuzz output.
   nightly-report:
     name: Nightly fuzz report
     needs: [fuzz]
@@ -89,19 +91,22 @@ jobs:
     permissions:
       issues: write
     steps:
-      - name: Open or update the nightly failure issue
+      - name: Open or update the nightly fuzz issue
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          TITLE: Nightly Rust checks on main failed
+          TITLE: Nightly fuzz run on main failed
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ARTIFACT_URL: ${{ needs.fuzz.outputs.artifact-url }}
           SHA: ${{ github.sha }}
         run: |
-          body=$(printf 'The nightly fuzz run failed on main at %s: a fuzz target crashed, or the targets did not build.\n\nRun: %s\n\nThe run summary names the targets that failed, and the fuzz-artifacts artifact holds each crashing input. Reproduce one with `cargo +nightly fuzz run TARGET FILE` (fuzz/README.md), fix the parser, and add the input to that target'"'"'s corpus.' "$SHA" "$RUN_URL")
-          number=$(gh issue list --state open --search "\"$TITLE\" in:title" --json number,title \
+          # No artifact when the targets did not build or no input was kept.
+          artifact="${ARTIFACT_URL:-none, the run kept no crashing input}"
+          body=$(printf 'The nightly fuzz run failed on main at %s: a fuzz target crashed, or the targets did not build.\n\nRun: %s\n\nCrash artifact (fuzz-artifacts): %s\n\nThe run summary names the targets that failed, and the artifact holds each crashing input. Reproduce one with `cargo +nightly fuzz run TARGET FILE` (fuzz/README.md), fix the parser, and add the input to that target'"'"'s corpus.' "$SHA" "$RUN_URL" "$artifact")
+          number=$(gh issue list --state open --label bug --search "\"$TITLE\" in:title" --json number,title \
             --jq 'map(select(.title == env.TITLE)) | .[0].number // empty')
           if [ -n "$number" ]; then
             gh issue comment "$number" --body "$body"
           else
-            gh issue create --title "$TITLE" --body "$body"
+            gh issue create --title "$TITLE" --label bug --body "$body"
           fi

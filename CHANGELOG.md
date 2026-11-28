@@ -1,5 +1,55 @@
 # Changelog
 
+## [0.10.0](https://github.com/Langspan/LangSpan.dev/compare/v0.9.1...v0.10.0) (2026-11-28)
+
+
+### ⚠ BREAKING CHANGES
+
+* the seven owner-grant commands are refused until the owner sets "owner_grants": true in the state directory's config.json. Set it, run the command, then set it back to false (docs/usage/configuration-and-limits.md).
+
+### Features
+
+* a one-command install script ([#261](https://github.com/Langspan/LangSpan.dev/issues/261)) ([#583](https://github.com/Langspan/LangSpan.dev/issues/583)) ([2357bdf](https://github.com/Langspan/LangSpan.dev/commit/2357bdfaa63f2072c86d45d8fa346cc457da4850))
+* clients ignore fields they do not know ([#332](https://github.com/Langspan/LangSpan.dev/issues/332)) ([#595](https://github.com/Langspan/LangSpan.dev/issues/595)) ([f53a3b4](https://github.com/Langspan/LangSpan.dev/commit/f53a3b4642714dcd00d42fc7e172bc9ff8b2cd0e))
+* draw the dashboard's Live view with the hero's renderer ([#491](https://github.com/Langspan/LangSpan.dev/issues/491), slice 2) ([#563](https://github.com/Langspan/LangSpan.dev/issues/563)) ([dad71f9](https://github.com/Langspan/LangSpan.dev/commit/dad71f96f1b446232404ad4bc852c37ce6785bb1))
+* owner-authority commands need the owner's own action ([#335](https://github.com/Langspan/LangSpan.dev/issues/335)) ([#596](https://github.com/Langspan/LangSpan.dev/issues/596)) ([9baa899](https://github.com/Langspan/LangSpan.dev/commit/9baa899b7bace8a5d55697caa4c3141508d6d56b))
+* route an agent's push to the default branch to landing ([#536](https://github.com/Langspan/LangSpan.dev/issues/536)) ([#576](https://github.com/Langspan/LangSpan.dev/issues/576)) ([c8dc84e](https://github.com/Langspan/LangSpan.dev/commit/c8dc84ed667ba9d49bb25de2e1d889ceb96d2cf4))
+
+
+### Bug fixes
+
+* a report never delays an admission ([#581](https://github.com/Langspan/LangSpan.dev/issues/581)) ([#591](https://github.com/Langspan/LangSpan.dev/issues/591)) ([da95edc](https://github.com/Langspan/LangSpan.dev/commit/da95edcc1f709ebe7c9c5f396757092820e39605))
+* main-red [#600](https://github.com/Langspan/LangSpan.dev/issues/600) ([#608](https://github.com/Langspan/LangSpan.dev/issues/608)) ([ead6a7e](https://github.com/Langspan/LangSpan.dev/commit/ead6a7e5a3fc047256a7b6f62cb5e3f1c1dc0a7c))
+
+## [0.9.1](https://github.com/Langspan/LangSpan.dev/compare/v0.9.0...v0.9.1) (2026-11-28)
+
+
+### Bug fixes
+
+* bump fuzz/Cargo.lock with each release ([#571](https://github.com/Langspan/LangSpan.dev/issues/571)) ([#572](https://github.com/Langspan/LangSpan.dev/issues/572)) ([00ec40a](https://github.com/Langspan/LangSpan.dev/commit/00ec40a53a27bb9e142550d99a3ec93ebe5ef598))
+* keep golden files and fixtures LF on Windows checkouts ([#568](https://github.com/Langspan/LangSpan.dev/issues/568)) ([#569](https://github.com/Langspan/LangSpan.dev/issues/569)) ([b385ceb](https://github.com/Langspan/LangSpan.dev/commit/b385ceb1e214ae6d4fb844c83b7f623a9fa66f26))
+* tell a briefing item only once the hook has returned it ([#531](https://github.com/Langspan/LangSpan.dev/issues/531)) ([#573](https://github.com/Langspan/LangSpan.dev/issues/573)) ([b70394a](https://github.com/Langspan/LangSpan.dev/commit/b70394a05e99feedc7ba23e605c4e78e4542ad07))
+* the open review follow-ups ([#575](https://github.com/Langspan/LangSpan.dev/issues/575)) ([1bbb571](https://github.com/Langspan/LangSpan.dev/commit/1bbb571bc5d0b8824dfc60848e5ed33cf187b9a2))
+
+## [0.9.0](https://github.com/Langspan/LangSpan.dev/compare/v0.8.0...v0.9.0) (2026-11-28)
+
+
+### Features
+
+* a read-only cursor feed of coordinator events on the dashboard ([#502](https://github.com/Langspan/LangSpan.dev/issues/502)) ([ee724e3](https://github.com/Langspan/LangSpan.dev/commit/ee724e389b7c4bdaff1398c8a2530fad30f39702)), closes [#500](https://github.com/Langspan/LangSpan.dev/issues/500)
+* add the shared-checkout arm to the coordination benchmark, with push attempts and rejections ([#543](https://github.com/Langspan/LangSpan.dev/issues/543)) ([#553](https://github.com/Langspan/LangSpan.dev/issues/553)) ([88e62a6](https://github.com/Langspan/LangSpan.dev/commit/88e62a6f1c593fd5282d469d063541001659c2fd))
+* run a whole coordination benchmark matrix and write its results document ([#508](https://github.com/Langspan/LangSpan.dev/issues/508)) ([8d5adba](https://github.com/Langspan/LangSpan.dev/commit/8d5adba189d36c90776ffee702254326be80c547))
+* tell two live sessions when their prompts are the same task ([#537](https://github.com/Langspan/LangSpan.dev/issues/537)) ([#547](https://github.com/Langspan/LangSpan.dev/issues/547)) ([bf7d81d](https://github.com/Langspan/LangSpan.dev/commit/bf7d81d3f14c93051f92a7024f44c84ec562392a))
+* the Live view's model in the hero's shape, and /api/events v2 ([#491](https://github.com/Langspan/LangSpan.dev/issues/491), slice 1) ([#551](https://github.com/Langspan/LangSpan.dev/issues/551)) ([e245e5f](https://github.com/Langspan/LangSpan.dev/commit/e245e5f2a530fc9d14bc16887ae0927cd6c635ac))
+
+
+### Bug fixes
+
+* count the version being released as published only once tagged ([#518](https://github.com/Langspan/LangSpan.dev/issues/518)) ([#520](https://github.com/Langspan/LangSpan.dev/issues/520)) ([2968eb1](https://github.com/Langspan/LangSpan.dev/commit/2968eb15188c0cb49a9f2a5cf74948d920988bd6))
+* end the hook's group when a signal reaches the stand-in while it starts the hook ([#303](https://github.com/Langspan/LangSpan.dev/issues/303)) ([#530](https://github.com/Langspan/LangSpan.dev/issues/530)) ([ff97058](https://github.com/Langspan/LangSpan.dev/commit/ff97058e9d112bbc09a8ebb2f9129803412c949e))
+* main-red [#552](https://github.com/Langspan/LangSpan.dev/issues/552) ([#559](https://github.com/Langspan/LangSpan.dev/issues/559)) ([050afd1](https://github.com/Langspan/LangSpan.dev/commit/050afd10300410585d2fa9b429011670d2bcab09))
+* the between-step watcher ends at once outside an interactive Claude Code session ([#534](https://github.com/Langspan/LangSpan.dev/issues/534)) ([#544](https://github.com/Langspan/LangSpan.dev/issues/544)) ([7d72abf](https://github.com/Langspan/LangSpan.dev/commit/7d72abf1009e2b23d4905d38a04d2985d45126d5))
+
 ## [0.8.0](https://github.com/Langspan/LangSpan.dev/compare/v0.7.0...v0.8.0) (2026-11-27)
 
 

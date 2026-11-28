@@ -66,6 +66,8 @@ enum AdapterInput {
         #[serde(default)]
         changes_only: bool,
         #[serde(default)]
+        confirm: bool,
+        #[serde(default)]
         inflight: Vec<InflightSymbol>,
         #[serde(default)]
         inflight_partial: bool,
@@ -149,6 +151,7 @@ impl From<AdapterInput> for Command {
                 mcp,
                 left,
                 changes_only,
+                confirm,
                 inflight,
                 inflight_partial,
                 mentioned,
@@ -162,6 +165,7 @@ impl From<AdapterInput> for Command {
                 mcp,
                 left,
                 changes_only,
+                confirm,
                 inflight,
                 inflight_partial,
                 mentioned,
@@ -390,7 +394,7 @@ cases! {
         GraphPath, GraphMap, GraphContext, GraphInflight, GraphExport, GraphImport, CheckWrite,
         CheckCalls,
     ],
-    "briefing" => [Brief, BriefPrepared, ForgetTold, Trails],
+    "briefing" => [Brief, BriefPrepared, ForgetTold, ConfirmTold, Trails],
     "hosts" => [ObserveHosts],
     "projections" => [
         Status, Dashboard, StatusLine, StatusRecords, Version, Events, Changes, Compact, Today,

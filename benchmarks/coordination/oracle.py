@@ -277,7 +277,8 @@ def judge(plan, checkout):
                 else:
                     entry.update(completed=None, accepted=None, detail="change_not_made: not judged, because " + why)
     else:
-        # What every contradiction task defines. Two tasks that want
+        # push_contention's tasks are independent: no pair, so each is
+        # accepted when completed. What every contradiction task defines. Two tasks that want
         # different values of one default: each function gets its own value
         # and the default stays as it was. One task alone: the default
         # changes to its value. Keeping the default and setting the value

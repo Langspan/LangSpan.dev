@@ -239,6 +239,18 @@ pub fn run_network_output(
     network_run(cwd, args, deadline, limit).map(|(status, output, _)| (status, output))
 }
 
+/// As `run_network_output`, also with the end of Git's standard error, as
+/// `said` gives it.
+pub(crate) fn network_output(
+    cwd: &Path,
+    args: &[&str],
+    deadline: Instant,
+    limit: usize,
+) -> Result<(std::process::ExitStatus, Vec<u8>, String), GitError> {
+    network_run(cwd, args, deadline, limit)
+        .map(|(status, output, errors)| (status, output, said(&errors)))
+}
+
 /// One network Git command: no credential prompt, SSH in batch mode unless
 /// the owner chose their own command.
 fn network_run(

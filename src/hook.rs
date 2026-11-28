@@ -4,7 +4,7 @@ use crate::{
     protocol::{Request, Response},
     sha256,
 };
-use langspan_core::{Command, Conflict, Outcome, ToolResult};
+use langspan_core::{Command, Conflict, ErrorCode, Outcome, ToolResult};
 use serde_json::{Value, json};
 use std::{
     fs, io,
@@ -16,6 +16,7 @@ mod deny;
 mod lifecycle;
 mod observe;
 mod prompt;
+mod push_route;
 mod reads;
 mod rename_hold;
 mod shell_hooks;
@@ -161,7 +162,9 @@ impl Session<'_> {
                 Failure::Transport(coverage(&error), error.to_string())
             })?;
         match &response.outcome {
-            Outcome::Error { code, message } if code == "coordination_unavailable" => {
+            Outcome::Error { code, message }
+                if code == ErrorCode::CoordinationUnavailable.as_str() =>
+            {
                 self.unreachable.set(true);
                 Err(Failure::Transport("unavailable", message.clone()))
             }
@@ -269,8 +272,8 @@ impl Session<'_> {
                 },
             ) {
                 Err(Failure::Rejected(message))
-                    if message.starts_with("session_not_found")
-                        || message.starts_with("stale_session") =>
+                    if message.starts_with(ErrorCode::SessionNotFound.as_str())
+                        || message.starts_with(ErrorCode::StaleSession.as_str()) =>
                 {
                     return;
                 }

@@ -13,6 +13,8 @@ mod index_worker;
 mod prepare;
 #[cfg(unix)]
 mod remote_worker;
+#[cfg(unix)]
+mod report_worker;
 
 #[cfg(not(unix))]
 pub async fn run(_state_dir: PathBuf) -> Result<(), crate::Error> {
@@ -27,16 +29,17 @@ mod unix {
         graph_path, graph_query, observe_elsewhere, outline_read, prepare_anchors, prepare_brief,
     };
     use super::index_worker::{
-        IndexJob, TRANSFER_WAIT, Transfer, forward_transfer, index_worker, is_transfer,
+        IndexJob, TRANSFER_WAIT, Transfer, forward_transfer, index_worker, is_transfer, open_index,
     };
     use super::prepare::{prepare, prepare_move};
     use super::remote_worker::{host_worker, remote_worker};
+    use super::report_worker::{forward_report, is_report, start_report_reader};
     use crate::{
         auto_check, local, notify,
         protocol::{self, MAX_FRAME_BYTES, PROTOCOL_VERSION, Request, Response},
         store::{Execution, Store},
     };
-    use langspan_core::{Command, Outcome, Route, State, validate_request_id};
+    use langspan_core::{Command, ErrorCode, Outcome, Route, State, validate_request_id};
     use serde::Deserialize;
     use std::{
         fs,
@@ -91,6 +94,9 @@ mod unix {
         /// least this many lines, or of at least `outline_min_bytes`.
         outline_min_lines: u64,
         outline_min_bytes: u64,
+        /// Owner-grant commands are carried out only while this is on
+        /// (issue #335, ADR 0039). Read again for each one, never at start.
+        owner_grants: bool,
     }
     impl Default for Config {
         fn default() -> Self {
@@ -111,6 +117,7 @@ mod unix {
                 recent_window_ms: langspan_core::RECENT_WINDOW_MS,
                 outline_min_lines: OUTLINE_MIN_LINES,
                 outline_min_bytes: OUTLINE_MIN_BYTES,
+                owner_grants: false,
             }
         }
     }
@@ -470,7 +477,7 @@ mod unix {
 
     /// Why a read or write of the store failed, for the client: which store,
     /// SQLite's reason, and what to do (issue #339).
-    fn store_failed(state_dir: &Path, error: impl std::fmt::Display) -> String {
+    pub(super) fn store_failed(state_dir: &Path, error: impl std::fmt::Display) -> String {
         format!(
             "the coordinator could not read or write its store in {}: {error}; free disk space or make the directory and its files writable, then retry (a write that failed was not recorded)",
             state_dir.display()
@@ -544,18 +551,20 @@ mod unix {
                     }
                 }
             })?;
+        // After the owner's store, whose tables it reads.
+        let report_sender = start_report_reader(&directory)?;
         let graph_path = directory.join("graph.sqlite3");
         local::private_file(&graph_path, true)?;
         let (index_sender, index_receiver) = mpsc::sync_channel::<IndexJob>(1);
         let (transfer_sender, transfer_receiver) = mpsc::sync_channel::<Transfer>(1);
         {
             let sender = sender.clone();
-            let graph_path = graph_path.clone();
+            // Opened here, before the owner thread answers anything, so no
+            // request's reader finds the file without its tables.
+            let index = open_index(&graph_path);
             std::thread::Builder::new()
                 .name("langspan-indexer".into())
-                .spawn(move || {
-                    index_worker(index_receiver, transfer_receiver, sender, graph_path)
-                })?;
+                .spawn(move || index_worker(index_receiver, transfer_receiver, sender, index))?;
         }
         let (check_sender, check_receiver) = mpsc::sync_channel::<auto_check::Message>(256);
         let write_counts = auto_check::WriteCounts::default();
@@ -646,6 +655,8 @@ mod unix {
                                 let _ = job.reply.send(refused);
                             } else if is_transfer(&job.request.command) {
                                 forward_transfer(store.state(), &transfer_sender, job);
+                            } else if is_report(&job.request.command) {
+                                forward_report(&store, &report_sender, job);
                             } else {
                             let touched = touched_workspace(store.state(), &job.request.command);
                             let check_before = auto_check_of(store.state(), &job.request.command);
@@ -714,7 +725,17 @@ mod unix {
                                 coverage: recorded.as_ref().ok().cloned(),
                             };
                             let id = format!("scan-outcome-{}-{now}", store.state().generation);
-                            let _ = store.execute(&id, &command, &command, now);
+                            let failure = match store.execute(&id, &command, &command, now) {
+                                Ok(Execution {
+                                    outcome: Outcome::Error { code, message },
+                                    ..
+                                }) => Some(format!("{code}: {message}")),
+                                Ok(_) => None,
+                                Err(error) => Some(error.to_string()),
+                            };
+                            if let Some(detail) = failure {
+                                eprintln!("{}", serde_json::json!({"level":"warn","event":"scan_outcome_not_recorded","workspace_id":workspace_id,"detail":detail}));
+                            }
                             observe_elsewhere(&mut store, graph_reader.as_ref(), &workspace_id, now);
                         }
                         match recorded {
@@ -836,9 +857,10 @@ mod unix {
             let sender = sender.clone();
             let config = config.clone();
             let activity = activity.clone();
+            let directory = directory.clone();
             tokio::spawn(async move {
                 let _permit = permit;
-                serve_connection(stream, sender, config).await;
+                serve_connection(stream, sender, config, &directory).await;
                 activity.touch();
             });
         }
@@ -884,7 +906,7 @@ mod unix {
         Some(error(
             job.request.request_id.clone(),
             state.generation,
-            "workspace_changed",
+            ErrorCode::WorkspaceChanged,
             format!(
                 "workspace {} was moved, switched or removed after this was observed in {}; nothing was recorded",
                 of.workspace_id,
@@ -901,22 +923,35 @@ mod unix {
         )
     }
 
+    /// Why a request that does not parse as a typed request is refused.
+    fn invalid_request() -> String {
+        format!(
+            "expected a typed request of protocol version {} to {PROTOCOL_VERSION}; unknown fields are rejected, so send only the fields that version defines",
+            protocol::OLDEST_PROTOCOL_VERSION
+        )
+    }
+
     pub(super) fn error(
         id: String,
         generation: u64,
-        code: &str,
+        // `impl Into<String>` only until the report worker's three string
+        // codes take `ErrorCode` too (#367, second slice).
+        code: impl Into<String>,
         message: impl Into<String>,
     ) -> Response {
+        relayed(id, generation, code.into(), message.into())
+    }
+
+    /// A refusal whose code was written elsewhere: by the core, or in an
+    /// outcome the store returned.
+    pub(super) fn relayed(id: String, generation: u64, code: String, message: String) -> Response {
         Response {
             version: PROTOCOL_VERSION,
             request_id: id,
             replayed: false,
             generation,
             lease_valid: None,
-            outcome: Outcome::Error {
-                code: code.into(),
-                message: message.into(),
-            },
+            outcome: Outcome::Error { code, message },
         }
     }
     fn response(id: String, execution: Execution) -> Response {
@@ -1192,7 +1227,7 @@ mod unix {
         if let Command::Events { after, limit } = command {
             let page = store.event_page(*after, *limit, |e| protocol::reads_event(granted, e));
             *outcome = page.unwrap_or_else(|e| Outcome::Error {
-                code: "storage_error".into(),
+                code: ErrorCode::StorageError.into(),
                 message: store_failed(state_dir, e),
             });
         }
@@ -1305,12 +1340,12 @@ mod unix {
             return error(
                 request_id,
                 store.state().generation,
-                "unsupported_version",
+                ErrorCode::UnsupportedVersion,
                 unsupported_version(),
             );
         }
         if let Err(e) = validate_request_id(&request_id) {
-            return error(request_id, store.state().generation, &e.code, e.message);
+            return relayed(request_id, store.state().generation, e.code, e.message);
         }
         // Every client, not only the CLI: the command is stored as it is.
         if let Command::AutoCheckEnable {
@@ -1327,7 +1362,7 @@ mod unix {
             return error(
                 request_id,
                 store.state().generation,
-                "secret_in_command",
+                ErrorCode::SecretInCommand,
                 message,
             );
         }
@@ -1369,26 +1404,26 @@ mod unix {
                         to,
                         max_hops,
                     } => graph_path(graph, store.state(), (workspace_id, from, to, *max_hops))
-                        .map_err(|message| ("index_unavailable", message)),
+                        .map_err(|message| (ErrorCode::IndexUnavailable, message)),
                     Command::GraphMap {
                         workspace_id,
                         depth,
                     } => graph_map(graph, store.state(), workspace_id, *depth)
-                        .map_err(|message| ("index_unavailable", message)),
+                        .map_err(|message| (ErrorCode::IndexUnavailable, message)),
                     Command::GraphInflight { workspace_id } => {
                         graph_inflight(graph, store.state(), workspace_id)
-                            .map_err(|message| ("index_unavailable", message))
+                            .map_err(|message| (ErrorCode::IndexUnavailable, message))
                     }
                     Command::GraphBlindSpots {
                         workspace_id,
                         limit,
                     } => graph_blind_spots(graph, store.state(), workspace_id, *limit)
-                        .map_err(|message| ("index_unavailable", message)),
+                        .map_err(|message| (ErrorCode::IndexUnavailable, message)),
                     Command::GraphContext { .. } => graph_context(graph, store.state(), &command),
                     Command::GraphSymbol { .. }
                     | Command::GraphReferences { .. }
                     | Command::GraphImpact { .. } => graph_query(graph, store.state(), &command)
-                        .map_err(|message| ("index_unavailable", message)),
+                        .map_err(|message| (ErrorCode::IndexUnavailable, message)),
                     // A transfer goes to the indexer before it gets here; one
                     // that does arrive goes on to the store, which refuses it.
                     // No other command routes here.
@@ -1444,7 +1479,7 @@ mod unix {
                 return error(
                     request_id,
                     store.state().generation,
-                    "storage_error",
+                    ErrorCode::StorageError,
                     store_failed(state_dir, e),
                 );
             }
@@ -1480,7 +1515,7 @@ mod unix {
                     return error(
                         request_id,
                         store.state().generation,
-                        "invalid_path",
+                        ErrorCode::InvalidPath,
                         e.to_string(),
                     );
                 }
@@ -1516,7 +1551,7 @@ mod unix {
             Err(e) => error(
                 request_id,
                 store.state().generation,
-                "storage_error",
+                ErrorCode::StorageError,
                 store_failed(state_dir, e),
             ),
         }
@@ -1542,7 +1577,33 @@ mod unix {
         }
     }
 
-    async fn serve_connection(stream: UnixStream, sender: mpsc::SyncSender<Job>, config: Config) {
+    /// Why `command` is refused, when it is an owner grant and the owner's
+    /// `config.json` doesn't allow owner grants now (issue #335, ADR 0039).
+    /// The file is read again for each one, so the owner turns the setting
+    /// on and off without a restart; a file that can't be read refuses.
+    fn owner_grant_refusal(directory: &Path, command: &Command) -> Option<String> {
+        let effect = langspan_core::owner_grant_effect(command)?;
+        let path = directory.join("config.json");
+        let path = path.display();
+        match Config::read(directory) {
+            Ok(Config {
+                owner_grants: true, ..
+            }) => None,
+            Ok(_) => Some(format!(
+                "this command {effect}, which needs the owner's own action: set \"owner_grants\": true in {path}, run the command again, then set it back to false"
+            )),
+            Err(error) => Some(format!(
+                "this command {effect}, which needs \"owner_grants\": true in {path}, and that file could not be read ({error}); fix it, then run the command again"
+            )),
+        }
+    }
+
+    async fn serve_connection(
+        stream: UnixStream,
+        sender: mpsc::SyncSender<Job>,
+        config: Config,
+        directory: &Path,
+    ) {
         let (reader, mut writer) = stream.into_split();
         let read = async {
             let mut bytes = Vec::new();
@@ -1567,13 +1628,20 @@ mod unix {
         let mut named: Option<Vec<String>> = None;
         let mut reply = match timeout(Duration::from_millis(config.io_timeout_ms), read).await {
             Ok(Ok(bytes)) => match serde_json::from_slice::<Request>(&bytes) {
-                Ok(mut request) => {
+                Ok(mut request) => 'reply: {
                     asked = request.version;
                     named.clone_from(&request.capabilities);
                     // Clients redact before sending; a client that did not
                     // still cannot have a secret recorded.
                     crate::text::redact::redact_command(&mut request.command);
                     let id = request.request_id.clone();
+                    if let Some(message) = owner_grant_refusal(directory, &request.command) {
+                        eprintln!(
+                            "{}",
+                            serde_json::json!({"level":"warn","event":"owner_grant_refused","request_id":id})
+                        );
+                        break 'reply error(id, 0, ErrorCode::OwnerGrantOff, message);
+                    }
                     let transfer = is_transfer(&request.command);
                     let (tx, rx) = oneshot::channel();
                     match sender.try_send(Job {
@@ -1592,7 +1660,7 @@ mod unix {
                                 _ => error(
                                     id,
                                     0,
-                                    "coordination_unavailable",
+                                    ErrorCode::CoordinationUnavailable,
                                     "request outcome is unknown; retry the identical request ID",
                                 ),
                             }
@@ -1600,7 +1668,7 @@ mod unix {
                         Err(_) => error(
                             id,
                             0,
-                            "coordination_unavailable",
+                            ErrorCode::CoordinationUnavailable,
                             "coordinator queue unavailable; retry the identical request ID",
                         ),
                     }
@@ -1619,16 +1687,16 @@ mod unix {
                     error(
                         String::new(),
                         0,
-                        "invalid_request",
-                        "expected a typed version 1 request; unknown fields are rejected",
+                        ErrorCode::InvalidRequest,
+                        invalid_request(),
                     )
                 }
             },
-            Ok(Err(e)) => error(String::new(), 0, "invalid_frame", e.to_string()),
+            Ok(Err(e)) => error(String::new(), 0, ErrorCode::InvalidFrame, e.to_string()),
             Err(_) => error(
                 String::new(),
                 0,
-                "read_timeout",
+                ErrorCode::ReadTimeout,
                 "JSON request was not received before the I/O deadline",
             ),
         };
@@ -1641,7 +1709,7 @@ mod unix {
             let mut too_large = error(
                 reply.request_id,
                 reply.generation,
-                "response_too_large",
+                ErrorCode::ResponseTooLarge,
                 "response exceeds 64 KiB; reduce the event page size, or page the state with `status --all`",
             );
             too_large.version = asked;

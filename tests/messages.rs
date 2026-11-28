@@ -3,6 +3,9 @@
 //! a real daemon: each reaches its recipient once, at the next point where
 //! the host accepts context.
 
+mod support;
+use support::git;
+
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -1190,24 +1193,6 @@ fn a_held_message_whose_sent_event_was_removed_is_answered_in_part() {
 
 const SUBAGENT: &str = "a8830b110c1d1bfdf";
 const LAST_REPLY: &str = "FINAL-REPLY-WORDS-7d1e: all done, the uploader retries now";
-
-fn git(root: &Path, arguments: &[&str]) {
-    let output = Process::new("git")
-        .arg("-C")
-        .arg(root)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .args([
-            "-c",
-            "user.name=Test",
-            "-c",
-            "user.email=test@example.invalid",
-        ])
-        .args(arguments)
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "git {arguments:?}: {output:?}");
-}
 
 /// A recorded host event with this test's session and checkout.
 fn recorded(fixture: &str, session: &str, cwd: &Path) -> Value {

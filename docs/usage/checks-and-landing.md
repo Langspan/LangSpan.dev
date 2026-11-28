@@ -133,6 +133,44 @@ value or a key-shaped argument is stored and shown as `[redacted]`, while the
 check's name and program stay readable. Prefer passing secrets through the
 environment, which is never recorded.
 
+### An agent's push to the default branch
+
+In a hooked session, an agent's `git push` that would update the remote's
+default branch (the branch `REMOTE/HEAD` names) does not run. The hook
+refuses it, every time, with the landing command to run instead:
+
+```text
+LangSpan: push routed to landing. main is the default branch of the remote, and a push to it goes through landing: ...
+Run `langspan --state-dir DIR land WORKSPACE --onto main --name CHECK refs/heads/feat --apply --rebase --check-again -- TEST_COMMAND` ...
+```
+
+The agent fills in a check name and the project's test command. The branch
+is named in full (`refs/heads/feat`), so a tag of the same name is never
+landed in its place. To learn where a push goes, the hook runs it first as
+`git push --dry-run --porcelain` with the same arguments. The push is routed when the dry
+run would update, force or delete the default branch, whether through a
+refspec, a mirror remote, `push.default`, `remote.pushDefault`
+or a configured `remote.origin.push`. Pushes to other branches and tags pass.
+An agent's push may name remotes and refspecs and use only `-u`, `-q`, `-v`,
+`--tags`, `--[no-]follow-tags`, `--atomic` and `--[no-]progress`, spelled out;
+force with `+SRC:DST` and delete with `:DST`, and set anything else with
+`git config` (not `git -c`).
+The hook refuses a push it cannot check this way: one combined with another
+command (`git add -A && git push`), one with an expansion in its words, one
+with any other option, `--` or `git -c`, any other command that names `git`
+and `push` (`bash -c 'git push'`, `xargs git push`),
+one whose dry run fails, lists no refs or does not finish in the hook's
+time, and one that names no remote and goes to a URL that two remotes share
+once their logins are left out (`alice@host:repo.git`, `bob@host:repo.git`;
+name the remote). The message
+names the word and says what to run instead. A push from another checkout, to a URL no remote has,
+or with no `REMOTE/HEAD` runs. Set the remote's HEAD with
+`git remote set-head origin --auto`. Pushes from your own terminal are never
+touched. To let agents push the default branch directly, run
+`git config langspan.defaultBranchPush direct` in the repository; with it set,
+the hook refuses none of these. See
+[ADR 0007](../adr/0007-check-evidence-integration-and-landing.md#routing-an-agents-push).
+
 Tests use real daemons, CLI commands and local file remotes. Hosted branch
 protection and native-agent workflows remain unverified. See
 [ADR 0007](../adr/0007-check-evidence-integration-and-landing.md) for command syntax,

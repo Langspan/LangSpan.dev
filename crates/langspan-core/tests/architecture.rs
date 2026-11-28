@@ -127,7 +127,7 @@ fn the_root_names_of_the_core_match_their_golden_list() {
             continue;
         };
         if let Some(module) = used.strip_suffix("::*;") {
-            let path = crate_dir.join("src").join(format!("{module}.rs"));
+            let path = module_file(&crate_dir.join("src"), module);
             let text = fs::read_to_string(&path).expect("read a re-exported core module");
             names.extend(
                 root_items(&text)
@@ -166,6 +166,33 @@ fn the_root_names_of_the_core_match_their_golden_list() {
             .filter(|line| !names.contains(*line))
             .collect::<Vec<_>>(),
     );
+}
+
+/// The file of the root module `module` under `src`: `module.rs`, or
+/// `module/mod.rs` for a directory module.
+fn module_file(src: &Path, module: &str) -> PathBuf {
+    let file = src.join(format!("{module}.rs"));
+    if file.is_file() {
+        file
+    } else {
+        src.join(module).join("mod.rs")
+    }
+}
+
+/// Touches the file system because a directory module is a layout on disk;
+/// the directory is this test's own and is removed after.
+#[test]
+fn a_glob_re_export_resolves_a_directory_module_too() {
+    let src = std::env::temp_dir().join(format!("langspan-core-arch-{}", std::process::id()));
+    fs::create_dir_all(src.join("nested")).expect("make a scratch source tree");
+    fs::write(src.join("flat.rs"), "pub struct Flat;\n").expect("write flat.rs");
+    fs::write(src.join("nested/mod.rs"), "pub struct Nested;\n").expect("write nested/mod.rs");
+    let names: Vec<_> = ["flat", "nested"]
+        .iter()
+        .map(|module| fs::read_to_string(module_file(&src, module)).expect("read the module"))
+        .collect();
+    fs::remove_dir_all(&src).expect("remove the scratch source tree");
+    assert_eq!(names, ["pub struct Flat;\n", "pub struct Nested;\n"]);
 }
 
 /// The top-level `pub` items of a rustfmt-formatted file, each joined onto one

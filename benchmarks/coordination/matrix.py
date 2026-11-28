@@ -227,6 +227,29 @@ def stale_cells(record):
     return found["writes_admitted"], "none stale" if found["fixed_after_s"] is None else cell(found["fixed_after_s"])
 
 
+PUSH_COLUMNS = ("Push attempts", "Push rejections", "Push retries", "All landed after (s)")
+
+
+def push_cells(record):
+    """A trial's push attempts, rejections and retries and its time to all
+    landed. A version 8 record has none; a version 9 record has no retries
+    or time (unknown)."""
+    found = record.get("pushes") or {"status": "not_applicable"}
+    if found["status"] != "reported":
+        return [found["status"].replace("_", " ")] * 4
+    after = found.get("landed_after_s", "unknown")
+    return [found["attempts"], found["rejections"], found.get("retries"), "not all landed" if after is None else after]
+
+
+def group_push_cells(group):
+    """A condition's push columns, as push_cells has them per trial."""
+    if group["push_attempts"] is None:
+        return ["not applicable"] * 4
+    after = group["landed_after_s"]
+    return [group["push_attempts"], group["push_rejections"], group["push_retries"],
+            None if after is None else ", ".join("not all landed" if value is None else cell(value) for value in after)]
+
+
 def table(header, rows):
     lines = ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
     return lines + ["| " + " | ".join(cell(value) for value in row) + " |" for row in rows]
@@ -234,7 +257,8 @@ def table(header, rows):
 
 def report(named, missing):
     """The results document for NAMED, a list of (trial directory name,
-    version 8 record), and MISSING, trial directories with no record."""
+    record of a version driver.READ_VERSIONS lists), and MISSING, trial
+    directories with no record."""
     records = [record for _, record in named]
     dry = sum(record["dry_run"] is True for record in records)
     lines = ["# Coordination benchmark results", ""]
@@ -252,11 +276,12 @@ def report(named, missing):
                      "unknown" if record["tasks_accepted"] is None else
                      "%d of %d" % (record["tasks_accepted"], record["tasks_total"]),
                      writes, fixed, tokens(record["cost"]["run"]), record["turns"], record["elapsed_s"],
-                     repair["status"] + (": " + repair["integrated_tests"] if repair["status"] == "ran" else "")])
+                     repair["status"] + (": " + repair["integrated_tests"] if repair["status"] == "ran" else ""),
+                     *push_cells(record)])
     lines += table(["Trial", "Status", "Excluded", "Combined build", "Tasks accepted", "Stale-name writes admitted",
-                    "Last stale caller fixed (s)", "Tokens", "Turns", "Elapsed (s)", "Repair"], rows)
+                    "Last stale caller fixed (s)", "Tokens", "Turns", "Elapsed (s)", "Repair", *PUSH_COLUMNS], rows)
     if missing:
-        lines += ["", "No record (the trial stopped before writing one; its directory is kept): "
+        lines += ["", "No record (the trial stopped before writing one; its directory, if it made one, is kept): "
                   + ", ".join(sorted(missing)) + "."]
     lines += ["", "## Conditions", "",
               "Excluded trials are counted and add nothing else. Combined build passed is before any repair; a "
@@ -272,10 +297,11 @@ def report(named, missing):
         rows.append([group["agent"], group["family"], group["sessions"], group["stagger_s"], group["arm"],
                      group["trials"], excluded, proportion(group["passed_without_repair"], group["compared"]),
                      proportion(group["correct_results"], group["compared"]), group["stale_writes_admitted"],
-                     fixed or "none", tokens(group["run"]), tokens(group["repair"]), tokens(group["total"])])
+                     fixed or "none", tokens(group["run"]), tokens(group["repair"]), tokens(group["total"]),
+                     *group_push_cells(group)])
     lines += table(["Agent", "Family", "N", "Stagger (s)", "Arm", "Trials", "Excluded", "Combined build passed",
                     "Correct results", "Stale-name writes admitted", "Last stale caller fixed (s)", "Tokens, run",
-                    "Tokens, repair", "Tokens, total"], rows)
+                    "Tokens, repair", "Tokens, total", *PUSH_COLUMNS], rows)
     lines += ["", "No result here is a LangSpan advantage unless the counts above show it.",
               "", "## Versions and seeds", ""]
     for label, key in (("Agent CLI", "agent_cli"), ("Requested model", "requested_model"), ("Models", "models"),
@@ -290,22 +316,46 @@ def report(named, missing):
     return "\n".join(lines) + "\n"
 
 
+def journaled(source):
+    """The trial names in the matrix journal SOURCE, none when it is absent."""
+    if not source.is_file():
+        return []
+    with open(source, "rb") as journal:
+        body = journal.read(driver.MAX_CONFIG_BYTES + 1)
+    if len(body) > driver.MAX_CONFIG_BYTES:
+        raise ValueError("%s exceeds its input bound" % source)
+    names = []
+    for number, line in enumerate(body.decode("utf-8").splitlines(), 1):
+        try:
+            found = json.loads(line)
+        except ValueError:
+            found = None
+        if not isinstance(found, dict) or not isinstance(found.get("trial"), str):
+            raise ValueError("%s line %d is not a matrix journal line" % (source, number))
+        names.append(found["trial"])
+    return names
+
+
 def read_trials(paths):
     """The (name, record) pairs and the names without a record under the
-    matrix directories PATHS. Raises ValueError on a record this version
-    cannot read."""
+    matrix directories PATHS: a trial directory without one, or a trial
+    in `matrix.jsonl` whose driver stopped before making its directory.
+    Raises ValueError on a record or journal line this version cannot
+    read."""
     named, missing = [], []
     for path in paths:
-        for directory in sorted(child for child in Path(path).iterdir() if child.is_dir()):
+        directories = sorted(child for child in Path(path).iterdir() if child.is_dir())
+        missing += sorted(set(journaled(Path(path) / "matrix.jsonl")) - {directory.name for directory in directories})
+        for directory in directories:
             source = directory / "record.json"
             if not source.is_file():
                 missing.append(directory.name)
                 continue
             record, _ = runner.bounded_json(source, driver.MAX_CONFIG_BYTES)
             version = record.get("schema_version") if isinstance(record, dict) else None
-            if version != driver.SCHEMA_VERSION:
-                raise ValueError("%s has schema version %s; the report reads version %d records"
-                                 % (source, version, driver.SCHEMA_VERSION))
+            if version not in driver.READ_VERSIONS:
+                raise ValueError("%s has schema version %s; the report reads version %s records"
+                                 % (source, version, " and ".join(map(str, driver.READ_VERSIONS))))
             named.append((directory.name, record))
     return named, missing
 
@@ -317,7 +367,8 @@ def main(argv=None):
     run.add_argument("--families", nargs="+", required=True, choices=families.FAMILIES)
     run.add_argument("--sessions", nargs="+", required=True, type=int, choices=families.SESSION_COUNTS)
     run.add_argument("--seeds", nargs="+", required=True, type=int)
-    run.add_argument("--arms", nargs="+", default=list(driver.ARMS), choices=driver.ARMS)
+    run.add_argument("--arms", nargs="+", default=list(driver.ARMS), choices=driver.ARMS + driver.SHARED_ARMS,
+                     help="default: the three compared arms; `shared` puts every session in one checkout")
     run.add_argument("--agent", default="standin", choices=driver.AGENTS)
     run.add_argument("--langspan", type=Path, help="the langspan binary, for the langspan arm")
     run.add_argument("--output", type=Path, required=True, help="the matrix directory; reused to resume")
@@ -335,6 +386,9 @@ def main(argv=None):
             print(json.dumps({"report": str(args.output), "trials": len(named), "without_record": len(missing)}))
             return 0
         planned = trials(args.families, args.sessions, args.seeds, args.arms)
+        for trial in planned:
+            # A trial the driver cannot plan stops the matrix before any trial runs.
+            driver.make_plan(trial["arm"], trial["family"], trial["sessions"], trial["seed"])
         if args.plan_only:
             print(json.dumps({"mode": "plan_only", "executed_commands": 0, "agent": args.agent,
                               "trials": len(planned), "sessions": sum(t["sessions"] for t in planned),

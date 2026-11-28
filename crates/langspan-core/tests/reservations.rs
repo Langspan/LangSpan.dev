@@ -89,6 +89,7 @@ fn brief(state: &State, session: &str) -> Briefing {
         recent_window_ms: None,
         mcp: false,
         changes_only: false,
+        confirm: false,
     };
     match decide(state, &command, "brief", 20).outcome {
         Outcome::Briefing { briefing } => briefing,

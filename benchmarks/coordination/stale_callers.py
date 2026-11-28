@@ -113,6 +113,15 @@ def unknown(reason):
     return {"status": "unknown", "reason": reason}
 
 
+def owners(sessions):
+    """Who committed a checkout's files: "session 1's", or "the checkout
+    of sessions 1 and 2 (shared)" when several sessions work in it."""
+    if len(sessions) == 1:
+        return "session %d's" % sessions[0]
+    names = [str(index) for index in sessions]
+    return "the checkout of sessions %s and %s (shared)" % (", ".join(names[:-1]), names[-1])
+
+
 def stale_callers(plan, transcripts, base, committed, changed):
     """The stale-caller measure of one trial. PLAN has its `family` and
     `tasks`; TRANSCRIPTS, per session in order, the events of its transcript
@@ -130,63 +139,93 @@ def stale_callers(plan, transcripts, base, committed, changed):
     from the change to the last stale caller fixed: None when none was
     stale, or one still is (`unfixed`). `unknown` when a session's
     committed file, its changed Python files among them, is not what its
-    replayed calls left, as after a write with Bash."""
+    replayed calls left, as after a write with Bash. Sessions known by the
+    same paths share one checkout: their writes replay together in clock
+    order, each still attributed to its own session, and the checkout is
+    checked against that combined replay. There a file is the checkout's,
+    not its writer's: a dependent's stale caller is fixed by whichever
+    session's admitted write leaves it in the new form, and made stale again
+    by whichever session's write puts the old form back, though
+    `writes_admitted` counts only the dependents' writes."""
     changer = next((index for index, task in enumerate(plan["tasks"], 1) if task["role"] == "changer"), None)
     if plan["family"] != "discovered_change" or changer is None:
         return {"status": "not_applicable", "reason": "the family has no interface change"}
     interface = plan["tasks"][changer - 1]["interface"]
     helper = module_path(interface["module"])
-    timeline = []
+    # Sessions known by the same paths share one checkout (the shared arm).
+    checkouts = {}
     for index, ((events, roots), task) in enumerate(zip(transcripts, plan["tasks"]), 1):
         found = writes(events, roots) if events is not None else None
         if found is None:
             return unknown("session %d has no transcript, or a write in it has no clock line" % index)
-        files = {}
-        for ns, path, tool, args, admitted in found:
-            if admitted:
-                files[path] = replay(files[path] if path in files else base(path), tool, args)
-                if files[path] is None:
-                    return unknown("session %d's %s of %s replaces text that is not there" % (index, tool, path))
-                timeline.append((ns, index, path, files[path]))
         touched = changed(index)
         if touched is None:
             return unknown("session %d's changed files could not be listed" % index)
         # A Python file is the only kind that can hold a caller.
-        touched = {path for path in touched if path.endswith(".py")}
-        for path in sorted(set(files) | touched | {module_path(task["module"])}
-                           | ({helper} if index == changer else set())):
-            if committed(index, path) != files.get(path, base(path)):
-                return unknown("session %d's committed %s is not what its Write and Edit calls left: it was "
-                               "written another way" % (index, path))
+        expected = {path for path in touched if path.endswith(".py")} | {module_path(task["module"])} \
+            | ({helper} if index == changer else set())
+        checkout = checkouts.setdefault(tuple(roots), {"sessions": [], "writes": [], "expected": set()})
+        checkout["sessions"].append(index)
+        checkout["writes"] += [(ns, index, path, tool, args) for ns, path, tool, args, admitted in found if admitted]
+        checkout["expected"] |= expected
+    timeline = []
+    for key, checkout in checkouts.items():
+        # Each session's writes in clock order, its peers' in the same checkout among them.
+        files, sessions = {}, checkout["sessions"]
+        for ns, index, path, tool, args in sorted(checkout["writes"], key=lambda write: write[:2]):
+            files[path] = replay(files[path] if path in files else base(path), tool, args)
+            if files[path] is None:
+                return unknown("session %d's %s of %s replaces text that is not there" % (index, tool, path))
+            timeline.append((ns, index, (key, path), files[path]))
+        for path in sorted(set(files) | checkout["expected"]):
+            if committed(sessions[0], path) != files.get(path, base(path)):
+                return unknown("%s committed %s is not what %s Write and Edit calls left: it was written another way"
+                               % (owners(sessions), path, "its" if len(sessions) == 1 else "their"))
     timeline.sort(key=lambda entry: entry[:2])
-    change = next((ns for ns, index, path, text in timeline if index == changer and path == helper
+    change = next((ns for ns, index, (_, path), text in timeline if index == changer and path == helper
                    and (required_arguments(text, interface["name"]) or 0) >= interface["arity"]), None)
     if change is None:
         return {"status": "not_applicable", "reason": "the changer did not make the change"}
-    dependents = [entry for entry in timeline if plan["tasks"][entry[1] - 1]["role"] == "dependent"]
+
+    def dependent(index):
+        return plan["tasks"][index - 1]["role"] == "dependent"
+
+    # A file is one (checkout, path): in a shared checkout a peer's write
+    # leaves it stale or fixes it as much as its writer's does.
     items, now, ever, admitted, last_fix = [], set(), set(), 0, None
 
-    def item(index, path, ns, kind):
+    def item(index, file, ns, kind):
         if len(items) < MAX_ITEMS:
-            items.append({"session": index, "path": path, "after_s": (ns - change) / 1e9, "kind": kind})
+            items.append({"session": index, "path": file[1], "after_s": (ns - change) / 1e9, "kind": kind})
 
-    at_change = {(index, path): text for ns, index, path, text in dependents if ns < change}
-    for (index, path), text in sorted(at_change.items()):
+    # Each file a dependent wrote before the change, as the last write before it left it.
+    at_change = {}
+    for ns, index, file, text in timeline:
+        if ns < change and (dependent(index) or file in at_change):
+            at_change[file] = (index, text)
+    for file, (index, text) in sorted(at_change.items(), key=lambda entry: (entry[1][0], entry[0])):
         if stale(text, interface):
-            now.add((index, path))
-            item(index, path, change, "stale_at_change")
+            now.add(file)
+            item(index, file, change, "stale_at_change")
     ever |= now  # before a write that follows the change can fix one
-    for ns, index, path, text in dependents:
+    owned = set(at_change)  # the files a dependent has written so far
+    for ns, index, file, text in timeline:
         if ns < change:
             continue
+        if dependent(index):
+            owned.add(file)
         if stale(text, interface):
-            admitted += 1
-            now.add((index, path))
-            item(index, path, ns, "stale_write")
-        elif (index, path) in now:
-            now.discard((index, path))
+            # A peer's write can leave a dependent's file stale again; only
+            # a dependent's own write counts in `writes_admitted`.
+            if file in owned:
+                if dependent(index):
+                    admitted += 1
+                now.add(file)
+                item(index, file, ns, "stale_write")
+        elif file in now:
+            now.discard(file)
             last_fix = ns
-            item(index, path, ns, "fixed")
+            item(index, file, ns, "fixed")
         ever |= now
     return {"status": "reported", "writes_admitted": admitted, "stale_files": len(ever), "unfixed": len(now),
             "fixed_after_s": (last_fix - change) / 1e9 if ever and not now else None, "items": items}

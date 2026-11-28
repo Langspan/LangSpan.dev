@@ -1,0 +1,45 @@
+4: events.jsonl line 13: invalid_event: A hook-run record must belong to the current daemon generation
+5: events.jsonl line 17: invalid_event: Intent must match its session's workspace and current generation
+6: events.jsonl line 94: invalid_event: Intent-ended event references no existing intent
+7: events.jsonl line 18: invalid_event: A prompt record must belong to the current daemon generation
+8: events.jsonl line 19: invalid_event: Prompt targets must be recorded sorted and without repeats
+9: events.jsonl line 19: invalid_event: A prompt targets record must belong to the current daemon generation
+10: events.jsonl line 23: invalid_event: A presence record names sorted, unique paths in the current generation
+11: events.jsonl line 97: invalid_event: An adoption names two different sessions of its workspace
+12: events.jsonl line 34: invalid_event: A stop record must belong to the current daemon generation
+13: events.jsonl line 48: invalid_event: A context record belongs to the current daemon generation and names at most 1 MiB
+14: events.jsonl line 46: invalid_event: A briefing signature is at most 64 bytes, and a delivery names at most 256 item keys
+15: events.jsonl line 27: invalid_event: A refusal keeps at most 8 paths, one peer session ID and a SHA-256 input digest
+16: events.jsonl line 25: invalid_event: Granted lease must be active in its session's current workspace and generation with a positive deadline
+17: events.jsonl line 36: invalid_event: A lease-granted event cannot reuse an existing lease ID
+18: events.jsonl line 31: invalid_event: A tool batch record must belong to the current daemon generation
+19: events.jsonl line 20: invalid_event: A source observation names sorted, unique files in the current generation
+20: events.jsonl line 37: invalid_event: Only an active lease in the current generation can end
+21: events.jsonl line 26: invalid_event: A wait record names 1 to 8 paths, at most one holder and at most 60000 milliseconds
+22: events.jsonl line 14: invalid_event: A policy record sets conflict to refuse, or to wait for 1 to 2000 milliseconds
+23: events.jsonl line 28: invalid_event: Observation must match its session's workspace and the current generation
+24: events.jsonl line 39: invalid_event: Observation names another session's admission
+25: events.jsonl line 90: invalid_event: A new uncoordinated change has not been delivered to any session
+26: events.jsonl line 92: invalid_event: An uncoordinated change is delivered to a session of its workspace
+27: events.jsonl line 65: invalid_event: An inconclusive record has no test results
+28: events.jsonl line 65: invalid_event: Test results belong to a working-tree record and name their command's identity
+29: events.jsonl line 75: invalid_event: No automatic check was enabled for this workspace
+30: events.jsonl line 71: invalid_event: A check report follows the record it reports
+31: events.jsonl line 71: invalid_event: A check report must match the record it reports
+32: events.jsonl line 66: invalid_event: Test results name their command's identity
+33: events.jsonl line 66: invalid_event: Test results follow the record they belong to
+34: events.jsonl line 66: invalid_event: Test results must match the working-tree record they belong to
+35: events.jsonl line 72: invalid_event: Nothing was learned about tests in this workspace
+36: events.jsonl line 76: invalid_event: A turn is taken in the current generation, with a later deadline, for a target nobody holds
+37: events.jsonl line 77: invalid_event: A landing joins the line once, in the current generation, with later deadlines, while there is room
+38: events.jsonl line 78: invalid_event: Only a waiting landing is seen again, and never to an earlier time
+39: events.jsonl line 79: invalid_event: Only a held turn can be renewed, and never to an earlier deadline
+40: events.jsonl line 82: invalid_event: Only a waiting landing can leave the line
+41: events.jsonl line 84: invalid_event: Only a turn that is held can expire
+42: events.jsonl line 47: invalid_event: A delivery names 1 to 3 in-flight keys of at most 64 ASCII bytes
+43: events.jsonl line 49: invalid_event: A message is sent unacknowledged and not withdrawn
+44: events.jsonl line 60: invalid_event: A publication record names a workspace that does not publish
+45: events.jsonl line 60: invalid_event: A publication record must carry the next sequence
+46: events.jsonl line 61: invalid_event: A received publication belongs to a publishing workspace in the current generation
+47: events.jsonl line 63: invalid_event: Publication was not enabled for this workspace
+48: events.jsonl line 102: invalid_event: A move names the workspace's current root and a different new one

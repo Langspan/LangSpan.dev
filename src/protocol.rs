@@ -41,6 +41,7 @@ pub const OLDEST_PROTOCOL_VERSION: u16 = 3;
 pub const CAPABILITIES: &[(&str, Option<u16>)] = &[
     ("anchored_notes", Some(PROTOCOL_VERSION_9)),
     ("briefing_memory", Some(PROTOCOL_VERSION_7)),
+    ("confirmed_briefings", None),
     ("inflight_partial", Some(PROTOCOL_VERSION_8)),
     ("interface_notices", Some(PROTOCOL_VERSION_5)),
     ("landing_rewrites", Some(PROTOCOL_VERSION_6)),
@@ -459,10 +460,12 @@ fn without_briefing_memory(outcome: &mut Outcome) {
 /// recap by tag, are not sent to a daemon without `anchored_notes`
 /// (roadmap E1), nor a recap asked for `since` to one without
 /// `recap_since` (roadmap C10). A check of renamed names alone is not sent
-/// to a daemon without `rename_holds` (issue #213), nor a reservation to
-/// one without `reservations` (ADR 0040).
+/// to a daemon without `rename_holds` (issue #213), nor a confirmation of
+/// told items to one without `confirmed_briefings` (issue #531), nor a
+/// reservation to one without `reservations` (ADR 0040).
 pub fn fits_with(granted: Capabilities, command: &Command) -> bool {
     match command {
+        Command::ConfirmTold { .. } => granted.has("confirmed_briefings"),
         Command::Reserve { .. } => granted.has("reservations"),
         Command::RecordLanding {
             rebased, adapted, ..
@@ -493,8 +496,14 @@ pub fn fits(version: u16, command: &Command) -> bool {
 /// recorded without its findings (`symbol_findings`, issue #265), which
 /// are advisory, by a daemon that cannot read them. A write check asks a
 /// daemon without `rename_holds` about its calls only, so it holds nothing
-/// (issue #213).
+/// (issue #213). A hook's briefing is asked of a daemon without
+/// `confirmed_briefings` as before: told when decided (issue #531).
 pub fn for_capabilities(granted: Capabilities, command: &mut Command) {
+    if let Command::Brief { confirm, .. } = command
+        && !granted.has("confirmed_briefings")
+    {
+        *confirm = false;
+    }
     match command {
         Command::Brief { changes_only, .. } if !granted.has("briefing_memory") => {
             *changes_only = false;

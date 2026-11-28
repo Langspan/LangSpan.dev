@@ -33,7 +33,6 @@ pub const COUNT_DAYS: usize = 32;
 pub const COUNT_WORKSPACES: usize = 64;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct RefusalCount {
     /// Wall-clock milliseconds since the Unix epoch: the first day's start,
     /// included, and the day after the last one's start, excluded.

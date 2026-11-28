@@ -47,10 +47,12 @@ mod messages;
 mod paging;
 mod reads;
 mod replay;
+mod report_reader;
 mod retention;
 mod scan;
 
 use paging::workspace_page;
+pub use report_reader::ReportReader;
 use sql::{
     COUNT_INDEXES, FORGOTTEN_INDEX, GENERATION_MARKER_INDEX, HISTORY_INDEX, INTENT_EVENT_INDEX,
     MOVES_INDEX, RETRACTED_INDEX,

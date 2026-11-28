@@ -15,6 +15,7 @@ mod classes;
 mod command;
 mod count;
 mod dashboard;
+mod error_code;
 mod event;
 mod flaky;
 mod history;
@@ -49,7 +50,7 @@ pub use anchors::{
     ANCHOR_CANDIDATES, AnchorIndex, AnchorLookup, AnchorState, MAX_TAGS, NoteAnchor, SYMBOL_BYTES,
     TAG_BYTES, anchored, remember_lookups, validate_tag, validate_tags,
 };
-pub use authority::{Authority, authority};
+pub use authority::{Authority, authority, owner_grant_effect};
 pub use briefing::*;
 pub use checks::*;
 pub use classes::{
@@ -66,6 +67,7 @@ pub use dashboard::{
     DenialRow, Denials, EditRow, LandingRow, MessageRow, NoteRow, NoticeRow, OverlapRow,
     PublishRow, RecentFile, ScanRow, WorkspaceRow, dashboard_denials,
 };
+pub use error_code::ErrorCode;
 pub use event::Event;
 pub use flaky::{
     FLAKY_DECAY_RUNS, FLAKY_MIN_FLIPS, FLAKY_WINDOW_RUNS, FlakyCount, FlakyTest, LastTests,
@@ -703,6 +705,9 @@ fn decide_checked(
         Command::ForgetTold { session_id, keys } => {
             sessions::decide_forget_told(state, session_id, keys)
         }
+        Command::ConfirmTold { session_id, keys } => {
+            sessions::decide_confirm_told(state, session_id, keys)
+        }
         Command::IntentSet {
             session_id,
             paths,
@@ -828,6 +833,7 @@ fn decide_checked(
             recent_window_ms,
             mcp,
             changes_only,
+            ..
         }
         | Command::BriefPrepared {
             session_id,

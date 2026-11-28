@@ -6,6 +6,9 @@
 //! The command waits for a signal file outside the working tree, so the
 //! other session's edit happens while it is running, whatever the load.
 
+mod support;
+use support::git;
+
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -32,19 +35,6 @@ struct Run {
     detail: String,
     /// A refusal's reason, as the host shows it to the agent.
     reason: String,
-}
-
-fn git(root: &Path, arguments: &[&str]) -> String {
-    let output = Process::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(arguments)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "git {arguments:?}: {output:?}");
-    String::from_utf8(output.stdout).unwrap()
 }
 
 /// A command started by Alice's shell call that is still running: it waits

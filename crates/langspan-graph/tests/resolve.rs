@@ -175,6 +175,26 @@ fn a_rust_crate_path_naming_no_module_file_resolves_to_the_crate_root() {
 }
 
 #[test]
+fn a_crate_path_in_main_rs_starts_from_the_binary_root() {
+    // A package with both roots: `crate::` in `main.rs` is the binary crate,
+    // whose root is `main.rs` itself, not the library's `lib.rs`.
+    let files = ["src/lib.rs", "src/main.rs", "src/cli.rs"];
+    assert_eq!(
+        resolved("src/main.rs", "crate::Args", &files).as_deref(),
+        Some("src/main.rs")
+    );
+    assert_eq!(
+        resolved("src/main.rs", "crate::cli::run", &files).as_deref(),
+        Some("src/cli.rs")
+    );
+    // Any other file still starts from the library root.
+    assert_eq!(
+        resolved("src/cli.rs", "crate::Args", &files).as_deref(),
+        Some("src/lib.rs")
+    );
+}
+
+#[test]
 fn a_rust_glob_import_resolves_to_its_module() {
     let written = targets(Language::Rust, "use crate::store::*;\nuse super::api::*;\n");
     assert_eq!(written, ["crate::store::*", "super::api::*"]);

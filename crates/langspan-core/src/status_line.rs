@@ -84,7 +84,6 @@ pub struct RecentRefusal {
 
 /// What the status line shows. Counts only, never a path.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct StatusLine {
     /// The registered workspace holding the asked directory, if any.
     pub workspace_id: Option<String>,

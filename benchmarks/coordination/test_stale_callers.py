@@ -31,6 +31,26 @@ def measure(trial, changed=None):
                                        changed or (lambda index: list(trial["committed"][index - 1])))
 
 
+def shared(trial):
+    """TRIAL as the shared arm runs it: every session in one checkout,
+    /bench/work/trunk, which holds every session's committed files."""
+    trial = json.loads(json.dumps(trial).replace("/bench/work/s1/", "/bench/work/trunk/")
+                       .replace("/bench/work/s2/", "/bench/work/trunk/"))
+    trial["roots"] = ["/bench/work/trunk"] * len(trial["roots"])
+    tree = {path: text for files in trial["committed"] for path, text in files.items()}
+    trial["committed"] = [tree] * len(trial["committed"])
+    return trial
+
+
+def write_call(name, tool, args, ns, path="/bench/work/trunk/shelf/orders.py"):
+    """The events of one admitted Write or Edit call and its clock line."""
+    return [{"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": name, "name": tool, "input": dict(args, file_path=path)}]}},
+            {"type": "user", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": name, "is_error": False, "content": "done"}]}},
+            {"type": stale_callers.CLOCK_TYPE, "tool_use_ids": [name], "monotonic_ns": ns}]
+
+
 def result_of(trial, session, tool_use_id):
     """The tool result block of TOOL_USE_ID in SESSION's transcript."""
     return next(block for event in trial["transcripts"][session - 1] for block in stale_callers.blocks(event)
@@ -147,6 +167,69 @@ class StaleCallers(unittest.TestCase):
             trial["committed"][1]["shelf/features/gone.py"] = text
             found = measure(trial)
             self.assertEqual((found["status"], found["stale_files"]), ("reported", 0))
+
+    def test_a_shared_checkout_is_replayed_from_every_session_s_writes(self):
+        # Every session's checkout holds its peers' files too: a peer's
+        # recorded write is not a write made another way, and the measure is
+        # the one the same writes give in separate checkouts.
+        for name in ("langspan-follow", "worktrees-ignore"):
+            self.assertEqual(measure(shared(recorded(name))), measure(recorded(name)), name)
+        # A session's Edit of a file a peer wrote applies to the peer's text,
+        # in clock order; the session's own replay alone cannot make it.
+        trial = shared(recorded("langspan-follow"))
+        orders = trial["committed"][0]["shelf/orders.py"]
+        trial["transcripts"][1][4:4] = write_call("edit-peer", "Edit", {
+            "old_string": "datetime.date.today())", "new_string": "datetime.date.today()) "}, 2152110000000000)
+        trial["committed"][0]["shelf/orders.py"] = orders.replace("datetime.date.today())",
+                                                                  "datetime.date.today()) ")
+        found = measure(trial)
+        self.assertEqual(found["status"], "reported", found.get("reason"))
+        # The same Edit before the peer's write replaces text that is not there yet.
+        trial["transcripts"][1][-6]["monotonic_ns"] = CHANGE["langspan-follow"] - 1
+        found = measure(trial)
+        self.assertEqual(found["status"], "unknown")
+        self.assertIn("shelf/orders.py", found["reason"])
+        # A write made another way in the shared checkout is still unknown, and
+        # the reason names the sessions that share it.
+        trial = shared(recorded("langspan-follow"))
+        trial["committed"][0]["shelf/features/gone.py"] += "\nlate = days_left\n"
+        found = measure(trial)
+        self.assertEqual(found["status"], "unknown")
+        self.assertIn("sessions 1 and 2", found["reason"])
+        self.assertIn("shelf/features/gone.py", found["reason"])
+
+    def test_a_shared_checkout_s_caller_is_fixed_by_whichever_session_writes_it(self):
+        # In one checkout a file is one file: session 1's write that leaves
+        # session 2's stale caller in the new form fixes it.
+        trial = shared(recorded("langspan-follow"))
+        fix = trial["transcripts"][1][4:7]
+        del trial["transcripts"][1][4:7]
+        trial["transcripts"][0][-2:-2] = fix
+        found = measure(trial)
+        fixed = (2152111981911375 - CHANGE["langspan-follow"]) / 1e9
+        self.assertEqual((found["status"], found["writes_admitted"], found["stale_files"], found["unfixed"],
+                          found["fixed_after_s"]), ("reported", 1, 1, 0, fixed), found)
+        self.assertEqual(found["items"][-1], {"session": 1, "path": "shelf/features/gone.py", "after_s": fixed,
+                                              "kind": "fixed"})
+        # Session 1's later write that puts the old form back leaves session
+        # 2's file stale again, though only session 2's writes are counted.
+        gone, later = "/bench/work/trunk/shelf/features/gone.py", 2152112000000000
+        old = "from shelf.dates import days_left\n\n\ndef count_expired(items):\n" \
+              "    return sum(1 for name, day in items if days_left(day) is None)\n"
+        trial["transcripts"][0][-2:-2] = write_call("restore", "Write", {"content": old}, later, gone)
+        trial["committed"][0]["shelf/features/gone.py"] = old
+        found = measure(trial)
+        self.assertEqual((found["status"], found["writes_admitted"], found["stale_files"], found["unfixed"],
+                          found["fixed_after_s"]), ("reported", 1, 1, 1, None), found)
+        self.assertEqual(found["items"][-1], {"session": 1, "path": "shelf/features/gone.py",
+                                              "after_s": (later - CHANGE["langspan-follow"]) / 1e9,
+                                              "kind": "stale_write"})
+        # A stale caller in a file no dependent wrote is not one.
+        trial = shared(recorded("langspan-follow"))
+        trial["transcripts"][0][-2:-2] = write_call("own", "Write", {"content": old}, later,
+                                                    "/bench/work/trunk/shelf/features/own.py")
+        trial["committed"][0]["shelf/features/own.py"] = old
+        self.assertEqual(measure(trial), measure(shared(recorded("langspan-follow"))))
 
     def test_the_input_is_not_changed(self):
         trial = recorded("langspan-follow")

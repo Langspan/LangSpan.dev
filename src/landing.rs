@@ -15,8 +15,9 @@ use crate::{
     rewrite::Notes,
 };
 use langspan_core::{
-    AttemptResult, CheckRecord, CheckResult, Command, Landing, LandingAttempt, LeftQueue,
-    MAX_LANDING_ATTEMPTS, MAX_TURN_WAIT_MS, Outcome, QueuedLanding, State, Turn, TurnQueueing,
+    AttemptResult, CheckRecord, CheckResult, Command, ErrorCode, Landing, LandingAttempt,
+    LeftQueue, MAX_LANDING_ATTEMPTS, MAX_TURN_WAIT_MS, Outcome, QueuedLanding, State, Turn,
+    TurnQueueing,
 };
 use serde::Serialize;
 use std::{
@@ -1134,7 +1135,7 @@ fn wait_for_turn(
                 waiting,
                 ..
             } => return Ok(busy(Unavailable::QueueFull, holder, held_ms, waiting)),
-            Outcome::Error { code, .. } if code == "not_queued" => {
+            Outcome::Error { code, .. } if code == ErrorCode::NotQueued.as_str() => {
                 let line = queue(state_dir, &target.workspace_id, &target.onto)?;
                 return Ok(busy(
                     Unavailable::Cancelled,

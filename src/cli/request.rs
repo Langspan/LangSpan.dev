@@ -109,6 +109,7 @@ pub(crate) fn request(
                 mcp: false,
                 // Asked for: the full view (issue #222).
                 changes_only: false,
+                confirm: false,
             },
             ["remote", "enable", workspace] => Command::RemoteEnable {
                 workspace_id: (*workspace).into(),

@@ -341,6 +341,7 @@ cases! {
     SessionSeen => "session seen",
     ContextRecorded => "record context",
     ToldForgotten => "forget told",
+    ToldConfirmed => "confirm told",
     Intent => "intent set",
     IntentEnded => "intent end",
     Reserved => "reserve",
@@ -739,6 +740,11 @@ fn transcript_of_the_coordination_commands() {
         json!({"op": "forget_told", "session_id": "s1", "keys": [1]}),
     );
     t.request(
+        "confirm told",
+        "r-h3c",
+        json!({"op": "confirm_told", "session_id": "s1", "keys": [1]}),
+    );
+    t.request(
         "session prompt",
         "r-h4",
         json!({"op": "session_prompt", "session_id": "s2", "summary": "fix the parser"}),
@@ -769,6 +775,20 @@ fn transcript_of_the_coordination_commands() {
         json!({"op": "record_refusal", "session_id": "s2", "kind": "commit_held", "paths": ["src/lib.rs"], "peer_session_id": "s1"}),
     );
     t.case("policy", &["policy", "w"]);
+    // An owner grant is refused until the owner allows it (issue #335).
+    t.case(
+        "policy set, before the owner allows owner grants",
+        &[
+            "policy",
+            "set",
+            "w",
+            "conflict",
+            "wait",
+            "--request-id",
+            "r-p0",
+        ],
+    );
+    support::owner_grants(&t.base.join("state"), true);
     t.case(
         "policy set",
         &[
@@ -952,6 +972,8 @@ fn transcript_of_the_remaining_outcomes() {
     t.case("graph map", &["graph", "map", "w"]);
     t.case("graph blind-spots", &["graph", "blind-spots", "w"]);
     t.case("graph inflight", &["graph", "inflight", "w"]);
+    // Export, import, automatic checks and publication are owner grants.
+    support::owner_grants(&t.base.join("state"), true);
     let index = t.base.join("index.jsonl").display().to_string();
     let index_json = t.base.join("index-json.jsonl").display().to_string();
     t.case_twice(

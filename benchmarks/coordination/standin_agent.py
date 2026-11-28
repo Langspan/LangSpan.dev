@@ -35,7 +35,9 @@ arrived, so that no peer acts before it could have been told of this one; a
 session whose task changes an interface (``leads``) waits until every peer
 has ended, so its change stays in flight while they work. When the notice
 tells it of the change only after its edit, it makes the informed edit then.
-A refused edit is read again and retried once, then skipped. It prints a
+A refused edit is read again and retried once, then skipped. In a shared
+checkout (the plan's ``isolation`` is ``shared``) it then commits the files
+it edited and pushes them, as Bash calls (see shared_checkout.py). It prints a
 short transcript in the shape of ``claude -p --output-format stream-json``:
 a first line listing its tools, as Claude Code's does, each edit's
 ``tool_use`` and ``tool_result``, and the result line last.
@@ -51,6 +53,10 @@ import subprocess
 import sys
 import time
 import uuid
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import shared_checkout  # noqa: E402
 
 # How long the stand-in waits for one hook. A host gives a hook its
 # configured timeout (5 s for LangSpan's) and goes on without it; the
@@ -410,6 +416,12 @@ def main(argv):
                 # an agent that follows it fixes its call.
                 informed = revised = True
                 edited += apply_edits(session, task["standin"]["follow"])
+        if shared_checkout.lands_by_pushing(plan.get("isolation"), plan.get("family")) and edited:
+            # Land by committing only its own files and pushing, as its
+            # prompt asks. Each rejection means a peer landed, and each peer
+            # lands once, so as many tries as sessions always land.
+            shared_checkout.commit_and_push(sorted(set(edited)), index,
+                                            attempts=max(shared_checkout.MAX_PUSH_ATTEMPTS, plan["sessions"]))
         session.fire("Stop", stop_hook_active=False)
         session.fire("SessionEnd", reason="other")
     print(json.dumps({

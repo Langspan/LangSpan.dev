@@ -1,0 +1,21 @@
+2026-11-28T02:01:20.8796280Z         PASS [   0.009s] (450/453) langspan-graph::resolve rust_crate_super_and_self_paths_resolve_to_module_files
+2026-11-28T02:01:20.8824010Z         PASS [   0.013s] (451/453) langspan-graph::resolve python_relative_and_absolute_imports_resolve_to_modules_and_packages
+2026-11-28T02:01:20.8875570Z         PASS [   0.008s] (452/453) langspan-graph::resolve typescript_tries_extensions_then_an_index_file_and_maps_js_to_ts
+2026-11-28T02:01:22.0615670Z         PASS [   2.294s] (453/453) langspan-core::briefing a_session_is_told_each_in_flight_signature_once_up_to_its_memory
+2026-11-28T02:01:22.0617900Z ────────────
+2026-11-28T02:01:22.0618440Z      Summary [  96.226s] 453 tests run: 453 passed, 996 skipped
+2026-11-28T02:01:22.1292170Z ##[group]Run python3 -I -B scripts/flaky-tests.py "target/nextest/$NEXTEST_PROFILE/junit.xml"
+2026-11-28T02:01:22.1292830Z ^[[36;1mpython3 -I -B scripts/flaky-tests.py "target/nextest/$NEXTEST_PROFILE/junit.xml"^[[0m
+2026-11-28T02:01:22.1438310Z ##[endgroup]
+2026-11-28T02:01:22.2834190Z ##[group]Run actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+2026-11-28T02:01:22.2834570Z with:
+2026-11-28T02:01:22.2834780Z   name: junit-macos-3
+2026-11-28T02:01:22.2835020Z   path: target/nextest/ci/junit.xml
+2026-11-28T02:01:22.2839220Z ##[endgroup]
+2026-11-28T02:01:22.7467690Z With the provided path, there will be 1 file uploaded
+2026-11-28T02:01:22.7469710Z Artifact name is valid!
+2026-11-28T02:01:22.7470220Z Root directory input is valid!
+2026-11-28T02:01:22.9468310Z Uploading artifact: junit-macos-3.zip
+2026-11-28T02:01:22.9468880Z Beginning upload of artifact content to blob storage
+2026-11-28T02:01:23.0128370Z ##[error]Failed to CreateArtifact: Unable to make request: ETIMEDOUT
+2026-11-28T02:01:23.3622880Z Post job cleanup.

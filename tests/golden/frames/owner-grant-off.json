@@ -1,0 +1,12 @@
+{
+  "version": 10,
+  "request_id": "compact-1",
+  "replayed": false,
+  "generation": 0,
+  "lease_valid": null,
+  "outcome": {
+    "type": "error",
+    "code": "owner_grant_off",
+    "message": "this command deletes events and receipts, which needs the owner's own action: set \"owner_grants\": true in $STATE/config.json, run the command again, then set it back to false"
+  }
+}

@@ -54,6 +54,10 @@ a `source_observed` row's `origin`, and a `clock_anchored` row's `wall_ms`
 and `clock_ms`. They are IDs, enums and numbers; the input digest stays out.
 A version 1 reader ignores them, and a version 2 reader decodes a version 1
 row without them (`fixtures/dashboard-events-v2.json` is the golden page).
+The server then drops the paths Git ignores in each row's workspace (its own,
+or its session's), asking `git check-ignore` in the root `/api/state` names
+for it, within 2 s; the row's shape is unchanged, and a workspace whose Git
+doesn't answer keeps its paths, since this only tidies what is drawn.
 `--demo` answers it with 404, and an unreachable coordinator
 with 503 and `available: false`. It reads only a request head of at most
 8 KiB and 64 headers, within 2 s per read and 5 s in total; refuses every other
@@ -102,7 +106,7 @@ LangSpan site's `assets/site.css`, and its header embeds the brand kit's
 lockups from `docs/assets/brand/` line for line; nothing is loaded at run
 time. It changes nothing, and it adds no route, listener or CORS header.
 
-**The Live view (issue #491, in progress).** A second view, with the file
+**The Live view (issue #491).** A second view, with the file
 matrix kept as the other, shows recorded work as it happens. It has no story
 mode: no selected incident, scene tour, caption or panel that opens by
 itself. One renderer serves both the dashboard and the homepage hero (site PR
@@ -112,10 +116,11 @@ the dashboard passes the model of `/api/state` and `/api/events`. The model,
 tested under `node --test`, and returns the hero's data shape without its
 playback fields (`fixtures/live-view-model.json` pins it):
 
-- one lane per local session with a timed step, labelled from its
-  `/api/state` row (task line, harness, shared or own checkout, branch) and
-  never by an ID. Remote sessions are not in the local log, so a remote edit
-  is never a card or a wire;
+- one lane per local session with a timed step, titled by its branch (else
+  its workspace, numbered when several share one) with its harness beneath,
+  from its `/api/state` row, and never by an ID or its task line: that is the
+  agent's prompt, untrusted text. Remote sessions are not in the local log,
+  so a remote edit is never a card or a wire;
 - one card per recorded step: a read, a successful edit (`Edit`, `Write`,
   `MultiEdit`, `NotebookEdit` or `apply_patch`), another successful command,
   a held write with its reason in words, and the held session's next
@@ -129,15 +134,69 @@ playback fields (`fixtures/live-view-model.json` pins it):
 
 A row without a time (`session_registered`, lease events, a `message_sent`
 recorded before messages kept one) is never a card; it goes to the inspector
-in seq order, and the view never invents its time. Daemon times become wall
-times through the newest `clock_anchored` row; `at_ms` is monotonic across
-generations. A page of the feed can hold fewer rows than asked, so the view
+in seq order, and the view never invents its time. A row's daemon time becomes
+a wall time through its own generation's `clock_anchored` row, the newest one
+before it; a row before every anchor read has no time. A page of the feed can hold fewer rows than asked, so the view
 reads until a page comes back empty, at most a bounded number of pages per
 poll. Path text from the feed is data; the renderer places it with
-`textContent`. Later slices of the issue: the renderer ported from the hero
-with its QA checks as layout tests, then the dashboard's Live and Files
-switch, tested against a real coordinator, and then the site's hero loading
-the shared file.
+`textContent`.
+
+The renderer, `src/dashboard-live-view.js` with `src/dashboard-live-view.css`,
+is the hero's (`assets/product-first.js` and `.css` at the PR's merged head)
+with its closure's timing and layout passed in. Its pure part (layout, frame
+state, camera, a held write's framing, a wire's route) is tested under
+`node --test` with the hero's QA checks as geometry, on the hero's recording
+(`fixtures/live-view-hero.json`, an equal copy of its TIMING) and on live
+work, at 1440 and 390 px: no wire crosses a card, a lane's consecutive cards
+are chained, a held wire draws with both ends in view or from an "earlier"
+card or a source chip, card text stays at least 10 px (12 px on a phone)
+under the framing scale, and labels fit the canvas. `mount(root, timing)`
+draws it into the hero's markup. The page carries the model, the renderer and
+the styles inside its one script and one style block, so the policy still
+names two hashes. It differs from the hero in four places:
+
+- **Live pacing.** `LangSpanLive.pace` adds the playback fields from the
+  events alone, with the hero's pacing numbers: each card plays 0.35 s after
+  the one before it, up to 0.45 s for a recorded gap of 30 s or more, and the
+  flow stops 3.2 s for a hold and 1 s for a save. Appending events never
+  moves an earlier card. A live timing plays once and rests at the end of its
+  last stop, so the newest wire is at full strength; new work flows in from
+  the right at the hero's 72 % of the width, and the clock never runs more
+  than 3 s behind the newest card. The first load rests at the newest work.
+  The status line counts lanes and the writes held in the 10 minutes up to
+  now, from the clock anchor.
+- **Many agents (owner, 28 November).** At most 6 lanes show (3 on a phone);
+  the rest scroll vertically, with the names pinned in the gutter. The view
+  opens on the window of lanes with the most cards. A plain wheel scrolls
+  the page until the canvas has focus, then the lanes; Ctrl or Cmd with the
+  wheel zooms, as on the hero. A held write's framing scrolls to show both
+  lanes when they fit, and uses the hero's source chip beside the held card
+  when they don't. A wire between lanes that aren't neighbours passes the
+  lanes between where none of their cards is. Lanes take the hero's three
+  colors in turn.
+- **Glyphs.** The hero draws each verb glyph as a CSS mask of a `data:`
+  image, which the policy's `img-src 'none'` blocks; the renderer draws the
+  same shapes as inline SVG.
+- **Recorded fields only.** A held card's details leave out the hero's quote
+  of LangSpan's reply, because the feed carries no message text. A lane's
+  details list its rows recorded without a time.
+
+The page has a Live and a Files switch: Live is the default once the feed has
+a timed step, and Files is the matrix, without the session's task line or
+intent, which are the agent's prompt: a row names its harness and branch, or
+its workspace. The first read takes only the log's tail, so a long log draws
+at once: the newest seq is found with one-row pages (doubling, then halving,
+about 2·log2 of it), and spans of 1000 seqs are read back from it, each
+read forward page by page to its end, since the store ends a page at
+48 KiB, often well short of 1000 rows, until one reaches a timed row 10 minutes before the newest, the log's start, or 4,000
+rows. The boot's clock anchor is then far back, so the view carries the
+state's newest one as `clock_anchor`, optional and additive: absent before
+one is recorded, and an older view decodes without it. After that the page
+reads `/api/events` from the last `next` after each `/api/state` poll, at
+most 50 pages of 1000 rows a poll, and keeps the newest 4,000 rows and the
+newest clock anchor once it holds more than 6,000. `--demo` shows the Files view
+only. Left for later: the site's hero loading the shared file, in
+Langspan/langspan.github.io.
 
 **Identities for joins.** Overlap rows named their sessions only by shortened
 labels, which collide: two sessions with the same host and first eight
@@ -194,8 +253,8 @@ page is plain HTTP, so anyone on the path can read the token and the view.
 - The counts are what one bounded view reports, not daily totals or measured
   outcomes. Refusals are a lower bound when the store found more than it
   passed. A daily count through `langspan today` remains a possible later
-  addition. The page does not yet read `/api/events`; until the Live view
-  ships, it does not build a chronology from successive polls.
+  addition. The Live view shows the newest 4,000 feed rows at most; earlier
+  work in a long log is not drawn.
 - A binary older than this change cannot decode a newer coordinator's view,
   as with every earlier addition to it; the dashboard and the daemon normally
   run from one binary.

@@ -375,6 +375,7 @@ fn brief(
             deliver: true,
             mid_turn: false,
             changes_only,
+            confirm: false,
             recent: false,
             recent_window_ms: None,
             mcp: false,

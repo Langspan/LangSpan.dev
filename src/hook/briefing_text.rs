@@ -128,6 +128,7 @@ fn briefing(peers: Vec<PeerWork>) -> Briefing {
         left_work: Vec::new(),
         trail: None,
         recent: None,
+        reserved: Vec::new(),
     }
 }
 

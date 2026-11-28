@@ -40,7 +40,7 @@ Limit open work so that each pull request merges quickly:
   today:
   - `protocol`, the wire protocol: `src/protocol.rs` and its clients;
   - `briefing`: `src/briefing.rs` and `src/briefing/`;
-  - `install`: `src/install.rs`, `src/user_install.rs` and `src/install/detect.rs`;
+  - `install`: `src/install.rs`, `src/install/` and `src/user_install.rs`;
   - `cli`, its argument list and flags table: `src/main.rs` and `src/cli/`;
   - `graph`, the source graph: `src/graph.rs`, `src/graph/`,
     `src/index_file.rs` and `crates/langspan-graph`.
@@ -119,8 +119,13 @@ on it while it is open. The issue names the commit, the run, the failing jobs,
 the tests that failed every try (at most 50), the first error lines of the
 failing jobs' logs (at most 15) and the pull requests merged since that
 platform's last green run on `main`. When the platform is green on `main`
-again, the job closes the issue with the green run's link. Nothing is
-reverted automatically. Treat the issue like a failing check on `main` and
+again, the job closes the issue with the green run's link. When no test
+failed and every failing job failed on GitHub's side (an artifact upload or
+cache error, a timed-out connection, a lost runner, by its log's error
+lines), the run's first attempt opens no issue. Instead it starts
+`rerun-failed.yml`, which waits for the run to end and reruns its failed
+jobs once; the rerun reports in the same way, and opens the issue if it
+fails too. Nothing is reverted automatically. Treat the issue like a failing check on `main` and
 fix it the same day. To see the issue a run would file without filing it,
 start `check.yml` by hand with `main_red_dry_run` set to the platform and,
 optionally, `main_red_run` set to the run to report on; the job prints the
@@ -302,7 +307,8 @@ target and what would close it are in
 Locally, `sh scripts/check.sh` runs the full lane, and
 `LANGSPAN_CHECK_LANE=fast sh scripts/check.sh` the fast one. The runners
 come from the repository variables `LINUX_RUNNER` and `MACOS_RUNNER`;
-unset, each job uses GitHub's standard runner.
+unset, each job uses GitHub's standard runner. The Linux benchmark dry
+runs use the [self-hosted runner](#self-hosted-runner) instead.
 
 When a dry run is skipped, the test log shows
 `skipped: no benchmark or briefing change`. A local `sh scripts/check.sh`
@@ -375,7 +381,9 @@ no longer exists, a row whose file measures no production lines, and a file
 of 100 production lines or more without a row. Under 100 lines one line is
 more than a point, so the 2-point margin would be a line or two of noise.
 A nightly run under the floor, or with a failing test, opens or comments on
-the issue "Nightly Rust checks on main failed".
+the issue "Nightly Rust checks on main failed". The suite runs that step's
+own shell against a stand-in `gh`, after a report under the floor, so the
+path is tested without a drop on `main` or a call to GitHub.
 
 To raise the baseline, run `bash scripts/coverage.sh` (or download the
 `coverage` artifact of a run on `main` into `target/coverage`), then
@@ -444,6 +452,53 @@ the check prints the new number; lower the row by hand in the same pull
 request. Return a typed error instead, as `client::ClientError` and
 `git::GitError` do (issue #368).
 
+The test files have one number of their own, checked by the same test in
+Rust rather than by the script: how many files under `tests/`, outside
+`tests/support/`, define their own `fn git(` or `fn hook(`. It may not go
+above `OWN_GIT_OR_HOOK_FILES` in `tests/ratchets.rs`; a failure names the
+files. Use `support::git` for a Git command in a test repository,
+`support::coordinator` to start a coordinator and `support::hook_call` for
+one hook call. When the count falls, the test prints it; lower the
+constant in the same pull request (issue #374).
+
+### Self-hosted runner
+
+The owner runs one Linux machine (8 cores, 16 GB) as a self-hosted runner
+with the labels `self-hosted` and `langspan-trusted`. One slow Linux job
+uses it: the Linux benchmark dry runs (`bench.yml`). Everything in
+`check.yml`, coverage, macOS, releases, fuzzing, Scorecard and the agentic
+workflows stay on GitHub's runners. A runner process takes one job at a
+time, so the four Linux test shards would wait for each other there; on
+GitHub's runners they run side by side. Coverage stays there until a timing
+test it runs passes on the machine: in `tests/report.rs` an admission waits
+about 1.8 s while a report reads (issue #581).
+
+The runner is used only for a trusted event: any event except
+`pull_request`, or a pull request whose branch is in this repository
+(`github.event.pull_request.head.repo.full_name == github.repository`).
+The job picks its runner with one expression, and a pull request from a
+fork gets `ubuntu-24.04`. A fork's pull request runs code from anyone on
+GitHub, and a self-hosted runner keeps its disk, home directory and tool
+installs from one job to the next. Code from a fork could leave something
+behind that a later run on `main` executes, or read what other jobs left on
+the machine. A GitHub runner is a fresh virtual machine for every job, so a
+fork's code can't reach anything after its own job. `tests/ci_workflows.rs`
+checks that only this job names the runner, with that expression, and that
+coverage and the `check.yml` shards don't.
+
+Because the machine keeps its state, the job doesn't assume a fresh one.
+It installs nothing with `sudo` or system-wide. The toolchain comes
+from the runner user's `rustup` (`rustup toolchain install` reads
+`rust-toolchain.toml`). CI tools are downloaded and checked again on every
+run into `~/.cache/langspan-ci-tools`. `actions/checkout` removes untracked
+files, `target/` included, before each job. The dry runs restore
+`check.yml`'s Linux entry with the same key as on GitHub's runners and save
+no cache, so a trusted pull request's run on the machine can't write an
+entry that `main` restores. The runner needs
+`rustup`, `python3`, `curl` and `sha256sum` for its user. It also needs a
+glibc at least as new as Ubuntu 24.04's, because the dry runs restore
+build scripts and dependencies compiled on `ubuntu-24.04`.
+
 ### Repository settings
 
 [`.github/desired-settings.json`](../.github/desired-settings.json) records
@@ -470,28 +525,40 @@ release. While its checks run, hold other merges so they don't restart the
 checks. The project's release app opens the release pull request, so its
 checks run like any other pull request's.
 
-After a release, add its golden stores (ADR 0015): run
-`bash scripts/golden-stores.sh VERSION`, which builds `langspan` from the new
-tag with `--locked` and runs that tag's demonstration with it, then write
-the stores' state snapshots with `LANGSPAN_UPDATE_GOLDEN=1` on
-`tests/golden_stores.rs`, and say in the pull request how the stores were
-made. `every_release_has_a_golden_store_directory` fails for a changelog
-version with no `tests/fixtures/store-VERSION/`, whether or not the release
-changed the event set or the schema. As for the frozen list below, the
-version being released counts only once its `v` tag exists, since its stores
-are built from the tag.
+Each release adds its golden stores (ADR 0015) and its frozen event-type
+list to the tests. Both are made from the tag, so the release pull request
+can't hold them, and the tests never ask them of the version `main` carries
+(`.release-please-manifest.json`, `Cargo.toml`): only of older releases.
+Publishing a release changes no commit, so it turns no pull request red
+(issue #566). The next release pull request raises the version, and from
+then on it fails until the previous release's stores and list are in.
 
-Add its frozen event-type list in the first pull request after the tag,
-since the release pull request can't hold it: copy the sorted `type` of each
-`fixtures/*-event-v10.json` at the new tag into
-`fixtures/event-types/VERSION.txt`, add its row to `RELEASES` in
-`tests/protocol.rs` with the capabilities its requests name, and run
-`python3 scripts/gen-docs.py`. `every_published_release_has_a_frozen_list`
-fails for a changelog version without one. The version being released counts
-only once its `v` tag exists, so the release pull request passes; from the
-tag on, the test fails locally and in the merge queue, which fetch the tags,
-until the list lands. A pull request run has no tags, and checks that version
-from the next release on.
+After publishing, the release workflow's `release-fixtures` job runs
+`bash scripts/release-fixtures.sh VERSION` on the tag, and
+`release-fixtures-pr` opens a pull request with the result, ready for
+review, as the release app so its checks run. The
+script runs `scripts/golden-stores.sh VERSION`, which builds `langspan` from
+the tag with `--locked` and runs that tag's demonstration with it; writes the
+stores' state snapshots with `LANGSPAN_UPDATE_GOLDEN=1` on
+`tests/golden_stores.rs`; copies the sorted `type` of each
+`fixtures/*-event-v10.json` into `fixtures/event-types/VERSION.txt`; and runs
+`python3 scripts/gen-docs.py`. Last, the ignored test `write_the_release_row`
+adds the release's row to `RELEASES` in `tests/protocol.rs`, a copy of the
+newest row, when the release reads the same event types, speaks the same
+protocol version and names the same capabilities; otherwise it fails saying
+which differ (issue #590). To finish the pull request, review the new
+snapshots and merge it. If the job fails, run the script by hand at the
+tag (`git checkout vVERSION`). When only the row is missing, the script has
+written everything else: add the row with the protocol version and the
+capabilities the release's requests name. Then open the pull request
+yourself, saying how the stores were made.
+
+`every_release_has_a_golden_store_directory` fails for a release older than
+the current version with no `tests/fixtures/store-VERSION/`, whether or not
+it changed the event set or the schema. `every_published_release_has_a_frozen_list`
+fails for one without `fixtures/event-types/VERSION.txt` or a `RELEASES`
+row, and for a list without a row. Neither reads the tags, so a run gives the
+same result with or without them.
 
 Before 1.0, a breaking change (`feat!:`) raises the minor version.
 [CONTRIBUTING.md](../CONTRIBUTING.md) lists how each title type affects the

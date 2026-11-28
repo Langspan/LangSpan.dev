@@ -428,7 +428,7 @@ pub fn shrink_status(
 /// One entry of the state, as `status --all` pages it. `key` is the entry's
 /// key in its state map; list entries are given in their order.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StatusRecord {
     Workspace {
         key: String,

@@ -4,6 +4,9 @@
 //! `fixtures/cursor-constructed`: built from Cursor's documentation and the
 //! installed CLI, not captured from a Cursor run (see their README).
 
+mod support;
+use support::git;
+
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -30,18 +33,6 @@ struct Run {
     detail: String,
     stdout: String,
     reply: Option<Value>,
-}
-
-fn git(root: &Path, arguments: &[&str]) {
-    let output = Process::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(arguments)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "git {arguments:?}: {output:?}");
 }
 
 /// A constructed fixture with its placeholder root replaced by `root`.

@@ -140,6 +140,10 @@ pub fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(
             session_id,
             forgotten,
         } => println!("Session {session_id}: {forgotten} briefing item(s) will be told again."),
+        Outcome::ToldConfirmed {
+            session_id,
+            confirmed,
+        } => println!("Session {session_id}: {confirmed} briefing item(s) now told."),
         // Intents and admissions
         Outcome::Intent { intent } => println!(
             "Intent for {}: {} on {:?}.",
