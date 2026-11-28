@@ -161,7 +161,7 @@ Fixed on `main` since the validation:
   ([ADR 0026](adr/0026-commit-guard-and-commit-mine.md)). Tested with two
   sessions' real hooks adding adjacent list entries in both orders, real Git
   and a real daemon (`tests/commit_guard.rs`), and the exactness check
-  against a real temporary repository's index (`src/commit.rs`); the dogfood
+  against a real temporary repository's index (`src/ownership/commit.rs`); the dogfood
   run in a shared checkout is pending.
 - Issue #40 (B27): `langspan status --mine` and MCP `langspan_my_changes`
   list this session's uncommitted files and hunks, each `mine`, `mixed` or

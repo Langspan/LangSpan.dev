@@ -67,10 +67,10 @@ pub mod user_install;
 
 // ownership
 pub mod adopt;
-pub mod commit;
 pub mod formatter;
 pub mod journal;
 mod lines;
+mod ownership;
 mod reformat;
 
 // checks
@@ -127,3 +127,4 @@ use hosts::tool_names;
 use hosts::vendor;
 use ids::registration;
 use ids::sha256;
+pub use ownership::commit;
