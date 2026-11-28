@@ -1117,6 +1117,11 @@ pub(crate) fn render_peers_placed(
             line.push_str(" (process no longer confirmed running)");
         }
         line.push(':');
+        // The same task first (issue #537), so a shortened line keeps it;
+        // the peer's task line, kept for it, comes after its files.
+        if peer.same_task {
+            line.push_str(" same task as yours: take a different part or agree who does it;");
+        }
         // Shared files first: they are what the reader most needs if the
         // line has to be shortened. Each path's end is kept, to tell which
         // a cut left out.

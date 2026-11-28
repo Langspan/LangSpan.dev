@@ -1,0 +1,98 @@
+[package]
+name = "langspan-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Its own workspace, so the targets add nothing to the main Cargo.lock.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "=0.4.12"
+langspan = { path = ".." }
+langspan-graph = { path = "../crates/langspan-graph" }
+serde_json = { version = "=1.0.154", features = ["preserve_order"] }
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "socket_frame"
+path = "fuzz_targets/socket_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "index_import"
+path = "fuzz_targets/index_import.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "test_output"
+path = "fuzz_targets/test_output.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "codex_patch"
+path = "fuzz_targets/codex_patch.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "graph_rust"
+path = "fuzz_targets/graph_rust.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "graph_python"
+path = "fuzz_targets/graph_python.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "graph_typescript"
+path = "fuzz_targets/graph_typescript.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "graph_tsx"
+path = "fuzz_targets/graph_tsx.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "graph_go"
+path = "fuzz_targets/graph_go.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "graph_java"
+path = "fuzz_targets/graph_java.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "graph_csharp"
+path = "fuzz_targets/graph_csharp.rs"
+test = false
+doc = false
+bench = false

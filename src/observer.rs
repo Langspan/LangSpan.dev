@@ -517,7 +517,7 @@ fn git_output(
         "core.untrackedCache=false",
     ];
     safe_args.extend_from_slice(args);
-    crate::git::output(root, &safe_args, deadline, limit)
+    crate::git::output(root, &safe_args, deadline, limit).map_err(String::from)
 }
 
 #[derive(PartialEq, Eq)]
