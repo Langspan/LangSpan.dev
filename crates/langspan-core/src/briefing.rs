@@ -20,13 +20,13 @@ use crate::{
     INFLIGHT_CANDIDATES, INFLIGHT_LINES, INFLIGHT_MENTIONS, InflightNotice, InflightSymbol,
     InterfaceImpact, LeftWork, LivenessStatus, MAX_TOLD, MAX_TRAILS, MESSAGE_BRIEF_BYTES, Message,
     Note, NoticeVia, Outcome, PRESENCE_PATHS, PresencePath, REMOTE_HORIZON_MS, RecentChanges,
-    Recipient, RemotePeerWork, RetractedMessage, Session, SessionActivity, StaleRead, State,
-    TRAIL_BYTES, Trail, TrailView, UNCOORDINATED_LINE_LIMIT, UncoordinatedNotice, activity_mut,
-    anchors, concerned_paths, current_session, error, fingerprint, fingerprint_u64, inflight_cost,
-    inflight_key, inflight_notice, inflight_told, interface_impacts, is_false, is_zero,
-    known_session, known_versions, last_peer_edit, left_work, message_cost, owed_to,
-    presence_setting, recent, related_workspace, retracted_cost, takes_handoff, told_notices,
-    trail, uncoordinated_owed, validate_known_workspace, work_paths,
+    Recipient, RemotePeerWork, Reservation, RetractedMessage, Session, SessionActivity, StaleRead,
+    State, TRAIL_BYTES, Trail, TrailView, UNCOORDINATED_LINE_LIMIT, UncoordinatedNotice,
+    activity_mut, anchors, concerned_paths, current_session, error, fingerprint, fingerprint_u64,
+    inflight_cost, inflight_key, inflight_notice, inflight_told, interface_impacts, is_false,
+    is_zero, known_session, known_versions, last_peer_edit, left_work, message_cost, owed_to,
+    presence_setting, recent, related_workspace, reservations, retracted_cost, takes_handoff,
+    told_notices, trail, uncoordinated_owed, validate_known_workspace, work_paths,
 };
 
 /// The signature of a briefing with nothing in it.
@@ -215,6 +215,10 @@ pub struct Briefing {
     /// for at session start (roadmap C3). Never part of the signature.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recent: Option<RecentChanges>,
+    /// Numbers other running sessions of this repository reserved (ADR
+    /// 0040), newest first, at most `BRIEF_RESERVATIONS`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reserved: Vec<Reservation>,
 }
 
 // Ties go to the lexically smallest session, so the result is deterministic.
@@ -792,6 +796,13 @@ fn brief(
     for stale in &stale_reads {
         signature.push_str(&format!("stale|{}|{}\n", stale.path, stale.session_id));
     }
+    let reserved = reservations::peer_claims(state, session_id, &me.workspace_id);
+    for claim in &reserved {
+        signature.push_str(&format!(
+            "reserved|{}|{}|{}\n",
+            claim.key, claim.number, claim.session_id
+        ));
+    }
     // A peer listed only for where it looked is presence, not work.
     for peer in peers.iter().filter(|peer| !presence_only(peer)) {
         signature.push_str(&peer.session_id);
@@ -876,6 +887,7 @@ fn brief(
                 .into_iter()
                 .collect(),
             recent: None,
+            reserved,
         },
         signature,
         inflight_keys,
@@ -985,6 +997,15 @@ fn note_key(note: &Note) -> u64 {
     ])
 }
 
+fn reserved_key(claim: &Reservation) -> u64 {
+    item_key(&[
+        "reserved",
+        &claim.key,
+        &claim.number.to_string(),
+        &claim.session_id,
+    ])
+}
+
 fn checkout_key(change: &CheckoutNotice) -> u64 {
     item_key(&[
         "checkout",
@@ -1042,6 +1063,7 @@ pub fn briefing_keys(briefing: &Briefing) -> Vec<u64> {
         }
     }
     keys.extend(briefing.remote.iter().map(remote_work_key));
+    keys.extend(briefing.reserved.iter().map(reserved_key));
     keys
 }
 
@@ -1153,7 +1175,11 @@ fn keep_changes(
     briefing
         .remote
         .retain(|remote| keep(remote_work_key(remote), false));
+    briefing
+        .reserved
+        .retain(|claim| keep(reserved_key(claim), false));
     let other_news = work_news
+        || !briefing.reserved.is_empty()
         || once
         || !briefing.stale_reads.is_empty()
         || !briefing.checkout_changes.is_empty()
@@ -1190,6 +1216,7 @@ fn shown_anything(briefing: &Briefing) -> bool {
         || !briefing.inflight.is_empty()
         || !briefing.notes.is_empty()
         || !briefing.checkout_changes.is_empty()
+        || !briefing.reserved.is_empty()
 }
 
 /// Bytes in the presence part of a briefing signature: with the work

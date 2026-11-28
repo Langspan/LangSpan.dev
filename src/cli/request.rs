@@ -72,6 +72,16 @@ pub(crate) fn request(
             ["intent", "end", session] => Command::IntentEnd {
                 session_id: (*session).into(),
             },
+            ["reserve", session, key, after @ ..] if after.len() <= 1 => Command::Reserve {
+                session_id: (*session).into(),
+                key: (*key).into(),
+                after: after
+                    .first()
+                    .map(|n| n.parse())
+                    .transpose()
+                    .map_err(|_| "AFTER must be an unsigned integer, the highest number you see")?
+                    .unwrap_or(0),
+            },
             ["admit", session, paths @ ..] if !paths.is_empty() => Command::Admit {
                 session_id: (*session).into(),
                 paths: paths.iter().map(|p| (*p).into()).collect(),

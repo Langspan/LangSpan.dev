@@ -95,6 +95,9 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         dropped_messages: _,
         presence,
         adoptions,
+        // Briefings carry other sessions' claims (ADR 0040); the snapshot
+        // keeps the counters. Never part of the status reply.
+        reservations: _,
         // Derived for the status line; never part of the status reply.
         clock_anchor: _,
         refusals: _,
@@ -203,6 +206,7 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
             .map(|(from, adoption)| (from.clone(), adoption.clone()))
             .collect(),
         sessions: shown_sessions.clone(),
+        reservations: BTreeMap::new(),
         clock_anchor: None,
         refusals: Vec::new(),
         path_refusals: Vec::new(),

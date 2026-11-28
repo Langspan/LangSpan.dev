@@ -34,6 +34,7 @@ vectors! {
     ToldConfirmed => "told-confirmed-outcome-v10.json",
     Intent => "intent-outcome-v10.json",
     IntentEnded => "intent-ended-outcome-v10.json",
+    Reserved => "reserved-outcome-v10.json",
     Admitted => "admitted-outcome-v10.json",
     Conflict => "conflict-outcome-v10.json",
     Completed => "completed-outcome-v10.json",

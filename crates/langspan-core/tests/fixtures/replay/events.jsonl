@@ -105,3 +105,4 @@
 {"type":"clock_anchored","anchor":{"generation":2,"clock_ms":0,"wall_ms":1795000100000}}
 {"type":"session_registered","session":{"session_id":"bob","workspace_id":"work","generation":2}}
 {"type":"session_seen","session_id":"bob","at_ms":11,"generation":2}
+{"type":"reserved","reservation":{"scope":"repo","key":"adr","number":40,"session_id":"bob","workspace_id":"work","at_ms":12}}

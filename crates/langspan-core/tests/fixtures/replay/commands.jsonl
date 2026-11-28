@@ -125,3 +125,4 @@
 {"event":{"type":"clock_anchored","anchor":{"generation":2,"clock_ms":0,"wall_ms":1795000100000}}}
 {"id":"ses-bob-2","at_ms":10,"command":{"op":"session_register","session_id":"bob","workspace_id":"work"}}
 {"id":"seen-bob","at_ms":11,"command":{"op":"session_seen","session_id":"bob"}}
+{"id":"reserve-bob","at_ms":12,"command":{"op":"reserve","session_id":"bob","key":"adr","after":39}}

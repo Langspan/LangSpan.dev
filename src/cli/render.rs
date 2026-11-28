@@ -152,6 +152,18 @@ pub fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(
             intent.paths
         ),
         Outcome::IntentEnded { session_id } => println!("Intent ended for {session_id}."),
+        Outcome::Reserved { reservation, held } => {
+            println!(
+                "Reserved {} {} for session {}. No other session of this repository is given it.",
+                reservation.key, reservation.number, reservation.session_id
+            );
+            for claim in held {
+                println!(
+                    "Also held: {} {} by session {} in workspace {}.",
+                    claim.key, claim.number, claim.session_id, claim.workspace_id
+                );
+            }
+        }
         Outcome::Admitted { lease } => println!(
             "Admission {}: holder {}, files {:?}, generation {}, current validity {}. Expires at {} ms of that daemon generation.",
             lease.lease_id,

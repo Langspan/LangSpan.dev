@@ -88,6 +88,7 @@ impl Command {
             | Command::ConfirmTold { .. }
             | Command::IntentSet { .. }
             | Command::IntentEnd { .. }
+            | Command::Reserve { .. }
             | Command::Admit { .. }
             | Command::AdmitTool { .. }
             | Command::ObserveSource { .. }

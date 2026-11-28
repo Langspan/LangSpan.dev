@@ -344,6 +344,7 @@ cases! {
     ToldConfirmed => "confirm told",
     Intent => "intent set",
     IntentEnded => "intent end",
+    Reserved => "reserve",
     Admitted => "admit",
     Conflict => "admit, conflict",
     Completed => "complete",
@@ -837,6 +838,15 @@ fn transcript_of_the_coordination_commands() {
         "r-o4",
         json!({"op": "observe_workspace_git", "workspace_id": "w", "repository_id": "repository-one",
             "branch_ref": "refs/heads/main"}),
+    );
+    // After the repository ID is fixed: a counter counts per repository.
+    t.case(
+        "reserve",
+        &["reserve", "s1", "adr", "39", "--request-id", "r-r1"],
+    );
+    t.case(
+        "reserve, held by another session",
+        &["reserve", "s2", "adr", "--request-id", "r-r2"],
     );
     let note = t.case(
         "remember",

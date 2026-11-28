@@ -2525,6 +2525,57 @@ fn peer_callers_reach_only_a_client_with_the_rename_holds_capability() {
     assert_eq!(encode(&request).unwrap(), earlier);
 }
 
+/// ADR 0040: a briefing's `reserved` claims and the `reserved` event reach
+/// only a client with `reservations`, which no frozen version has, and a
+/// `reserve` request is not sent to a daemon without it.
+#[test]
+fn reservations_reach_only_a_client_with_the_reservations_capability() {
+    let with = include_bytes!("../fixtures/capabilities/reservations/with.json");
+    let without = include_bytes!("../fixtures/capabilities/reservations/without.json");
+    let response: Response = serde_json::from_slice(with).unwrap();
+    let all = Capabilities::ALL.names();
+    assert_eq!(
+        encode_with(Capabilities::ALL, Some(&all), &response).unwrap(),
+        with
+    );
+    let others: Vec<String> = all
+        .iter()
+        .filter(|name| *name != "reservations")
+        .cloned()
+        .collect();
+    let granted = Capabilities::negotiate(PROTOCOL_VERSION, Some(&others));
+    assert_eq!(
+        String::from_utf8(encode_with(granted, Some(&others), &response).unwrap()).unwrap(),
+        String::from_utf8_lossy(without)
+    );
+    for version in OLDEST_PROTOCOL_VERSION..=PROTOCOL_VERSION {
+        let text = String::from_utf8(encode_for(version, &response).unwrap()).unwrap();
+        assert!(!text.contains("\"reserved\""), "{version}: {text}");
+    }
+
+    let event: langspan_core::Event =
+        serde_json::from_slice(include_bytes!("../fixtures/reserved-event-v10.json")).unwrap();
+    let page = answer(langspan_core::Outcome::Events {
+        events: vec![langspan_core::RecordedEvent {
+            seq: 1,
+            event: event.clone(),
+        }],
+    });
+    let shown: serde_json::Value =
+        serde_json::from_slice(&encode_with(granted, Some(&others), &page).unwrap()).unwrap();
+    assert_eq!(event_types(&shown).len(), 0, "{shown}");
+    assert_eq!(shown["withheld"], 1, "{shown}");
+    let shown: serde_json::Value =
+        serde_json::from_slice(&encode_with(Capabilities::ALL, Some(&all), &page).unwrap())
+            .unwrap();
+    assert!(event_types(&shown).contains("reserved"), "{shown}");
+
+    let wire = include_bytes!("../fixtures/reserve-command-v10.json");
+    let request: Request = serde_json::from_slice(wire).unwrap();
+    assert!(fits_with(Capabilities::ALL, &request.command));
+    assert!(!fits_with(granted, &request.command));
+}
+
 /// Issue #531: a hook's briefing is told only once the hook confirms it,
 /// with `confirmed_briefings`, which no frozen version has. A daemon
 /// without it is asked as before, told when decided, and is never sent a

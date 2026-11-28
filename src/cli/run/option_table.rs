@@ -55,6 +55,7 @@ pub(crate) const COMMANDS: &[&str] = &[
     "session attach-pid s1 PID --request-id r1",
     "intent set s1 a.rs --request-id r1",
     "intent end s1 --request-id r1",
+    "reserve s1 adr 39 --request-id r1",
     "admit s1 a.rs --request-id r1",
     "complete s1 l1 --request-id r1",
     "brief s1 --request-id r1",

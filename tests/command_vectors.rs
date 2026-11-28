@@ -42,6 +42,7 @@ vectors! {
         ConfirmTold => "confirm-told-command-v10.json",
         IntentSet => "intent-set-command-v10.json",
         IntentEnd => "intent-end-command-v10.json",
+        Reserve => "reserve-command-v10.json",
         Admit => "admit-command-v10.json",
         AdmitTool => "admit-tool-command-v10.json",
         ObserveSource => "observe-source-command-v10.json",

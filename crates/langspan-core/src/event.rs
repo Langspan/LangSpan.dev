@@ -10,9 +10,9 @@ use crate::{
     CheckoutRun, ClockAnchor, Delivery, DiskObservation, Intent, InterfaceNotice, KeptTests,
     Landing, LandingAttempt, Lease, LeftQueue, Message, Note, NoteAnchor, NoticeVia, Observation,
     ObservedFile, Policy, PolicyCase, PresenceKind, PresenceSetting, RefusalKind, RemoteLink,
-    RemotePeer, ScanCoverage, ScanFailure, Session, SessionLiveness, SettledOutcome, SourceOrigin,
-    Stamp, TestResults, Trail, Turn, TurnWaiter, UncoordinatedChange, UninstalledHost, WaitResult,
-    Workspace, WorkspaceGit, WorktreeFile, is_false,
+    RemotePeer, Reservation, ScanCoverage, ScanFailure, Session, SessionLiveness, SettledOutcome,
+    SourceOrigin, Stamp, TestResults, Trail, Turn, TurnWaiter, UncoordinatedChange,
+    UninstalledHost, WaitResult, Workspace, WorkspaceGit, WorktreeFile, is_false,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -126,6 +126,10 @@ pub enum Event {
     },
     IntentEnded {
         session_id: String,
+    },
+    /// A session took the next number of a counter (ADR 0040).
+    Reserved {
+        reservation: Reservation,
     },
     LeaseGranted {
         lease: Lease,

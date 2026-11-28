@@ -32,6 +32,7 @@ mod refusal_outcome;
 mod remote;
 mod rename_holds;
 mod report;
+mod reservations;
 mod route;
 mod sessions;
 mod shared;
@@ -107,6 +108,8 @@ pub use report::{
     ReportKnown, ReportQuery, ReportSession, host_kind, known_sessions, open_intents, report,
     session_workspaces,
 };
+pub(crate) use reservations::Counter;
+pub use reservations::{MAX_RESERVATION_KEYS, Reservation};
 pub use route::Route;
 pub use sessions::*;
 pub(crate) use shared::*;
@@ -712,6 +715,11 @@ fn decide_checked(
             summary,
         } => sessions::decide_intent_set(state, session_id, paths, summary),
         Command::IntentEnd { session_id } => sessions::decide_intent_end(state, session_id),
+        Command::Reserve {
+            session_id,
+            key,
+            after,
+        } => reservations::decide_reserve(state, session_id, key, *after, now_ms),
         // The summary is the adapter's one line; the digests let it learn,
         // without any peer's words, whether a live peer's prompt began the
         // same way, so that it can name this prompt by where it differs.
@@ -1119,6 +1127,7 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
         } => sessions::apply_session_seen(state, session_id, at_ms, generation)?,
         Event::IntentSet { intent } => sessions::apply_intent_set(state, intent)?,
         Event::IntentEnded { session_id } => sessions::apply_intent_ended(state, session_id)?,
+        Event::Reserved { reservation } => reservations::apply_reserved(state, reservation)?,
         Event::SessionPrompted {
             session_id,
             summary,

@@ -278,6 +278,7 @@ fn covering_line(event: &Event) -> usize {
         Event::SessionSeen { .. } => 13,
         Event::IntentSet { .. } => 17,
         Event::IntentEnded { .. } => 94,
+        Event::Reserved { .. } => 108,
         Event::LeaseGranted { .. } => 25,
         Event::LeaseCompleted { .. } => 30,
         Event::LeaseExpired { .. } => 37,

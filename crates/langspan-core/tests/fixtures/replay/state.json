@@ -444,6 +444,23 @@
         "workspace_id": "work"
       }
     },
+    "reservations": {
+      "repo": {
+        "adr": {
+          "claims": [
+            {
+              "at_ms": 12,
+              "key": "adr",
+              "number": 40,
+              "scope": "repo",
+              "session_id": "bob",
+              "workspace_id": "work"
+            }
+          ],
+          "highest": 40
+        }
+      }
+    },
     "scan_coverage": {
       "work": {
         "omitted": 0,

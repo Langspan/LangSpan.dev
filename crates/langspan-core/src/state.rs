@@ -8,10 +8,11 @@ use serde::{Deserialize, Serialize};
 // already allows.
 use crate::{
     Adoption, AutoCheck, BTreeMap, CheckNotice, CheckRecord, CheckoutChange, CheckoutRun,
-    ClockAnchor, Intent, InterfaceNotice, KeptTests, Landing, Lease, Message, Note, PathRefusal,
-    PresenceSetting, RecentRefusal, RemoteLink, RemotePeer, Rename, RetractedMessage, ScanCoverage,
-    ScanFailure, Session, SessionActivity, SessionLiveness, TestLearning, Trail, Turn, TurnWaiter,
-    UncoordinatedChange, UninstalledHost, UnsettledRefusal, Workspace, WorkspaceGit, WriteRun,
+    ClockAnchor, Counter, Intent, InterfaceNotice, KeptTests, Landing, Lease, Message, Note,
+    PathRefusal, PresenceSetting, RecentRefusal, RemoteLink, RemotePeer, Rename, RetractedMessage,
+    ScanCoverage, ScanFailure, Session, SessionActivity, SessionLiveness, TestLearning, Trail,
+    Turn, TurnWaiter, UncoordinatedChange, UninstalledHost, UnsettledRefusal, Workspace,
+    WorkspaceGit, WriteRun,
 };
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -111,6 +112,9 @@ pub struct State {
     /// the ended session's ID (issue #161). One adoption per ended session.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub adoptions: BTreeMap<String, Adoption>,
+    /// Reserved numbers per repository, then key (ADR 0040); not in `status`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) reservations: BTreeMap<String, BTreeMap<String, Counter>>,
     /// Recorded renames per workspace, newest first, at most `MAX_RENAMES`
     /// (roadmap D7): what `graph symbol --renamed` follows. A name defined
     /// again is dropped. Derived on replay; not part of the status reply.

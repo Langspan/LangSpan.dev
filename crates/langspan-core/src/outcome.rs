@@ -11,10 +11,10 @@ use crate::{
     InterfaceImpact, InterfaceNotice, Landing, Lease, MapArea, MapEdge, Message, MessageStatus,
     NameContext, NameRef, Note, Observation, OutlineEntry, PeerCallers, PolicyRow, PresenceSetting,
     Publication, QueuedLanding, Recall, Recap, RecordedEvent, RefusalCount, RemoteLink, Rename,
-    Report, ScanFailure, ScanSummary, SentPublication, Session, SessionLiveness, ShownMessage,
-    StaleFile, State, StatusLine, StatusRecord, StatusSummary, SymbolPath, SymbolRef, Today,
-    TrailView, Turn, Workspace, WorkspaceEnding, WorkspaceGit, WorkspaceKept, WorkspaceSummary,
-    WriteCheck, WrittenLines, is_false, is_zero,
+    Report, Reservation, ScanFailure, ScanSummary, SentPublication, Session, SessionLiveness,
+    ShownMessage, StaleFile, State, StatusLine, StatusRecord, StatusSummary, SymbolPath, SymbolRef,
+    Today, TrailView, Turn, Workspace, WorkspaceEnding, WorkspaceGit, WorkspaceKept,
+    WorkspaceSummary, WriteCheck, WrittenLines, is_false, is_zero,
 };
 
 // One reply per request, built and sent once: its size does not matter, and
@@ -83,6 +83,12 @@ pub enum Outcome {
     },
     IntentEnded {
         session_id: String,
+    },
+    /// The number taken, and the other running sessions' claims of the
+    /// same counter, newest first.
+    Reserved {
+        reservation: Reservation,
+        held: Vec<Reservation>,
     },
     Admitted {
         lease: Lease,

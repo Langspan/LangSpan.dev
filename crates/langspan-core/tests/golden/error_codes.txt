@@ -34,6 +34,7 @@ invalid_graph_context
 invalid_hosts
 invalid_id
 invalid_input_digest
+invalid_key
 invalid_landing
 invalid_left
 invalid_limit
@@ -44,6 +45,7 @@ invalid_move
 invalid_name
 invalid_note
 invalid_notice
+invalid_number
 invalid_overwrites
 invalid_participant
 invalid_path
@@ -104,6 +106,7 @@ report_unavailable
 request_id_conflict
 response_too_large
 root_derived_id
+scope_unknown
 secret_in_command
 secret_in_test_name
 sender_not_in_workspace
@@ -122,6 +125,7 @@ symbol_ambiguous
 symbol_not_found
 too_many_attempts
 too_many_inputs
+too_many_keys
 too_many_paths
 too_many_related_operations
 too_many_verified_overlaps

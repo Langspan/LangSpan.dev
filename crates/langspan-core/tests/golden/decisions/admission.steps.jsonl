@@ -41,3 +41,8 @@
 {"name":"admit-bob-after-expiry","now_ms":200000,"command":{"op":"admit","session_id":"codex.bob","paths":["src/ui.rs"],"ttl_ms":60000}}
 {"name":"intent-end-alice","now_ms":200100,"command":{"op":"intent_end","session_id":"claude-code.alice"}}
 {"name":"intent-end-unknown-session","now_ms":200200,"command":{"op":"intent_end","session_id":"codex.nobody"}}
+{"name":"reserve-before-scan","now_ms":200210,"command":{"op":"reserve","session_id":"claude-code.alice","key":"adr","after":39}}
+{"name":"scan-app-outside-git","now_ms":200220,"command":{"op":"observe_scan","workspace_id":"app","failure":"the workspace is not a Git working tree"}}
+{"name":"reserve-alice","now_ms":200300,"command":{"op":"reserve","session_id":"claude-code.alice","key":"adr","after":39}}
+{"name":"reserve-bob-held","now_ms":200400,"command":{"op":"reserve","session_id":"codex.bob","key":"adr"}}
+{"name":"reserve-invalid-key","now_ms":200500,"command":{"op":"reserve","session_id":"codex.bob","key":"ADR 41"}}

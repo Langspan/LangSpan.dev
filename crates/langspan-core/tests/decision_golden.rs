@@ -368,7 +368,7 @@ cases! {
         SetPresence, SessionStop, SessionEnd, Adopt,
     ],
     "admission" => [
-        IntentSet, IntentEnd, Admit, AdmitTool, Holders, RecordWait, RecordRefusal, Policy,
+        IntentSet, IntentEnd, Reserve, Admit, AdmitTool, Holders, RecordWait, RecordRefusal, Policy,
         SetPolicy, ObserveSource, OutlineRead, Observe, ObserveTool, ObserveToolBatch, Complete,
     ],
     "observation" => [

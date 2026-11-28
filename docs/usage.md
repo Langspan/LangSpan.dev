@@ -177,6 +177,7 @@ time:
 | `invalid_hosts` | No | A host name or host list is invalid. |
 | `invalid_id` | No | An ID is not 1 to 128 ASCII letters, digits, dots, underscores or hyphens. |
 | `invalid_input_digest` | No | A tool input digest is not 64 hexadecimal characters. |
+| `invalid_key` | No | A reservation key is not 1 to 64 lowercase ASCII letters, digits, dots, underscores or hyphens. |
 | `invalid_landing` | No | A landing records too many commits. |
 | `invalid_left` | No | A briefing names too many sessions that left work. |
 | `invalid_limit` | No | A count, window or limit is out of its range. |
@@ -187,6 +188,7 @@ time:
 | `invalid_name` | No | A definition or symbol name is invalid. |
 | `invalid_note` | No | A note is too long or names too many files. |
 | `invalid_notice` | No | An interface notice or change is malformed. |
+| `invalid_number` | No | The number a reservation counts after is too large to count past. |
 | `invalid_overwrites` | No | A write's overwritten files are invalid. |
 | `invalid_participant` | No | A participant ID or name is invalid. |
 | `invalid_path` | No | A path is not a normalized relative path, is repeated, or is missing. |
@@ -247,6 +249,7 @@ time:
 | `request_id_conflict` | No | The request ID belongs to a different command; use a new ID. |
 | `response_too_large` | No | The response exceeds 64 KiB; page it or ask for less. |
 | `root_derived_id` | No | User-level hooks derive the workspace's ID from its old root, which still exists; move or delete that checkout first. |
+| `scope_unknown` | New ID | The workspace has not been scanned yet, so its repository is unknown; reserve again in a few seconds. |
 | `secret_in_command` | No | The command holds what looks like a secret and was not recorded. |
 | `secret_in_test_name` | No | A test name holds what looks like a secret. |
 | `sender_not_in_workspace` | No | The sending or withdrawing session belongs to another workspace. |
@@ -265,6 +268,7 @@ time:
 | `symbol_not_found` | No | No indexed definition has that name. |
 | `too_many_attempts` | No | A push turn records at most 3 landing attempts. |
 | `too_many_inputs` | No | A check or landing combines too many commits. |
+| `too_many_keys` | No | The repository already counts 256 reservation keys; reserve under an existing key. |
 | `too_many_paths` | No | A request names too many paths. |
 | `too_many_related_operations` | No | A disk observation correlates too many operations. |
 | `too_many_verified_overlaps` | No | A registration verifies too many overlapping workspaces. |

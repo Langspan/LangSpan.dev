@@ -296,6 +296,7 @@ fn long_peer_briefing() -> Briefing {
         left_work: Vec::new(),
         trail: None,
         recent: None,
+        reserved: Vec::new(),
     }
 }
 

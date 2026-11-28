@@ -47,6 +47,7 @@ pub fn authority(command: &Command) -> Authority {
         | Command::ConfirmTold { .. }
         | Command::IntentSet { .. }
         | Command::IntentEnd { .. }
+        | Command::Reserve { .. }
         | Command::Admit { .. }
         | Command::AdmitTool { .. }
         | Command::ObserveSource { .. }
