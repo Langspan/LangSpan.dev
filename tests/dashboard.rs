@@ -3,13 +3,16 @@
 //! sessions driven through the real hook executable, and requests made over
 //! real TCP: who may read it, what it shows, and what it refuses.
 
+mod support;
+use support::git;
+
 use serde_json::{Value, json};
 use std::{
     fs,
     io::{BufRead, BufReader, Read, Write},
     net::TcpStream,
     os::unix::fs::PermissionsExt,
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::{Child, Command as Process, Stdio},
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
@@ -25,26 +28,6 @@ struct Fixture {
     base: PathBuf,
     daemon: Option<Child>,
     dashboard: Option<Child>,
-}
-
-fn git(root: &Path, args: &[&str]) {
-    let output = Process::new("git")
-        .arg("-C")
-        .arg(root)
-        .args([
-            "-c",
-            "user.name=LangSpan test",
-            "-c",
-            "user.email=test@example.invalid",
-        ])
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
 }
 
 struct Http {

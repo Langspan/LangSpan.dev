@@ -3226,6 +3226,126 @@ fn coverage_fails_under_the_total_floor_or_two_points_under_any_row() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// Runs the `run:` block of coverage.yml's nightly-report step with bash, as
+/// GitHub runs it, against a stand-in gh first on PATH. `open` is what the
+/// step's `gh issue list --jq` prints: the open issue's number, or nothing.
+/// Returns each gh call, one argument per line inside brackets. A process
+/// test: what it verifies is the workflow's own shell driving gh, so the
+/// failure path is shown without a coverage drop on main or a GitHub call.
+fn nightly_coverage_report(open: &str) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let report = job(&workflow("coverage.yml"), "nightly-report");
+    // Each `${{ }}` value the step reads is set below; one more would go
+    // unset here, so the test names it.
+    let env: Vec<&str> = report
+        .lines()
+        .skip_while(|line| *line != "        env:")
+        .skip(1)
+        .take_while(|line| line.starts_with("          "))
+        .collect();
+    let keys: Vec<&str> = env
+        .iter()
+        .filter_map(|line| line.trim().split(':').next())
+        .collect();
+    assert_eq!(
+        keys,
+        ["GH_TOKEN", "GH_REPO", "TITLE", "RUN_URL", "SHA"],
+        "nightly-report's step env changed; set the new value in this test"
+    );
+    let title = env
+        .iter()
+        .find_map(|line| line.trim().strip_prefix("TITLE: "))
+        .unwrap();
+    let script: String = report
+        .lines()
+        .skip_while(|line| *line != "        run: |")
+        .skip(1)
+        .take_while(|line| line.is_empty() || line.starts_with("          "))
+        .map(|line| format!("{}\n", line.get(10..).unwrap_or("")))
+        .collect();
+    assert!(script.contains("gh issue"), "{script}");
+
+    let dir = temp_dir("coverage-nightly-report");
+    let bin = dir.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::write(
+        bin.join("gh"),
+        "#!/usr/bin/env bash\nset -euo pipefail\n\
+         { echo call; for a in \"$@\"; do printf '[%s]\\n' \"$a\"; done; } >>\"$GH_STUB_LOG\"\n\
+         if [ \"$1 $2\" = \"issue list\" ]; then printf '%s' \"$GH_STUB_OPEN\"; fi\n",
+    )
+    .unwrap();
+    fs::set_permissions(bin.join("gh"), fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(dir.join("step.sh"), script).unwrap();
+    let log = dir.join("calls");
+    let out = Command::new("bash")
+        .args(["--noprofile", "--norc", "-eo", "pipefail"])
+        .arg(dir.join("step.sh"))
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .env("GH_STUB_LOG", &log)
+        .env("GH_STUB_OPEN", open)
+        .env_remove("GH_TOKEN")
+        .env("GH_REPO", "o/r")
+        .env("TITLE", title)
+        .env("RUN_URL", "https://github.com/o/r/actions/runs/200")
+        .env("SHA", "abc123")
+        .output()
+        .expect("bash runs the nightly-report step");
+    let calls = fs::read_to_string(&log).unwrap_or_default();
+    let _ = fs::remove_dir_all(&dir);
+    assert!(
+        out.status.success(),
+        "{}{calls}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    calls
+}
+
+#[test]
+fn a_nightly_coverage_drop_opens_the_nightly_issue_or_comments_on_it() {
+    // A summary under the floor fails the report, which coverage.sh exits
+    // with, so the coverage job fails and nightly-report runs.
+    let dir = temp_dir("coverage-nightly-drop");
+    let files = eleven(
+        Measured("src/f00.rs", 4000, 3200, 0),
+        Measured("src/f10.rs", 100, 95, 0),
+    );
+    let out = coverage_fixture(&dir, &files, &rows("80.0"));
+    let (ok, stdout, stderr) = coverage_report(&dir, &out, &[]);
+    let _ = fs::remove_dir_all(&dir);
+    assert!(!ok, "{stdout}");
+    assert!(stderr.contains("is under the 90% floor"), "{stderr}");
+    assert!(read("scripts/coverage.sh").ends_with("exit \"$report\"\n"));
+    let report = job(&workflow("coverage.yml"), "nightly-report");
+    assert!(report.contains("    needs: [coverage]\n"));
+    assert!(report.contains("    if: github.event_name == 'schedule' && failure()\n"));
+
+    let title = "Nightly Rust checks on main failed";
+    let list = format!(
+        "call\n[issue]\n[list]\n[--state]\n[open]\n[--search]\n[\"{title}\" in:title]\n\
+         [--json]\n[number,title]\n[--jq]\n[map(select(.title == env.TITLE)) | .[0].number // empty]\n"
+    );
+    let body = "[The nightly coverage run failed on main at abc123: coverage fell under \
+                the floor, or a test failed.\n\nRun: https://github.com/o/r/actions/runs/200\n\n\
+                The run summary has the per-file table and names what fell. Fix it the same \
+                day; a deliberate drop lowers that file's baseline row in a pull request that \
+                says why (docs/development-process.md#coverage).]\n";
+
+    // No open issue: one is opened with that title.
+    assert_eq!(
+        nightly_coverage_report(""),
+        format!("{list}call\n[issue]\n[create]\n[--title]\n[{title}]\n[--body]\n{body}")
+    );
+    // The issue is open: a comment on it, never a second issue.
+    assert_eq!(
+        nightly_coverage_report("17"),
+        format!("{list}call\n[issue]\n[comment]\n[17]\n[--body]\n{body}")
+    );
+}
+
 #[test]
 fn coverage_fails_for_a_row_without_its_file_or_a_large_file_without_a_row() {
     // src/f05.rs was split: its row stays behind and the new file has none.

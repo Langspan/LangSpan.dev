@@ -14,11 +14,11 @@
     "cost", "evidence"
   ],
   "properties": {
-    "schema_version": {"const": 9},
+    "schema_version": {"const": 10},
     "record_type": {"const": "coordination_run"},
     "run_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
     "arm": {"enum": ["worktrees", "awareness_only", "langspan", "shared"]},
-    "family": {"enum": ["rename_vs_new_caller", "contradictory_defaults", "discovered_change"]},
+    "family": {"enum": ["rename_vs_new_caller", "contradictory_defaults", "discovered_change", "push_contention"]},
     "sessions": {"enum": [2, 5, 10]},
     "seed": {"type": "integer", "minimum": 0},
     "agent": {"enum": ["standin", "claude-code"]},
@@ -77,7 +77,7 @@
         "properties": {
           "session": {"type": "integer", "minimum": 1},
           "task_id": {"type": "string"},
-          "role": {"enum": ["rename", "new_caller", "contradiction", "control", "changer", "dependent"]},
+          "role": {"enum": ["rename", "new_caller", "contradiction", "control", "changer", "dependent", "independent"]},
           "branch": {"type": "string"},
           "process_status": {"type": ["string", "null"]},
           "merged": {"type": "boolean"},
@@ -112,27 +112,31 @@
             "type": ["boolean", "null"]
           },
           "pushes": {
-            "description": "Shared arm: the session's Bash calls that ran `git push` (attempts) and those whose result shows Git refusing the push (rejections), from its transcript. null in an arm whose sessions do not push, or with no transcript.",
+            "description": "Shared arm, and every arm in push_contention: the session's Bash calls that ran `git push` or, in the langspan arm, `langspan land --apply` (attempts; a push LangSpan's hook routed to landing never ran and is not one), those whose result shows Git, or the landing, refusing the push (rejections), those made after a rejected one (retries) and those whose result is neither a rejection nor an error (landed), from its transcript. null in a trial whose sessions do not push, or with no transcript.",
             "type": ["object", "null"],
             "additionalProperties": false,
-            "required": ["attempts", "rejections"],
+            "required": ["attempts", "rejections", "retries", "landed"],
             "properties": {
               "attempts": {"type": "integer", "minimum": 0},
-              "rejections": {"type": "integer", "minimum": 0}
+              "rejections": {"type": "integer", "minimum": 0},
+              "retries": {"type": "integer", "minimum": 0},
+              "landed": {"type": "integer", "minimum": 0}
             }
           }
         }
       }
     },
     "pushes": {
-      "description": "The tasks' push attempts and rejections summed. reported: every session's transcript was read; unknown when one was not, and not_applicable in an arm whose sessions do not push, both with null counts.",
+      "description": "The tasks' push attempts, rejections and retries summed, and landed_after_s: the seconds from the runner's start of the trial to the last update of `origin main`, from the bare remote's reflog (whole seconds, this machine's wall clock), null unless every session landed a push. reported: every session's transcript was read; unknown when one was not, and not_applicable in a trial whose sessions do not push, both with null values.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["status", "attempts", "rejections"],
+      "required": ["status", "attempts", "rejections", "retries", "landed_after_s"],
       "properties": {
         "status": {"enum": ["reported", "unknown", "not_applicable"]},
         "attempts": {"type": ["integer", "null"], "minimum": 0},
-        "rejections": {"type": ["integer", "null"], "minimum": 0}
+        "rejections": {"type": ["integer", "null"], "minimum": 0},
+        "retries": {"type": ["integer", "null"], "minimum": 0},
+        "landed_after_s": {"type": ["number", "null"], "minimum": 0}
       }
     },
     "tasks_total": {"type": "integer", "minimum": 1},

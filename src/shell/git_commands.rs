@@ -447,6 +447,8 @@ impl Lexer {
                         segments.push(Vec::new());
                     }
                 }
+                // A line continuation: Bash removes it, between words too.
+                '\\' if self.peek(1) == Some('\n') => self.at += 2,
                 '#' if word.is_none() => {
                     while self.peek(0).is_some_and(|c| c != '\n') {
                         self.at += 1;

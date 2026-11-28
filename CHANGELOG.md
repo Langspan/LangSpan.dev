@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.10.0](https://github.com/Langspan/LangSpan.dev/compare/v0.9.1...v0.10.0) (2026-11-28)
+
+
+### ⚠ BREAKING CHANGES
+
+* the seven owner-grant commands are refused until the owner sets "owner_grants": true in the state directory's config.json. Set it, run the command, then set it back to false (docs/usage/configuration-and-limits.md).
+
+### Features
+
+* a one-command install script ([#261](https://github.com/Langspan/LangSpan.dev/issues/261)) ([#583](https://github.com/Langspan/LangSpan.dev/issues/583)) ([2357bdf](https://github.com/Langspan/LangSpan.dev/commit/2357bdfaa63f2072c86d45d8fa346cc457da4850))
+* clients ignore fields they do not know ([#332](https://github.com/Langspan/LangSpan.dev/issues/332)) ([#595](https://github.com/Langspan/LangSpan.dev/issues/595)) ([f53a3b4](https://github.com/Langspan/LangSpan.dev/commit/f53a3b4642714dcd00d42fc7e172bc9ff8b2cd0e))
+* draw the dashboard's Live view with the hero's renderer ([#491](https://github.com/Langspan/LangSpan.dev/issues/491), slice 2) ([#563](https://github.com/Langspan/LangSpan.dev/issues/563)) ([dad71f9](https://github.com/Langspan/LangSpan.dev/commit/dad71f96f1b446232404ad4bc852c37ce6785bb1))
+* owner-authority commands need the owner's own action ([#335](https://github.com/Langspan/LangSpan.dev/issues/335)) ([#596](https://github.com/Langspan/LangSpan.dev/issues/596)) ([9baa899](https://github.com/Langspan/LangSpan.dev/commit/9baa899b7bace8a5d55697caa4c3141508d6d56b))
+* route an agent's push to the default branch to landing ([#536](https://github.com/Langspan/LangSpan.dev/issues/536)) ([#576](https://github.com/Langspan/LangSpan.dev/issues/576)) ([c8dc84e](https://github.com/Langspan/LangSpan.dev/commit/c8dc84ed667ba9d49bb25de2e1d889ceb96d2cf4))
+
+
+### Bug fixes
+
+* a report never delays an admission ([#581](https://github.com/Langspan/LangSpan.dev/issues/581)) ([#591](https://github.com/Langspan/LangSpan.dev/issues/591)) ([da95edc](https://github.com/Langspan/LangSpan.dev/commit/da95edcc1f709ebe7c9c5f396757092820e39605))
+* main-red [#600](https://github.com/Langspan/LangSpan.dev/issues/600) ([#608](https://github.com/Langspan/LangSpan.dev/issues/608)) ([ead6a7e](https://github.com/Langspan/LangSpan.dev/commit/ead6a7e5a3fc047256a7b6f62cb5e3f1c1dc0a7c))
+
 ## [0.9.1](https://github.com/Langspan/LangSpan.dev/compare/v0.9.0...v0.9.1) (2026-11-28)
 
 

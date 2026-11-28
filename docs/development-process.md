@@ -388,7 +388,9 @@ no longer exists, a row whose file measures no production lines, and a file
 of 100 production lines or more without a row. Under 100 lines one line is
 more than a point, so the 2-point margin would be a line or two of noise.
 A nightly run under the floor, or with a failing test, opens or comments on
-the issue "Nightly Rust checks on main failed".
+the issue "Nightly Rust checks on main failed". The suite runs that step's
+own shell against a stand-in `gh`, after a report under the floor, so the
+path is tested without a drop on `main` or a call to GitHub.
 
 To raise the baseline, run `bash scripts/coverage.sh` (or download the
 `coverage` artifact of a run on `main` into `target/coverage`), then
@@ -456,6 +458,15 @@ production function and closure signatures that return
 the check prints the new number; lower the row by hand in the same pull
 request. Return a typed error instead, as `client::ClientError` and
 `git::GitError` do (issue #368).
+
+The test files have one number of their own, checked by the same test in
+Rust rather than by the script: how many files under `tests/`, outside
+`tests/support/`, define their own `fn git(` or `fn hook(`. It may not go
+above `OWN_GIT_OR_HOOK_FILES` in `tests/ratchets.rs`; a failure names the
+files. Use `support::git` for a Git command in a test repository,
+`support::coordinator` to start a coordinator and `support::hook_call` for
+one hook call. When the count falls, the test prints it; lower the
+constant in the same pull request (issue #374).
 
 ### Self-hosted runner
 
@@ -612,6 +623,10 @@ Flow:
 - **CI feedback time:** the median and 90th percentile time from push to
   result for the fast lane on pull requests, against its 3-minute target,
   and for the full lane in the merge queue, against its 8-minute target.
+- **Person-touches per merged change:** the named people's merges, reviews,
+  comments, manual commits and `needs-owner` decisions, divided by merged
+  pull requests, by week, from
+  [`scripts/evidence-report.py`](usage/person-touches-per-merged-change.md).
 
 Quality:
 

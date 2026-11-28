@@ -9,8 +9,10 @@
 #[path = "support/golden.rs"]
 mod golden;
 mod support;
+use support::git;
 
 use langspan::graph::Index;
+
 use serde_json::Value;
 use std::{
     fs,
@@ -208,17 +210,6 @@ impl Drop for Daemon {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
-}
-
-fn git(root: &Path, args: &[&str]) {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "{output:?}");
 }
 
 /// The export with its one time-dependent field, the header's

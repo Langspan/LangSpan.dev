@@ -1971,3 +1971,36 @@ fn since_away_after_retention_removed_the_owners_last_work_is_truncated_not_omit
     let since = recap.since.expect("the account is left out");
     assert!(since.truncated && since.ongoing, "{since:?}");
 }
+
+/// Issue #581: the daemon reads a report on a read-only connection of its
+/// own, which finds the newest snapshot itself. After a compaction it gives
+/// the owner's report: Alice registered before the snapshot and prompts
+/// after it, so only the snapshot says her prompt is in workspace `w`.
+/// Real SQLite, two connections to one file; no daemon.
+#[test]
+fn a_report_reader_after_a_compaction_reads_the_owners_report() {
+    let directory = Directory::new();
+    let path = directory.file("state.sqlite3");
+    let wall = Wall::at(START_MS);
+    let mut store = wall.open(&path);
+    History::setup(&mut store);
+    wall.set(START_MS + 100 * DAY_MS);
+    assert!(report(store.compact(30, true).unwrap()).events > 0);
+    let prompt = Command::SessionPrompt {
+        session_id: "alice".into(),
+        summary: "work on the store".into(),
+        line_digests: Vec::new(),
+    };
+    run(&mut store, "alice-prompt", prompt, 1000);
+    let mut reader = langspan::store::ReportReader::open(&path).unwrap();
+    let (from, to) = (0, START_MS + 1000 * DAY_MS);
+    let owners = store.report("w", from, to).unwrap();
+    let Outcome::Report { report: counted } = &owners else {
+        panic!("no report: {owners:?}");
+    };
+    assert!(
+        serde_json::to_string(counted).unwrap().contains("alice"),
+        "{counted:?}"
+    );
+    assert_eq!(reader.report("w", from, to).unwrap(), owners);
+}

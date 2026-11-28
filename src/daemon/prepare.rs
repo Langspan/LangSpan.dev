@@ -3,7 +3,7 @@
 //! core decides.
 
 use super::unix::{LIVENESS_COALESCE_MS, now_ms};
-use langspan_core::{Command, State};
+use langspan_core::{Command, ErrorCode, State};
 use std::{
     fs, io,
     os::unix::fs::MetadataExt,
@@ -60,7 +60,7 @@ pub(super) fn prepare_move(
     workspace_id: &str,
     root: &str,
     switch: bool,
-) -> Result<Command, (&'static str, String)> {
+) -> Result<Command, (ErrorCode, String)> {
     let Some(registered) = state.workspaces.get(workspace_id) else {
         // The core refuses an unknown ID in its own words.
         return Ok(Command::WorkspaceMoveVerified {
@@ -69,7 +69,7 @@ pub(super) fn prepare_move(
             verified_overlaps: Vec::new(),
         });
     };
-    let invalid = |message: String| ("invalid_root", message);
+    let invalid = |message: String| (ErrorCode::InvalidRoot, message);
     if root.len() > 4096 {
         return Err(invalid("NEW_ROOT exceeds 4096 bytes".into()));
     }
@@ -88,7 +88,7 @@ pub(super) fn prepare_move(
     let deadline = Instant::now() + Duration::from_secs(1);
     let not_top = |detail: String| {
         (
-            "not_checkout_top",
+            ErrorCode::NotCheckoutTop,
             format!("{detail}; give the top directory of the checkout. Nothing changed"),
         )
     };
@@ -136,7 +136,7 @@ pub(super) fn prepare_move(
                 _ => String::new(),
             };
             return Err((
-                "old_root_exists",
+                ErrorCode::OldRootExists,
                 format!(
                     "The old root {} still exists{link}. To coordinate the checkout at NEW_ROOT under {workspace_id} instead, add --switch; to coordinate both, register NEW_ROOT with `langspan workspace add`. Nothing changed",
                     old.display()
@@ -145,7 +145,7 @@ pub(super) fn prepare_move(
         }
         (true, false) => {
             return Err((
-                "old_root_missing",
+                ErrorCode::OldRootMissing,
                 format!(
                     "The old root {} no longer exists; for a checkout that was moved, run without --switch. Nothing changed",
                     old.display()
@@ -156,7 +156,7 @@ pub(super) fn prepare_move(
         // new session there would claim it again and be refused.
         (true, true) if workspace_id == crate::ids::user_workspace_id(old) => {
             return Err((
-                "root_derived_id",
+                ErrorCode::RootDerivedId,
                 format!(
                     "Workspace {workspace_id} has the ID user-level hooks derive from {}, so new sessions there would still claim it. To coordinate NEW_ROOT under this ID, move or delete that checkout first, then run this again without --switch; to coordinate both, register NEW_ROOT with `langspan workspace add`. Nothing changed",
                     old.display()
@@ -167,7 +167,7 @@ pub(super) fn prepare_move(
         (false, false) => {}
     }
     let verified_overlaps = verified_overlaps(state, workspace_id, &canonical, deadline)
-        .map_err(|message| ("workspace_conflict", message))?;
+        .map_err(|message| (ErrorCode::WorkspaceConflict, message))?;
     Ok(Command::WorkspaceMoveVerified {
         workspace_id: workspace_id.into(),
         root: text,
@@ -176,12 +176,13 @@ pub(super) fn prepare_move(
 }
 
 /// `old`'s `HEAD` commit is in `new`'s object database.
-fn same_repository(
-    old: &Path,
-    new: &Path,
-    deadline: Instant,
-) -> Result<(), (&'static str, String)> {
-    let refused = |detail: String| ("different_repository", format!("{detail}. Nothing changed"));
+fn same_repository(old: &Path, new: &Path, deadline: Instant) -> Result<(), (ErrorCode, String)> {
+    let refused = |detail: String| {
+        (
+            ErrorCode::DifferentRepository,
+            format!("{detail}. Nothing changed"),
+        )
+    };
     // As the observer runs Git: no fsmonitor program, no replace refs.
     const SAFE: [&str; 3] = ["--no-replace-objects", "-c", "core.fsmonitor=false"];
     let head = crate::git::output(

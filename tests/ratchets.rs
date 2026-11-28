@@ -25,12 +25,60 @@ fn python(args: &[&str]) -> (bool, String) {
     (output.status.success(), report)
 }
 
+/// The most test files outside `tests/support/` that may define their own
+/// `fn git(` or `fn hook(` (issue #374). Lower it when the count falls.
+const OWN_GIT_OR_HOOK_FILES: usize = 39;
+
+/// The `.rs` files under `dir`, recursively, except `tests/support/`.
+fn test_sources(dir: &Path, found: &mut Vec<std::path::PathBuf>) {
+    for entry in fs::read_dir(dir).expect("read a directory under tests/") {
+        let path = entry.expect("read an entry under tests/").path();
+        if path.is_dir() {
+            if !path.ends_with("tests/support") {
+                test_sources(&path, found);
+            }
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            found.push(path);
+        }
+    }
+}
+
 #[test]
 fn no_ratchet_grows_past_its_baseline() {
     let (passed, report) = python(&["scripts/ratchets.py", "--check", "."]);
     // The report names what can be tightened even when the check passes.
     eprintln!("{report}");
     assert!(passed, "{report}");
+
+    // Test files with a Git or hook helper of their own, instead of
+    // tests/support's `git` and `hook_call`.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut sources = Vec::new();
+    test_sources(&root.join("tests"), &mut sources);
+    let mut own: Vec<String> = sources
+        .iter()
+        // This file names the two in its messages.
+        .filter(|path| !path.ends_with("tests/ratchets.rs"))
+        .filter(|path| {
+            let text = fs::read_to_string(path).expect("read a test file");
+            text.contains("fn git(") || text.contains("fn hook(")
+        })
+        .map(|path| path.strip_prefix(root).unwrap().display().to_string())
+        .collect();
+    own.sort();
+    assert!(
+        own.len() <= OWN_GIT_OR_HOOK_FILES,
+        "{} test files define their own `fn git(` or `fn hook(`, more than the {OWN_GIT_OR_HOOK_FILES} \
+         allowed; use tests/support's `git` or `hook_call` instead: {own:#?}",
+        own.len()
+    );
+    if own.len() < OWN_GIT_OR_HOOK_FILES {
+        eprintln!(
+            "only {} test files define their own `fn git(` or `fn hook(`: lower \
+             OWN_GIT_OR_HOOK_FILES in tests/ratchets.rs to that",
+            own.len()
+        );
+    }
 }
 
 /// A second reading of the namespaces, independent of the Python lexer: the

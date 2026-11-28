@@ -4,8 +4,9 @@
 
 use super::{
     PROTOCOL_VERSION, Registration, Response, Store, check_calls, error, inflight_worktrees,
+    relayed,
 };
-use langspan_core::{Command, NOTICE_DEPENDENTS, Outcome, PeerCallers, State};
+use langspan_core::{Command, ErrorCode, NOTICE_DEPENDENTS, Outcome, PeerCallers, State};
 
 /// Worktrees one answer names callers in, at most.
 const MAX_CALLER_WORKTREES: usize = 8;
@@ -28,18 +29,25 @@ pub(in crate::daemon) fn checked_calls(
         renamed,
     } = command
     else {
-        return error(request_id, generation, "internal", "not a write check");
+        return error(
+            request_id,
+            generation,
+            ErrorCode::Internal,
+            "not a write check",
+        );
     };
     let mut callers = Vec::new();
     if !renamed.is_empty() {
         let asking = match langspan_core::validate_renamed(store.state(), session_id, renamed) {
             Ok(asking) => asking.workspace_id.clone(),
-            Err(e) => return error(request_id, generation, &e.code, e.message),
+            Err(e) => return relayed(request_id, generation, e.code, e.message),
         };
         if let Some(graph) = graph {
             match peer_callers(store.state(), graph, &asking, renamed) {
                 Ok(found) => callers = found,
-                Err(failure) => return error(request_id, generation, "index_unavailable", failure),
+                Err(failure) => {
+                    return error(request_id, generation, ErrorCode::IndexUnavailable, failure);
+                }
             }
         }
     }

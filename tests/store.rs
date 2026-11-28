@@ -504,6 +504,42 @@ fn denied_and_completed_requests_replay_without_taking_fresh_authority() {
     ));
 }
 
+// A real store: the refusal's receipt is what the usage guide's `New ID`
+// retry rests on.
+#[test]
+fn a_workspace_busy_refusal_replays_for_its_request_id_after_the_cause_clears() {
+    let database = Database::new();
+    let mut store = Store::open(&database.path()).unwrap();
+    register(&mut store);
+    execute(
+        &mut store,
+        "grant",
+        admission("session", "src/api.rs", 100),
+        1,
+    );
+    let remove = Command::WorkspaceRemove {
+        workspace_id: "workspace".into(),
+        apply: true,
+    };
+    let busy = execute(&mut store, "remove", remove.clone(), 2);
+    assert!(
+        matches!(&busy, Outcome::Error { code, .. } if code == "workspace_busy"),
+        "{busy:?}"
+    );
+    let complete = Command::Complete {
+        session_id: "session".into(),
+        lease_id: "grant".into(),
+    };
+    execute(&mut store, "complete", complete, 3);
+    let replayed = store.execute("remove", &remove, &remove, 4).unwrap();
+    assert!(replayed.replayed);
+    assert_eq!(replayed.outcome, busy);
+    assert!(matches!(
+        execute(&mut store, "remove-again", remove, 5),
+        Outcome::WorkspaceRemoval { applied: true, .. }
+    ));
+}
+
 #[test]
 fn receipt_failure_rolls_back_events_and_does_not_publish_state() {
     let database = Database::new();
@@ -1255,4 +1291,33 @@ fn store_records_and_replays_each_command_by_its_route() {
             assert_eq!(second.unwrap().replayed, recorded, "{op}");
         }
     }
+}
+
+/// Review 4725756607 (issue #581): a report queued behind another is read
+/// from a snapshot opened after it was asked, so its window ends when that
+/// snapshot was taken, not when the owner queued it. Otherwise events
+/// committed while it waited are read, and settle refusals, yet fall
+/// outside the window and every edit count. The store and the reader share
+/// one real SQLite file in WAL mode, because the reader's snapshot is the
+/// subject.
+#[test]
+fn a_queued_report_ends_its_window_at_its_reads_snapshot() {
+    let database = Database::new();
+    let mut store = Store::open(&database.path()).unwrap();
+    let mut reader = langspan::store::ReportReader::open(&database.path()).unwrap();
+    // The owner queued the report at `asked_ms`; the writes below commit
+    // while it waits.
+    let asked_ms = langspan::store::wall_now_ms();
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let written_ms = langspan::store::wall_now_ms();
+    register(&mut store);
+    let Outcome::Report { report } = reader.report("workspace", 0, asked_ms).unwrap() else {
+        panic!("no report");
+    };
+    assert!(
+        report.window.to_ms >= written_ms,
+        "the window ends at {} before the writes it read, at {written_ms}",
+        report.window.to_ms
+    );
+    assert_eq!(report.sessions.len(), 1, "{report:?}");
 }

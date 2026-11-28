@@ -35,9 +35,11 @@ arrived, so that no peer acts before it could have been told of this one; a
 session whose task changes an interface (``leads``) waits until every peer
 has ended, so its change stays in flight while they work. When the notice
 tells it of the change only after its edit, it makes the informed edit then.
-A refused edit is read again and retried once, then skipped. In a shared
-checkout (the plan's ``isolation`` is ``shared``) it then commits the files
-it edited and pushes them, as Bash calls (see shared_checkout.py). It prints a
+A refused edit is read again and retried once, then skipped. Where its
+sessions land by pushing (a shared checkout, or the push_contention family)
+it then commits the files it edited and pushes them, as Bash calls (see
+shared_checkout.py); in the LangSpan arm those calls pass through LangSpan's
+hooks, and a push routed to landing runs the landing command. It prints a
 short transcript in the shape of ``claude -p --output-format stream-json``:
 a first line listing its tools, as Claude Code's does, each edit's
 ``tool_use`` and ``tool_result``, and the result line last.
@@ -198,7 +200,7 @@ class Session:
         payload = {"session_id": self.session_id, "cwd": self.cwd, "hook_event_name": event, **extra}
         if tool is not None:
             payload.update(tool_name=tool, tool_input=tool_input, tool_use_id=tool_use_id)
-        denied = False
+        denied, self.reason = False, None
         for command, timeout in hook_commands(self.settings, event, tool):
             self.calls += 1
             started = time.monotonic()
@@ -214,11 +216,21 @@ class Session:
             context = output.get("additionalContext") if isinstance(output, dict) else None
             if isinstance(context, str):
                 self.context.append(context)
+            reason = output.get("permissionDecisionReason") if isinstance(output, dict) else None
+            if decision == "deny" and isinstance(reason, str):
+                self.reason = reason
             denied |= decision == "deny" or code == 2
             self.log.write(json.dumps({"event": event, "tool": tool, "tool_use_id": tool_use_id,
                                        "exit_code": code, "decision": decision, "stdout": stdout[:4000],
                                        "elapsed_ms": round(elapsed * 1000, 1), "late": late}) + "\n")
         return denied
+
+    def refused(self, tool, tool_input, tool_use_id):
+        """Run the PreToolUse hooks for one call: the refusal's reason, as
+        the host shows it to the agent, or None when the call may run."""
+        if not self.fire("PreToolUse", tool, tool_input, tool_use_id):
+            return None
+        return self.reason or "refused by a hook"
 
     def read(self, path):
         self.fire("PostToolUse", "Read", {"file_path": str(path.resolve())}, "read-" + uuid.uuid4().hex)
@@ -416,10 +428,17 @@ def main(argv):
                 # an agent that follows it fixes its call.
                 informed = revised = True
                 edited += apply_edits(session, task["standin"]["follow"])
-        if plan.get("isolation") == "shared" and edited:
-            # One checkout for every session: land by committing only its
-            # own files and pushing, as its prompt asks.
-            shared_checkout.commit_and_push(sorted(set(edited)), index)
+        if shared_checkout.lands_by_pushing(plan.get("isolation"), plan.get("family")) and edited:
+            # Land by committing only its own files and pushing, as its
+            # prompt asks. Each rejection means a peer landed, and each peer
+            # lands once, so as many tries as sessions always land. In the
+            # LangSpan arm its Bash calls pass through LangSpan's hooks, which
+            # route the push of its branch to landing.
+            worktree = plan.get("isolation") == "worktree"
+            shared_checkout.commit_and_push(sorted(set(edited)), index,
+                                            attempts=max(shared_checkout.MAX_PUSH_ATTEMPTS, plan["sessions"]),
+                                            hooks=session if settings else None,
+                                            push="git push origin HEAD:main" if worktree else "git push origin main")
         session.fire("Stop", stop_hook_active=False)
         session.fire("SessionEnd", reason="other")
     print(json.dumps({
