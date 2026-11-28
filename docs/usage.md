@@ -79,6 +79,8 @@ to those pages and keep the anchors this guide had as a single page.
 
 ### [What a session did after a refusal](usage/the-coordination-report.md#what-a-session-did-after-a-refusal)
 
+## [Person-touches per merged change](usage/person-touches-per-merged-change.md)
+
 ## [Desktop notices](usage/desktop-notices.md)
 
 ## [Look up symbols and affected files](usage/look-up-symbols-and-affected-files.md)
