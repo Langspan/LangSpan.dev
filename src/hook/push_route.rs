@@ -159,14 +159,6 @@ fn to_default(dir: &Path, push: &GitPush, until: Instant) -> Result<Option<ToDef
         return Err(Unread::Direct);
     }
     let current = git(dir, &["symbolic-ref", "--quiet", "--short", "HEAD"], until)?;
-    // `:` (or `+:`, the parser drops the `+`) pushes the matching branches.
-    let matching = push.refspecs.iter().any(|refspec| refspec == ":")
-        || push.refspecs.is_empty()
-            && git(dir, &["config", "--get", "push.default"], until)?.as_deref()
-                == Some("matching");
-    let every_branch = push.every_branch || matching;
-    // Each (source, destination) the push would update.
-    let mut updates: Vec<(Option<String>, String)> = Vec::new();
     let mut remote = push.remote.clone();
     // Without refspecs, Git pushes to the current branch's push remote,
     // whether it pushes one branch or every branch.
@@ -188,12 +180,26 @@ fn to_default(dir: &Path, push: &GitPush, until: Instant) -> Result<Option<ToDef
         }
         _ => None,
     };
-    if push.refspecs.is_empty() && !every_branch {
+    let remote = remote
+        .filter(|r| !r.is_empty())
+        .unwrap_or_else(|| "origin".into());
+    if !plain(&remote) {
+        return Err(Unread::NotNamed);
+    }
+    let (refspecs, force) = refspecs(dir, push, &remote, until)?;
+    // `:` (or `+:`, the `+` is dropped) pushes the matching branches.
+    let matching = refspecs.iter().any(|refspec| refspec == ":")
+        || refspecs.is_empty()
+            && git(dir, &["config", "--get", "push.default"], until)?.as_deref()
+                == Some("matching");
+    let every_branch = push.every_branch || matching;
+    // Each (source, destination) the push would update.
+    let mut updates: Vec<(Option<String>, String)> = Vec::new();
+    if refspecs.is_empty() && !every_branch {
         // Git's choice: the current branch, to its push destination.
         let Some((current, to_remote, to_ref)) = pushed else {
             return Ok(None);
         };
-        let remote = remote.as_deref().unwrap_or_default();
         let destination = if remote == to_remote && !to_ref.is_empty() {
             to_ref
         } else {
@@ -201,7 +207,14 @@ fn to_default(dir: &Path, push: &GitPush, until: Instant) -> Result<Option<ToDef
         };
         updates.push((Some(current.clone()), destination));
     }
-    for refspec in &push.refspecs {
+    // A negative refspec (`^SOURCE`) only excludes sources.
+    let excluded = |source: &str| {
+        refspecs
+            .iter()
+            .filter_map(|r| r.strip_prefix('^'))
+            .any(|negative| negative == source || wildcard_source("*", negative, source).is_some())
+    };
+    for refspec in refspecs.iter().filter(|r| !r.starts_with('^')) {
         let (source, destination) = match refspec.split_once(':') {
             Some((source, destination)) => (source, destination.to_owned()),
             None if refspec == "HEAD" => match &current {
@@ -216,12 +229,6 @@ fn to_default(dir: &Path, push: &GitPush, until: Instant) -> Result<Option<ToDef
             source => Some(source.to_owned()),
         };
         updates.push((source, destination));
-    }
-    let remote = remote
-        .filter(|r| !r.is_empty())
-        .unwrap_or_else(|| "origin".into());
-    if !plain(&remote) {
-        return Err(Unread::NotNamed);
     }
     let head = git(
         dir,
@@ -241,13 +248,32 @@ fn to_default(dir: &Path, push: &GitPush, until: Instant) -> Result<Option<ToDef
         remote: remote.clone(),
         onto: onto.clone(),
         source,
-        force: push.force,
+        force,
         delete,
     };
     if every_branch {
         return Ok(Some(hit(None, false)));
     }
     for (source, destination) in updates {
+        if destination.contains('*') {
+            // A wildcard refspec: the default branch is updated when the
+            // source its pattern maps onto it is an existing local ref.
+            let Some(source) = source.as_deref().and_then(|source| {
+                wildcard_source(source, &destination, &format!("refs/heads/{onto}"))
+                    .or_else(|| wildcard_source(source, &destination, &onto))
+            }) else {
+                continue;
+            };
+            if !plain(&source) || excluded(&source) {
+                continue;
+            }
+            let commit = format!("{source}^{{commit}}");
+            if git(dir, &["rev-parse", "--verify", "--quiet", &commit], until)?.is_some() {
+                let source = source.strip_prefix("refs/heads/").unwrap_or(&source);
+                return Ok(Some(hit(Some(source.to_owned()), false)));
+            }
+            continue;
+        }
         let branch = match destination.strip_prefix("refs/heads/") {
             Some(branch) => branch,
             // A tag or another namespace.
@@ -260,6 +286,42 @@ fn to_default(dir: &Path, push: &GitPush, until: Instant) -> Result<Option<ToDef
         }
     }
     Ok(None)
+}
+
+/// The push's refspecs, and whether it forces. Without refspecs on the
+/// command line, Git pushes every `remote.NAME.push` refspec the remote has.
+fn refspecs(
+    dir: &Path,
+    push: &GitPush,
+    remote: &str,
+    until: Instant,
+) -> Result<(Vec<String>, bool), Unread> {
+    if !push.refspecs.is_empty() {
+        return Ok((push.refspecs.clone(), push.force));
+    }
+    let key = format!("remote.{remote}.push");
+    let configured = git(dir, &["config", "--get-all", &key], until)?.unwrap_or_default();
+    let mut force = push.force;
+    let refspecs = configured
+        .lines()
+        .map(|line| {
+            let line = line.trim();
+            force |= line.starts_with('+');
+            line.trim_start_matches('+').to_owned()
+        })
+        .filter(|line| !line.is_empty())
+        .collect();
+    Ok((refspecs, force))
+}
+
+/// The source a wildcard refspec `source:destination` pushes to `target`:
+/// the part of `target` that the destination's `*` matches, put in place of
+/// the source's `*`. `None` when the destination does not match `target`.
+fn wildcard_source(source: &str, destination: &str, target: &str) -> Option<String> {
+    let (before, after) = destination.split_once('*')?;
+    let star = target.strip_prefix(before)?.strip_suffix(after)?;
+    let (source_before, source_after) = source.split_once('*')?;
+    Some(format!("{source_before}{star}{source_after}"))
 }
 
 /// `text` quoted for a POSIX shell.
@@ -481,6 +543,104 @@ mod tests {
                 "{command}: {every}"
             );
         }
+    }
+
+    /// A wildcard refspec updates the default branch when its source side
+    /// names an existing local branch that maps onto it.
+    #[test]
+    fn a_wildcard_refspec_onto_the_default_branch_is_routed() {
+        let repo = repo("wildcard");
+        for command in [
+            "git push origin 'refs/heads/*:refs/heads/*'",
+            "git push origin '+refs/heads/*:refs/heads/*'",
+            "git push origin 'refs/heads/ma*:refs/heads/ma*'",
+        ] {
+            let reason = reason(run(&repo, command));
+            assert!(
+                reason.contains("--name CHECK main --apply"),
+                "{command}: {reason}"
+            );
+        }
+        for command in [
+            "git push origin 'refs/heads/f*:refs/heads/f*'",
+            "git push origin 'refs/heads/*:refs/heads/x/*'",
+            "git push origin 'refs/heads/nope/*:refs/heads/*'",
+            "git push origin 'refs/heads/*:refs/tags/*'",
+        ] {
+            let detail = passed(run(&repo, command));
+            assert_eq!(
+                detail, "push route: no push to the default branch",
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wildcard_source_is_the_destinations_match_put_in_the_sources_star() {
+        let main = "refs/heads/main";
+        assert_eq!(
+            wildcard_source("refs/heads/*", "refs/heads/*", main).as_deref(),
+            Some(main)
+        );
+        assert_eq!(
+            wildcard_source("refs/remotes/o/*-x", "refs/heads/m*", main).as_deref(),
+            Some("refs/remotes/o/ain-x")
+        );
+        assert_eq!(
+            wildcard_source("refs/heads/*", "refs/heads/x/*", main),
+            None
+        );
+        assert_eq!(wildcard_source("refs/heads/a", "refs/heads/*", main), None);
+    }
+
+    /// Without refspecs on the command line, Git pushes the remote's
+    /// configured `remote.NAME.push` refspecs, all of them.
+    #[test]
+    fn a_push_without_refspecs_uses_every_configured_push_refspec() {
+        let repo = repo("configured");
+        git_ok(
+            &repo.work,
+            &[
+                "config",
+                "remote.origin.push",
+                "refs/heads/feat:refs/heads/feat",
+            ],
+        );
+        for command in ["git push", "git push origin"] {
+            let detail = passed(run(&repo, command));
+            assert_eq!(
+                detail, "push route: no push to the default branch",
+                "{command}"
+            );
+        }
+        git_ok(
+            &repo.work,
+            &[
+                "config",
+                "--add",
+                "remote.origin.push",
+                "+refs/heads/*:refs/heads/*",
+            ],
+        );
+        for command in ["git push", "git push origin"] {
+            let reason = reason(run(&repo, command));
+            assert!(
+                reason.contains("--name CHECK main --apply"),
+                "{command}: {reason}"
+            );
+            assert!(reason.contains("landing never does"), "{command}: {reason}");
+        }
+        // A negative refspec excludes the default branch from the wildcard.
+        git_ok(
+            &repo.work,
+            &["config", "--add", "remote.origin.push", "^refs/heads/main"],
+        );
+        let detail = passed(run(&repo, "git push"));
+        assert_eq!(detail, "push route: no push to the default branch");
+        git_ok(&repo.work, &["config", "--unset-all", "remote.origin.push"]);
+        git_ok(&repo.work, &["config", "remote.origin.push", ":"]);
+        let every = reason(run(&repo, "git push"));
+        assert!(every.contains("push the other branches by name"), "{every}");
     }
 
     /// Git picks the current branch's push remote for a push without

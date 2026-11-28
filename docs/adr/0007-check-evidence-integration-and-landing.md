@@ -330,8 +330,11 @@ Before a hooked shell call runs, the hook reads each `git push` in it
 (`src/shell/git_push.rs`, the commit guard's lenient reader) and asks Git
 where it would go (`src/hook/push_route.rs`, `git --no-optional-locks`,
 within a third of the hook's time left): the remote's default branch is what
-`refs/remotes/REMOTE/HEAD` names, and a push without refspecs goes where
-`%(push:remoteref)` of the current branch says. A push that would update the
+`refs/remotes/REMOTE/HEAD` names, and a push without refspecs pushes every
+`remote.REMOTE.push` refspec when the remote has any, else goes where
+`%(push:remoteref)` of the current branch says. A wildcard refspec such as
+`refs/heads/*:refs/heads/*` updates the default branch when the source its
+pattern maps onto it is an existing local ref. A push that would update the
 default branch is refused, on every attempt, with the exact command:
 `langspan --state-dir DIR land WORKSPACE --onto MAIN --name CHECK BRANCH --apply --rebase --check-again -- TEST_COMMAND`.
 That command is the only way the hook leaves to land an agent's commits on

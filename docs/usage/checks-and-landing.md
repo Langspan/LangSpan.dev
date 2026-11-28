@@ -146,7 +146,9 @@ Run `langspan --state-dir DIR land WORKSPACE --onto main --name CHECK feat --app
 
 The agent fills in a check name and the project's test command. A forced
 push, a deletion of the default branch, and `--all`, `--mirror` or the
-matching refspec `:` are refused too; pushes to other branches, tags and dry
+matching refspec `:` are refused too, as is a wildcard refspec such as
+`refs/heads/*:refs/heads/*` or a configured `remote.origin.push` that would
+update the default branch; pushes to other branches, tags and dry
 runs pass. When the hook cannot tell where a push goes (an expansion in the
 remote or refspec, a URL instead of a remote name, a checkout other than the
 workspace's, or no `REMOTE/HEAD`), it lets the push run; set the remote's
