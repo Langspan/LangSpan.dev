@@ -39,7 +39,7 @@ mod unix {
         protocol::{self, MAX_FRAME_BYTES, PROTOCOL_VERSION, Request, Response},
         store::{Execution, Store},
     };
-    use langspan_core::{Command, Outcome, Route, State, validate_request_id};
+    use langspan_core::{Command, ErrorCode, Outcome, Route, State, validate_request_id};
     use serde::Deserialize;
     use std::{
         fs,
@@ -725,7 +725,17 @@ mod unix {
                                 coverage: recorded.as_ref().ok().cloned(),
                             };
                             let id = format!("scan-outcome-{}-{now}", store.state().generation);
-                            let _ = store.execute(&id, &command, &command, now);
+                            let failure = match store.execute(&id, &command, &command, now) {
+                                Ok(Execution {
+                                    outcome: Outcome::Error { code, message },
+                                    ..
+                                }) => Some(format!("{code}: {message}")),
+                                Ok(_) => None,
+                                Err(error) => Some(error.to_string()),
+                            };
+                            if let Some(detail) = failure {
+                                eprintln!("{}", serde_json::json!({"level":"warn","event":"scan_outcome_not_recorded","workspace_id":workspace_id,"detail":detail}));
+                            }
                             observe_elsewhere(&mut store, graph_reader.as_ref(), &workspace_id, now);
                         }
                         match recorded {
@@ -896,7 +906,7 @@ mod unix {
         Some(error(
             job.request.request_id.clone(),
             state.generation,
-            "workspace_changed",
+            ErrorCode::WorkspaceChanged,
             format!(
                 "workspace {} was moved, switched or removed after this was observed in {}; nothing was recorded",
                 of.workspace_id,
@@ -924,19 +934,24 @@ mod unix {
     pub(super) fn error(
         id: String,
         generation: u64,
-        code: &str,
+        // `impl Into<String>` only until the report worker's three string
+        // codes take `ErrorCode` too (#367, second slice).
+        code: impl Into<String>,
         message: impl Into<String>,
     ) -> Response {
+        relayed(id, generation, code.into(), message.into())
+    }
+
+    /// A refusal whose code was written elsewhere: by the core, or in an
+    /// outcome the store returned.
+    pub(super) fn relayed(id: String, generation: u64, code: String, message: String) -> Response {
         Response {
             version: PROTOCOL_VERSION,
             request_id: id,
             replayed: false,
             generation,
             lease_valid: None,
-            outcome: Outcome::Error {
-                code: code.into(),
-                message: message.into(),
-            },
+            outcome: Outcome::Error { code, message },
         }
     }
     fn response(id: String, execution: Execution) -> Response {
@@ -1212,7 +1227,7 @@ mod unix {
         if let Command::Events { after, limit } = command {
             let page = store.event_page(*after, *limit, |e| protocol::reads_event(granted, e));
             *outcome = page.unwrap_or_else(|e| Outcome::Error {
-                code: "storage_error".into(),
+                code: ErrorCode::StorageError.into(),
                 message: store_failed(state_dir, e),
             });
         }
@@ -1325,12 +1340,12 @@ mod unix {
             return error(
                 request_id,
                 store.state().generation,
-                "unsupported_version",
+                ErrorCode::UnsupportedVersion,
                 unsupported_version(),
             );
         }
         if let Err(e) = validate_request_id(&request_id) {
-            return error(request_id, store.state().generation, &e.code, e.message);
+            return relayed(request_id, store.state().generation, e.code, e.message);
         }
         // Every client, not only the CLI: the command is stored as it is.
         if let Command::AutoCheckEnable {
@@ -1347,7 +1362,7 @@ mod unix {
             return error(
                 request_id,
                 store.state().generation,
-                "secret_in_command",
+                ErrorCode::SecretInCommand,
                 message,
             );
         }
@@ -1389,26 +1404,26 @@ mod unix {
                         to,
                         max_hops,
                     } => graph_path(graph, store.state(), (workspace_id, from, to, *max_hops))
-                        .map_err(|message| ("index_unavailable", message)),
+                        .map_err(|message| (ErrorCode::IndexUnavailable, message)),
                     Command::GraphMap {
                         workspace_id,
                         depth,
                     } => graph_map(graph, store.state(), workspace_id, *depth)
-                        .map_err(|message| ("index_unavailable", message)),
+                        .map_err(|message| (ErrorCode::IndexUnavailable, message)),
                     Command::GraphInflight { workspace_id } => {
                         graph_inflight(graph, store.state(), workspace_id)
-                            .map_err(|message| ("index_unavailable", message))
+                            .map_err(|message| (ErrorCode::IndexUnavailable, message))
                     }
                     Command::GraphBlindSpots {
                         workspace_id,
                         limit,
                     } => graph_blind_spots(graph, store.state(), workspace_id, *limit)
-                        .map_err(|message| ("index_unavailable", message)),
+                        .map_err(|message| (ErrorCode::IndexUnavailable, message)),
                     Command::GraphContext { .. } => graph_context(graph, store.state(), &command),
                     Command::GraphSymbol { .. }
                     | Command::GraphReferences { .. }
                     | Command::GraphImpact { .. } => graph_query(graph, store.state(), &command)
-                        .map_err(|message| ("index_unavailable", message)),
+                        .map_err(|message| (ErrorCode::IndexUnavailable, message)),
                     // A transfer goes to the indexer before it gets here; one
                     // that does arrive goes on to the store, which refuses it.
                     // No other command routes here.
@@ -1464,7 +1479,7 @@ mod unix {
                 return error(
                     request_id,
                     store.state().generation,
-                    "storage_error",
+                    ErrorCode::StorageError,
                     store_failed(state_dir, e),
                 );
             }
@@ -1500,7 +1515,7 @@ mod unix {
                     return error(
                         request_id,
                         store.state().generation,
-                        "invalid_path",
+                        ErrorCode::InvalidPath,
                         e.to_string(),
                     );
                 }
@@ -1536,7 +1551,7 @@ mod unix {
             Err(e) => error(
                 request_id,
                 store.state().generation,
-                "storage_error",
+                ErrorCode::StorageError,
                 store_failed(state_dir, e),
             ),
         }
@@ -1625,7 +1640,7 @@ mod unix {
                             "{}",
                             serde_json::json!({"level":"warn","event":"owner_grant_refused","request_id":id})
                         );
-                        break 'reply error(id, 0, "owner_grant_off", message);
+                        break 'reply error(id, 0, ErrorCode::OwnerGrantOff, message);
                     }
                     let transfer = is_transfer(&request.command);
                     let (tx, rx) = oneshot::channel();
@@ -1645,7 +1660,7 @@ mod unix {
                                 _ => error(
                                     id,
                                     0,
-                                    "coordination_unavailable",
+                                    ErrorCode::CoordinationUnavailable,
                                     "request outcome is unknown; retry the identical request ID",
                                 ),
                             }
@@ -1653,7 +1668,7 @@ mod unix {
                         Err(_) => error(
                             id,
                             0,
-                            "coordination_unavailable",
+                            ErrorCode::CoordinationUnavailable,
                             "coordinator queue unavailable; retry the identical request ID",
                         ),
                     }
@@ -1669,14 +1684,19 @@ mod unix {
                     }
                     named = field("capabilities")
                         .and_then(|names| serde_json::from_value(names.clone()).ok());
-                    error(String::new(), 0, "invalid_request", invalid_request())
+                    error(
+                        String::new(),
+                        0,
+                        ErrorCode::InvalidRequest,
+                        invalid_request(),
+                    )
                 }
             },
-            Ok(Err(e)) => error(String::new(), 0, "invalid_frame", e.to_string()),
+            Ok(Err(e)) => error(String::new(), 0, ErrorCode::InvalidFrame, e.to_string()),
             Err(_) => error(
                 String::new(),
                 0,
-                "read_timeout",
+                ErrorCode::ReadTimeout,
                 "JSON request was not received before the I/O deadline",
             ),
         };
@@ -1689,7 +1709,7 @@ mod unix {
             let mut too_large = error(
                 reply.request_id,
                 reply.generation,
-                "response_too_large",
+                ErrorCode::ResponseTooLarge,
                 "response exceeds 64 KiB; reduce the event page size, or page the state with `status --all`",
             );
             too_large.version = asked;

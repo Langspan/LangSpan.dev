@@ -15,6 +15,7 @@ mod classes;
 mod command;
 mod count;
 mod dashboard;
+mod error_code;
 mod event;
 mod flaky;
 mod history;
@@ -65,6 +66,7 @@ pub use dashboard::{
     DenialRow, Denials, EditRow, LandingRow, MessageRow, NoteRow, NoticeRow, OverlapRow,
     PublishRow, RecentFile, ScanRow, WorkspaceRow, dashboard_denials,
 };
+pub use error_code::ErrorCode;
 pub use event::Event;
 pub use flaky::{
     FLAKY_DECAY_RUNS, FLAKY_MIN_FLIPS, FLAKY_WINDOW_RUNS, FlakyCount, FlakyTest, LastTests,

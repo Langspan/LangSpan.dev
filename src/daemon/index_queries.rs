@@ -4,13 +4,13 @@
 
 use super::Registration;
 use super::unix::{
-    OUTLINE_MIN, OUTLINE_MIN_BYTES, OUTLINE_MIN_LINES, RECENT_WINDOW_MS, error, now_ms,
+    OUTLINE_MIN, OUTLINE_MIN_BYTES, OUTLINE_MIN_LINES, RECENT_WINDOW_MS, error, now_ms, relayed,
 };
 use crate::{
     protocol::{MAX_FRAME_BYTES, PROTOCOL_VERSION, Response},
     store::{Execution, Store},
 };
-use langspan_core::{Command, Outcome, State};
+use langspan_core::{Command, ErrorCode, Outcome, State};
 use std::{
     path::Path,
     time::{Duration, Instant},
@@ -393,7 +393,7 @@ pub(super) fn graph_context(
     graph: Option<&crate::graph::Index>,
     state: &State,
     command: &Command,
-) -> Result<Outcome, (&'static str, String)> {
+) -> Result<Outcome, (ErrorCode, String)> {
     let Command::GraphContext {
         workspace_id,
         names,
@@ -403,16 +403,20 @@ pub(super) fn graph_context(
         qualifiers,
     } = command
     else {
-        return Err(("invalid_graph_context", "not a code-context query".into()));
+        let refused = (
+            ErrorCode::InvalidGraphContext,
+            "not a code-context query".into(),
+        );
+        return Err(refused);
     };
     let limit = *limit;
     langspan_core::validate_graph_context(names, limit)
-        .map_err(|error| ("invalid_graph_context", error.message))?;
+        .map_err(|error| (ErrorCode::InvalidGraphContext, error.message))?;
     langspan_core::validate_rank(session_id.as_deref(), qualifiers)
-        .map_err(|error| ("invalid_graph_context", error.message))?;
+        .map_err(|error| (ErrorCode::InvalidGraphContext, error.message))?;
     if !rank && (session_id.is_some() || !qualifiers.is_empty()) {
         return Err((
-            "invalid_graph_context",
+            ErrorCode::InvalidGraphContext,
             "session_id and qualifiers rank a query: send them with rank set".into(),
         ));
     }
@@ -425,7 +429,7 @@ pub(super) fn graph_context(
             now_ms(),
         )
     });
-    let unavailable = |message: String| ("index_unavailable", message);
+    let unavailable = |message: String| (ErrorCode::IndexUnavailable, message);
     let of = Registration::of(state, workspace_id)
         .ok_or_else(|| unavailable("workspace is not registered".into()))?;
     let graph = graph
@@ -1112,9 +1116,10 @@ pub(super) fn prepare_anchors(
     state: &State,
     graph: Option<&crate::graph::Index>,
     command: &Command,
-) -> Result<Command, (&'static str, String)> {
-    let unavailable =
-        |error: Box<dyn std::error::Error + Send + Sync>| ("index_unavailable", error.to_string());
+) -> Result<Command, (ErrorCode, String)> {
+    let unavailable = |error: Box<dyn std::error::Error + Send + Sync>| {
+        (ErrorCode::IndexUnavailable, error.to_string())
+    };
     match command {
         Command::Remember {
             workspace_id,
@@ -1419,12 +1424,12 @@ fn check_calls(
     };
     let standings = match standings(store.state(), session_id, calls, now) {
         Ok(standings) => standings,
-        Err(e) => return error(request_id, generation, &e.code, e.message),
+        Err(e) => return relayed(request_id, generation, e.code, e.message),
     };
     let candidates =
         match langspan_core::call_candidates(store.state(), session_id, calls, &standings, now) {
             Ok(candidates) => candidates,
-            Err(e) => return error(request_id, generation, &e.code, e.message),
+            Err(e) => return relayed(request_id, generation, e.code, e.message),
         };
     let workspace_id = store.state().sessions[session_id].workspace_id.clone();
     let not_ready = |coverage: Option<langspan_core::GraphCoverage>| {
@@ -1447,7 +1452,7 @@ fn check_calls(
             return error(
                 request_id,
                 generation,
-                "index_unavailable",
+                ErrorCode::IndexUnavailable,
                 failure.to_string(),
             );
         }
@@ -1496,7 +1501,7 @@ fn check_calls(
                 return error(
                     request_id,
                     generation,
-                    "index_unavailable",
+                    ErrorCode::IndexUnavailable,
                     failure.to_string(),
                 );
             }
@@ -1512,7 +1517,7 @@ fn check_calls(
                 return error(
                     request_id,
                     generation,
-                    "index_unavailable",
+                    ErrorCode::IndexUnavailable,
                     failure.to_string(),
                 );
             }
@@ -1527,7 +1532,7 @@ fn check_calls(
         now,
     ) {
         Ok(breaks) => breaks,
-        Err(e) => return error(request_id, generation, &e.code, e.message),
+        Err(e) => return relayed(request_id, generation, e.code, e.message),
     };
     // Only the notices the hook's alert will show are recorded: one
     // left out for room stays to be told at a later write. The hook
@@ -1545,10 +1550,11 @@ fn check_calls(
             Ok(Execution {
                 outcome: Outcome::Error { code, message },
                 ..
-            }) => return error(request_id, generation, &code, message),
+            }) => return relayed(request_id, generation, code, message),
             Ok(_) => {}
             Err(failure) => {
-                return error(request_id, generation, "storage_error", failure.to_string());
+                let message = failure.to_string();
+                return error(request_id, generation, ErrorCode::StorageError, message);
             }
         }
     }
@@ -1595,7 +1601,12 @@ pub(super) fn outline_read(
         bytes,
     } = &command
     else {
-        return error(request_id, generation, "internal", "not an outline read");
+        return error(
+            request_id,
+            generation,
+            ErrorCode::Internal,
+            "not an outline read",
+        );
     };
     let answer =
         |outline: Option<(u32, Vec<langspan_core::OutlineEntry>)>, skipped: &str| Response {
@@ -1629,7 +1640,7 @@ pub(super) fn outline_read(
         return error(
             request_id,
             generation,
-            "session_not_found",
+            ErrorCode::SessionNotFound,
             "the session is not registered in a known workspace",
         );
     };
@@ -1648,7 +1659,7 @@ pub(super) fn outline_read(
             return error(
                 request_id,
                 generation,
-                "index_unavailable",
+                ErrorCode::IndexUnavailable,
                 failure.to_string(),
             );
         }
@@ -1675,7 +1686,12 @@ pub(super) fn outline_read(
             },
             _ => answer(None, "shown"),
         },
-        Err(e) => error(request_id, generation, "storage_error", e.to_string()),
+        Err(e) => error(
+            request_id,
+            generation,
+            ErrorCode::StorageError,
+            e.to_string(),
+        ),
     }
 }
 
@@ -1695,13 +1711,13 @@ pub(super) fn check_write(
     let generation = state.generation;
     let request = match langspan_core::write_check_request(state, session_id, paths, symbols) {
         Ok(request) => request,
-        Err(e) => return error(request_id, generation, &e.code, e.message),
+        Err(e) => return relayed(request_id, generation, e.code, e.message),
     };
     let Some(of) = Registration::of(state, &request.workspace_id) else {
         return error(
             request_id,
             generation,
-            "workspace_not_found",
+            ErrorCode::WorkspaceNotFound,
             "the session's workspace is not registered",
         );
     };
@@ -1749,7 +1765,7 @@ pub(super) fn check_write(
             return error(
                 request_id,
                 generation,
-                "index_unavailable",
+                ErrorCode::IndexUnavailable,
                 failure.to_string(),
             );
         }

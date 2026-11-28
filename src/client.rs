@@ -36,7 +36,7 @@ fn corrupt(error: impl std::fmt::Display) -> ClientError {
 mod unix {
     use super::{ClientError, corrupt};
     use crate::protocol::{Capabilities, PROTOCOL_VERSION, Request, Response, encode, read_frame};
-    use langspan_core::Outcome;
+    use langspan_core::{ErrorCode, Outcome};
     use rustix::{
         event::{PollFd, PollFlags, Timespec, poll},
         io::Errno,
@@ -85,7 +85,8 @@ mod unix {
         // to what that daemon reads (`protocol::for_capabilities`), and one
         // that would lose its meaning is not sent at all (`protocol::fits_with`).
         let refused = matches!(&response.outcome, Outcome::Error { code, .. }
-            if code == "unsupported_version" || code == "invalid_request");
+            if code == ErrorCode::UnsupportedVersion.as_str()
+                || code == ErrorCode::InvalidRequest.as_str());
         let again = if !refused || request.version != PROTOCOL_VERSION {
             None
         } else if response.version < PROTOCOL_VERSION && crate::protocol::answers(response.version)
