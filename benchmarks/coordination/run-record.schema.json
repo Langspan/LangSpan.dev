@@ -112,7 +112,7 @@
             "type": ["boolean", "null"]
           },
           "pushes": {
-            "description": "Shared arm, and every arm in push_contention: the session's Bash calls that ran `git push` (attempts), those whose result shows Git refusing the push (rejections), those made after a rejected one (retries) and those whose result is neither a rejection nor an error (landed), from its transcript. null in a trial whose sessions do not push, or with no transcript.",
+            "description": "Shared arm, and every arm in push_contention: the session's Bash calls that ran `git push` or, in the langspan arm, `langspan land --apply` (attempts; a push LangSpan's hook routed to landing never ran and is not one), those whose result shows Git, or the landing, refusing the push (rejections), those made after a rejected one (retries) and those whose result is neither a rejection nor an error (landed), from its transcript. null in a trial whose sessions do not push, or with no transcript.",
             "type": ["object", "null"],
             "additionalProperties": false,
             "required": ["attempts", "rejections", "retries", "landed"],
