@@ -228,10 +228,10 @@ class SharedDryRun(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def run_shared(self, n):
-        output = self.root / ("shared-%d" % n)
+    def run_shared(self, n, family="rename_vs_new_caller"):
+        output = self.root / ("shared-%d-%s" % (n, family))
         done = subprocess.run([sys.executable, "-B", str(HERE / "driver.py"), "--arm", "shared", "--family",
-                               "rename_vs_new_caller", "--sessions", str(n), "--seed", "11", "--time-limit", "600",
+                               family, "--sessions", str(n), "--seed", "11", "--time-limit", "600",
                                "--run", "--output", str(output)], capture_output=True, text=True, timeout=900)
         record_path = output / "record.json"
         self.assertTrue(record_path.is_file(), done.stdout + done.stderr)
@@ -264,6 +264,13 @@ class SharedDryRun(unittest.TestCase):
 
     def test_dry_run_shared_arm_five_sessions(self):
         self.run_shared(5)
+
+    def test_dry_run_shared_arm_reports_stale_callers_from_every_session_s_writes(self):
+        # The driver's real shared checkout and transcripts: each session's
+        # checkout holds its peers' recorded writes, which are not writes
+        # made another way.
+        found = self.run_shared(2, "discovered_change")
+        self.assertEqual(found["stale_callers"]["status"], "reported", found["stale_callers"])
 
 
 if __name__ == "__main__":
