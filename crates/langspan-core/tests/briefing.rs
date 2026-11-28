@@ -2622,3 +2622,246 @@ fn presence_never_takes_a_work_bearing_peers_place_in_the_briefing() {
     }
     assert_eq!(briefing.omitted_peers, 0);
 }
+
+// Same task (issue #537): two running sessions whose recorded prompt
+// targets meet each other's targets or claims. Decided from those records
+// alone, never from model judgment.
+
+fn brief_changes(state: &mut State, session: &str, id: &str, now: u64) -> Briefing {
+    match ok(run(
+        state,
+        id,
+        Command::Brief {
+            session_id: session.into(),
+            max_peers: 8,
+            deliver: true,
+            mid_turn: false,
+            left: Vec::new(),
+            recent: false,
+            recent_window_ms: None,
+            mcp: false,
+            changes_only: true,
+        },
+        now,
+    )) {
+        Outcome::Briefing { briefing } => briefing,
+        other => panic!("{other:?}"),
+    }
+}
+
+fn hold(state: &mut State, session: &str, path: &str, now: u64) {
+    assert!(matches!(
+        ok(run(
+            state,
+            &format!("a-{session}-{now}"),
+            Command::Admit {
+                session_id: session.into(),
+                paths: vec![path.into()],
+                ttl_ms: 60_000,
+            },
+            now,
+        )),
+        Outcome::Admitted { .. }
+    ));
+}
+
+/// Whether `briefing` tells its session that `other` is on the same task.
+fn told_same_task(briefing: &Briefing, other: &str) -> bool {
+    briefing
+        .peers
+        .iter()
+        .any(|peer| peer.session_id == other && peer.same_task)
+}
+
+#[test]
+fn two_sessions_whose_targets_share_a_file_are_each_told_same_task_once() {
+    let mut state = ready();
+    // Bob was already told alice's task line before her targets were known.
+    prompted(
+        &mut state,
+        "alice",
+        "make parse_header accept folded lines",
+        100,
+    );
+    edited(&mut state, "alice", "src/other.rs", 100);
+    let first = brief_changes(&mut state, "bob", "b0", 150);
+    assert!(
+        !peer(&first, "alice").same_task,
+        "no targets yet: {first:?}"
+    );
+    targets(&mut state, "alice", &["src/http.rs", "src/lib.rs"], 200);
+    prompted(&mut state, "bob", "fix the 400 from parse_header", 300);
+    targets(&mut state, "bob", &["src/http.rs"], 300);
+
+    let bobs = brief_changes(&mut state, "bob", "b1", 400);
+    assert!(bobs.changed);
+    let alice = peer(&bobs, "alice");
+    assert!(alice.same_task, "{bobs:?}");
+    // The notice names her task line, although bob was told it before.
+    assert_eq!(
+        alice.summary.as_deref(),
+        Some("make parse_header accept folded lines")
+    );
+    let alices = brief_changes(&mut state, "alice", "a1", 400);
+    let bob = peer(&alices, "bob");
+    assert!(bob.same_task, "{alices:?}");
+    assert_eq!(
+        bob.summary.as_deref(),
+        Some("fix the 400 from parse_header")
+    );
+
+    // Once each: the next briefings do not repeat it.
+    for (session, other, id) in [("bob", "alice", "b2"), ("alice", "bob", "a2")] {
+        let again = brief_changes(&mut state, session, id, 500);
+        assert!(!told_same_task(&again, other), "told twice: {again:?}");
+        assert!(!again.changed, "{again:?}");
+    }
+}
+
+#[test]
+fn a_whole_briefing_carries_same_task_in_its_signature_once() {
+    let mut state = ready();
+    prompted(&mut state, "alice", "parse_header", 100);
+    targets(&mut state, "alice", &["src/http.rs"], 100);
+    prompted(&mut state, "bob", "parse_header too", 100);
+    targets(&mut state, "bob", &["src/http.rs"], 100);
+    let bobs = brief(&mut state, "bob", "b1", 200);
+    assert!(bobs.changed && told_same_task(&bobs, "alice"), "{bobs:?}");
+    assert!(!brief(&mut state, "bob", "b2", 300).changed);
+    // Once told in a whole view, a briefing of changes does not repeat it.
+    assert!(!told_same_task(
+        &brief_changes(&mut state, "bob", "b3", 400),
+        "alice"
+    ));
+}
+
+#[test]
+fn a_task_pointing_at_a_file_a_peer_holds_is_the_same_task_on_both_sides() {
+    let mut state = ready();
+    // Carol, in a linked worktree, holds the file; she has no prompt targets.
+    prompted(&mut state, "carol", "rework the session store", 100);
+    hold(&mut state, "carol", "src/store.rs", 100);
+    prompted(&mut state, "alice", "add expiry to the session store", 200);
+    targets(&mut state, "alice", &["src/store.rs"], 200);
+    assert!(told_same_task(
+        &brief(&mut state, "alice", "a1", 300),
+        "carol"
+    ));
+    assert!(told_same_task(
+        &brief(&mut state, "carol", "c1", 300),
+        "alice"
+    ));
+}
+
+#[test]
+fn disjoint_targets_and_shared_edits_alone_are_never_the_same_task() {
+    let mut state = ready();
+    prompted(&mut state, "alice", "parse_header", 100);
+    targets(&mut state, "alice", &["src/http.rs"], 100);
+    hold(&mut state, "alice", "src/http.rs", 100);
+    prompted(&mut state, "bob", "render the footer", 100);
+    targets(&mut state, "bob", &["src/footer.rs"], 100);
+    hold(&mut state, "bob", "src/footer.rs", 100);
+    // Both edited one file, outside either task's targets.
+    edited(&mut state, "alice", "src/shared.rs", 150);
+    edited(&mut state, "bob", "src/shared.rs", 160);
+    let bobs = brief(&mut state, "bob", "b1", 200);
+    let alice = peer(&bobs, "alice");
+    assert_eq!(alice.overlap, ["src/shared.rs"], "{bobs:?}");
+    assert!(!alice.same_task, "disjoint targets matched: {bobs:?}");
+    assert!(!told_same_task(
+        &brief(&mut state, "alice", "a1", 200),
+        "bob"
+    ));
+    // Nor does the field appear on the wire when false.
+    let json = serde_json::to_value(&bobs).unwrap();
+    assert!(json["peers"][0].get("same_task").is_none(), "{json}");
+}
+
+#[test]
+fn a_subagent_on_its_parents_request_is_not_the_same_task_to_the_parent() {
+    let mut state = ready();
+    register(&mut state, "alice.a1", Some("alice"), false);
+    prompted(&mut state, "alice", "parse_header", 5);
+    targets(&mut state, "alice", &["src/http.rs"], 5);
+    prompted(&mut state, "alice.a1", "parse_header, relayed", 6);
+    targets(&mut state, "alice.a1", &["src/http.rs"], 6);
+    edited(&mut state, "alice.a1", "src/http.rs", 10);
+    let parent = brief(&mut state, "alice", "p1", 20);
+    assert!(!peer(&parent, "alice.a1").same_task, "{parent:?}");
+}
+
+// Review comment 4724596946: a match that lapses and returns is the same
+// peer on the same task; it is not told again, whatever made it lapse.
+
+/// Bob is told alice's task, `lapse` removes the match for one delivered
+/// briefing (a whole view or changes only), and `restore` brings it back.
+fn told_once_across_a_lapse(
+    whole_view: bool,
+    lapse: impl Fn(&mut State),
+    restore: impl Fn(&mut State),
+) {
+    let mut state = ready();
+    prompted(&mut state, "alice", "rework the session store", 100);
+    hold(&mut state, "alice", "src/store.rs", 100);
+    edited(&mut state, "alice", "src/other.rs", 100);
+    prompted(&mut state, "bob", "add expiry to the session store", 100);
+    targets(&mut state, "bob", &["src/store.rs"], 100);
+    let tell = |state: &mut State, id: &str, now: u64| {
+        if whole_view {
+            brief(state, "bob", id, now)
+        } else {
+            brief_changes(state, "bob", id, now)
+        }
+    };
+    assert!(told_same_task(&tell(&mut state, "b1", 200), "alice"));
+    lapse(&mut state);
+    let gap = tell(&mut state, "b2", 70_000);
+    assert!(!told_same_task(&gap, "alice"), "{gap:?}");
+    restore(&mut state);
+    let back = brief_changes(&mut state, "bob", "b3", 71_000);
+    assert!(!told_same_task(&back, "alice"), "told again: {back:?}");
+}
+
+#[test]
+fn a_peer_whose_hold_lapses_and_returns_is_not_told_same_task_again() {
+    // The 60-second lease expires before 70_000; alice then admits again.
+    for whole_view in [false, true] {
+        told_once_across_a_lapse(
+            whole_view,
+            |_| {},
+            |state| hold(state, "alice", "src/store.rs", 70_500),
+        );
+    }
+}
+
+#[test]
+fn a_session_whose_targets_lapse_and_return_is_not_told_same_task_again() {
+    // Bob's next prompt points elsewhere, and the one after it back.
+    for whole_view in [false, true] {
+        told_once_across_a_lapse(
+            whole_view,
+            |state| {
+                hold(state, "alice", "src/store.rs", 69_000);
+                targets(state, "bob", &["src/footer.rs"], 69_000);
+            },
+            |state| targets(state, "bob", &["src/store.rs"], 70_500),
+        );
+    }
+}
+
+#[test]
+fn another_peer_on_the_same_task_is_told_after_the_first_one_ended() {
+    let mut state = ready();
+    prompted(&mut state, "alice", "rework the session store", 100);
+    hold(&mut state, "alice", "src/store.rs", 100);
+    prompted(&mut state, "bob", "add expiry to the session store", 100);
+    targets(&mut state, "bob", &["src/store.rs"], 100);
+    let first = brief_changes(&mut state, "bob", "b1", 200);
+    assert!(told_same_task(&first, "alice"), "{first:?}");
+    end(&mut state, "alice", 300);
+    prompted(&mut state, "carol", "rework the session store", 400);
+    hold(&mut state, "carol", "src/store.rs", 400);
+    let carols = brief_changes(&mut state, "bob", "b2", 500);
+    assert!(told_same_task(&carols, "carol"), "{carols:?}");
+}

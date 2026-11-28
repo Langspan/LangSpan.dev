@@ -20,7 +20,10 @@ or an alias. An edge in a cycle, pointing outward, between namespaces of one
 layer without an `allow` row, outside an `only` list or from a pipeline file to
 an adapter beside it fails without an edge row; so does a top-level file that
 isn't a namespace, a file deeper than src/<namespace>/<sub>/<file>.rs and an
-alias nothing uses. Only production code is
+alias nothing uses. A crate's fn and closure return types `-> Result<T, String>`
+may not outnumber its row `CRATE N` in scripts/ratchets/string-errors.tsv
+(no row allows none); lower the row by hand when the count shrinks. Only
+production code is
 measured: `#[cfg(test)]` items and files outside `src/` are skipped. The
 scanner is lexical, not a Rust parser; it is exact for rustfmt-formatted code.
 """
@@ -34,6 +37,7 @@ BASELINE_DIR = os.path.join("scripts", "ratchets", "baseline")
 LAYERS = ("utility", "infrastructure", "application", "interface")
 LAYER_MARK = re.compile(r"^//\s*layer:\s*(\S*)\s*$", re.M)
 NAMESPACES = "scripts/ratchets/namespaces.tsv"
+STRING_ERRORS = "scripts/ratchets/string-errors.tsv"
 ROLES = ("adapter", "feature")
 ROLE_MARK = re.compile(r"^//\s*role:\s*(\S*)\s*$", re.M)
 MAX_DEPTH = 3  # src/<namespace>/<sub>/<file>.rs
@@ -163,6 +167,7 @@ _PUB = re.compile(
 # array type, literal or slice pattern, and `!` before a macro's. A `"` ends a
 # string literal and a `\x01` a comment (see strip's mark); rustfmt keeps a comment
 # between an operand and its `[`, so the operand is matched across one.
+_RESULT = re.compile(r"->\s*(?:\w+::)*Result\s*<")
 _INDEX = re.compile(r"(\w+|[)\]?\"])(?:[\s\x01]*\x01[\s\x01]*)?\[")
 # Keywords that start an array, slice type or slice pattern after a comment. A raw
 # identifier such as `r#match` is an operand, so `indexing` checks for its `r#`.
@@ -284,6 +289,29 @@ class Source:
                 counts[0] += 1
         self._indexing = tuple(counts)
         return self._indexing
+
+    def string_errors(self):
+        """Production fn and closure return types `-> Result<T, String>`."""
+        count, s = 0, self.text
+        for m in _RESULT.finditer(s):
+            depth, j, comma = 0, m.end(), None
+            while j < len(s):
+                if s.startswith("->", j):
+                    j += 2
+                    continue
+                c = s[j]
+                if c in "<([":
+                    depth += 1
+                elif c in ">)]":
+                    if not depth:
+                        break
+                    depth -= 1
+                elif c == "," and not depth:
+                    comma = j
+                j += 1
+            if comma is not None and s[comma + 1 : j].strip() == "String":
+                count += 1
+        return count
 
     def count(self, metric):
         """The production number a crate-wide ratchet sums: pub, index or slice."""
@@ -726,6 +754,41 @@ def load_namespaces(root):
         return parse_namespaces(f.read(), NAMESPACES)
 
 
+def load_string_errors(root):
+    """{crate: N} from string-errors.tsv rows `CRATE N`; a crate without a row allows none."""
+    path, out = os.path.join(root, STRING_ERRORS), {}
+    if not os.path.exists(path):
+        return out
+    with open(path, encoding="utf-8") as f:
+        for number, line in enumerate(f.read().split("\n"), 1):
+            row = line.split("\t")
+            if not line.strip() or line.startswith("#"):
+                continue
+            if len(row) != 2 or not row[1].isdigit():
+                raise RatchetError(f"{STRING_ERRORS}:{number}: expected `CRATE N`, tab-separated; got {line!r}")
+            out[row[0]] = int(row[1])
+    return out
+
+
+def _string_errors(ws, allowed):
+    """(failures, improvements) of each crate's `Result<_, String>` count against its row."""
+    failures, improvements, totals = [], [], {}
+    for path, source in sorted(ws.sources.items()):
+        totals.setdefault(ws.crate_of[path], []).append((path, source.string_errors()))
+    what = "`Result<_, String>` signatures"
+    for crate, counts in sorted(totals.items()):
+        actual, base = sum(n for _, n in counts), allowed.get(crate, 0)
+        if actual > base:
+            files = ", ".join(f"{p} {n}" for p, n in counts if n)
+            failures.append(
+                f"crate {crate}: {actual} {what}, baseline {base}, {actual - base} more; in: {files}. "
+                "Return a typed error instead of String"
+            )
+        elif actual < base:
+            improvements.append(f"crate {crate}: {actual} {what}, baseline {base}; set its row in {STRING_ERRORS} to {actual}")
+    return failures, improvements
+
+
 def load_baselines(root):
     base, out = os.path.join(root, BASELINE_DIR), {}
     for here, _, files in os.walk(base):
@@ -834,6 +897,8 @@ def check(root):
             improvements.append(f"{path}: edge {module} -> {row} is no longer debt; "
                                 + TIGHTEN.format(path=path))
     failures += ws.layout()
+    grown, shrunk = _string_errors(ws, load_string_errors(root))
+    failures, improvements = failures + grown, improvements + shrunk
     for path in sorted(set(baselines) - set(ws.sources)):
         improvements.append(f"{path}: no longer measured; {TIGHTEN.format(path=path)} to delete its baseline")
     return failures, improvements

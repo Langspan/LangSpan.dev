@@ -1,0 +1,17 @@
+{
+  "version": 2,
+  "next": 5,
+  "events": [
+    {"seq": 1, "type": "clock_anchored", "paths": [], "more_paths": 0,
+     "wall_ms": 1800000000000, "clock_ms": 5000},
+    {"seq": 2, "type": "session_registered", "session_id": "codex.bob.sub", "workspace_id": "app",
+     "paths": [], "more_paths": 0},
+    {"seq": 3, "type": "write_refused", "session_id": "codex.bob.sub", "workspace_id": "app",
+     "at_ms": 6000, "paths": ["src/api.rs"], "more_paths": 0,
+     "peer_session_id": "claude-code.alice", "refusal": "stale_base"},
+    {"seq": 4, "type": "source_observed", "session_id": "codex.bob.sub", "at_ms": 6100,
+     "paths": ["src/api.rs"], "more_paths": 0, "origin": "read"},
+    {"seq": 5, "type": "operation_observed", "session_id": "codex.bob.sub", "workspace_id": "app",
+     "at_ms": 6200, "paths": ["src/api.rs"], "more_paths": 0, "tool": "Edit", "result": "succeeded"}
+  ]
+}

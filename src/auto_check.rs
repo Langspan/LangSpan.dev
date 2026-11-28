@@ -669,11 +669,13 @@ fn still_enabled(
     of: &Registration,
 ) -> bool {
     let ask = |command| match record(Some(of), "read".into(), command) {
-        Some(Outcome::Error { code, message }) => {
-            Err(crate::Error::from(format!("{code}: {message}")))
-        }
+        Some(Outcome::Error { code, message }) => Err(crate::client::ClientError::Refused(
+            format!("{code}: {message}"),
+        )),
         Some(outcome) => Ok(outcome),
-        None => Err(crate::Error::from("the state owner is gone")),
+        None => Err(crate::client::ClientError::Unavailable(
+            "the state owner is gone".into(),
+        )),
     };
     crate::client::status_with(ask, &["auto_checks"]).is_ok_and(|(state, _)| {
         state.auto_checks.get(&check.workspace_id) == Some(check)
