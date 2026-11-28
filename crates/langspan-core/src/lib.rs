@@ -48,7 +48,7 @@ pub use anchors::{
     ANCHOR_CANDIDATES, AnchorIndex, AnchorLookup, AnchorState, MAX_TAGS, NoteAnchor, SYMBOL_BYTES,
     TAG_BYTES, anchored, remember_lookups, validate_tag, validate_tags,
 };
-pub use authority::{Authority, authority};
+pub use authority::{Authority, authority, owner_grant_effect};
 pub use briefing::*;
 pub use checks::*;
 pub use classes::{

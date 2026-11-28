@@ -128,7 +128,9 @@ impl Fixture {
         fs::create_dir(&state).unwrap();
         fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
         let config = state.join("config.json");
-        fs::write(&config, json!({"auto_check_debounce_ms": 100}).to_string()).unwrap();
+        // Turning a check on is an owner grant; the owner allows it.
+        let config_json = json!({"auto_check_debounce_ms": 100, "owner_grants": true});
+        fs::write(&config, config_json.to_string()).unwrap();
         fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
         let daemon = Process::new(env!("CARGO_BIN_EXE_langspan"))
             .env("LANGSPAN_TEST_SCAN_EVERY_MS", "200")

@@ -8,6 +8,7 @@
 
 #[path = "support/golden.rs"]
 mod golden;
+mod support;
 
 use langspan::graph::Index;
 use serde_json::Value;
@@ -133,6 +134,8 @@ impl Daemon {
     fn start(state: PathBuf, root: &Path, files_per_pass: Option<usize>) -> Self {
         fs::create_dir(&state).unwrap();
         fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+        // Export and import are owner grants; these daemons' owner allows them.
+        support::owner_grants(&state, true);
         let mut command = Command::new(env!("CARGO_BIN_EXE_langspan"));
         command
             .env("LANGSPAN_AUTOSTART", "off")

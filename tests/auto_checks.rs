@@ -82,7 +82,9 @@ impl Fixture {
     }
     /// As `with_config`, with a debug build's idle limit in milliseconds
     /// (`LANGSPAN_TEST_IDLE_EXIT_MS`) and the daemon's log in `daemon.log`.
-    fn with_idle_exit(config_json: Value, idle_ms: Option<u64>) -> Self {
+    fn with_idle_exit(mut config_json: Value, idle_ms: Option<u64>) -> Self {
+        // Turning a check on is an owner grant: allowed as its owner would.
+        config_json["owner_grants"] = json!(true);
         let base = fs::canonicalize(std::env::temp_dir())
             .unwrap()
             .join(format!(

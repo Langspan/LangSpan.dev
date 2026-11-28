@@ -50,7 +50,8 @@ impl Developer {
         fs::create_dir_all(&self.state).unwrap();
         fs::set_permissions(&self.state, fs::Permissions::from_mode(0o700)).unwrap();
         let config = self.state.join("config.json");
-        fs::write(&config, r#"{"remote_pass_ms":200}"#).unwrap();
+        // Turning publication on is an owner grant; the owner allows it.
+        fs::write(&config, r#"{"remote_pass_ms":200,"owner_grants":true}"#).unwrap();
         fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
         self.daemon = Some(
             Process::new(env!("CARGO_BIN_EXE_langspan"))
