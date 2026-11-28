@@ -141,12 +141,13 @@ refuses it, every time, with the landing command to run instead:
 
 ```text
 LangSpan: push routed to landing. main is the default branch of the remote, and a push to it goes through landing: ...
-Run `langspan --state-dir DIR land WORKSPACE --onto main --name CHECK feat --apply --rebase --check-again -- TEST_COMMAND` ...
+Run `langspan --state-dir DIR land WORKSPACE --onto main --name CHECK refs/heads/feat --apply --rebase --check-again -- TEST_COMMAND` ...
 ```
 
-The agent fills in a check name and the project's test command. To learn
-where a push goes, the hook runs it first as `git push --dry-run --porcelain`
-with the same arguments. The push is routed when the dry
+The agent fills in a check name and the project's test command. The branch
+is named in full (`refs/heads/feat`), so a tag of the same name is never
+landed in its place. To learn where a push goes, the hook runs it first as
+`git push --dry-run --porcelain` with the same arguments. The push is routed when the dry
 run would update, force or delete the default branch, whether through a
 refspec, a mirror remote, `push.default`, `remote.pushDefault`
 or a configured `remote.origin.push`. Pushes to other branches and tags pass.

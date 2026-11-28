@@ -321,15 +321,16 @@ fn default_branch(dir: &Path, remote: &str, until: Instant) -> Result<Option<Str
     }))
 }
 
-/// What would land: the local branch, the current one for `HEAD`.
+/// What would land: the local ref, the current branch's for `HEAD`. It stays
+/// fully qualified (`refs/heads/feat`), since a tag of the same name comes
+/// first when Git resolves a short one and would land other commits.
 fn source(dir: &Path, update: &Update, until: Instant) -> Result<Option<String>, Unread> {
     Ok(match update.from.as_str() {
         "" => None,
         "HEAD" => Some(
-            git(dir, &["symbolic-ref", "--quiet", "--short", "HEAD"], until)?
-                .unwrap_or_else(|| "HEAD".into()),
+            git(dir, &["symbolic-ref", "--quiet", "HEAD"], until)?.unwrap_or_else(|| "HEAD".into()),
         ),
-        from => Some(from.strip_prefix("refs/heads/").unwrap_or(from).to_owned()),
+        from => Some(from.to_owned()),
     })
 }
 
@@ -582,10 +583,47 @@ mod tests {
 
     const NOT_DEFAULT: &str = "push route: no push to the default branch";
 
-    fn lands(source: &str) -> String {
+    /// The landing command for the local branch `branch`.
+    fn lands(branch: &str) -> String {
         format!(
-            "land 'app' --onto main --name CHECK {source} --apply --rebase --check-again -- TEST_COMMAND`"
+            "land 'app' --onto main --name CHECK refs/heads/{branch} --apply --rebase --check-again -- TEST_COMMAND`"
         )
+    }
+
+    /// Review of PR #576: the landing command named `feat`, and a tag `feat`
+    /// comes first when Git resolves that, so landing would have published
+    /// the tag's commit. The command names `refs/heads/feat`, and `land`'s
+    /// own resolution of it gives the branch's commit. Git's resolution of
+    /// an ambiguous name is what is verified, so this runs Git.
+    #[test]
+    fn the_landing_command_names_the_branch_even_when_a_tag_shares_its_name() {
+        let repo = repo("tag-named-like-branch");
+        git_ok(&repo.work, &["tag", "feat", "main"]);
+        let reason = routed(&repo, "git push origin refs/heads/feat:refs/heads/main");
+        assert!(reason.contains(&lands("feat")), "{reason}");
+        // As `integrate::commit` resolves the source: `rev-parse NAME^{commit}`.
+        let resolve = |name: &str| {
+            let out = Command::new("git")
+                .args([
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    &format!("{name}^{{commit}}"),
+                ])
+                .current_dir(&repo.work)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .output()
+                .unwrap();
+            String::from_utf8(out.stdout).unwrap()
+        };
+        let branch = resolve("refs/heads/feat");
+        assert_ne!(branch, resolve("refs/tags/feat"), "the fixture's tag");
+        assert_ne!(
+            resolve("feat"),
+            branch,
+            "Git resolves the short name to the tag"
+        );
     }
 
     #[test]
@@ -820,7 +858,7 @@ mod tests {
         main_ahead(&repo);
         let reason = routed(&repo, "git push");
         assert!(
-            reason.contains("--onto main --remote fork --name CHECK main"),
+            reason.contains("--onto main --remote fork --name CHECK refs/heads/main"),
             "{reason}"
         );
     }
