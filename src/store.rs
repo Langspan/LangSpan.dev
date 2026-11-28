@@ -43,6 +43,7 @@ pub const HISTORY_BUDGET_BYTES: usize = 28 * 1024;
 
 #[macro_use]
 mod sql;
+pub mod chain;
 mod messages;
 mod paging;
 mod reads;
@@ -106,6 +107,8 @@ pub struct Store {
     /// commits, so that a test can kill the daemon there.
     compaction_pause: Option<Duration>,
     tap: Option<Tap>,
+    /// The digest the next event chains from (`chain`).
+    head: String,
     /// The newest events `today` and `report` read: `TODAY_EVENTS`, which
     /// a test lowers to cross it with a short log.
     today_events: usize,
@@ -262,6 +265,10 @@ impl Store {
         }
 
         let (state, snapshot_seq) = Self::recover_as_newest_writer(&connection)?;
+        // After the store proved readable, so a store this build refuses
+        // is left as it was (ADR 0038).
+        chain::migrate(&connection)?;
+        let head = chain::extend(&connection)?;
         let generation = state
             .generation
             .checked_add(1)
@@ -273,6 +280,7 @@ impl Store {
             wall_ms,
             compaction_pause: None,
             tap: None,
+            head,
             today_events: TODAY_EVENTS,
             report_history_events: langspan_core::REPORT_HISTORY_EVENTS,
         };
@@ -534,10 +542,13 @@ impl Store {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut head = self.head.clone();
         for event in events {
+            let json = serde_json::to_string(event)?;
+            head = chain::link(&head, &json);
             transaction.execute(
-                "INSERT INTO events(event_json, recorded_at_ms) VALUES (?1, ?2)",
-                params![serde_json::to_string(event)?, recorded_at],
+                "INSERT INTO events(event_json, recorded_at_ms, digest) VALUES (?1, ?2, ?3)",
+                params![json, recorded_at, head],
             )?;
             // The last scan was of the old checkout: the next scan of the
             // new root starts a fresh baseline, so files that differ between
@@ -575,6 +586,7 @@ impl Store {
         }
         transaction.commit()?;
         self.state = next_state;
+        self.head = head;
         if let Some(tap) = &mut self.tap {
             let room = TAP_LIMIT.saturating_sub(tap.events.len());
             let keep = tap.keep;

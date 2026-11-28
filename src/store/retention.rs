@@ -324,6 +324,11 @@ impl Store {
                 params![since_sql, target_sql],
             )?;
         }
+        super::chain::record_gaps(
+            &transaction,
+            REMOVED,
+            params![target_sql, cutoff_sql, anchor_sql],
+        )?;
         transaction.execute(
             &format!("DELETE FROM events WHERE {REMOVED}"),
             params![target_sql, cutoff_sql, anchor_sql],

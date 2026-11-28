@@ -867,6 +867,14 @@ same: --json --state-dir --request-id --after --limit
 every other option
   exit 1: {"level":"error","message":"option {option} is not valid for this command"}
 
+## langspan events verify
+alone: exit 1: {"level":"error","message":"could not verify the event log: no coordination store at $TMP/state/state.sqlite3: the coordinator has not run with this state directory"}
+same: --json --apply --state-dir --home
+--help -h
+  exit 0: the help
+every other option
+  exit 1: {"level":"error","message":"option {option} is not valid for this command"}
+
 ## langspan compact
 alone: exit 1: {"level":"error","message":"coordination unavailable: No such file or directory (os error 2); start `langspan daemon --state-dir <dir>`"}
 same: --json --apply --state-dir --request-id --keep-days

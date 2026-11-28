@@ -4,7 +4,9 @@ use crate::check::{auto_check, evidence, flaky_tests};
 use crate::flags::{ParsedOptions, flags_of, parse_options, state_dir};
 use crate::help::HELP;
 use crate::land::{integrate, landing_queue};
-use crate::local::{adopt, commit_mine, demo, notify, refusal_count, status_line, status_mine};
+use crate::local::{
+    adopt, commit_mine, demo, events_verify, notify, refusal_count, status_line, status_mine,
+};
 use crate::request::request;
 use crate::serve::{daemon, dashboard, mcp};
 use langspan::cli::doctor::doctor;
@@ -111,6 +113,9 @@ pub(crate) async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
         }
         ["statusline"] => return status_line(&state_dir, &mut options, json),
         ["count"] => return refusal_count(&state_dir, &mut options, json),
+        ["events", "verify"] if command.is_empty() => {
+            return events_verify(&state_dir, &options, json);
+        }
         ["notify", action] if command.is_empty() => {
             return notify(&state_dir, action, &mut options, json);
         }

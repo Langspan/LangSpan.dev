@@ -351,6 +351,36 @@ Decided and built 25 November 2026.
   (no `VACUUM`). Exporting removed events, the source index and remote refs
   are out of scope.
 
+## J9: the hash chain, first slice as built
+
+Amended 28 November 2026. The owner made the audit log part of the
+standard-protocol epic ([#626](https://github.com/Langspan/LangSpan.dev/issues/626)),
+which replaces "not now" in row J9: a person must be able to show what the
+log said when a call was made. The first slice
+([issue #91](https://github.com/Langspan/LangSpan.dev/issues/91)) is built;
+`replay --at SEQ` and the head in `doctor` follow.
+
+- **The link.** Each event row's new `digest` column is the SHA-256, in
+  lowercase hex, of the previous row's digest in hex followed by this row's
+  `event_json`, with no separator. The first row chains from 64 zeros. A
+  person can recompute any link with `printf '%s%s' PREV JSON | shasum -a 256`.
+- **No schema change (ADR 0038).** A column and a `chain_gaps` table, not a
+  new marker: an earlier build still opens the store and writes rows without
+  a digest. When this build next opens it, it chains every row after the
+  newest chained one; an upgrade chains the whole log once. A row without a
+  digest before a chained one is left for `verify` to name.
+- **Across compaction.** Before a compaction deletes rows, it records the
+  digest of the last row of each run it deletes in `chain_gaps`, keyed by
+  that row's sequence, so the rows it keeps, and those written after, still
+  check. A compaction by a build before this one records none; `verify`
+  names the first row after the rows it deleted.
+- **`langspan events verify [--json]`** reads the store file read-only,
+  without the coordinator, and prints `ok: N events, head DIGEST` or the
+  first sequence whose digest is missing or wrong, and then exits 1. It
+  refuses a store this build has not opened yet. The daemon keeps running on
+  a broken chain: the chain detects a change after a person wrote the head
+  down; it does not prevent one by the owner's own account.
+
 ## Roadmap
 
 These rows are on the public roadmap. They are worked on in the open after the first

@@ -1,6 +1,7 @@
 //! Minimal SHA-256 (FIPS 180-4) for deterministic adapter identities.
 //!
-//! It names retries; it is not used for authentication or secrecy. Written
+//! It names retries and links the event log's hash chain; it is not used
+//! for authentication or secrecy. Written
 //! here to avoid a dependency for one bounded use; see docs/dependencies.md.
 
 const K: [u32; 64] = [
