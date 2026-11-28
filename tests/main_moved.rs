@@ -172,6 +172,19 @@ fn a_session_editing_a_struct_main_moved_is_told_once_before_it_merges() {
     );
     // Once per change: the next prompt does not repeat it.
     assert!(!f.prompt().contains("moved under your work"));
+    // A later change to the moved code is a new change.
+    f.on_main(
+        &[(
+            "src/state.rs",
+            Some("pub struct State {\n    pub a: u16,\n}\n"),
+        )],
+        "narrow",
+    );
+    let told = f.prompt();
+    assert!(
+        told.contains("\n- `State` moved from `src/lib.rs` to `src/state.rs` (commit "),
+        "{told}"
+    );
     // After the merge (the session's edit set aside, as a merge that took
     // main's side would leave it), main has nothing the branch lacks.
     git(&f.work(), &["checkout", "--quiet", "--", "src/lib.rs"]);
@@ -226,6 +239,31 @@ fn work_the_session_committed_with_commit_mine_is_still_its_work() {
         told.contains("\n- `State` changed in `src/lib.rs` (commit "),
         "{told}"
     );
+}
+
+/// Git's rename detection is what is verified: the moved file is found by
+/// content, and a later change to it is told again.
+#[test]
+fn a_file_main_renamed_is_told_again_when_main_changes_it_there() {
+    let f = Fixture::new("r");
+    f.write(
+        "src/lib.rs",
+        &LIB.replace("pub a: u32,", "pub a: u32,\n    pub b: u32,"),
+    );
+    f.on_main(
+        &[("src/lib.rs", None), ("src/moved.rs", Some(LIB))],
+        "rename",
+    );
+    let moved = "\n- `src/lib.rs` moved to `src/moved.rs` (commit ";
+    let told = f.prompt();
+    assert!(told.contains(moved), "{told}");
+    assert!(!f.prompt().contains("moved under your work"));
+    f.on_main(
+        &[("src/moved.rs", Some(&LIB.replace("    1\n", "    2\n")))],
+        "change moved",
+    );
+    let told = f.prompt();
+    assert!(told.contains(moved), "{told}");
 }
 
 #[test]

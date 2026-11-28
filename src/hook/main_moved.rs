@@ -37,15 +37,22 @@ pub(super) struct Upstream {
 /// change's own digest is part of its key, so a later change is told again.
 #[derive(Debug, PartialEq, Eq)]
 enum Item {
-    /// The whole file moved on the target, to this path.
-    FileMoved(String),
+    /// The whole file moved on the target, to this path; the digest of the
+    /// moved file, so a later change there is told too.
+    FileMoved(String, String),
     /// Changed where no symbol tells more; the digest of its new version.
     FileChanged(String),
     /// A symbol's body changed; the digest of its new body.
     Changed(String, String),
-    MovedTo(String, String),
+    /// A symbol moved to another file; that file and the digest of the
+    /// symbol's body there.
+    MovedTo(String, String, String),
     Removed(String),
 }
+
+/// Where on the target a symbol moved, by name and kind: the other file it
+/// is in, and the digest of its body there.
+type MovedTo<'a> = dyn Fn(&str, SymbolKind) -> Option<(String, String)> + 'a;
 
 /// The section for `session_id` placed after `before`, the reply's section
 /// ahead of it, within `room` bytes: the section, the text of both, and the
@@ -138,11 +145,10 @@ fn section(
             .filter_map(|(_, to, _)| to.as_deref())
             .filter(|to| *to != from)
             .take(MAX_FILES)
-            .find(|to| {
-                let graph = blob(&tip, to).and_then(|bytes| graph(to, &bytes));
-                graph.is_some_and(|graph| find(&graph, name, kind).is_some())
+            .find_map(|to| {
+                let moved = moved_body(to, &blob(&tip, to)?, name, kind)?;
+                Some((to.to_owned(), moved))
             })
-            .map(str::to_owned)
     };
     let told = read_told(state_dir);
     let mut found: Vec<(String, String)> = Vec::new();
@@ -151,7 +157,10 @@ fn section(
             continue;
         };
         let items = match to.as_deref() {
-            Some(to) if to != old => vec![Item::FileMoved(to.to_owned())],
+            Some(to) if to != old => {
+                let moved = blob(&tip, to).map(|bytes| digest(&bytes));
+                vec![Item::FileMoved(to.to_owned(), moved.unwrap_or_default())]
+            }
             // A version Git did not give says nothing; a deletion is empty,
             // and so is the base of a file the target added too.
             to => {
@@ -187,16 +196,12 @@ fn section(
 /// The changes in one file the session edited and the target changed or
 /// deleted (`tip` empty): each symbol whose body the session changed since
 /// `base` (renamed or deleted included) that the target also changed, moved
-/// (`moved_to` names where) or removed. A file without a complete parse at every version, where the
-/// session changed code outside every symbol or no symbol's body, or where a
-/// symbol it changed shares its name and kind with another, is told whole.
-fn compare(
-    path: &str,
-    base: &[u8],
-    now: &[u8],
-    tip: &[u8],
-    moved_to: &dyn Fn(&str, SymbolKind) -> Option<String>,
-) -> Vec<Item> {
+/// (`moved_to` names where, with the digest of its body there) or removed. A
+/// file without a complete parse at every version, where the session changed
+/// code outside every symbol or no symbol's body, where a symbol it changed
+/// shares its name and kind with another, or where both added a symbol of
+/// the same name and kind but not the same body, is told whole.
+fn compare(path: &str, base: &[u8], now: &[u8], tip: &[u8], moved_to: &MovedTo) -> Vec<Item> {
     let graphs = (graph(path, base), graph(path, now), graph(path, tip));
     let (Some(base_graph), Some(now_graph), Some(tip_graph)) = graphs else {
         return vec![Item::FileChanged(digest(tip))];
@@ -213,12 +218,16 @@ fn compare(
         }
         seen.push((name, kind));
         let mut before = bodies(base, &base_graph, name, kind);
-        if before.is_empty() {
-            continue;
-        }
         let mut edited = bodies(now, &now_graph, name, kind);
         before.sort();
         edited.sort();
+        if before.is_empty() {
+            // Both added this name: their definitions may clash.
+            let mut theirs = bodies(tip, &tip_graph, name, kind);
+            theirs.sort();
+            whole |= !theirs.is_empty() && theirs != edited;
+            continue;
+        }
         if before == edited {
             continue;
         }
@@ -239,7 +248,7 @@ fn compare(
             Some(after) if body(tip, after) == body(base, before) => continue,
             Some(after) => Item::Changed(name, digest(body(tip, after).unwrap_or_default())),
             None => match moved_to(&symbol.name, symbol.kind) {
-                Some(to) => Item::MovedTo(name, to),
+                Some((to, moved)) => Item::MovedTo(name, to, moved),
                 // Both removed it: nothing to reconcile.
                 None if gone => continue,
                 None => Item::Removed(name),
@@ -282,6 +291,13 @@ fn outside(source: &[u8], graph: &FileGraph) -> Vec<u8> {
 fn graph(path: &str, source: &[u8]) -> Option<FileGraph> {
     let graph = langspan_graph::extract(Language::for_path(path)?, source).ok()?;
     (!graph.partial).then_some(graph)
+}
+
+/// The digest of the body of `name` of `kind` in `source`, read as `path`;
+/// `None` when it has no such symbol.
+fn moved_body(path: &str, source: &[u8], name: &str, kind: SymbolKind) -> Option<String> {
+    let graph = graph(path, source)?;
+    Some(digest(body(source, find(&graph, name, kind)?)?))
 }
 
 fn find<'a>(graph: &'a FileGraph, name: &str, kind: SymbolKind) -> Option<&'a Symbol> {
@@ -333,10 +349,10 @@ fn name_status(out: &str) -> Vec<(String, Option<String>, bool)> {
 fn words(path: &str, item: &Item, commit: &str) -> String {
     let path = clean(path, NAME_LIMIT);
     let what = match item {
-        Item::FileMoved(to) => format!("`{path}` moved to `{}`", clean(to, NAME_LIMIT)),
+        Item::FileMoved(to, _) => format!("`{path}` moved to `{}`", clean(to, NAME_LIMIT)),
         Item::FileChanged(_) => format!("`{path}` changed"),
         Item::Changed(name, _) => format!("`{}` changed in `{path}`", clean(name, NAME_LIMIT)),
-        Item::MovedTo(name, to) => format!(
+        Item::MovedTo(name, to, _) => format!(
             "`{}` moved from `{path}` to `{}`",
             clean(name, NAME_LIMIT),
             clean(to, NAME_LIMIT)
@@ -410,7 +426,7 @@ mod tests {
         "pub struct State {\n    pub a: u32,\n}\n\npub fn other() -> u32 {\n    1\n}\n";
 
     fn items(now: &str, tip: &str, moved: Option<&str>) -> Vec<Item> {
-        let moved = moved.map(str::to_owned);
+        let moved = moved.map(|to| (to.to_owned(), "d".to_owned()));
         compare(
             "src/lib.rs",
             BASE.as_bytes(),
@@ -426,7 +442,11 @@ mod tests {
         let tip = "pub fn other() -> u32 {\n    1\n}\n";
         assert_eq!(
             items(&now, tip, Some("src/state.rs")),
-            [Item::MovedTo("State".into(), "src/state.rs".into())]
+            [Item::MovedTo(
+                "State".into(),
+                "src/state.rs".into(),
+                "d".into()
+            )]
         );
         assert_eq!(items(&now, tip, None), [Item::Removed("State".into())]);
         let changed = BASE.replace("pub a: u32,", "pub a: u64,");
@@ -453,6 +473,30 @@ mod tests {
         );
         let gone = "pub struct State {\n    pub a: u32,\n}\n";
         assert_eq!(items(&now, gone, None), []);
+    }
+
+    #[test]
+    fn a_name_the_session_and_the_target_both_added_is_told_with_its_file() {
+        let now = BASE.replace("fn other()", "fn renamed()");
+        let added = |body: &str| format!("{BASE}\npub fn renamed() -> u32 {{\n    {body}\n}}\n");
+        assert!(matches!(
+            items(&now, &added("2"), None).as_slice(),
+            [Item::FileChanged(_)]
+        ));
+        // The same addition on both sides is nothing to reconcile.
+        assert_eq!(items(&now, &added("1"), None), []);
+    }
+
+    #[test]
+    fn a_moved_symbol_is_keyed_by_its_body_where_it_went() {
+        let moved =
+            |source: &str| moved_body("src/state.rs", source.as_bytes(), "State", SymbolKind::Type);
+        let first = moved("pub struct State {\n    pub a: u32,\n}\n").unwrap();
+        assert_ne!(
+            Some(first),
+            moved("pub struct State {\n    pub a: u64,\n}\n")
+        );
+        assert_eq!(moved("pub fn other() {}\n"), None);
     }
 
     #[test]

@@ -194,12 +194,14 @@ counts those commits as its work. A file the session and the target both added
 is named as changed. Its code is each symbol in those files whose body
 differs from the merge base's version. The hook names such a symbol when the target changed its body,
 moved it to another file that the target changed, or removed it. It also names
-a file the target moved or deleted whole. A file in no indexed language, or
-one whose own change is outside every symbol, is named as changed when the
-target changed it. Upstream changes to other files, or to other symbols in the
+a file the target moved or deleted whole. A file in no indexed language, one
+whose own change is outside every symbol, or one where both added a symbol of
+the same name with different bodies, is named as changed when the target
+changed it. Upstream changes to other files, or to other symbols in the
 same file, are never named.
 
-Each change is named once per session, and nothing is said once `HEAD`
+Each change is named once per session; a later target change to the same
+code, including code it moved, is a new change. Nothing is said once `HEAD`
 contains the target. The told changes are kept as digests in the owner-only
 file `main-moved-told` in the state directory. At most 8 changes are named
 per prompt, from at most 20 of the session's files. The check has a quarter of
