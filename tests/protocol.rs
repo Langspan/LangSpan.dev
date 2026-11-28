@@ -2823,10 +2823,30 @@ const NAMED_0_8: &[&str] = &[
     "withheld_events",
 ];
 
+/// 0.10.0 adds `confirmed_briefings` (a briefing is marked delivered only once
+/// the hook has returned it, #531/#573).
+const NAMED_0_10: &[&str] = &[
+    "anchored_notes",
+    "briefing_memory",
+    "confirmed_briefings",
+    "inflight_partial",
+    "interface_notices",
+    "landing_rewrites",
+    "outline_reads",
+    "recap_since",
+    "refusal_outcomes",
+    "rename_holds",
+    "renames",
+    "symbol_findings",
+    "tolerant_responses",
+    "trails",
+    "withheld_events",
+];
+
 /// Each release, the protocol version it speaks, the capabilities it names
 /// (none before 0.5.0), and the event types it reads, frozen from that
 /// release's tag (issue #331).
-const RELEASES: [(&str, u16, Option<&[&str]>, &str); 11] = [
+const RELEASES: [(&str, u16, Option<&[&str]>, &str); 12] = [
     (
         "0.1.0",
         3,
@@ -2892,6 +2912,12 @@ const RELEASES: [(&str, u16, Option<&[&str]>, &str); 11] = [
         10,
         Some(NAMED_0_8),
         include_str!("../fixtures/event-types/0.9.1.txt"),
+    ),
+    (
+        "0.10.0",
+        10,
+        Some(NAMED_0_10),
+        include_str!("../fixtures/event-types/0.10.0.txt"),
     ),
 ];
 
