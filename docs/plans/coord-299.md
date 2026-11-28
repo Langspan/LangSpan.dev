@@ -150,6 +150,15 @@ apply arm there.
     and the usage guide's table, and `reservations.rs` writes them through
     `ErrorCode`.
 
+## Changed during the fifth run (after merging main at 6517267b)
+
+- The briefing line moved into its own function, `place_reserved` in
+  `src/briefing/render.rs`, so `render_peers_placed` grows by one line; the
+  file's 36 new lines are recorded in its baseline.
+- The three error codes were not yet in the committed list; they are now,
+  with their usage-guide rows, and `reservations.rs` writes every code it
+  sends through `ErrorCode`.
+
 ## Shared contracts touched
 
 `Command`, `Event`, `Outcome`, `Briefing`, `State` (one field each, additive),

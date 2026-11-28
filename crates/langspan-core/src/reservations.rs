@@ -5,7 +5,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{BTreeMap, CoreError, Decision, Event, Outcome, State, current_session, error};
+use crate::{
+    BTreeMap, CoreError, Decision, ErrorCode, Event, Outcome, State, current_session, error,
+};
 
 /// Keys counted per scope. A new key past this is refused.
 pub const MAX_RESERVATION_KEYS: usize = 256;
@@ -46,7 +48,7 @@ fn validate_key(key: &str) -> Result<(), CoreError> {
         })
     {
         return Err(error(
-            "invalid_key",
+            ErrorCode::InvalidKey.as_str(),
             "A reservation key is 1 to 64 lowercase ASCII letters, digits, dots, underscores or hyphens, such as adr or protocol-version",
         ));
     }
@@ -85,7 +87,7 @@ pub(crate) fn decide_reserve(
     if counter.is_none() && counters.is_some_and(|counters| counters.len() >= MAX_RESERVATION_KEYS)
     {
         return Err(error(
-            "too_many_keys",
+            ErrorCode::TooManyKeys.as_str(),
             "This repository already counts 256 reservation keys; reserve under an existing key",
         ));
     }
@@ -94,8 +96,8 @@ pub(crate) fn decide_reserve(
         .checked_add(1)
         .ok_or_else(|| {
             error(
-                "invalid_number",
-                "The number after it is too large to count",
+                ErrorCode::InvalidNumber.as_str(),
+                "The number to count after is the largest there is; give the highest number your checkout uses instead",
             )
         })?;
     let held = counter
@@ -132,7 +134,7 @@ pub(crate) fn apply_reserved(
     validate_key(&reservation.key)?;
     if session.workspace_id != reservation.workspace_id {
         return Err(error(
-            "invalid_event",
+            ErrorCode::InvalidEvent.as_str(),
             "A reservation must name its session's workspace",
         ));
     }
@@ -142,14 +144,14 @@ pub(crate) fn apply_reserved(
         .or_default();
     if !counters.contains_key(&reservation.key) && counters.len() >= MAX_RESERVATION_KEYS {
         return Err(error(
-            "invalid_event",
+            ErrorCode::InvalidEvent.as_str(),
             "A reservation exceeds the key bound",
         ));
     }
     let counter = counters.entry(reservation.key.clone()).or_default();
     if reservation.number <= counter.highest {
         return Err(error(
-            "invalid_event",
+            ErrorCode::InvalidEvent.as_str(),
             "A reservation must take a number above every earlier one of its key",
         ));
     }
