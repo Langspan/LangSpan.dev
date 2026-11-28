@@ -402,6 +402,7 @@ mod unix {
                     recent_window_ms: None,
                     mcp: false,
                     changes_only: true,
+                    confirm: false,
                 },
             )
             .with_version(version);
@@ -692,6 +693,7 @@ mod unix {
                     recent_window_ms: None,
                     mcp: false,
                     changes_only: true,
+                    confirm: false,
                 },
             );
             let response = call(&dir, &request).unwrap();

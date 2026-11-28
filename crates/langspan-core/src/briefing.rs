@@ -1367,6 +1367,14 @@ pub(crate) fn decide_brief(
         briefing.changed = differs || once;
         (keys.into_iter().take(MAX_TOLD).collect(), true)
     };
+    // A hook's briefing tells what it shows only once the hook confirms it
+    // placed it (issue #531): until then, only what was told before is.
+    let told_next = match command {
+        Command::Brief { confirm: true, .. } | Command::BriefPrepared { confirm: true, .. } => {
+            told_next.into_iter().filter(|key| told.contains(key)).collect()
+        }
+        _ => told_next,
+    };
     let told_before: Vec<u64> = activity
         .map(|activity| activity.told.clone())
         .unwrap_or_default();
