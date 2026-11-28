@@ -23,7 +23,7 @@ been written down since this index was added.
 | Notes, messages, index and stored history | [Remembered notes](#remembered-notes) to [Source index](#source-index), [Region admission](#region-admission) to [Retention](#retention) | Not recorded. |
 | Browser → dashboard, and desktop notices | [Dashboard](#dashboard), [Desktop notices](#desktop-notices) | Not recorded. |
 | Benchmark driver → agent CLIs | [Coordination benchmark driver](#coordination-benchmark-driver) | Not recorded. |
-| GitHub Actions → published releases | [Release pipeline](#release-pipeline), [The install script](#the-install-script), [CI build cache](#ci-build-cache) | 2026-11-27: releases exist; their controls are not yet observed (see the release pipeline). |
+| GitHub Actions → published releases | [Release pipeline](#release-pipeline), [The install script](#the-install-script), [CI build cache](#ci-build-cache) | 2026-11-28: checksums and attestations observed on v0.9.0; immutability not yet observed (see the release pipeline). |
 | Mixed versions | [Mixed versions and `doctor`'s version check](#mixed-versions-and-doctors-version-check) | Not recorded. |
 
 ## Data and boundaries
@@ -1004,11 +1004,15 @@ place of the CLI, never a model.
 [ADR 0031](../adr/0031-releases.md) adds a new boundary: binaries built by
 GitHub Actions and downloaded by users. It runs only in
 `Langspan/LangSpan.dev`. Releases have been published since v0.1.0
-([changelog](../../CHANGELOG.md)). What a real release showed is not yet
-recorded here: whether its archives' SHA-256 lines in `SHA256SUMS` and its
-attestations verify with `gh attestation verify`, and whether the repository
-setting that makes a published release immutable is on. Until it is, the
-controls below are as designed, not as observed.
+([changelog](../../CHANGELOG.md)). Observed on v0.9.0 (release run
+46094984554, 2026-11-28), all four `verify-published` jobs passed: each
+downloaded the published archive, `install.sh` and `SHA256SUMS`, checked both
+against `SHA256SUMS`, and ran `gh attestation verify` on the archive with and
+without the attached bundle and for its SBOM, before installing the binary
+and checking its `--version`. The x86_64 Linux job's log shows both checksum
+lines `OK` and the install of `langspan-v0.9.0-x86_64-unknown-linux-gnu`. Whether the repository setting that makes a
+published release immutable is on has not been observed; until it is, the
+tampering-after-publication row below is as designed, not as observed.
 
 Each job of `release.yml` and what its token may write:
 
@@ -1042,7 +1046,8 @@ Each job of `release.yml` and what its token may write:
 [`scripts/install.sh`](../../scripts/install.sh), attached to each release,
 is the quickstart's one-line install. Piped to `sh`, it runs as the user and
 trusts what the release serves: it downloads `SHA256SUMS` and one archive,
-checks the archive's SHA-256, extracts one file and replaces
+checks the archive's SHA-256, runs `gh attestation verify` on it when the
+GitHub CLI is installed and signed in, extracts one file and replaces
 `~/.local/bin/langspan`. The script itself is checked only by HTTPS; the
 user who wants more downloads it first and runs
 `gh attestation verify install.sh -R Langspan/LangSpan.dev`.
@@ -1050,11 +1055,11 @@ user who wants more downloads it first and runs
 | Threat | Control | Residual risk |
 | --- | --- | --- |
 | **Spoofing**: a server other than GitHub answers | Every download uses `curl --proto '=https' --tlsv1.2`, so a redirect to plain HTTP is refused; the URLs are fixed to this repository's releases. A test runs the script against a stand-in `curl` that refuses any call without `--proto =https`. | Whoever controls the release, or a certificate authority the system trusts, can serve any file. |
-| **Tampering**: an altered archive | The archive's SHA-256 must match its line in `SHA256SUMS` before it is extracted; a mismatch installs nothing. | `SHA256SUMS` comes from the same release as the archive, so the check catches a broken or partial download, not a replaced release. Provenance needs `gh attestation verify`, which the script does not run (see [Release pipeline](#release-pipeline)). |
+| **Tampering**: an altered archive | The archive's SHA-256 must match its line in `SHA256SUMS` before it is extracted; a mismatch installs nothing. | `SHA256SUMS` comes from the same release as the archive, so the checksum catches a broken or partial download, not a replaced release. With gh installed and its active github.com account signed in, the script also runs `gh attestation verify` on the archive for this repository's `release.yml` before extracting it; a failure installs nothing and shows the first 2000 bytes of gh's output. The sign-in check, `gh auth status --active --hostname github.com`, looks at that account only: a bare `gh auth status` fails when any other account or host has a sign-in problem, which would skip the attestation. A test runs it against a stand-in `gh` that verifies, rejects, is signed out, or has another account's sign-in expired, and with no `gh` on PATH. | Without gh, signed out of github.com, or with gh older than 2.49, provenance isn't checked; the script prints that it was skipped. gh is found on PATH, so a same-user process can replace it. Each `gh` call is stopped after 30 seconds (the sign-in check) or 120 (the attestation). |
 | **Tampering**: a crafted `SHA256SUMS` or archive writes outside the temporary folder | Exactly one listed name must match `langspan-v*-TARGET.tar.gz` with only `[0-9A-Za-z._-]`; only `NAME/langspan` is extracted, into a fresh `mktemp -d` folder removed on exit; the extracted file must be a regular file, not a symlink. Downloads are capped at 64 KiB and 256 MiB. A version argument must look like `v1.2.3`. The script never runs `eval`, `sudo` or a downloaded file. | `tar` itself parses the archive. |
 | **Tampering**: a failed install breaks the old binary | The new binary is copied next to the destination, made `0755`, then moved over it with a rename, so a running `langspan` is not overwritten in place and a failed copy leaves the old one. | A same-user process can change `~/.local/bin` meanwhile; same-user races are not an isolation boundary. |
 | **Spoofing**: an older `langspan` runs instead of the new one | After the install, the script finds the `langspan` the shell would run first on PATH, compares its folder with `~/.local/bin` after resolving symlinks, and when they differ names that file and prints the line that puts `~/.local/bin` first. It changes no shell startup file. | The user must run the printed line; a shell that has already looked up `langspan` may need `hash -r`. |
-| **Information disclosure** | The script sends only the download requests; it reads no credential and sends no telemetry. | GitHub sees the requests, as for any download. |
+| **Information disclosure** | The script sends only the download requests, and when gh is present, gh's own requests to GitHub for the sign-in check and the attestation. gh uses its own sign-in, which the script never reads. It sends no telemetry. | GitHub sees the requests, as for any download, and with gh signed in, which account looked up the attestation. |
 | **Elevation of privilege** | No root: it writes only under `~/.local/bin` and the temporary folder, and doesn't run `langspan setup`. | Anyone who can write `~/.local/bin` can already replace the binary. |
 
 ## CI build cache
@@ -1092,6 +1097,21 @@ build cache. The `Linux` and `macOS` checks read only the shards' JUnit
 reports, bounded at 64 MiB each by the scripts that parse them, and fail
 unless the build and every shard passed. A cancelled or timed-out part
 fails them; it doesn't leave them skipped.
+
+The Linux benchmark dry runs run on the owner's self-hosted runner, which
+keeps its disk between jobs
+([self-hosted runner](../development-process.md#self-hosted-runner)); no
+`check.yml` job does, so no required check runs there. The threat is a
+fork's code leaving something on the machine that a later run on `main`
+executes. The job picks the runner only for an event other than
+`pull_request`, or for a pull request whose branch is in this repository.
+A fork's pull request gets `ubuntu-24.04`, and `tests/ci_workflows.rs`
+holds that rule. The residual risk is that someone who can push a branch to
+this repository can leave state on the machine, and that state could change
+the result of a later run there. They can already open a pull request whose
+code CI runs. The job saves no build cache and publishes no release, so
+the most such state can change is the result of a check that isn't
+required.
 
 The fuzz workflow (`fuzz.yml`) restores and saves no cache, and runs only
 nightly on `main` or when started by hand, never for a pull request. Its fuzz

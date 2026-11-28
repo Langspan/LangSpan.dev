@@ -21,7 +21,7 @@ Close Claude Code. To install the latest release on macOS or Linux, run:
 curl -fsSL https://github.com/Langspan/LangSpan.dev/releases/latest/download/install.sh | sh
 ```
 
-The script checks the download against the release's `SHA256SUMS` and installs `langspan` in `~/.local/bin`, without root. It doesn't run setup. Follow the steps it prints: add `~/.local/bin` to `PATH` if needed, run `langspan setup`, then `langspan demo`. To read the script before you run it, see the [install guide](docs/install.md#use-the-install-script).
+The script checks the download against the release's `SHA256SUMS`, and with the GitHub CLI signed in, against the release workflow's attestation too. It installs `langspan` in `~/.local/bin`, without root. It doesn't run setup. Follow the steps it prints: add `~/.local/bin` to `PATH` if needed, run `langspan setup`, then `langspan demo`. To read the script before you run it, see the [install guide](docs/install.md#use-the-install-script).
 
 ### Install by hand
 

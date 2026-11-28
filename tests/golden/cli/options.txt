@@ -639,7 +639,7 @@ same: --json --apply --state-dir --root --home
 --mine
   exit 1: {"level":"error","message":"duplicate option --mine"}
 --session
-  exit 1: {"level":"error","message":"git rev-parse --path-format=absolute --show-toplevel --absolute-git-dir failed (exit status: 128). Git said: fatal: not a git repository (or any of the parent directories): .git"}
+  exit 1: {"level":"error","message":"git rev-parse --path-format=absolute --show-toplevel --absolute-git-dir failed (exit status: 128). Git said: fatal: not a git repository {reason}"}
 -m --message
   exit 1: {"level":"error","message":"duplicate option --message"}
 every other option
@@ -817,7 +817,7 @@ same: --json --apply --state-dir --root --home
 --mine
   exit 1: {"level":"error","message":"duplicate option --mine"}
 --session
-  exit 1: {"level":"error","message":"git rev-parse --path-format=absolute --show-toplevel --absolute-git-dir failed (exit status: 128). Git said: fatal: not a git repository (or any of the parent directories): .git"}
+  exit 1: {"level":"error","message":"git rev-parse --path-format=absolute --show-toplevel --absolute-git-dir failed (exit status: 128). Git said: fatal: not a git repository {reason}"}
 every other option
   exit 1: {"level":"error","message":"option {option} is not valid for this command"}
 
