@@ -486,8 +486,10 @@ test("the view's clock anchor times a tail that holds none, and replaces an olde
   assert.ok(!tail.some((e) => e.type === "clock_anchored"));
   const given = { generation: 1, clock_ms: 0, wall_ms: 1_800_000_000_000 };
   const events = Live.withAnchor(tail, given);
-  assert.deepEqual(events.slice(0, -1), tail);
-  assert.deepEqual(events.at(-1), { seq: tail.at(-1).seq, type: "clock_anchored", paths: [], more_paths: 0, clock_ms: 0, wall_ms: 1_800_000_000_000 });
+  // Every row of the tail is after the boot's anchor, so the anchor leads.
+  assert.deepEqual(events.slice(1), tail);
+  assert.deepEqual(events[0], { seq: 0, type: "clock_anchored", paths: [], more_paths: 0, clock_ms: 0, wall_ms: 1_800_000_000_000 });
+  assert.ok(Live.pace(model(STATE, events), events).cards.every((c) => c.time !== null), "every card is timed");
   // Wall time now, 2 s after the newest edit, through the anchor.
   const now = Live.daemonNow(events, given.wall_ms + log.at(-1).at_ms + 2000);
   assert.equal(now, log.at(-1).at_ms + 2000);
@@ -499,7 +501,7 @@ test("the view's clock anchor times a tail that holds none, and replaces an olde
   const own = [{ seq: 5, type: "clock_anchored", clock_ms: 0, wall_ms: given.wall_ms, paths: [], more_paths: 0 }, ...tail];
   assert.equal(Live.withAnchor(own, given), own);
   const old = [{ ...own[0], clock_ms: -5 }, ...tail];
-  assert.equal(Live.withAnchor(old, given).at(-1).clock_ms, 0);
+  assert.deepEqual(Live.withAnchor(old, given).at(-1), { seq: tail.at(-1).seq, type: "clock_anchored", paths: [], more_paths: 0, clock_ms: 0, wall_ms: given.wall_ms });
   assert.equal(Live.withAnchor(tail, undefined), tail);
   assert.equal(Live.daemonNow(tail, 1), undefined);
 });

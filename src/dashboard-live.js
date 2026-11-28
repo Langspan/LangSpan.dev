@@ -381,16 +381,20 @@ var LangSpanLive = (function () {
     return { events: trim(events, events.length - Math.max(0, from)), next: newest };
   }
 
-  // The rows with `anchor`, the view's clock anchor (`clock_anchor`), as the
-  // newest anchor row when the rows' own newest is not it: a tail rarely
-  // holds the boot's anchor. The rows as given without one.
+  // The rows with `anchor`, the view's clock anchor (`clock_anchor`), when
+  // the rows' own newest is not it. A tail rarely holds the boot's anchor;
+  // without an anchor of their own, every row is after the view's, so it
+  // leads them at seq 0 and times each one. After an older anchor of their
+  // own it is the newest row, a restart since the rows were read. The rows
+  // as given without one.
   function withAnchor(events, anchor) {
     const { clock_ms, wall_ms } = anchor || {};
     if (typeof clock_ms !== "number" || typeof wall_ms !== "number") return events;
     const own = events.filter((e) => e.type === "clock_anchored").pop();
     if (own && own.clock_ms === clock_ms && own.wall_ms === wall_ms) return events;
-    const seq = events.length ? events[events.length - 1].seq : 0;
-    return [...events, { seq, type: "clock_anchored", paths: [], more_paths: 0, clock_ms, wall_ms }];
+    const row = (seq) => ({ seq, type: "clock_anchored", paths: [], more_paths: 0, clock_ms, wall_ms });
+    if (!own) return [row(0), ...events];
+    return [...events, row(events[events.length - 1].seq)];
   }
 
   // The daemon's clock at wall time `wall_ms`, from the rows' newest clock
