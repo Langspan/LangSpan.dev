@@ -279,6 +279,13 @@ nothing in either lane of `check.yml`.
   fails, it opens an issue titled "Nightly Rust checks on main failed" or
   "Nightly benchmark dry runs on main failed", or comments on that issue
   while it is open. Treat that issue like a failing check on `main`.
+- **An advisory dry run** shows that path without an advisory on `main`:
+  `gh workflow run check.yml --ref BRANCH -f advisory_dry_run=true`. The
+  Linux build audits the real lockfile, then
+  `tests/fixtures/advisory-dry-run/known-advisory.lock` (RUSTSEC-2021-0003),
+  and fails on it; `nightly-report` then opens or comments on an issue
+  titled "Advisory dry run of the nightly report", never the real one.
+  Close that issue afterwards ([evidence](evidence/ci/advisories.md)).
 
 The two times are targets the lanes should meet, not gates: a run over
 them still passes. `bash scripts/measure-ci.sh` reports them from GitHub's
