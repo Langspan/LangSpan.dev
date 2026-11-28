@@ -914,6 +914,22 @@ field is the refused tool call's input digest on `write_refused`.
 | Denial of service | One answer reads at most the newest 50,000 events, as `today` does, and says `truncated` with the time it covered. The workspaces and intents in force before them are folded from at most the newest 10,000 intent, registration and workspace-removal events (after the newest snapshot), through a partial index, so the time one report holds the single store worker, and so delays admissions, does not grow with the log; a report that needed an older event says `partial`. Per-session state is bounded by the sessions in those events; the answer lists at most 16 sessions and fits one 48 KiB frame, dropping session rows and counting them. |
 | Elevation of privilege | It grants nothing and decides nothing; a failure is an error answer. |
 
+## Tokens per merged change
+
+`langspan tokens` (#493) reads Claude Code's transcripts, a new input, and
+runs one read-only `git log`. It talks to no coordinator and starts nothing
+else. Transcripts hold prompts, code, tool output and possibly secrets a
+session saw.
+
+| Concern | Behavior and remaining boundary |
+| --- | --- |
+| Spoofing | Any same-user process can write a transcript and change the figures; the answer is the owner's own measurement, not evidence for anyone else. |
+| Tampering (prompt injection) | Nothing reaches a model: there is no MCP tool. Of each line only the message ID, time and four integer counts are kept; text is never printed. Paths from Git are matched against three fixed names and printed only when they match. |
+| Repudiation | Reading records nothing. |
+| Information disclosure | Prompts, code, tool output and credentials are parsed past and dropped, never stored, printed or sent. The answer names the transcript folder and, on a process-change day, the instruction files' paths. |
+| Denial of service | Only `.jsonl` files changed in the window are read, at most 20,000 of them, four directories deep, without following links; a line over 4 MiB is skipped a buffer at a time, never held whole. `git log` is bounded to 16 MiB and 20 seconds, with `--end-of-options` before the branch. |
+| Elevation of privilege | It grants and decides nothing; a failure is an error (exit 1). |
+
 ## Region admission
 
 [ADR 0012](../adr/0012-region-admission.md): the hook reads and parses the file

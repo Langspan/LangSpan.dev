@@ -192,6 +192,12 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  kind and workspace, once per session, kind and files
                                  a day, and how many were retried and let through.
                                  Says what LangSpan did, not what it saved. Reads only
+  tokens --onto BRANCH [--days N] [--root DIR]
+                                 Claude Code tokens per merged change by local day
+                                 (default 14 days): usage counts from the transcripts
+                                 in CLAUDE_CONFIG_DIR or ~/.claude, first-parent
+                                 commits of BRANCH, process changes marked, and the
+                                 confounders. No daemon. Reads only
   policy WORKSPACE               The coordination policy table in effect: each kind
                                  of case, advisory, wait or refuse, and whether it can
                                  be set. Reads only
