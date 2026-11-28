@@ -19,7 +19,7 @@ LANGSPAN=$(cd "$(dirname "$LANGSPAN")" && pwd)/$(basename "$LANGSPAN")
 # A Unix socket path is limited to about 100 bytes: keep the base short.
 BASE=$(mktemp -d /tmp/ls-demo.XXXXXX)
 # The demonstration starts and stops each coordinator itself (step 8 shows a
-# hook with none running), so hooks do not start one on demand (ADR 0035).
+# hook with none running), so hooks do not start one on demand (ADR 0040).
 export LANGSPAN_AUTOSTART=off
 PIDS=()
 cleanup() {

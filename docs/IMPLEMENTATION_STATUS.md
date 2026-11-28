@@ -1,38 +1,33 @@
 # LangSpan implementation status
 
-## Current summary, 25 November 2026
+## Current summary: version 0.10.0, 28 November 2026
 
-`main` is at `d29ec9c` (PR #58 merged, after PR #57). Every launch-bar track
-(L1 to L10 in the [roadmap](roadmap.md)) has merged, and
+The crate in `Cargo.toml` is at 0.10.0, the latest release in
+[CHANGELOG.md](../CHANGELOG.md) (28 November 2026; 0.1.0 was the first, on
+25 November). `tests/versions_in_docs.rs` fails when this heading names
+another version. This summary separates the merged implementation from
+retained host evidence. It does not certify a fresh complete test run; a
+check result belongs to its exact commit and CI run. Commit IDs, pull request
+numbers and CI runs in the launch-bar records below refer to the project's
+development history before this repository was published. Every launch-bar
+track (L1 to L10 in the [roadmap](roadmap.md)) merged by 25 November, and
 PRs #57 and #58 fixed four of the five faults the launch validation found.
-This summary separates the merged implementation from retained host
-evidence. It does not certify a fresh complete test run. Commit IDs, pull
-request numbers and CI runs in this document refer to the project's
-development history before this repository was published.
 
-**CI on `main`.** The `Rust checks` workflow runs `Linux`, then `macOS` (only
-after Linux passes), plus `Workflows`. The last completed run on `main`, for
-`94fa888` (PR #57, run 45623704896),
-passed on Linux, macOS and Workflows. The run for `d29ec9c`
-(45625216724) was still running when this was written: Linux and Workflows had passed,
-macOS had not finished. Since PR #48, a pull request's Linux job takes about
-3 to 4 minutes and a push to `main`, which also builds and runs the release
-binary, about 5. Recent Linux failures:
+**CI.** `.github/workflows/check.yml` runs a pull request's fast lane on
+Linux, and the whole suite on Linux and macOS, each in four shards, in the
+merge queue, on `main` and every night; the nightly run also builds and runs
+the release binary ([engineering practice](engineering.md#commands)).
 
-- `592e284` failed at `tests/graph.rs:231` (`left: ["module"]`,
-  `right: ["module", "function"]`). That was a product race between a graph
-  answer's rows and its coverage, fixed by PR #40.
-- The graph tests' hooks have also answered `timeout` on CI. PR #50 made such
-  a failure name the path that fired; see the open issue below.
-- `e50a41f` (PR #37's merge) failed in
-  `advisory_liveness_rejection_does_not_suppress_admission_or_observation`
-  (`tests/codex.rs:635`, `Text file busy` while starting the copied test
-  executable). PR #55 gave that test the shared retry for a freshly copied
-  binary that PR #49 added for the Homebrew install test.
+**Hosts.** Claude Code, Codex and Antigravity have each been verified on a
+real host (below). Cursor is built from documentation and has not run on a
+real host. Gemini CLI support was removed in PR #264 (issue #246,
+[ADR 0033](adr/0033-gemini-cli-adapter.md)); Antigravity is the Google host,
+and `uninstall --hosts gemini-cli` still removes an earlier install.
 
-**What is merged.** The local coordinator; Claude Code and Codex adapters;
-[Cursor](adr/0032-cursor-adapter.md) and [Gemini CLI](adr/0033-gemini-cli-adapter.md)
-adapters built from documentation; briefings; source-version checks;
+**What is merged.** The local coordinator; Claude Code, Codex and
+[Antigravity](adr/0035-antigravity-adapter.md) adapters; the
+[Cursor](adr/0032-cursor-adapter.md) adapter built from documentation;
+[one-command setup](adr/0040-one-command-setup.md); briefings; source-version checks;
 [the end of a reply and of a tool batch](adr/0027-turn-and-batch-events.md),
 with Codex `Stop` and `SessionEnd`; [line ownership](adr/0028-line-ownership.md);
 the [commit guard and `commit --mine`](adr/0026-commit-guard-and-commit-mine.md);
@@ -116,7 +111,7 @@ Fixed on `main` since the validation:
 - Issue #2: the main checkout's hook steps aside for a linked worktree's
   own install only on Claude Code, the one host seen running both there.
   On Codex (0.171.0 was seen running only the main checkout's hooks in a
-  linked worktree) and on Cursor and Gemini CLI (not observed there), it
+  linked worktree) and on Cursor and Antigravity (not observed there), it
   decides under the worktree install's workspace instead; `doctor` reports
   a worktree install the host will not run. Tested with real linked
   worktrees, a real daemon and constructed events; the real Codex run in a
@@ -198,6 +193,20 @@ Fixed on `main` since the validation:
   Codex completed an edit, Claude preserved it, and Codex later declined to
   edit without rereading the changed file. It predates the shell, region,
   dashboard and launch-bar work.
+- Codex 0.171.0 on macOS 27.2 arm64, 25 November 2026, with a Claude Code
+  2.1.332 peer ([Codex real host](evidence/codex-real-host/README.md),
+  issue #110): its hooks fired, a conflicting `apply_patch` and a stale
+  source were refused, a linked worktree with its own install was
+  coordinated as that workspace, Codex quoted the skill's stale-source rule,
+  and `commit --mine` from its shell committed only its hunks. On
+  26 November a real Codex sent `Stop`, `SessionEnd` and the first-patch
+  snapshot ([Codex turn events](evidence/codex-turn-events/README.md); the
+  Codex version was not recorded).
+- Antigravity CLI (`agy`) 1.5.14, two runs on 25 November 2026
+  ([ADR 0035](adr/0035-antigravity-adapter.md#evidence), issue #110):
+  briefings delivered at `SessionStart` and `PreInvocation`; in the repeat
+  run of the corrected adapter, admission, conflict and stale-source
+  refusals, an allowed harmless command and the install.
 - Two machines, run 3 ([evidence](evidence/two-machine/README.md), PR #45), at
   `592e284`: a Mac and a Claude Code cloud machine published through GitHub
   (the cloud in the branch namespace, the Mac under `refs/langspan/`). Real
@@ -211,11 +220,8 @@ Fixed on `main` since the validation:
 
 **Not observed on a real host:**
 
-- Any Codex hook since the mixed-host run, including `Stop`, `SessionEnd` and
-  the first-patch snapshot.
-- Cursor and Gemini CLI at all. Both are built from documentation; their tests
-  run on constructed or source-derived events. No Cursor run has been captured
-  and the headless Gemini CLI runs stopped at sign-in.
+- Cursor at all. It is built from documentation; its tests run on
+  constructed or source-derived events, and no Cursor run has been captured.
 - Line ownership, automatic checks, the landing queue and conflict hunks,
   shell writes, two regions of one file admitted together, user-level
   install loaded by a host, the source-graph tools, messages, and any MCP
@@ -223,11 +229,14 @@ Fixed on `main` since the validation:
 - Across machines: a change of approach caused by another machine's facts,
   simultaneous edits with both sides told, landing, and network failure.
 
-**Releases.** [v0.1.0](https://github.com/Langspan/LangSpan.dev/releases/tag/v0.1.0)
-was published on 25 November 2026. Four macOS/Linux archives, matching CycloneDX
-SBOMs, SHA256SUMS and a Sigstore provenance bundle are listed on the release.
-This describes published artifacts; it does not extend the native-host
-acceptance evidence above. No Homebrew tap has been published.
+**Releases.** [CHANGELOG.md](../CHANGELOG.md) lists every release from
+v0.1.0 (25 November 2026) to v0.10.0 (28 November 2026), cut by the
+[release pipeline](adr/0031-releases.md). v0.1.0 listed four macOS/Linux
+archives, matching CycloneDX SBOMs, SHA256SUMS and a Sigstore provenance
+bundle; the checksums and attestations were last checked on v0.9.0
+([threat model](security/threat-model.md#release-pipeline)). This describes
+published artifacts; it does not extend the native-host acceptance evidence
+above. No Homebrew tap has been published.
 
 **Known open issues.**
 
@@ -261,8 +270,8 @@ acceptance evidence above. No Homebrew tap has been published.
   runs out (M2, ADR 0027).
 - The commit guard still reads the whole workspace's line journal, and a
   write hook's lookup still grows with that file's own entries (PR #57).
-- No Codex, Cursor or Gemini CLI hook of the launch-bar work has run on a
-  real host.
+- No Cursor hook has run on a real host, and none of the launch-bar work
+  after 25 November has a Codex or Antigravity run.
 - Comparative evidence of reduced rework or manual relay is still open: no
   comparison arm of the [coordination benchmark](../benchmarks/coordination/README.md)
   has been run on current `main`. `matrix.py` runs a whole comparison and
