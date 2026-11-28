@@ -230,6 +230,8 @@ jobs:
           LANGSPAN_BENCH_DRY_RUNS: skip
           LANGSPAN_TEST_ARCHIVE: ${{ runner.temp }}/tests.tar.zst
           LANGSPAN_ADVISORY_DRY_RUN: ${{ inputs.advisory_dry_run && '1' || '' }}
+          # Job linux-lint runs lint beside this job.
+          LANGSPAN_CHECK_LINT: "false"
         run: sh scripts/check.sh
       # The fast lane ran its tests here; the full lane's run in the shards.
       - name: Name the tests that passed only on retry
@@ -284,6 +286,74 @@ jobs:
         with:
           path: ~/.cache/langspan-ci-tools/cargo-audit
           key: ${{ steps.keys.outputs.audit }}
+  # Linux lint (check.sh's `lint` lane: both clippy passes) in every lane,
+  # beside the build job rather than before its test build, which shares
+  # nothing with clippy's output. It decides what the change touches for
+  # itself, as macOS does, and keeps a build cache of its own (the key
+  # names the job), saved only by main. The required check `Linux` waits
+  # for it. macOS still lints in its build job.
+  linux-lint:
+    name: Linux lint
+    runs-on: ${{ vars.LINUX_RUNNER || 'ubuntu-24.04' }}
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 6 || github.event_name == 'merge_group' && 15 || 30 }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: ${{ github.event_name != 'merge_group' && 2 || 0 }}
+      - name: Decide what the change touches
+        id: changes
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+        run: bash scripts/ci-changes.sh
+      - name: Install the toolchain from rust-toolchain.toml
+        if: steps.changes.outputs.code == 'true'
+        run: |
+          rustup --version
+          rustup toolchain install
+          rustc --version
+      - name: Name the cache keys
+        id: keys
+        if: steps.changes.outputs.code == 'true'
+        env:
+          BUILD_PREFIX: rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('rust-toolchain.toml') }}-
+          BUILD_HASH: ${{ hashFiles('Cargo.lock', 'scripts/install-ci-tools.sh') }}
+        run: |
+          {
+            echo "build-prefix=$BUILD_PREFIX"
+            echo "build=$BUILD_PREFIX$BUILD_HASH"
+          } >> "$GITHUB_OUTPUT"
+      - name: Restore the build cache
+        id: cache
+        if: steps.changes.outputs.code == 'true' && !inputs.cold
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ${{ env.CACHE_PATHS }}
+          key: ${{ steps.keys.outputs.build }}
+          restore-keys: ${{ steps.keys.outputs.build-prefix }}
+      - name: Check lint
+        if: steps.changes.outputs.code == 'true'
+        env:
+          LANGSPAN_CHECK_LANE: lint
+        run: sh scripts/check.sh
+      # As the build job, except that clippy builds no langspan binary: what
+      # shows this run linted is langspan-core's lint output.
+      - name: Prune the build cache and check its size
+        id: size
+        if: ${{ !cancelled() && github.ref == 'refs/heads/main' && steps.changes.outputs.code == 'true' && steps.cache.outputs.cache-hit != 'true' }}
+        env:
+          LIMIT_MB: ${{ env.CACHE_LIMIT_MB }}
+        run: bash scripts/ci-cache-prune.sh 'debug/build/langspan-core/*/out/liblangspan_core-*.rmeta'
+      - if: ${{ !cancelled() && steps.size.outputs.save == 'true' }}
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ${{ env.CACHE_PATHS }}
+          key: ${{ steps.keys.outputs.build }}
   # The full lane's tests, in shards of the archive the build job made:
   # scripts/ci-shards.py gives each test to one shard by the measured times
   # in scripts/ci-test-times.tsv, so every test runs exactly once and each
@@ -368,14 +438,15 @@ jobs:
           path: target/nextest/${{ env.NEXTEST_PROFILE }}/junit.xml
           if-no-files-found: warn
           retention-days: 14
-  # The required check `Linux`: it passes only when the build job and every
-  # shard passed, or when no shard was meant to run (a pull request's fast
-  # lane, or a change that touches no code). It runs whatever they ended
-  # with, so a failed, cancelled or timed-out part fails it rather than
-  # leaving it skipped. It names the shards' flaky tests for flaky-report.
+  # The required check `Linux`: it passes only when the build job, the lint
+  # job and every shard passed, or when no shard was meant to run (a pull
+  # request's fast lane, or a change that touches no code). It runs
+  # whatever they ended with, so a failed, cancelled or timed-out part
+  # fails it rather than leaving it skipped. It names the shards' flaky
+  # tests for flaky-report.
   linux-result:
     name: Linux
-    needs: [linux, linux-tests]
+    needs: [linux, linux-lint, linux-tests]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -398,6 +469,7 @@ jobs:
           EVENT: ${{ github.event_name }}
           CODE: ${{ needs.linux.outputs.code }}
           BUILD: ${{ needs.linux.result }}
+          LINT: ${{ needs.linux-lint.result }}
           TESTS: ${{ needs.linux-tests.result }}
         run: bash scripts/ci-shard-results.sh "$RUNNER_TEMP/junit"
   # The same check on Apple silicon, in the full lane only. `macos-26` is
