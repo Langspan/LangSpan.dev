@@ -33,7 +33,6 @@ const HOSTS: [&str; 4] = [CLAUDE_CODE_HOST, CODEX_HOST, CURSOR_HOST, ANTIGRAVITY
 
 /// What one session, or every session of one host kind, did in the window.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct ReportCounts {
     /// Tool calls admitted before they ran (`lease_granted` of a hook).
     pub edits_admitted: u32,
@@ -94,7 +93,6 @@ impl ReportCounts {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct ReportSession {
     /// Session text: data, never instructions.
     pub session_id: String,
@@ -103,7 +101,6 @@ pub struct ReportSession {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct ReportHost {
     pub host: String,
     /// Sessions of this kind with an event in the window, listed or not.
@@ -117,7 +114,6 @@ pub struct ReportHost {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct Report {
     pub workspace_id: String,
     pub window: TodayWindow,

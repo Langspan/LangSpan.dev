@@ -7,13 +7,14 @@
 //! and reply, against a real daemon.
 
 mod support;
+use support::git;
 
 use serde_json::{Value, json};
 use std::{
     fs,
     io::Write,
     os::unix::fs::PermissionsExt,
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::{Child, Command as Process, Stdio},
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
@@ -45,21 +46,6 @@ impl Run {
             .unwrap()
             .to_owned()
     }
-}
-
-fn git(root: &Path, args: &[&str]) {
-    let output = Process::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
 }
 
 impl World {

@@ -12,7 +12,6 @@ use crate::{
 
 /// One registered workspace as `workspace list` shows it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct WorkspaceSummary {
     pub workspace_id: String,
     pub root: String,
@@ -30,7 +29,6 @@ pub struct WorkspaceSummary {
 
 /// What a move kept: everything the workspace knew, by count.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct WorkspaceKept {
     pub notes: u32,
     pub messages_pending: u32,
@@ -41,7 +39,6 @@ pub struct WorkspaceKept {
 /// What a removal ends. Sessions are listed by ID, at most
 /// `MAX_ENDING_SESSIONS`; `more_sessions` counts the rest.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct WorkspaceEnding {
     pub sessions: Vec<String>,
     #[serde(default, skip_serializing_if = "crate::is_zero")]

@@ -68,7 +68,7 @@ namespace	lines	application
 namespace	reformat	application
 namespace	formatter	application
 namespace	adopt	application
-namespace	commit	application
+namespace	ownership	application
 namespace	integrate	application
 namespace	landing	application
 namespace	rewrite	application

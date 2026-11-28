@@ -54,7 +54,9 @@ holder instead of being refused at once:
    before the wait. A changed file is refused as a stale source ("These files
    changed while this edit waited … for the session holding them."), naming
    the path and the holder. That refusal is given once: the retry is
-   admitted.
+   admitted. A file that can no longer be read (now a symlink, a directory
+   or over the size bound) gets no decision, naming the path, since whether
+   it changed is unknown.
 5. Files unchanged: the hook asks again, with every usual check, and the
    edit is admitted.
 

@@ -46,9 +46,10 @@ impl Daemon {
         for dir in [&base, &state] {
             fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();
         }
-        // The shortest I/O deadline the daemon accepts, for the read timeout.
+        // The shortest I/O deadline the daemon accepts, for the read timeout,
+        // and owner grants allowed, so every request type reaches its check.
         let config = state.join("config.json");
-        fs::write(&config, r#"{"io_timeout_ms":100}"#).unwrap();
+        fs::write(&config, r#"{"io_timeout_ms":100,"owner_grants":true}"#).unwrap();
         fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
         let child = Process::new(env!("CARGO_BIN_EXE_langspan"))
             .env("LANGSPAN_AUTOSTART", "off")

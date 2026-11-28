@@ -111,6 +111,8 @@ to those pages and keep the anchors this guide had as a single page.
 
 ## [Configuration and limits](usage/configuration-and-limits.md)
 
+### [Commands that need the owner's own action](usage/configuration-and-limits.md#commands-that-need-the-owners-own-action)
+
 ### [Retention](usage/configuration-and-limits.md#retention)
 
 ## Error codes
@@ -220,6 +222,7 @@ step first, which the message names.
 | `old_root_missing` | No | A move with `--switch` names an old root that no longer exists. |
 | `other_workspace` | No | That session worked in another workspace. |
 | `own_publication` | No | A workspace does not observe its own publication. |
+| `owner_grant_off` | No | The command needs the owner's own action: `"owner_grants": true` in the state directory's `config.json`. |
 | `policy_fixed` | No | That coordination policy is fixed. |
 | `presence_off` | No | This session's presence is off. |
 | `process_identity_mismatch` | No | The session already names another process. |
@@ -228,6 +231,8 @@ step first, which the message names.
 | `recipient_not_found` | No | The recipient is not a session of this workspace. |
 | `remote_not_enabled` | No | The workspace does not publish. |
 | `remote_sharing_on` | No | The workspace publishes, or its ref is not yet removed; disable it first. |
+| `report_busy` | Yes | Other reports are being read; ask again when they finish. |
+| `report_unavailable` | No | The report reader has stopped; restart the coordinator with `langspan daemon`. |
 | `request_id_conflict` | No | The request ID belongs to a different command; use a new ID. |
 | `response_too_large` | No | The response exceeds 64 KiB; page it or ask for less. |
 | `root_derived_id` | No | User-level hooks derive the workspace's ID from its old root, which still exists; move or delete that checkout first. |

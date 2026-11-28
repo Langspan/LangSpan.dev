@@ -2,7 +2,7 @@
 //! owner hands it.
 
 use super::Registration;
-use super::unix::{Job, ask_as, error, now_ms, unsupported_version};
+use super::unix::{Job, ask_as, error, now_ms, relayed, unsupported_version};
 use crate::protocol::{self, PROTOCOL_VERSION, Response};
 use langspan_core::{Command, ErrorCode, Outcome, State, validate_request_id};
 use std::{
@@ -80,7 +80,12 @@ pub(super) fn forward_transfer(state: &State, transfers: &mpsc::SyncSender<Trans
     let refused = if !protocol::answers(version) {
         Some(refuse(ErrorCode::UnsupportedVersion, unsupported_version()))
     } else if let Err(e) = validate_request_id(&request_id) {
-        Some(refuse(ErrorCode::InvalidRequestId, e.message))
+        Some(relayed(
+            request_id.clone(),
+            state.generation,
+            e.code,
+            e.message,
+        ))
     } else if !Path::new(path).is_absolute() || path.len() > 4096 || path.contains('\0') {
         Some(refuse(
             ErrorCode::InvalidPath,

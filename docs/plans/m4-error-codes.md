@@ -63,10 +63,22 @@ touches 27 core files other tasks also edit. So:
    `workspace_changed`), with each code's class decided from the message the
    code is written with.
 
+As landed, step 3 covers only the files in this task's reservation. Main
+added `src/daemon/report_worker.rs` (#581) during the wait for admission; it
+calls the daemon's `error()` with string codes, so `error()` takes
+`impl Into<String>` until that file changes, and the codes it writes
+(`report_busy`, `report_unavailable`) and `owner_grant_off` are in the enum
+and the table. Core codes the daemon relays (`validate_request_id`'s) go
+through `relayed()` unchanged.
+
 **Slice 2 (next pull request, "Fixes #367")**
 
 - `validate::error` takes `ErrorCode`; the 258 core sites change mechanically
   (`"invalid_event"` becomes `ErrorCode::InvalidEvent`, nothing else).
+- The string codes left in `src/`: `src/daemon/report_worker.rs` (then
+  `error()` takes `ErrorCode` again), and `src/store/messages.rs`,
+  `src/store/paging.rs`, `src/store/reads.rs`, `src/store/replay.rs` and any
+  other `CoreError { code: "..." }` or `code == "..."` the ratchet finds.
 - `scripts/ratchets.py`: a count row of string literals equal to a committed
   code in production code outside `error_code.rs`, held at zero with no
   baseline rows (it lands when the count is already zero, so no baseline file

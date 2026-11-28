@@ -58,6 +58,39 @@ See [implementation status](../IMPLEMENTATION_STATUS.md) and the
 [threat model](../security/threat-model.md) for current coverage,
 platform limits, and the cooperative boundary.
 
+## Commands that need the owner's own action
+
+Seven commands make the coordinator act with your own authority beyond
+coordination state ([ADR 0039](../adr/0039-caller-authority.md)). It carries
+them out only while `"owner_grants": true` is in `config.json`, and otherwise
+refuses each one with `owner_grant_off`, an error that says what the command
+does and names the setting:
+
+| Command | What it does with your authority |
+| --- | --- |
+| `langspan check auto WORKSPACE -- COMMAND` | Runs a program after a session's writes. |
+| `langspan remote enable` | Sends work metadata to a remote. |
+| `langspan graph export` | Writes a file at the path it names. |
+| `langspan graph import` | Reads a file at the path it names. |
+| `langspan policy set` | Changes the policy every session's admission meets. |
+| `langspan workspace remove` | Ends a workspace's sessions, notes and messages. |
+| `langspan compact` | Deletes events and receipts. |
+
+A dry run of `compact`, `workspace remove` or `graph import` is refused too.
+To run one, add `"owner_grants": true` to `config.json` (owner-only, `0600`;
+create it if there is none), run the command, then set it back to `false`.
+The coordinator reads the file again for each of these commands, so no
+restart is needed, and a refused request records nothing, so the same
+`--request-id` works when you run it again. While the setting is on, any
+process running as you can send these commands, including an agent that can
+reach the socket; the setting protects only against an agent that can reach
+the socket but can't write the state directory. A `config.json` that can't be
+read or isn't valid refuses them. Turning a grant off (`check auto --off`,
+`remote disable`) and every other command are never refused, and the
+coordinator's own compaction under `retention_days` doesn't need the setting.
+A build before this setting refuses to start with a `config.json` that has
+`owner_grants`.
+
 ## Retention
 
 Events and receipts are kept until they are compacted

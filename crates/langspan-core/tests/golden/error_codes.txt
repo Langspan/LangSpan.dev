@@ -90,6 +90,7 @@ old_root_exists
 old_root_missing
 other_workspace
 own_publication
+owner_grant_off
 policy_fixed
 presence_off
 process_identity_mismatch
@@ -98,6 +99,8 @@ receipt_unreadable
 recipient_not_found
 remote_not_enabled
 remote_sharing_on
+report_busy
+report_unavailable
 request_id_conflict
 response_too_large
 root_derived_id

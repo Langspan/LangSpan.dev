@@ -8,12 +8,11 @@
 use serde_json::{Value, json};
 use std::{
     fs,
-    io::Write,
     os::unix::fs::PermissionsExt,
     path::PathBuf,
-    process::{Child, Command as Process, Stdio},
+    process::Command as Process,
     sync::atomic::{AtomicU64, Ordering},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use langspan::protocol::Request;
@@ -22,14 +21,15 @@ use rmcp::model::CallToolRequestParams;
 use rmcp::transport::TokioChildProcess;
 use rmcp::{ServiceExt, model::ContentBlock};
 
-#[allow(dead_code)] // Only the wall-clock wait is used here.
+#[allow(dead_code)] // Only the wall-clock wait and the process helpers are used here.
 mod support;
+use support::git;
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 struct World {
     base: PathBuf,
-    daemon: Option<Child>,
+    daemon: Option<support::Owned>,
 }
 
 impl World {
@@ -47,9 +47,9 @@ impl World {
         fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
         let world = Self { base, daemon: None };
         fs::write(world.work().join("src/lib.rs"), "pub fn lib() {}\n").unwrap();
-        world.git(&["init", "-q", "-b", "main"]);
-        world.git(&["add", "."]);
-        world.git(&["commit", "-q", "-m", "start"]);
+        git(&world.work(), &["init", "-q", "-b", "main"]);
+        git(&world.work(), &["add", "."]);
+        git(&world.work(), &["commit", "-q", "-m", "start"]);
         world
     }
     fn work(&self) -> PathBuf {
@@ -59,27 +59,10 @@ impl World {
         self.base.join("state")
     }
     fn start(&mut self) {
-        self.daemon = Some(
-            Process::new(env!("CARGO_BIN_EXE_langspan"))
-                .env("LANGSPAN_AUTOSTART", "off")
-                .args(["daemon", "--state-dir"])
-                .arg(self.state())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap(),
-        );
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while self.cli(&["status"]).0 != 0 {
-            assert!(Instant::now() < deadline, "daemon did not become ready");
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        self.daemon = Some(support::coordinator(&self.state()));
     }
     fn stop(&mut self) {
-        if let Some(mut child) = self.daemon.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+        drop(self.daemon.take());
     }
     fn cli_full(&self, args: &[&str]) -> (i32, String, String) {
         let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
@@ -107,40 +90,16 @@ impl World {
         assert_eq!(code, 0, "{out}{err}");
         serde_json::from_str::<Value>(&out).unwrap()["outcome"]["today"].clone()
     }
-    fn git(&self, args: &[&str]) {
-        let output = Process::new("git")
-            .arg("-C")
-            .arg(self.work())
-            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
     /// One hook event; the reply's JSON, if any.
     fn hook(&self, event: Value) -> Value {
-        let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
-            .env("LANGSPAN_AUTOSTART", "off")
-            .args(["hook", "claude-code", "--state-dir"])
-            .arg(self.state())
-            .args(["--workspace", "app", "--root"])
-            .arg(self.work())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(event.to_string().as_bytes())
-            .unwrap();
-        let output = child.wait_with_output().unwrap();
+        let output = support::hook_call(
+            &self.state(),
+            "claude-code",
+            "app",
+            &self.work(),
+            &[],
+            &event,
+        );
         serde_json::from_slice(&output.stdout).unwrap_or(Value::Null)
     }
     fn lifecycle(&self, session: &str, name: &str) -> Value {

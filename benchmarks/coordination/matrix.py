@@ -266,7 +266,7 @@ def report(named, missing):
                     "Last stale caller fixed (s)", "Tokens", "Turns", "Elapsed (s)", "Repair", "Push attempts",
                     "Push rejections"], rows)
     if missing:
-        lines += ["", "No record (the trial stopped before writing one; its directory is kept): "
+        lines += ["", "No record (the trial stopped before writing one; its directory, if it made one, is kept): "
                   + ", ".join(sorted(missing)) + "."]
     lines += ["", "## Conditions", "",
               "Excluded trials are counted and add nothing else. Combined build passed is before any repair; a "
@@ -302,13 +302,37 @@ def report(named, missing):
     return "\n".join(lines) + "\n"
 
 
+def journaled(source):
+    """The trial names in the matrix journal SOURCE, none when it is absent."""
+    if not source.is_file():
+        return []
+    with open(source, "rb") as journal:
+        body = journal.read(driver.MAX_CONFIG_BYTES + 1)
+    if len(body) > driver.MAX_CONFIG_BYTES:
+        raise ValueError("%s exceeds its input bound" % source)
+    names = []
+    for number, line in enumerate(body.decode("utf-8").splitlines(), 1):
+        try:
+            found = json.loads(line)
+        except ValueError:
+            found = None
+        if not isinstance(found, dict) or not isinstance(found.get("trial"), str):
+            raise ValueError("%s line %d is not a matrix journal line" % (source, number))
+        names.append(found["trial"])
+    return names
+
+
 def read_trials(paths):
     """The (name, record) pairs and the names without a record under the
-    matrix directories PATHS. Raises ValueError on a record this version
-    cannot read."""
+    matrix directories PATHS: a trial directory without one, or a trial
+    in `matrix.jsonl` whose driver stopped before making its directory.
+    Raises ValueError on a record or journal line this version cannot
+    read."""
     named, missing = [], []
     for path in paths:
-        for directory in sorted(child for child in Path(path).iterdir() if child.is_dir()):
+        directories = sorted(child for child in Path(path).iterdir() if child.is_dir())
+        missing += sorted(set(journaled(Path(path) / "matrix.jsonl")) - {directory.name for directory in directories})
+        for directory in directories:
             source = directory / "record.json"
             if not source.is_file():
                 missing.append(directory.name)

@@ -198,6 +198,39 @@ class StaleCallers(unittest.TestCase):
         self.assertIn("sessions 1 and 2", found["reason"])
         self.assertIn("shelf/features/gone.py", found["reason"])
 
+    def test_a_shared_checkout_s_caller_is_fixed_by_whichever_session_writes_it(self):
+        # In one checkout a file is one file: session 1's write that leaves
+        # session 2's stale caller in the new form fixes it.
+        trial = shared(recorded("langspan-follow"))
+        fix = trial["transcripts"][1][4:7]
+        del trial["transcripts"][1][4:7]
+        trial["transcripts"][0][-2:-2] = fix
+        found = measure(trial)
+        fixed = (2152111981911375 - CHANGE["langspan-follow"]) / 1e9
+        self.assertEqual((found["status"], found["writes_admitted"], found["stale_files"], found["unfixed"],
+                          found["fixed_after_s"]), ("reported", 1, 1, 0, fixed), found)
+        self.assertEqual(found["items"][-1], {"session": 1, "path": "shelf/features/gone.py", "after_s": fixed,
+                                              "kind": "fixed"})
+        # Session 1's later write that puts the old form back leaves session
+        # 2's file stale again, though only session 2's writes are counted.
+        gone, later = "/bench/work/trunk/shelf/features/gone.py", 2152112000000000
+        old = "from shelf.dates import days_left\n\n\ndef count_expired(items):\n" \
+              "    return sum(1 for name, day in items if days_left(day) is None)\n"
+        trial["transcripts"][0][-2:-2] = write_call("restore", "Write", {"content": old}, later, gone)
+        trial["committed"][0]["shelf/features/gone.py"] = old
+        found = measure(trial)
+        self.assertEqual((found["status"], found["writes_admitted"], found["stale_files"], found["unfixed"],
+                          found["fixed_after_s"]), ("reported", 1, 1, 1, None), found)
+        self.assertEqual(found["items"][-1], {"session": 1, "path": "shelf/features/gone.py",
+                                              "after_s": (later - CHANGE["langspan-follow"]) / 1e9,
+                                              "kind": "stale_write"})
+        # A stale caller in a file no dependent wrote is not one.
+        trial = shared(recorded("langspan-follow"))
+        trial["transcripts"][0][-2:-2] = write_call("own", "Write", {"content": old}, later,
+                                                    "/bench/work/trunk/shelf/features/own.py")
+        trial["committed"][0]["shelf/features/own.py"] = old
+        self.assertEqual(measure(trial), measure(shared(recorded("langspan-follow"))))
+
     def test_the_input_is_not_changed(self):
         trial = recorded("langspan-follow")
         before = copy.deepcopy(trial)

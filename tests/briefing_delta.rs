@@ -11,12 +11,15 @@ use langspan::{
     protocol::{PROTOCOL_VERSION, Request},
 };
 use langspan_core::{Command, Outcome, State};
+mod support;
+use support::git;
+
 use serde_json::{Value, json};
 use std::{
     fs,
     io::Write,
     os::unix::fs::PermissionsExt,
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::{Child, Command as Process, Stdio},
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
@@ -41,26 +44,6 @@ struct Run {
     coverage: String,
     /// The hook's own diagnostic line, for a failure's message.
     diagnostic: String,
-}
-
-fn git(root: &Path, args: &[&str]) {
-    let output = Process::new("git")
-        .arg("-C")
-        .arg(root)
-        .args([
-            "-c",
-            "user.name=LangSpan test",
-            "-c",
-            "user.email=test@example.invalid",
-        ])
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
 }
 
 impl Fixture {

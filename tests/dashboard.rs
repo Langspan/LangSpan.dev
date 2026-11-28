@@ -3,13 +3,16 @@
 //! sessions driven through the real hook executable, and requests made over
 //! real TCP: who may read it, what it shows, and what it refuses.
 
+mod support;
+use support::git;
+
 use serde_json::{Value, json};
 use std::{
     fs,
     io::{BufRead, BufReader, Read, Write},
     net::TcpStream,
     os::unix::fs::PermissionsExt,
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::{Child, Command as Process, Stdio},
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
@@ -25,26 +28,6 @@ struct Fixture {
     base: PathBuf,
     daemon: Option<Child>,
     dashboard: Option<Child>,
-}
-
-fn git(root: &Path, args: &[&str]) {
-    let output = Process::new("git")
-        .arg("-C")
-        .arg(root)
-        .args([
-            "-c",
-            "user.name=LangSpan test",
-            "-c",
-            "user.email=test@example.invalid",
-        ])
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
 }
 
 struct Http {
@@ -647,4 +630,86 @@ fn the_event_feed_pages_every_event_in_seq_order_without_gaps_or_prompt_text() {
     assert_eq!(down.status, 503, "{}", down.body);
     let down: Value = serde_json::from_str(&down.body).unwrap();
     assert_eq!(down["available"], false, "{down}");
+}
+
+/// Real daemon, hooks and TCP, because what is verified is the page and
+/// policy the dashboard really serves and the rows a real hold appends
+/// (issue #491): the Live view's markup and renderer inside the page's two
+/// hashed blocks, and a held write with what its card and wire are drawn from.
+#[test]
+fn the_served_page_draws_the_live_view_from_a_real_hold() {
+    let mut f = Fixture::new();
+    // A build output Git ignores, which the feed leaves out (and real Git
+    // decides what is ignored).
+    fs::write(f.root().join(".gitignore"), "target/\n").unwrap();
+    fs::create_dir(f.root().join("target")).unwrap();
+    fs::write(f.root().join("target/out.txt"), "hello\n").unwrap();
+    f.start_daemon();
+    assert_eq!(f.codex_admit(BOB, "call-1", "a.txt"), "admitted");
+    assert_eq!(f.codex_admit(CAROL, "call-2", "a.txt"), "denied");
+    assert_eq!(f.codex_admit(BOB, "call-3", "target/out.txt"), "admitted");
+    let (port, token) = f.start_dashboard();
+
+    let page = get(port, &format!("/?t={token}"), "");
+    assert_eq!(page.status, 200);
+    for part in [
+        "data-live-view",
+        "data-canvas",
+        "data-gutter",
+        "data-cam=\"follow\"",
+        "id=\"view-files\"",
+        "id=\"files-view\"",
+        "var LangSpanLiveView = (function",
+        "LangSpanLiveView.mount(",
+        "/api/events?after=",
+        ".live-canvas{",
+    ] {
+        assert!(page.body.contains(part), "the served page lacks {part}");
+    }
+    let csp = page
+        .headers
+        .lines()
+        .find_map(|line| line.strip_prefix("content-security-policy: "))
+        .unwrap();
+    assert_eq!(csp.matches("'sha256-").count(), 2, "{csp}");
+    assert!(csp.contains("img-src 'none'"), "{csp}");
+
+    let header = format!("X-LangSpan-Token: {token}\r\n");
+    let reply = get(port, "/api/events?after=0&limit=1000", &header);
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let rows: Value = serde_json::from_str(&reply.body).unwrap();
+    let rows = rows["events"].as_array().unwrap();
+    let held = rows
+        .iter()
+        .find(|row| row["type"] == "write_refused")
+        .expect("the denied write is in the feed");
+    // A card needs a time and a session; its wire needs the peer's session,
+    // which has steps of its own in the feed.
+    assert!(held["at_ms"].as_u64().is_some(), "{held}");
+    assert!(
+        held["paths"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p == "a.txt"),
+        "{held}"
+    );
+    let (session, peer) = (&held["session_id"], &held["peer_session_id"]);
+    assert!(
+        session.is_string() && peer.is_string() && session != peer,
+        "{held}"
+    );
+    assert!(
+        rows.iter().any(|row| &row["session_id"] == peer),
+        "{rows:?}"
+    );
+    assert!(
+        rows.iter().any(|row| row["type"] == "clock_anchored"),
+        "{rows:?}"
+    );
+    assert!(
+        !reply.body.contains("target/out.txt"),
+        "an ignored path was served: {}",
+        reply.body
+    );
 }

@@ -651,7 +651,10 @@ the first symbol. A symbol counts when one of the session's own
 files (edited, held, declared or read) mentions its name, or imports a path
 whose last part is the name or the file's module name: the file name without
 its extension, or the directory for Go and for `mod.rs`, `lib.rs`, `main.rs`,
-`index.*` and `__init__.py`. Symbols already told to the session are left
+`index.*` and `__init__.py`. A symbol also counts when the session's own
+copy of the file that defines it is one of those files: a session writing a
+new caller reads the definition before any file of its own mentions the name
+(issue #194). Symbols already told to the session are left
 out, and at most 32 go to the core in a prepared command that only the
 daemon builds, like `WorkspaceRegisterVerified`. The core names the worktree
 root and the session that last reported editing the file, and selects at most

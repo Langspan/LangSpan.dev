@@ -512,6 +512,54 @@ fn a_platform_check_passes_only_when_its_build_and_every_shard_passed() {
     );
 }
 
+/// The self-hosted runner for a trusted event, GitHub's standard runner
+/// for a pull request from a fork (docs/development-process.md#self-hosted-runner).
+const TRUSTED_RUNNER: &str = "(github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('[\"self-hosted\",\"langspan-trusted\"]') || 'ubuntu-24.04'";
+
+#[test]
+fn only_the_linux_dry_runs_use_the_self_hosted_runner_and_never_for_a_fork() {
+    let hosted = "\n    runs-on: ${{ vars.LINUX_RUNNER || 'ubuntu-24.04' }}\n";
+    // Coverage stays on GitHub's runners until a timing test in
+    // tests/report.rs passes on the self-hosted machine (issue #581).
+    assert!(job(&workflow("coverage.yml"), "coverage").contains(hosted));
+    // The four Linux shards stay on GitHub's runners: one self-hosted
+    // runner takes one job at a time, so they would wait for each other.
+    assert!(job(&workflow("check.yml"), "linux-tests").contains(hosted));
+    let bench = job(&workflow("bench.yml"), "dry-runs");
+    assert!(bench.contains(&format!(
+        "          - platform: linux\n            runner: ${{{{ {TRUSTED_RUNNER} }}}}\n"
+    )));
+    assert!(bench.contains(
+        "          - platform: macos\n            runner: ${{ vars.MACOS_RUNNER || 'macos-26' }}\n"
+    ));
+    // Nowhere else, and in no other form, in any workflow: a fork's pull
+    // request must never reach the runner, which keeps state from one job
+    // to the next. Comments may name it.
+    let dir = root().join(".github/workflows");
+    let mut seen = Vec::new();
+    for entry in fs::read_dir(&dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display())) {
+        let name = entry.expect("workflow entry").file_name();
+        let name = name.to_str().expect("UTF-8 workflow name").to_owned();
+        if !(name.ends_with(".yml") || name.ends_with(".yaml")) {
+            continue;
+        }
+        let code: String = workflow(&name)
+            .lines()
+            .filter(|line| !line.trim_start().starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let expected = match name.as_str() {
+            "bench.yml" => 1,
+            _ => 0,
+        };
+        assert_eq!(code.matches("self-hosted").count(), expected, "{name}");
+        assert_eq!(code.matches("langspan-trusted").count(), expected, "{name}");
+        assert_eq!(code.matches(TRUSTED_RUNNER).count(), expected, "{name}");
+        seen.push(name);
+    }
+    assert!(seen.iter().any(|name| name == "check.yml"), "{seen:?}");
+}
+
 #[test]
 fn each_job_takes_its_runner_from_a_repository_variable() {
     let text = workflow("check.yml");
@@ -1403,6 +1451,32 @@ fn runs_are_grouped_by_event_and_only_the_nightly_run_builds_the_release() {
     assert!(workflow("release.yml").contains("cargo build"));
 }
 
+/// Issue #588 waited on a person marking the release's fixtures pull request
+/// ready. It opens ready for review, as the release app, whose pull requests
+/// run the checks (one opened with `GITHUB_TOKEN` triggers no workflow).
+#[test]
+fn the_release_fixtures_pull_request_opens_ready_as_the_release_app() {
+    let pr = job(&workflow("release.yml"), "release-fixtures-pr");
+    let open = steps(&pr)
+        .into_iter()
+        .find(|step| step.contains("gh pr create"))
+        .expect("release-fixtures-pr opens no pull request");
+    assert!(
+        !open.contains("--draft"),
+        "the fixtures pull request opens as a draft"
+    );
+    assert!(
+        !open.contains("mark this ready"),
+        "the fixtures pull request body still asks to mark it ready"
+    );
+    assert!(open.contains("GH_TOKEN: ${{ steps.app-token.outputs.token }}"));
+    assert!(
+        pr.contains("permissions: {}"),
+        "release-fixtures-pr gets a GITHUB_TOKEN scope"
+    );
+    assert!(pr.contains("permission-pull-requests: write"));
+}
+
 /// Runs scripts/ci-cache-prune.sh in `dir`; returns (GITHUB_OUTPUT, stdout).
 fn cache_prune(dir: &Path) -> (String, String) {
     let output = dir.join("output");
@@ -1629,7 +1703,7 @@ fn a_red_or_green_main_runs_the_main_red_report_for_each_platform_with_issues_wr
         "\n    needs: [linux-result, macos-result]\n",
         // A push to main, or a manual run that asks for a dry run.
         "\n    if: always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && (inputs.main_red_dry_run == 'Linux' || inputs.main_red_dry_run == 'macOS')))\n",
-        "\n    permissions:\n      issues: write\n    concurrency:\n",
+        "\n    permissions:\n      actions: write\n      issues: write\n    concurrency:\n",
         "\n      group: main-red-${{ github.event_name }}-${{ matrix.platform }}\n      cancel-in-progress: false\n",
         "\n        platform: [Linux, macOS]\n",
         "\n          persist-credentials: false\n",
@@ -1652,13 +1726,17 @@ fn a_red_or_green_main_runs_the_main_red_report_for_each_platform_with_issues_wr
         2,
         "{report}"
     );
-    // The token can write issues and nothing else.
+    // The token can write issues and start rerun-failed.yml, nothing else.
     let permissions = report.split("    permissions:\n").nth(1).unwrap();
     let scopes: Vec<_> = permissions
         .lines()
         .take_while(|l| l.starts_with("      "))
         .collect();
-    assert_eq!(scopes, ["      issues: write"], "{report}");
+    assert_eq!(
+        scopes,
+        ["      actions: write", "      issues: write"],
+        "{report}"
+    );
     // The dry-run inputs default to no dry run, so the release workflow's
     // `gh workflow run check.yml` starts none.
     let on = text.split("\npermissions:").next().unwrap();
@@ -1675,6 +1753,43 @@ fn a_red_or_green_main_runs_the_main_red_report_for_each_platform_with_issues_wr
         .collect();
     assert_eq!(writers.len(), 3);
     assert_eq!(text.matches("issues: write").count(), 3, "{text}");
+    // Only main-red can start a workflow.
+    assert_eq!(
+        text.matches("\n      actions: write\n").count(),
+        1,
+        "{text}"
+    );
+}
+
+#[test]
+fn rerun_failed_reruns_a_finished_push_run_on_main_once_and_runs_no_repository_code() {
+    let text = workflow("rerun-failed.yml");
+    for line in [
+        "\non:\n  workflow_dispatch:\n",
+        "\npermissions: {}\n",
+        "\n    permissions:\n      actions: write\n    concurrency:\n",
+        "\n      group: rerun-failed-${{ inputs.run_id }}\n      cancel-in-progress: false\n",
+        // The input reaches the shell only through the environment.
+        "\n          RUN_ID: ${{ inputs.run_id }}\n",
+        "            '' | *[!0-9]*) ",
+        // Only check.yml's push runs on main, only on their first attempt,
+        // only once finished, and only when they failed.
+        "if [ \"$path $event $branch\" != \".github/workflows/check.yml push main\" ]; then\n",
+        "if [ \"$attempt\" != 1 ]; then\n",
+        "if [ \"$conclusion\" != failure ]; then\n",
+        "timeout 60 gh run rerun \"$RUN_ID\" --failed\n",
+        // Bounded: 60 checks, 30 s apart, each call at most 60 s.
+        "for _ in $(seq 60); do\n",
+        "            sleep 30\n",
+    ] {
+        assert!(text.contains(line), "rerun-failed.yml lacks {line}");
+    }
+    assert!(!text.contains("actions/checkout"), "{text}");
+    assert!(!text.contains("run: ${{"), "{text}");
+    assert_eq!(text.matches("${{ inputs.run_id }}").count(), 2, "{text}");
+    // scripts/ci-main-red.py starts it by this name.
+    let script = fs::read_to_string(root().join("scripts/ci-main-red.py")).unwrap();
+    assert!(script.contains("RERUN_WORKFLOW = \"rerun-failed.yml\"\n"));
 }
 
 /// What one run of scripts/ci-main-red.py did against the gh stub.
@@ -1701,6 +1816,7 @@ impl MainRed {
                     "issue comment",
                     "issue close",
                     "label create",
+                    "workflow run",
                 ]
                 .iter()
                 .any(|w| c.starts_with(w))
@@ -1860,6 +1976,217 @@ fn the_error_lines_are_capped_fenced_and_cleaned_as_log_data() {
     assert!(block.contains("repeated failure 9\n") || block.ends_with("repeated failure 9"));
     assert!(!block.contains("repeated failure 10"), "{block}");
     assert!(run.body.contains("More error lines are in the job logs."));
+    // Every log read lets gh print the escape bytes the script then strips.
+    assert!(
+        run.calls
+            .contains("api repos/o/r/actions/jobs/2/logs --allow-escape-sequences\n"),
+        "{}",
+        run.calls
+    );
+}
+
+#[test]
+fn an_older_gh_without_the_escape_flag_still_reads_the_logs() {
+    // Such a gh rejects --allow-escape-sequences as an unknown flag and
+    // passes escape bytes through, so the script asks gh's help first.
+    let log = "2026-11-27T10:01:00.0000000Z \u{1b}[31merror\u{1b}[0m: in colour\n";
+    let run = main_red(
+        "macOS",
+        "failure",
+        false,
+        &[("old-gh", ""), ("api/repos_o_r_actions_jobs_2_logs", log)],
+    );
+    assert!(run.ok, "{}", run.stderr);
+    assert!(
+        run.body
+            .contains("\n~~~~text\n--- macOS tests 2\nerror: in colour\n"),
+        "{}",
+        run.body
+    );
+    assert!(!run.body.contains("Could not read the log"), "{}", run.body);
+    assert!(
+        !run.calls.contains("--allow-escape-sequences"),
+        "{}",
+        run.calls
+    );
+    // gh's help is read once, however many logs there are.
+    assert_eq!(
+        run.calls.matches("api --help\n").count(),
+        1,
+        "{}",
+        run.calls
+    );
+}
+
+/// The log of a macOS shard whose 453 tests all passed and whose JUnit
+/// upload then timed out, as in #564. The lines are that job's recorded log
+/// (from its rerun, the only attempt GitHub still serves) and the error line
+/// is the one #564 quotes. `^[` in the file stands for the escape byte.
+fn upload_timeout_log() -> String {
+    fs::read_to_string(root().join("tests/fixtures/ci-main-red/upload-timeout.log"))
+        .unwrap()
+        .replace("^[", "\u{1b}")
+}
+
+/// A JUnit report in which every test passed.
+const PASSING_JUNIT: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="ci" tests="1" failures="0" errors="0">
+  <testsuite name="cli_golden" tests="1" failures="0" errors="0">
+    <testcase name="help_is_pinned" classname="cli_golden" time="0.1"/>
+  </testsuite>
+</testsuites>
+"#;
+
+/// Run 200 at `attempt`, as GitHub lists it.
+fn run_200(attempt: u32) -> String {
+    format!(
+        r#"{{"id": 200, "run_attempt": {attempt}, "head_sha": "c0ffee0000000000000000000000000000000003", "html_url": "https://github.com/o/r/actions/runs/200", "created_at": "2026-11-27T10:00:00Z"}}"#
+    )
+}
+
+#[test]
+fn an_infrastructure_failure_with_every_test_passed_reruns_once_instead_of_opening_an_issue() {
+    let log = upload_timeout_log();
+    let run = main_red(
+        "macOS",
+        "failure",
+        false,
+        &[
+            ("api/repos_o_r_actions_jobs_2_logs", &log),
+            ("junit-macos-1/junit.xml", PASSING_JUNIT),
+        ],
+    );
+    assert!(run.ok, "{}", run.stderr);
+    assert_eq!(
+        run.writes(),
+        ["workflow run rerun-failed.yml --repo o/r --ref main -f run_id=200"],
+        "{}",
+        run.calls
+    );
+    assert!(
+        run.stdout.contains(
+            "every test passed and macOS tests 2 failed on GitHub's infrastructure: `##[error]Failed to CreateArtifact: Unable to make request: ETIMEDOUT`"
+        ),
+        "{}",
+        run.stdout
+    );
+
+    // A dry run says so and writes nothing.
+    let run = main_red(
+        "macOS",
+        "failure",
+        true,
+        &[
+            ("api/repos_o_r_actions_jobs_2_logs", &log),
+            ("junit-macos-1/junit.xml", PASSING_JUNIT),
+        ],
+    );
+    assert!(run.ok, "{}", run.stderr);
+    assert!(run.writes().is_empty(), "{}", run.calls);
+    assert!(
+        run.stdout
+            .starts_with("Dry run: would rerun the failed jobs of run 200 once:"),
+        "{}",
+        run.stdout
+    );
+}
+
+#[test]
+fn a_rerun_that_fails_again_opens_the_issue_with_the_escaped_logs_error_lines() {
+    let log = upload_timeout_log();
+    let attempt_2 = run_200(2);
+    let run = main_red(
+        "macOS",
+        "failure",
+        false,
+        &[
+            ("api/repos_o_r_actions_runs_200", &attempt_2),
+            ("api/repos_o_r_actions_jobs_2_logs", &log),
+            ("junit-macos-1/junit.xml", PASSING_JUNIT),
+        ],
+    );
+    assert!(run.ok, "{}", run.stderr);
+    let writes = run.writes();
+    assert_eq!(writes.len(), 2, "{}", run.calls);
+    assert!(writes[1].starts_with("issue create "), "{writes:?}");
+    for part in [
+        "Run: https://github.com/o/r/actions/runs/200 (attempt 2: its failed jobs were rerun)",
+        "\n~~~~text\n--- macOS tests 2\n##[error]Failed to CreateArtifact: Unable to make request: ETIMEDOUT\n",
+    ] {
+        assert!(
+            run.body.contains(part),
+            "the body lacks {part:?}:\n{}",
+            run.body
+        );
+    }
+    assert!(!run.body.contains("Could not read the log"), "{}", run.body);
+    assert!(!run.body.contains('\u{1b}'), "{}", run.body);
+}
+
+#[test]
+fn a_failure_that_is_not_only_infrastructure_opens_the_issue_without_a_rerun() {
+    let log = upload_timeout_log();
+    let product_error = format!(
+        "{log}2026-11-28T02:01:23.4000000Z ##[error]Process completed with exit code 100.\n"
+    );
+    let failed_test = format!(
+        "{log}2026-11-28T02:01:23.4000000Z FAIL [   2.001s] cli_golden every_option_against_every_command\n"
+    );
+    let cases: [&[(&str, &str)]; 4] = [
+        // A test failed in the JUnit reports.
+        &[("api/repos_o_r_actions_jobs_2_logs", &log)],
+        // Another step failed as well.
+        &[
+            ("api/repos_o_r_actions_jobs_2_logs", &product_error),
+            ("junit-macos-1/junit.xml", PASSING_JUNIT),
+        ],
+        // The log names a failed test the reports missed.
+        &[
+            ("api/repos_o_r_actions_jobs_2_logs", &failed_test),
+            ("junit-macos-1/junit.xml", PASSING_JUNIT),
+        ],
+        // The log could not be read, so nothing shows the runner failed.
+        &[
+            ("api/repos_o_r_actions_jobs_2_logs.flood-stderr", "10"),
+            ("junit-macos-1/junit.xml", PASSING_JUNIT),
+        ],
+    ];
+    for (i, files) in cases.iter().enumerate() {
+        let run = main_red("macOS", "failure", false, files);
+        assert!(run.ok, "case {i}: {}", run.stderr);
+        let writes = run.writes();
+        assert_eq!(writes.len(), 2, "case {i}: {}", run.calls);
+        assert!(
+            writes[1].starts_with("issue create "),
+            "case {i}: {writes:?}"
+        );
+    }
+
+    // A rerun that can't be requested opens the issue and says why.
+    let run = main_red(
+        "macOS",
+        "failure",
+        false,
+        &[
+            ("api/repos_o_r_actions_jobs_2_logs", &log),
+            ("junit-macos-1/junit.xml", PASSING_JUNIT),
+            (
+                "dispatch-error",
+                "HTTP 403: Resource not accessible by integration\n",
+            ),
+        ],
+    );
+    assert!(run.ok, "{}", run.stderr);
+    let writes = run.writes();
+    assert_eq!(writes.len(), 3, "{}", run.calls);
+    assert!(writes[0].starts_with("workflow run "), "{writes:?}");
+    assert!(
+        run.body.contains(
+            "Could not request a rerun of the failed jobs: gh workflow run exited 1: HTTP 403: Resource not accessible by integration"
+        ),
+        "{}",
+        run.body
+    );
 }
 
 #[test]
@@ -2383,6 +2710,35 @@ fn coverage_runs_nightly_reports_a_drop_and_is_not_a_required_check() {
     }
 }
 
+#[test]
+fn fuzzing_runs_nightly_only_and_files_one_bug_issue_with_the_crash_artifact() {
+    let text = workflow("fuzz.yml");
+    assert!(
+        text.contains("\non:\n  schedule:\n    - cron: \"17 5 * * *\"\n  workflow_dispatch:\n"),
+        "{text}"
+    );
+    for trigger in ["pull_request", "merge_group", "push:"] {
+        assert!(!text.contains(trigger), "fuzz.yml still names {trigger}");
+    }
+    assert!(
+        job(&text, "fuzz").contains(
+            "    outputs:\n      artifact-url: ${{ steps.crashes.outputs.artifact-url }}\n"
+        )
+    );
+    let report = job(&text, "nightly-report");
+    for line in [
+        "if: github.event_name == 'schedule' && failure()",
+        "TITLE: Nightly fuzz run on main failed",
+        "ARTIFACT_URL: ${{ needs.fuzz.outputs.artifact-url }}",
+        // An open issue with the same title gets a comment, never a twin.
+        "gh issue list --state open --label bug --search \"\\\"$TITLE\\\" in:title\"",
+        "gh issue comment \"$number\" --body \"$body\"",
+        "gh issue create --title \"$TITLE\" --label bug --body \"$body\"",
+    ] {
+        assert!(report.contains(line), "nightly-report lacks {line}");
+    }
+}
+
 /// One measured file: its production lines, how many of them integration
 /// tests cover, and how many more only in-file unit tests cover.
 struct Measured(&'static str, usize, usize, usize);
@@ -2559,6 +2915,126 @@ fn coverage_fails_under_the_total_floor_or_two_points_under_any_row() {
     let message = "the total, 84.8% of production lines, is under the 90% floor";
     assert!(stderr.contains(message), "{stderr}");
     let _ = fs::remove_dir_all(&dir);
+}
+
+/// Runs the `run:` block of coverage.yml's nightly-report step with bash, as
+/// GitHub runs it, against a stand-in gh first on PATH. `open` is what the
+/// step's `gh issue list --jq` prints: the open issue's number, or nothing.
+/// Returns each gh call, one argument per line inside brackets. A process
+/// test: what it verifies is the workflow's own shell driving gh, so the
+/// failure path is shown without a coverage drop on main or a GitHub call.
+fn nightly_coverage_report(open: &str) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let report = job(&workflow("coverage.yml"), "nightly-report");
+    // Each `${{ }}` value the step reads is set below; one more would go
+    // unset here, so the test names it.
+    let env: Vec<&str> = report
+        .lines()
+        .skip_while(|line| *line != "        env:")
+        .skip(1)
+        .take_while(|line| line.starts_with("          "))
+        .collect();
+    let keys: Vec<&str> = env
+        .iter()
+        .filter_map(|line| line.trim().split(':').next())
+        .collect();
+    assert_eq!(
+        keys,
+        ["GH_TOKEN", "GH_REPO", "TITLE", "RUN_URL", "SHA"],
+        "nightly-report's step env changed; set the new value in this test"
+    );
+    let title = env
+        .iter()
+        .find_map(|line| line.trim().strip_prefix("TITLE: "))
+        .unwrap();
+    let script: String = report
+        .lines()
+        .skip_while(|line| *line != "        run: |")
+        .skip(1)
+        .take_while(|line| line.is_empty() || line.starts_with("          "))
+        .map(|line| format!("{}\n", line.get(10..).unwrap_or("")))
+        .collect();
+    assert!(script.contains("gh issue"), "{script}");
+
+    let dir = temp_dir("coverage-nightly-report");
+    let bin = dir.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::write(
+        bin.join("gh"),
+        "#!/usr/bin/env bash\nset -euo pipefail\n\
+         { echo call; for a in \"$@\"; do printf '[%s]\\n' \"$a\"; done; } >>\"$GH_STUB_LOG\"\n\
+         if [ \"$1 $2\" = \"issue list\" ]; then printf '%s' \"$GH_STUB_OPEN\"; fi\n",
+    )
+    .unwrap();
+    fs::set_permissions(bin.join("gh"), fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(dir.join("step.sh"), script).unwrap();
+    let log = dir.join("calls");
+    let out = Command::new("bash")
+        .args(["--noprofile", "--norc", "-eo", "pipefail"])
+        .arg(dir.join("step.sh"))
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .env("GH_STUB_LOG", &log)
+        .env("GH_STUB_OPEN", open)
+        .env_remove("GH_TOKEN")
+        .env("GH_REPO", "o/r")
+        .env("TITLE", title)
+        .env("RUN_URL", "https://github.com/o/r/actions/runs/200")
+        .env("SHA", "abc123")
+        .output()
+        .expect("bash runs the nightly-report step");
+    let calls = fs::read_to_string(&log).unwrap_or_default();
+    let _ = fs::remove_dir_all(&dir);
+    assert!(
+        out.status.success(),
+        "{}{calls}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    calls
+}
+
+#[test]
+fn a_nightly_coverage_drop_opens_the_nightly_issue_or_comments_on_it() {
+    // A summary under the floor fails the report, which coverage.sh exits
+    // with, so the coverage job fails and nightly-report runs.
+    let dir = temp_dir("coverage-nightly-drop");
+    let files = eleven(
+        Measured("src/f00.rs", 4000, 3200, 0),
+        Measured("src/f10.rs", 100, 95, 0),
+    );
+    let out = coverage_fixture(&dir, &files, &rows("80.0"));
+    let (ok, stdout, stderr) = coverage_report(&dir, &out, &[]);
+    let _ = fs::remove_dir_all(&dir);
+    assert!(!ok, "{stdout}");
+    assert!(stderr.contains("is under the 90% floor"), "{stderr}");
+    assert!(read("scripts/coverage.sh").ends_with("exit \"$report\"\n"));
+    let report = job(&workflow("coverage.yml"), "nightly-report");
+    assert!(report.contains("    needs: [coverage]\n"));
+    assert!(report.contains("    if: github.event_name == 'schedule' && failure()\n"));
+
+    let title = "Nightly Rust checks on main failed";
+    let list = format!(
+        "call\n[issue]\n[list]\n[--state]\n[open]\n[--search]\n[\"{title}\" in:title]\n\
+         [--json]\n[number,title]\n[--jq]\n[map(select(.title == env.TITLE)) | .[0].number // empty]\n"
+    );
+    let body = "[The nightly coverage run failed on main at abc123: coverage fell under \
+                the floor, or a test failed.\n\nRun: https://github.com/o/r/actions/runs/200\n\n\
+                The run summary has the per-file table and names what fell. Fix it the same \
+                day; a deliberate drop lowers that file's baseline row in a pull request that \
+                says why (docs/development-process.md#coverage).]\n";
+
+    // No open issue: one is opened with that title.
+    assert_eq!(
+        nightly_coverage_report(""),
+        format!("{list}call\n[issue]\n[create]\n[--title]\n[{title}]\n[--body]\n{body}")
+    );
+    // The issue is open: a comment on it, never a second issue.
+    assert_eq!(
+        nightly_coverage_report("17"),
+        format!("{list}call\n[issue]\n[comment]\n[17]\n[--body]\n{body}")
+    );
 }
 
 #[test]
@@ -2883,4 +3359,67 @@ fn the_settings_drift_audit_names_each_changed_setting() {
         "{stdout}"
     );
     assert_eq!(stdout.lines().count(), 2, "{stdout}");
+}
+
+const WORKSPACE_PACKAGES: [&str; 3] = ["langspan", "langspan-core", "langspan-graph"];
+
+/// The version of each workspace package that `lock` pins, from its
+/// `[[package]]` tables, sorted by name.
+fn locked_workspace_versions(lock: &str) -> Vec<(String, String)> {
+    let mut found = Vec::new();
+    for table in lock.split("[[package]]").skip(1) {
+        let field = |key: &str| {
+            table.lines().find_map(|line| {
+                line.strip_prefix(&format!("{key} = \""))
+                    .and_then(|rest| rest.strip_suffix('"'))
+                    .map(str::to_owned)
+            })
+        };
+        if let (Some(name), Some(version)) = (field("name"), field("version"))
+            && WORKSPACE_PACKAGES.contains(&name.as_str())
+        {
+            found.push((name, version));
+        }
+    }
+    found.sort();
+    found
+}
+
+/// The fuzz targets build with `--locked` against their own lock file
+/// (fuzz.yml), which release-please's rust updater doesn't touch, so a
+/// release PR that bumps the workspace version without it fails Fuzz (#571).
+/// release-please-config.json bumps it through `extra-files`, one entry per
+/// workspace package, and the lock holds the current version. release-please's
+/// toml updater parses the file into tagged values (`{ value, start, end }`),
+/// so a filter compares `@.name.value`; `@.name` is an object and matches
+/// nothing.
+#[test]
+fn fuzz_lock_pins_the_current_workspace_version() {
+    let version = env!("CARGO_PKG_VERSION");
+    let expected: Vec<(String, String)> = WORKSPACE_PACKAGES
+        .iter()
+        .map(|name| ((*name).to_owned(), version.to_owned()))
+        .collect();
+    assert_eq!(
+        locked_workspace_versions(&read("fuzz/Cargo.lock")),
+        expected,
+        "fuzz/Cargo.lock pins another version of the workspace than Cargo.toml's {version}: run \
+         `cargo update -p langspan --manifest-path fuzz/Cargo.toml`"
+    );
+    let config: serde_json::Value =
+        serde_json::from_str(&read("release-please-config.json")).expect("the config parses");
+    let extra = config["packages"]["."]["extra-files"]
+        .as_array()
+        .expect("release-please-config.json lists extra-files");
+    for name in WORKSPACE_PACKAGES {
+        let entry = serde_json::json!({
+            "type": "toml",
+            "path": "fuzz/Cargo.lock",
+            "jsonpath": format!("$.package[?(@.name.value=='{name}')].version"),
+        });
+        assert!(
+            extra.contains(&entry),
+            "release-please-config.json doesn't bump {name} in fuzz/Cargo.lock: add {entry} to extra-files"
+        );
+    }
 }

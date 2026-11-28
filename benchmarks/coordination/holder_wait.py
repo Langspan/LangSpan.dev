@@ -78,12 +78,23 @@ def prepare(run_dir):
     return checkout
 
 
+def owner_grants(state_dir, on):
+    """Write the coordinator's owner-only `config.json` with `owner_grants` set to `on`."""
+    fd = os.open(Path(state_dir) / "config.json", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as config:
+        json.dump({"owner_grants": on}, config)
+
+
 def set_policy(langspan, state_dir, arm, checkout, wait_ms):
     driver.langspan_cli(langspan, state_dir, "workspace", "add", WORKSPACE, str(checkout),
                         "--request-id", "holder-workspace")
     args = ["policy", "set", WORKSPACE, "conflict"]
     args += ["wait", "--wait-ms", str(wait_ms)] if arm == "langspan_wait" else ["refuse"]
+    # Setting a policy is an owner grant (issue #335): the operator allows it
+    # for this one command and turns it off again before any session starts.
+    owner_grants(state_dir, True)
     driver.langspan_cli(langspan, state_dir, *args, "--request-id", "holder-policy")
+    owner_grants(state_dir, False)
     return json.loads(driver.langspan_cli(langspan, state_dir, "policy", WORKSPACE, "--json"))["outcome"]["rows"]
 
 

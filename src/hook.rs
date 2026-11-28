@@ -16,6 +16,7 @@ mod deny;
 mod lifecycle;
 mod observe;
 mod prompt;
+mod push_route;
 mod reads;
 mod rename_hold;
 mod shell_hooks;

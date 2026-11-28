@@ -161,12 +161,23 @@ expect "the recap records it" 'Interface change in "src/upload.rs"' "$out"
 
 step "6. Two machines: each developer's agent learns of the other's work"
 ( cd "$BASE/alice" && g add -A && g commit -q -m "alice: retries" )
+# Publication is an owner grant: refused until the owner allows it in
+# config.json, which the owner turns off again afterwards (issue #335).
+owner_grants() { printf '{"remote_pass_ms":300,"owner_grants":%s}' "$2" > "$BASE/$1-state/config.json"; }
+out=$(cli alice remote enable app --name Alice --share-task on --request-id en-a 2>&1 || true)
+expect "turning publication on is refused without the owner's setting" 'owner_grant_off' "$out"
+expect "and the refusal names the setting" 'owner_grants' "$out"
+owner_grants alice true
 cli alice remote enable app --name Alice --share-task on --request-id en-a >/dev/null
+owner_grants alice false
+ok "the owner allowed it in config.json, ran it again and turned the setting off"
 hook bob codex "$(lifecycle bob codex-9 UserPromptSubmit 'Rewrite the changelog')" >/dev/null
 ( cd "$BASE/bob" && g checkout -q -b bob/changelog )
 codex_edit bob codex-9 y1 CHANGELOG.md 'changes, rewritten by bob
 '
+owner_grants bob true
 cli bob remote enable app --name Bob --request-id en-b >/dev/null
+owner_grants bob false
 until_seen "bob's coordinator receives alice's publication" 'Teammate "Alice"' cli bob status
 until_seen "alice's coordinator receives bob's" 'Teammate "Bob"' cli alice status
 out=$(hook bob codex "$(lifecycle bob codex-9 SessionStart)")

@@ -13,8 +13,9 @@ import unittest
 import runner
 
 
-@unittest.skipUnless(os.name == "posix", "owned process-group cleanup requires POSIX")
-class RunnerTests(unittest.TestCase):
+class RunnerFixture(unittest.TestCase):
+    """A temporary directory and manifest helpers; no tests of its own."""
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="langspan-bench-test-")
         self.root = Path(self.temp.name)
@@ -51,6 +52,9 @@ class RunnerTests(unittest.TestCase):
         finals = [row for row in rows if row["record_type"] == "run_finished"]
         return output, rows, finals
 
+
+@unittest.skipUnless(os.name == "posix", "owned process-group cleanup requires POSIX")
+class RunnerTests(RunnerFixture):
     def test_success_captures_real_output_and_never_invents_coverage_or_correctness(self):
         manifest = self.manifest([
             self.command("a", "print('agent A output')"),
@@ -104,46 +108,6 @@ class RunnerTests(unittest.TestCase):
         self.assertTrue(all(r["status"] == "failed" for r in finals))
         self.assertTrue(all(r["commands"][0]["exit_code"] == 9 for r in finals))
         self.assertTrue(all(r["metrics"]["integrated_correctness"]["status"] == "failed" for r in finals))
-
-    def test_timeout_retains_partial_output_and_stops_own_descendants(self):
-        child_pid = self.root / "child.pid"
-        heartbeat = self.root / "heartbeat"
-        descendant = (
-            "from pathlib import Path; import os,time; "
-            "Path('child.pid').write_text(str(os.getpid()))\n"
-            "while True:\n"
-            " with open('heartbeat','ab') as f: f.write(b'x')\n"
-            " time.sleep(.01)\n"
-        )
-        parent = (
-            "import subprocess,sys,time; "
-            "subprocess.Popen([sys.executable,'-c',sys.argv[1]]); "
-            "print('started before timeout',flush=True); time.sleep(60)"
-        )
-        # Include interpreter and descendant startup in the deadline; a
-        # subsecond budget can expire before either fixture executes.
-        manifest = self.manifest([
-            self.command("timeout", parent, descendant, timeout_seconds=5)
-        ], checks=[self.command("after", "print('check after timeout')")])
-        try:
-            output, _, finals = self.run_benchmark(manifest)
-            command = finals[0]["commands"][0]
-            self.assertEqual(command["status"], "timed_out")
-            self.assertEqual(finals[0]["status"], "timed_out")
-            self.assertIn("started before timeout", (output / command["stdout_path"]).read_text())
-            self.assertEqual(finals[0]["commands"][-1]["phase"], "check")
-            self.assertTrue(command["cleanup"]["sigterm_sent"])
-            size = heartbeat.stat().st_size
-            time.sleep(.15)
-            self.assertEqual(heartbeat.stat().st_size, size, "descendant survived owned-group cleanup")
-            self.assertEqual(finals[0]["metrics"]["integrated_correctness"]["status"], "unknown")
-        finally:
-            # Only the PID written by this fixture's own child is considered.
-            if child_pid.exists():
-                try:
-                    os.kill(int(child_pid.read_text()), signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
 
     def test_spawn_failure_is_a_record_and_output_limit_is_bounded(self):
         missing = self.command("missing", "")
@@ -250,6 +214,51 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual((output / row["commands"][0]["stdout_path"]).read_text(), row["arm"] + "\n")
         firsts = [row["arm"] for row in finals if row["arm_order"] == 1]
         self.assertEqual(firsts, ["worktrees", "awareness_only", "langspan"])
+
+
+# Its own class, so that its 5 s timeout runs beside the tests above
+# (tests/benchmark_harness.rs) instead of after them.
+@unittest.skipUnless(os.name == "posix", "owned process-group cleanup requires POSIX")
+class RunnerTimeout(RunnerFixture):
+    def test_timeout_retains_partial_output_and_stops_own_descendants(self):
+        child_pid = self.root / "child.pid"
+        heartbeat = self.root / "heartbeat"
+        descendant = (
+            "from pathlib import Path; import os,time; "
+            "Path('child.pid').write_text(str(os.getpid()))\n"
+            "while True:\n"
+            " with open('heartbeat','ab') as f: f.write(b'x')\n"
+            " time.sleep(.01)\n"
+        )
+        parent = (
+            "import subprocess,sys,time; "
+            "subprocess.Popen([sys.executable,'-c',sys.argv[1]]); "
+            "print('started before timeout',flush=True); time.sleep(60)"
+        )
+        # Include interpreter and descendant startup in the deadline; a
+        # subsecond budget can expire before either fixture executes.
+        manifest = self.manifest([
+            self.command("timeout", parent, descendant, timeout_seconds=5)
+        ], checks=[self.command("after", "print('check after timeout')")])
+        try:
+            output, _, finals = self.run_benchmark(manifest)
+            command = finals[0]["commands"][0]
+            self.assertEqual(command["status"], "timed_out")
+            self.assertEqual(finals[0]["status"], "timed_out")
+            self.assertIn("started before timeout", (output / command["stdout_path"]).read_text())
+            self.assertEqual(finals[0]["commands"][-1]["phase"], "check")
+            self.assertTrue(command["cleanup"]["sigterm_sent"])
+            size = heartbeat.stat().st_size
+            time.sleep(.15)
+            self.assertEqual(heartbeat.stat().st_size, size, "descendant survived owned-group cleanup")
+            self.assertEqual(finals[0]["metrics"]["integrated_correctness"]["status"], "unknown")
+        finally:
+            # Only the PID written by this fixture's own child is considered.
+            if child_pid.exists():
+                try:
+                    os.kill(int(child_pid.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
 
 if __name__ == "__main__":

@@ -15,7 +15,7 @@ use langspan_core::{
     HISTORY_EVENTS, HISTORY_MOVES, HistoryQuery, Outcome, RecordedEvent, ReportQuery, TodayQuery,
     TodayWindow, dashboard_denials, definition_history,
 };
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::BTreeMap;
 
 /// Before the events a report reads: sessions holding an intent, each with
@@ -165,7 +165,7 @@ impl Store {
         if let Some(refused) = self.refused_window(workspace_id, from_ms, wall_ms) {
             return Ok(refused);
         }
-        let (events, anchor, earlier) = self.newest_events(self.today_events)?;
+        let (events, anchor, earlier) = Self::newest_events(&self.connection, self.today_events)?;
         let retained_from_ms = retention::since_ms(&self.connection)?;
         let mut today = langspan_core::today(
             &self.state,
@@ -222,7 +222,8 @@ impl Store {
         else {
             return Ok(None);
         };
-        let (events, anchor, earlier) = self.newest_events(langspan_core::SINCE_EVENTS)?;
+        let (events, anchor, earlier) =
+            Self::newest_events(&self.connection, langspan_core::SINCE_EVENTS)?;
         let query = langspan_core::SinceQuery {
             workspace_id,
             from: *from,
@@ -239,12 +240,11 @@ impl Store {
     /// generation the first belongs to (when it was anchored) and whether
     /// older events exist. `today` and `report` read `today_events`.
     fn newest_events(
-        &self,
+        connection: &Connection,
         limit: usize,
     ) -> StoreResult<(Vec<RecordedEvent>, Option<ClockAnchor>, bool)> {
-        let mut statement = self
-            .connection
-            .prepare("SELECT seq, event_json FROM events ORDER BY seq DESC LIMIT ?1")?;
+        let mut statement =
+            connection.prepare("SELECT seq, event_json FROM events ORDER BY seq DESC LIMIT ?1")?;
         let mut rows = statement.query([i64::try_from(limit)?])?;
         let mut events = Vec::new();
         while let Some(row) = rows.next()? {
@@ -261,14 +261,13 @@ impl Store {
         // Older events exist when the log holds some before the first one
         // read. What retention removed is the caller's to pass separately,
         // as its cutoff: the kept generation markers are older than it.
-        let earlier: bool = self.connection.query_row(
+        let earlier: bool = connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM events WHERE seq < ?1)",
             [first],
             |row| row.get(0),
         )?;
         // The generation the first event read belongs to, if it was anchored.
-        let before: Option<String> = self
-            .connection
+        let before: Option<String> = connection
             .query_row(ANCHOR_LOOKUP, [first], |row| row.get(0))
             .optional()?;
         let anchor = match before
@@ -289,10 +288,13 @@ impl Store {
     /// are read, the newest: when more exist, the snapshot is not used and
     /// the third value says which sessions the events read made known, so a
     /// report's cost stays bounded however long the log grows.
-    fn report_history_before(&self, seq: u64) -> StoreResult<ReportHistory> {
-        let from = self.snapshot_seq;
-        let budget = self.report_history_events;
-        let mut statement = self.connection.prepare_cached(INTENT_EVENTS_BEFORE)?;
+    fn report_history_before(
+        connection: &Connection,
+        from: u64,
+        budget: usize,
+        seq: u64,
+    ) -> StoreResult<ReportHistory> {
+        let mut statement = connection.prepare_cached(INTENT_EVENTS_BEFORE)?;
         let mut rows = statement.query(params![
             i64::try_from(from)?,
             i64::try_from(seq)?,
@@ -311,8 +313,8 @@ impl Store {
                 BTreeMap::new(),
                 Some(langspan_core::ReportKnown::default()),
             )
-        } else if self.snapshot_seq > 0 {
-            let (snapshot, _) = retention::snapshot(&self.connection)?;
+        } else if from > 0 {
+            let (snapshot, _) = retention::snapshot(connection)?;
             (
                 snapshot
                     .intents
@@ -345,13 +347,51 @@ impl Store {
     /// `today` places them, counted by the core. Reads only; it writes
     /// nothing and acknowledges no message.
     pub fn report(&self, workspace_id: &str, from_ms: u64, wall_ms: u64) -> StoreResult<Outcome> {
-        if let Some(refused) = self.refused_window(Some(workspace_id), from_ms, wall_ms) {
+        if let Some(refused) = self.report_refused(workspace_id, from_ms, wall_ms) {
             return Ok(refused);
         }
-        let (events, anchor, earlier) = self.newest_events(self.today_events)?;
-        let retained_from_ms = retention::since_ms(&self.connection)?;
-        let (open_intents, session_workspaces, known) =
-            self.report_history_before(events.first().map_or(0, |first| first.seq))?;
+        let limits = (self.today_events, self.report_history_events);
+        Self::read_report(
+            &self.connection,
+            self.snapshot_seq,
+            limits,
+            workspace_id,
+            from_ms,
+            wall_ms,
+        )
+    }
+
+    /// Why a report of `workspace_id` from `from_ms` cannot be read, from
+    /// the state; the daemon asks this before a reader reads it.
+    pub(crate) fn report_refused(
+        &self,
+        workspace_id: &str,
+        from_ms: u64,
+        wall_ms: u64,
+    ) -> Option<Outcome> {
+        self.refused_window(Some(workspace_id), from_ms, wall_ms)
+    }
+
+    /// The report from the log on `connection`, whose newest snapshot is
+    /// at `snapshot_seq`, reading at most `limits` (`today_events`, then
+    /// the older history events folded): on the state owner's connection,
+    /// or a [`super::ReportReader`]'s own (issue #581).
+    pub(super) fn read_report(
+        connection: &Connection,
+        snapshot_seq: u64,
+        (today_events, history_events): (usize, usize),
+        workspace_id: &str,
+        from_ms: u64,
+        wall_ms: u64,
+    ) -> StoreResult<Outcome> {
+        let (events, anchor, earlier) = Self::newest_events(connection, today_events)?;
+        let retained_from_ms = retention::since_ms(connection)?;
+        let (open_intents, session_workspaces, known) = Self::report_history_before(
+            connection,
+            snapshot_seq,
+            history_events,
+            events.first().map_or(0, |first| first.seq),
+        )?;
         let mut report = langspan_core::report(&ReportQuery {
             workspace_id,
             window: TodayWindow {

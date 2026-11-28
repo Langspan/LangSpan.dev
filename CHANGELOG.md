@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.9.1](https://github.com/Langspan/LangSpan.dev/compare/v0.9.0...v0.9.1) (2026-11-28)
+
+
+### Bug fixes
+
+* bump fuzz/Cargo.lock with each release ([#571](https://github.com/Langspan/LangSpan.dev/issues/571)) ([#572](https://github.com/Langspan/LangSpan.dev/issues/572)) ([00ec40a](https://github.com/Langspan/LangSpan.dev/commit/00ec40a53a27bb9e142550d99a3ec93ebe5ef598))
+* keep golden files and fixtures LF on Windows checkouts ([#568](https://github.com/Langspan/LangSpan.dev/issues/568)) ([#569](https://github.com/Langspan/LangSpan.dev/issues/569)) ([b385ceb](https://github.com/Langspan/LangSpan.dev/commit/b385ceb1e214ae6d4fb844c83b7f623a9fa66f26))
+* tell a briefing item only once the hook has returned it ([#531](https://github.com/Langspan/LangSpan.dev/issues/531)) ([#573](https://github.com/Langspan/LangSpan.dev/issues/573)) ([b70394a](https://github.com/Langspan/LangSpan.dev/commit/b70394a05e99feedc7ba23e605c4e78e4542ad07))
+* the open review follow-ups ([#575](https://github.com/Langspan/LangSpan.dev/issues/575)) ([1bbb571](https://github.com/Langspan/LangSpan.dev/commit/1bbb571bc5d0b8824dfc60848e5ed33cf187b9a2))
+
 ## [0.9.0](https://github.com/Langspan/LangSpan.dev/compare/v0.8.0...v0.9.0) (2026-11-28)
 
 

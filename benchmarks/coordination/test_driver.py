@@ -1671,9 +1671,9 @@ class RepairAndSummary(Temporary):
         self.assertIn("schema version 6", done.stderr)
 
 
-class StandinHooks(Temporary):
-    """How the stand-in runs a hook: to completion within its own bound,
-    whatever the host timeout, and never leaving one running."""
+class HookProcesses(Temporary):
+    """Running a hook through the stand-in, and checking that every process
+    it started has ended; no tests of its own."""
 
     def session(self, command, timeout):
         settings = {"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [
@@ -1690,6 +1690,56 @@ class StandinHooks(Temporary):
         wrapper = [sys.executable, "-I", "-B", str(HERE / "driver.py"), "hook-log", str(self.root / "hooks.jsonl")]
         return (("bare", command),
                 ("wrapped", " ".join(shlex.quote(part) for part in wrapper) + " " + shlex.quote(command)))
+
+    def kill_groups(self, group_file, *groups):
+        """Kill GROUPS and the hook's group named in GROUP_FILE, so a failed
+        test leaves nothing running."""
+        if group_file.exists() and group_file.read_text().strip():
+            groups += (int(group_file.read_text()),)
+        for group in groups:
+            try:
+                os.killpg(group, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+
+    @staticmethod
+    def live_members(group):
+        """PIDs of the processes in process GROUP that can still run. A
+        zombie can't write; where PID 1 does not reap orphans it stays in
+        the group, so `killpg(group, 0)` alone would wait for it forever."""
+        listing = subprocess.run(["ps", "-A", "-o", "pid=,pgid=,stat="], capture_output=True,
+                                 text=True, check=True, timeout=10).stdout
+        return [int(pid) for pid, pgid, stat in (line.split()[:3] for line in listing.splitlines() if line.strip())
+                if int(pgid) == group and not stat.startswith("Z")]
+
+    def assert_stopped(self, group_file, heartbeat):
+        """The hook's process group, named in GROUP_FILE, has no live process
+        within a bound, and HEARTBEAT doesn't grow for 0.2 s after that.
+        Waiting for the writer to exit, not for a quiet spell, means a write
+        in flight when the signal landed can't fail the test, and a writer
+        that only paused can't pass it."""
+        group = int(group_file.read_text())
+        deadline = time.monotonic() + 10
+        while True:
+            live = self.live_members(group)
+            if not live:
+                break
+            self.assertLess(time.monotonic(), deadline,
+                            "the hook's process group %d still runs %s" % (group, live))
+            time.sleep(0.05)
+        size = heartbeat.stat().st_size
+        # Checked throughout the period, so a write fails the test when it lands.
+        held = time.monotonic() + 0.2
+        while True:
+            self.assertEqual(heartbeat.stat().st_size, size, "%s grew after its writer exited" % heartbeat)
+            if time.monotonic() >= held:
+                break
+            time.sleep(0.01)
+
+
+class StandinHooks(HookProcesses):
+    """How the stand-in runs a hook: to completion within its own bound,
+    whatever the host timeout, and never leaving one running."""
 
     def test_a_following_wait_lasts_until_just_before_the_session_limit(self):
         # A fixed wait ran out on a loaded machine before LangSpan's notice
@@ -1719,55 +1769,20 @@ class StandinHooks(Temporary):
         self.assertGreaterEqual(entry["elapsed_ms"], 600, entry)
         self.assertEqual(session.late_hooks, 1)
 
-    def test_a_hook_past_the_standin_bound_leaves_no_process_running(self):
-        # A hook the stand-in gives up on must not go on acting, for example
-        # by reading a file after the edit it was asked about was applied.
-        # The child's heartbeat shows whether it still acts. Its PID alone
-        # does not: where PID 1 does not reap orphans, a killed child stays
-        # a zombie and `kill(pid, 0)` still succeeds.
-        # The same holds behind the `hook-log` wrapper, whose hook the
-        # stand-in's SIGKILL does not reach, and for a child that ignores
-        # the SIGTERM sent first.
-        # On a loaded machine the wrapper's interpreter can take longer than
-        # the bound to start the hook; that attempt didn't reach the case
-        # under test, so it runs again with the bound doubled. Every attempt
-        # whose child ran gets the full check.
-        original = standin_agent.HOOK_SECONDS
-        self.addCleanup(setattr, standin_agent, "HOOK_SECONDS", original)
-        for trap in ("", "trap '' TERM; "):
-            for kind, command in self.commands(
-                    "echo $$ > %s; " + trap + "while :; do printf x >> %s; sleep 0.05; done & wait"):
-                with self.subTest(kind=kind, trap=trap):
-                    for bound in (0.5, 1, 2, 4, 8, 16):
-                        standin_agent.HOOK_SECONDS = bound
-                        name = "%s-%d-%s" % (kind, len(trap), bound)
-                        heartbeat, group = self.root / ("heartbeat-" + name), self.root / ("group-" + name)
-                        session, _ = self.session(command % (shlex.quote(str(group)), shlex.quote(str(heartbeat))), 1)
-                        try:
-                            denied = session.fire("PreToolUse", "Write", {"file_path": "x"}, "edit-1")
-                            self.assertFalse(denied)
-                            ran = heartbeat.exists() and heartbeat.stat().st_size > 0
-                            if not (ran and group.exists() and group.read_text().strip()):
-                                continue
-                            self.assert_stopped(group, heartbeat)
-                            break
-                        finally:
-                            self.kill_groups(group)
-                    else:
-                        self.fail("the hook's child never ran within a %s s bound" % bound)
-
     def test_a_hook_that_exits_leaves_no_background_child_running(self):
         # A hook can start a child with its streams redirected and exit 0.
         # The child is in the hook's process group, outside the runner's, so
         # once the hook returns nothing else would stop it.
         # Behind the `hook-log` wrapper the child is in a group only the
         # wrapper can end, so the wrapper ends it when the hook returns.
+        # The hook exits once its child has written, bounded by 10 s.
         for kind, command in self.commands(
                 "echo $$ > %s; (while :; do printf x >> %s; sleep 0.05; done) </dev/null >/dev/null 2>&1 & "
-                "sleep 0.3; exit 0"):
+                "i=0; while [ ! -s %s ] && [ $i -lt 1000 ]; do sleep 0.01; i=$((i+1)); done; exit 0"):
             with self.subTest(kind=kind):
                 heartbeat, group = self.root / ("heartbeat-" + kind), self.root / ("group-" + kind)
-                session, log = self.session(command % (shlex.quote(str(group)), shlex.quote(str(heartbeat))), 5)
+                session, log = self.session(command % (shlex.quote(str(group)), shlex.quote(str(heartbeat)),
+                                                       shlex.quote(str(heartbeat))), 5)
                 try:
                     denied = session.fire("PreToolUse", "Write", {"file_path": "x"}, "edit-1")
                     log.flush()
@@ -1779,46 +1794,6 @@ class StandinHooks(Temporary):
                     self.assert_stopped(group, heartbeat)
                 finally:
                     self.kill_groups(group)
-
-    def kill_groups(self, group_file, *groups):
-        """Kill GROUPS and the hook's group named in GROUP_FILE, so a failed
-        test leaves nothing running."""
-        if group_file.exists() and group_file.read_text().strip():
-            groups += (int(group_file.read_text()),)
-        for group in groups:
-            try:
-                os.killpg(group, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
-
-    @staticmethod
-    def live_members(group):
-        """PIDs of the processes in process GROUP that can still run. A
-        zombie can't write; where PID 1 does not reap orphans it stays in
-        the group, so `killpg(group, 0)` alone would wait for it forever."""
-        listing = subprocess.run(["ps", "-A", "-o", "pid=,pgid=,stat="], capture_output=True,
-                                 text=True, check=True, timeout=10).stdout
-        return [int(pid) for pid, pgid, stat in (line.split()[:3] for line in listing.splitlines() if line.strip())
-                if int(pgid) == group and not stat.startswith("Z")]
-
-    def assert_stopped(self, group_file, heartbeat):
-        """The hook's process group, named in GROUP_FILE, has no live process
-        within a bound, and HEARTBEAT doesn't grow after that. Waiting for
-        the writer to exit, not for a quiet spell, means a write in flight
-        when the signal landed can't fail the test, and a writer that only
-        paused can't pass it."""
-        group = int(group_file.read_text())
-        deadline = time.monotonic() + 10
-        while True:
-            live = self.live_members(group)
-            if not live:
-                break
-            self.assertLess(time.monotonic(), deadline,
-                            "the hook's process group %d still runs %s" % (group, live))
-            time.sleep(0.05)
-        size = heartbeat.stat().st_size
-        time.sleep(0.2)
-        self.assertEqual(heartbeat.stat().st_size, size, "%s grew after its writer exited" % heartbeat)
 
     def test_a_signal_while_the_hook_starts_still_ends_its_group(self):
         # A process test: signal delivery and process groups are what it
@@ -1893,6 +1868,47 @@ class StandinHooks(Temporary):
                     finally:
                         self.kill_groups(started, standin.pid)
                         standin.wait()
+
+
+# Its own class, so that its bounds and the SIGTERM grace run beside the
+# tests above (tests/benchmark_harness.rs) instead of after them.
+class StandinHookBound(HookProcesses):
+    def test_a_hook_past_the_standin_bound_leaves_no_process_running(self):
+        # A hook the stand-in gives up on must not go on acting, for example
+        # by reading a file after the edit it was asked about was applied.
+        # The child's heartbeat shows whether it still acts. Its PID alone
+        # does not: where PID 1 does not reap orphans, a killed child stays
+        # a zombie and `kill(pid, 0)` still succeeds.
+        # The same holds behind the `hook-log` wrapper, whose hook the
+        # stand-in's SIGKILL does not reach, and for a child that ignores
+        # the SIGTERM sent first.
+        # On a loaded machine the wrapper's interpreter can take longer than
+        # the bound to start the hook; that attempt didn't reach the case
+        # under test, so it runs again with the bound doubled. Every attempt
+        # whose child ran gets the full check.
+        original = standin_agent.HOOK_SECONDS
+        self.addCleanup(setattr, standin_agent, "HOOK_SECONDS", original)
+        for trap in ("", "trap '' TERM; "):
+            for kind, command in self.commands(
+                    "echo $$ > %s; " + trap + "while :; do printf x >> %s; sleep 0.05; done & wait"):
+                with self.subTest(kind=kind, trap=trap):
+                    for bound in (0.5, 1, 2, 4, 8, 16):
+                        standin_agent.HOOK_SECONDS = bound
+                        name = "%s-%d-%s" % (kind, len(trap), bound)
+                        heartbeat, group = self.root / ("heartbeat-" + name), self.root / ("group-" + name)
+                        session, _ = self.session(command % (shlex.quote(str(group)), shlex.quote(str(heartbeat))), 1)
+                        try:
+                            denied = session.fire("PreToolUse", "Write", {"file_path": "x"}, "edit-1")
+                            self.assertFalse(denied)
+                            ran = heartbeat.exists() and heartbeat.stat().st_size > 0
+                            if not (ran and group.exists() and group.read_text().strip()):
+                                continue
+                            self.assert_stopped(group, heartbeat)
+                            break
+                        finally:
+                            self.kill_groups(group)
+                    else:
+                        self.fail("the hook's child never ran within a %s s bound" % bound)
 
 
 class RefusalCollection(Temporary):
@@ -2049,8 +2065,17 @@ class WatcherDryRun(Temporary):
                     watcher.stdin.write(json.dumps(prompt).encode())
                     watcher.stdin.close()
                     self.assertFalse(session.fire("UserPromptSubmit", prompt=prompt["prompt"]), "prompt refused")
-                    # The turn runs past the shortened bound before it edits.
-                    time.sleep(4)
+                    # The turn runs past the shortened bound before it edits:
+                    # until the wrapper has logged the watcher it ended there.
+                    # Without a bound the watcher ends only with the turn, at
+                    # Stop below, so nothing is waited for.
+                    deadline = time.monotonic() + 30
+                    while bound is not None and not any(
+                            entry["background"] and entry["session_id"] == session.session_id
+                            # Whole lines only: the last may still be written.
+                            for entry in map(json.loads, hook_log.read_text().split("\n")[:-1])):
+                        self.assertLess(time.monotonic(), deadline, "the wrapper never ended the watcher")
+                        time.sleep(0.05)
                     session.read(target)
                     old, new = ("one-line summary", "short summary") if turn == 0 else ("short summary", "summary")
                     self.assertTrue(session.edit(target, "Edit", {"file_path": str(target), "old_string": old,
@@ -2155,7 +2180,8 @@ class DryRun(Temporary):
             self.assertEqual([t["refusals"] for t in record["tasks"]], [0] * n)
             # Issue #222: the context LangSpan's hooks added, from the coordinator, per task and in all.
             added = [t["context_added"] for t in record["tasks"]]
-            self.assertTrue(all(a is not None and a["turns"] >= 1 for a in added), added)
+            self.assertTrue(all(a is not None and a["turns"] >= 1 for a in added),
+                            "%s\n%s" % (added, self.turn_report(output, record)))
             if not any(a["bytes"] > 0 for a in added):
                 self.fail("no context added: %s\n%s" % (added, self.silence_report(output, record)))
             trial = record["context_added"]
@@ -2251,6 +2277,25 @@ class DryRun(Temporary):
             lines.append("session %d (%s): %d hook calls, slowest %s ms, %d ended by the wrapper, coverage %s" % (
                 index, task["role"], len(entries), max((e.get("elapsed_ms", 0) for e in entries), default=None),
                 sum(bool(e.get("timed_out")) for e in entries), json.dumps(coverage, sort_keys=True)))
+        return "\n".join(lines)
+
+    def turn_report(self, output, record):
+        """What a session with no turn counted saw: each of its start and
+        prompt hooks, how long it took, how it exited and what LangSpan's
+        hook said it did."""
+        lines = []
+        for index, task in enumerate(record["tasks"], 1):
+            if task["context_added"] and task["context_added"]["turns"] >= 1:
+                continue
+            lines.append("session %d (%s, %s):" % (index, task["role"], task["task_id"]))
+            log = output / task["hook_log"] if task["hook_log"] else None
+            for line in log.read_text().splitlines() if log and log.is_file() else []:
+                entry = json.loads(line)
+                if entry.get("event") not in ("SessionStart", "UserPromptSubmit"):
+                    continue
+                lines.append("  %s %s at %s: %s ms, exit %s, ended %s: %s" % (
+                    entry.get("event"), entry.get("session_id"), entry.get("at"), entry.get("elapsed_ms"),
+                    entry.get("exit_code"), entry.get("timed_out"), entry.get("stderr", "")[:1500]))
         return "\n".join(lines)
 
     def informed(self, output_record):
