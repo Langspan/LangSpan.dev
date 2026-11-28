@@ -49,13 +49,64 @@ function incident() {
   return [anchor(), registered(A), registered(B), op(A, 2000), held(B, A, 3000), read(B, 3500), op(B, 4000)];
 }
 
-test("one lane per local session with a timed step, labelled from its state row, with no IDs", () => {
+test("one lane per local session with a timed step, named by its branch with the harness beneath, and no IDs", () => {
   const m = model(STATE, incident());
   assert.deepEqual(m.lanes, [
-    { label: "Agent · #12 invoice totals", short: "#12 invoice", agent: "Claude Code", checkout: "shared checkout", branch: "feat/billing" },
-    { label: "Agent · Agent B", short: "Agent B", agent: "Codex", checkout: "shared checkout", branch: "feat/billing" },
+    { label: "feat/billing", short: "billing", meta: "Claude Code", agent: "Claude Code",
+      checkout: "shared checkout", branch: "feat/billing", workspace: "app" },
+    { label: "feat/billing (2)", short: "billing (2)", meta: "Codex", agent: "Codex", checkout: "shared checkout", branch: "feat/billing", workspace: "app" },
   ]);
-  for (const lane of m.lanes) for (const text of Object.values(lane)) assert.ok(!/alice|bob|c0ffee/.test(text), text);
+  for (const lane of m.lanes) for (const text of Object.values(lane)) assert.ok(!/alice|bob|c0ffee|Agent [A-Z]\b/.test(text), text);
+});
+
+test("a session's prompt text never reaches a label, the details or anything else the view draws", () => {
+  // The state row's task line is the agent's first prompt: untrusted text.
+  // Each shorter than the 32 characters the lane names were once clipped to.
+  const prompts = ["answer the review findings", "<task-notification>", "<task-id>bthzp03gb</task-id>"];
+  const state = { agents: prompts.map((task, i) => agent(["claude-code.p" + i, "codex.q" + i, "cursor.r" + i][i], "claude-code", task, { branch_ref: i ? null : "refs/heads/feat/x" })),
+    workspaces: [{ workspace_id: "app", branch_ref: null }] };
+  seq = 0;
+  const events = [anchor(), ...state.agents.map((a, i) => op(a.session_id, 2000 + i * 1000))];
+  const drawn = JSON.stringify(Live.pace(model(state, events), events));
+  for (const text of prompts) assert.ok(!drawn.includes(text), text + " was drawn");
+  // Without a branch, the workspace names the lane.
+  assert.deepEqual(model(state, events).lanes.map((l) => [l.label, l.meta]), [["feat/x", "Claude Code"], ["app", "Claude Code"], ["app (2)", "Claude Code"]]);
+});
+
+test("a read or an edit left without paths (the feed drops those Git ignores) draws no card; a command still does", () => {
+  seq = 0;
+  const events = [anchor(), op(A, 2000, null), read(A, 2500), op(A, 3000, null, "Bash")];
+  events[2].paths = [];
+  assert.deepEqual(model(STATE, events).cards.map((c) => c.kind), ["command"]);
+});
+
+test("a session without a state row is named from its events' workspace's branch, never a letter", () => {
+  seq = 0;
+  const state = { agents: [], workspaces: [{ workspace_id: "lsd-a11", branch_ref: "refs/heads/feat/x" }] };
+  const events = [anchor(), op("codex.gone", 2000, F), Object.assign(op("claude-code.bare", 3000, "b.ts"), { workspace_id: undefined })];
+  events[1].workspace_id = "lsd-a11";
+  assert.deepEqual(model(state, events).lanes.map((l) => [l.label, l.meta, l.workspace]), [
+    ["feat/x", "Codex", "lsd-a11"], ["Claude Code session", "Claude Code", ""],
+  ]);
+});
+
+test("agents working counts sessions with a tool step in the last 10 minutes; a lease counts at the row before it; a registration never", () => {
+  seq = 0;
+  const lease = (id) => row({ type: "lease_granted", session_id: id, workspace_id: "app", paths: [F] });
+  const events = [anchor(), registered("codex.carol"), op(A, 2000), lease(B), op(A, 700_000, "b.ts"), lease(B)];
+  const p = Live.pace(model(STATE, events), events, { now_ms: 700_000 });
+  // At 700 s, A's edit and B's lease (placed at 700 s) are in the window; carol only registered.
+  assert.deepEqual([p.status.at(-1).agents, p.working], [2, [0]]);
+  assert.equal(model(STATE, events).status.agents, 2);
+  const idle = Live.pace(model(STATE, events), events, { now_ms: 700_000 + 600_000 });
+  assert.deepEqual([idle.status.at(-1).agents, idle.working], [0, []]);
+});
+
+test("trim keeps the newest rows and the newest clock anchor before them", () => {
+  const rows = [{ seq: 1, type: "clock_anchored" }, { seq: 2 }, { seq: 3, type: "clock_anchored" }, { seq: 4 }, { seq: 5 }];
+  assert.deepEqual(Live.trim(rows, 2).map((e) => e.seq), [3, 4, 5]);
+  assert.deepEqual(Live.trim(rows, 3).map((e) => e.seq), [3, 4, 5]);
+  assert.equal(Live.trim(rows, 9), rows);
 });
 
 test("a remote agent in the state is never a lane, and a session alone in its workspace has its own checkout", () => {
@@ -290,6 +341,69 @@ test("a hold on several files lists them, and its wire starts at the peer's edit
   assert.deepEqual(m.wires, [{ kind: "held", label: "Held", from: "c0", from_lane: 0, to: "c1", seq: [3] }]);
 });
 
+// pace: the playback fields the renderer reads, from the events alone.
+const hero = JSON.parse(readFileSync(new URL("../fixtures/live-view-hero.json", import.meta.url), "utf8"));
+const paced = (events, opts) => Live.pace(model(STATE, events), events, opts);
+
+test("pace uses the hero's pacing numbers, unchanged", () => {
+  assert.deepEqual(Live.PACING, hero.pacing);
+});
+
+test("pace is deterministic and spaces cards as the hero does, with a stop for each hold and save", () => {
+  const a = paced(incident());
+  assert.deepEqual(a, paced(incident()));
+  const P = hero.pacing;
+  // Edit at 2 s, held at 3 s, read at 3.5 s, saved at 4 s: each gap is
+  // under 30 s, so it plays a little over gap_min_s.
+  assert.deepEqual(a.cards.map((c) => [c.kind, c.at]), [["edit", 0.4], ["held", 0.753], ["read", 4.305], ["saved", 4.657]]);
+  assert.deepEqual(a.stops_s, [[0.753, 3.953, "held"], [4.657, 5.657, "saved"]]);
+  assert.deepEqual(a.wires, [{ kind: "held", label: "Held", from: "c0", from_lane: 0, to: "c1", seq: [5],
+    at: 1.553, ms: P.wire_draw_ms, stop: [0.753, 3.953], emphasis_at: 2.203 }]);
+  assert.equal(a.live, true);
+  // The clock rests at the end of the last stop, so the newest wire is
+  // still at full strength.
+  assert.equal(a.duration_s, 5.657);
+  assert.equal(a.final_s, a.duration_s);
+  assert.deepEqual(a.lanes, model(STATE, incident()).lanes);
+});
+
+test("pace shortens any gap over 30 s to the hero's longest step", () => {
+  seq = 0;
+  const near = paced([anchor(), op(A, 2000, "a.ts"), op(A, 2000 + 30_000, "b.ts")]);
+  seq = 0;
+  const far = paced([anchor(), op(A, 2000, "a.ts"), op(A, 2000 + 3_600_000, "b.ts")]);
+  assert.equal(near.cards[1].at, 0.85);
+  assert.equal(far.cards[1].at, 0.85);
+});
+
+test("pace keeps every earlier card's time when events are appended", () => {
+  const events = incident();
+  const before = paced(events.slice(0, 5));
+  const after = paced(events);
+  for (const c of before.cards) assert.equal(after.cards.find((x) => x.id === c.id).at, c.at, c.id);
+  for (const s of before.stops_s) assert.ok(after.stops_s.some((x) => x[0] === s[0] && x[1] === s[1]));
+});
+
+test("pace counts agents and the writes held in the 10 minutes before each card, or before now", () => {
+  seq = 0;
+  const events = [anchor(), op(A, 2000), held(B, A, 3000), op(A, 700_000, "b.ts"), held(B, A, 701_000, "stale_base", "b.ts")];
+  const p = paced(events);
+  // At 700 s only A has worked in the last 10 minutes.
+  assert.deepEqual(p.status.map((s) => [s.agents, s.held]), [[1, 0], [2, 1], [1, 0], [2, 1]]);
+  const later = paced(events, { now_ms: 701_000 + 600_000 });
+  assert.deepEqual(later.status.at(-1), { at: later.cards.at(-1).at, agents: 0, held: 0 });
+});
+
+test("pace of no events is an empty view that rests at zero", () => {
+  const p = paced([anchor()]);
+  assert.deepEqual([p.cards, p.wires, p.stops_s, p.duration_s], [[], [], [], 0]);
+});
+
+test("rows without a time keep their lane, so a lane's details can list them", () => {
+  const m = model(STATE, incident());
+  assert.deepEqual(m.untimed.map((e) => [e.type, e.lane]), [["session_registered", 0], ["session_registered", 1]]);
+});
+
 test("readFeed reads until a page comes back empty, even after short pages", async () => {
   const pages = { 0: [1, 2], 2: [3], 3: [4, 5], 5: [] };
   const asked = [];
@@ -308,4 +422,108 @@ test("readFeed stops at its page bound, and on a page that doesn't advance", asy
   assert.deepEqual(await Live.readFeed(endless, 0, 3), { events: [1, 2, 3].map((s) => ({ seq: s })), next: 3, complete: false });
   const stuck = async (after) => ({ events: [{ seq: after }], next: after });
   assert.deepEqual(await Live.readFeed(stuck, 7, 3), { events: [], next: 7, complete: false });
+});
+
+// A coordinator's /api/events over `log`: the rows after `after`, at most
+// `limit` and at most `cap`, counting every row it serves. The store ends a
+// page at 48 KiB, so a real page often holds far fewer rows than asked: 133
+// of 1000 in a dogfood log's burst of branch observations.
+function server(log, cap = Infinity) {
+  const served = { rows: 0, pages: 0 };
+  const fetchPage = async (after, limit) => {
+    const start = log.findIndex((e) => e.seq > after);
+    const events = start < 0 ? [] : log.slice(start, start + Math.min(limit, cap));
+    served.rows += events.length;
+    served.pages += 1;
+    return { events, next: events.length ? events.at(-1).seq : after };
+  };
+  return { fetchPage, served };
+}
+const TAIL = { window_ms: 10 * 60 * 1000, keep: 4000, page: 1000 };
+// A clock anchor at boot, then `n` edits `every` ms apart, seqs `step` apart.
+function longLog(n, every, step = 1) {
+  const log = [{ seq: 1, type: "clock_anchored", wall_ms: 1_800_000_000_000, clock_ms: 0, paths: [], more_paths: 0 }];
+  for (let i = 0; i < n; i++) {
+    log.push({ seq: 2 + i * step, type: "operation_observed", session_id: i % 2 ? A : B, workspace_id: "app",
+      at_ms: 1000 + i * every, paths: ["src/f" + (i % 7) + ".rs"], more_paths: 0, tool: "Edit", result: "succeeded" });
+  }
+  return log;
+}
+
+test("the first read of a 50,000-event log takes only the last 10 minutes, without reading the log from its start", async () => {
+  for (const step of [1, 3]) {
+    const log = longLog(50_000, 1000, step);
+    const { fetchPage, served } = server(log);
+    const tail = await Live.readTail(fetchPage, TAIL);
+    const newest = log.at(-1);
+    const window = log.filter((e) => e.at_ms >= newest.at_ms - TAIL.window_ms);
+    assert.equal(window.length, 601);
+    assert.deepEqual(tail, { events: window, next: newest.seq }, "step " + step);
+    // One page of the tail and two one-row probes per bit of the newest seq.
+    assert.ok(served.rows <= TAIL.page + 2 * 18, served.rows + " rows read, step " + step);
+    assert.ok(served.pages <= 1 + 2 * 18, served.pages + " pages read, step " + step);
+    // And it draws: both lanes, the newest edit last.
+    const m = Live.pace(Live.model(STATE, tail.events), tail.events);
+    assert.equal(m.lanes.length, 2);
+    assert.deepEqual(m.cards.at(-1).seq, [newest.seq]);
+  }
+});
+
+test("a tail read through pages the store cut short still holds every newest row", async () => {
+  const log = longLog(50_000, 1000, 3);
+  const { fetchPage, served } = server(log, 133);
+  const tail = await Live.readTail(fetchPage, TAIL);
+  const newest = log.at(-1);
+  assert.deepEqual(tail, { events: log.filter((e) => e.at_ms >= newest.at_ms - TAIL.window_ms), next: newest.seq });
+  // Each 1000-seq span is about 333 rows here, three short pages and the
+  // probes; the last page of a span can run past it into rows already read.
+  assert.ok(served.pages <= 3 * 4 + 2 * 18, served.pages + " pages read");
+});
+
+test("the view's clock anchor times a tail that holds none, and replaces an older one", () => {
+  const log = longLog(900, 1000);
+  const tail = log.slice(-601);
+  assert.ok(!tail.some((e) => e.type === "clock_anchored"));
+  const given = { generation: 1, clock_ms: 0, wall_ms: 1_800_000_000_000 };
+  const events = Live.withAnchor(tail, given);
+  assert.deepEqual(events.slice(0, -1), tail);
+  assert.deepEqual(events.at(-1), { seq: tail.at(-1).seq, type: "clock_anchored", paths: [], more_paths: 0, clock_ms: 0, wall_ms: 1_800_000_000_000 });
+  // Wall time now, 2 s after the newest edit, through the anchor.
+  const now = Live.daemonNow(events, given.wall_ms + log.at(-1).at_ms + 2000);
+  assert.equal(now, log.at(-1).at_ms + 2000);
+  const p = Live.pace(model(STATE, events), events, { now_ms: now });
+  assert.equal(p.cards.at(-1).time, utc(given.wall_ms + log.at(-1).at_ms));
+  assert.deepEqual(p.working, [0, 1]);
+  // The tail's own anchor stands when it is the view's; an older one gives
+  // way; without either the tail is untimed.
+  const own = [{ seq: 5, type: "clock_anchored", clock_ms: 0, wall_ms: given.wall_ms, paths: [], more_paths: 0 }, ...tail];
+  assert.equal(Live.withAnchor(own, given), own);
+  const old = [{ ...own[0], clock_ms: -5 }, ...tail];
+  assert.equal(Live.withAnchor(old, given).at(-1).clock_ms, 0);
+  assert.equal(Live.withAnchor(tail, undefined), tail);
+  assert.equal(Live.daemonNow(tail, 1), undefined);
+});
+
+test("a busy tail stops at its row bound, a short log is read whole with its anchor, and an empty one is empty", async () => {
+  const busy = longLog(50_000, 10);
+  const one = server(busy);
+  const tail = await Live.readTail(one.fetchPage, TAIL);
+  assert.deepEqual(tail.events, busy.slice(-TAIL.keep));
+  assert.ok(one.served.rows <= TAIL.keep + 2 * 18, one.served.rows + " rows read");
+  const short = longLog(20, 1000);
+  assert.deepEqual(await Live.readTail(server(short).fetchPage, TAIL), { events: short, next: short.at(-1).seq });
+  // Older than the window, but still the clock.
+  const old = longLog(900, 1000);
+  const kept = await Live.readTail(server(old).fetchPage, TAIL);
+  assert.deepEqual(kept.events[0], old[0]);
+  assert.equal(kept.events.length, 1 + 601);
+  assert.deepEqual(await Live.readTail(server([]).fetchPage, TAIL), { events: [], next: 0 });
+});
+
+test("the Files view never draws a session's task line or intent: the agent's prompt, untrusted text", () => {
+  const page = readFileSync(new URL("../src/dashboard.html", import.meta.url), "utf8");
+  const script = page.slice(page.indexOf("<script"));
+  // The page builds text only from fields it names, so naming neither of
+  // these fields is what keeps them off the screen.
+  assert.deepEqual([...script.matchAll(/\.(task|intent)\b|\[['"](task|intent)['"]\]/g)].map((m) => m[0]), []);
 });

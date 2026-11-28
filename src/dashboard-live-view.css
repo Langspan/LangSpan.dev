@@ -1,0 +1,146 @@
+/* The Live view (issue #491), the homepage hero's rules
+   (Langspan/langspan.github.io#41, assets/product-first.css) carried over,
+   each scoped under .live so the dashboard's own styles and these never
+   meet. The hero's tokens are set on .live; its dark values follow the
+   page's data-theme instead of the system setting. Coral marks LangSpan's
+   holds only. Card style B: a 14 px verb glyph that always sits beside its
+   verb in words, monospace path pills and one type scale. */
+.live{
+  --paper:#f4f3ef;--ink:#151513;--slate:#3f3e44;--muted:#64645e;--line:#dfdfd7;--raised:#fffefa;--well:#e9e8e2;
+  --accent:#a94b31;--coral:#d87859;--hover:#e7e5dd;
+  --band:#ebe9e2;--band-dot:#d6d3ca;--canvas:#fbfaf6;--dot:#dcdad2;--card:#ffffff;--card-line:#e4e2da;--pill:#f1f0eb;
+  --lane-a:#4f6d8a;--lane-b:#7a5a9a;--lane-c:#3d7065;--held:#b83d28;--msg:#8f5c12;
+  --rec-fg:#2f6b47;--saved-bg:#e7f1ea;--saved-line:#2f6b47;
+  --sans:Inter,"Helvetica Neue",Arial,sans-serif;
+  --mono:ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",monospace;
+  color:var(--ink);font:400 16px/1.5 var(--sans)}
+[data-theme="dark"] .live{
+  --paper:#151513;--ink:#f4f3ef;--slate:#c9c8c2;--muted:#b0afa6;--line:#34332f;--raised:#1d1d1a;--well:#262622;
+  --accent:#eba68e;--hover:#262622;
+  --band:#1b1b18;--band-dot:#2b2a27;--canvas:#191917;--dot:#2c2b28;--card:#222220;--card-line:#3a3a34;--pill:#2e2d2a;
+  --lane-a:#9db8d3;--lane-b:#c3a6dd;--lane-c:#8fc9bb;--held:#f09a83;--msg:#e2b56a;
+  --rec-fg:#a5d6b6;--saved-bg:#1f3328;--saved-line:#6fae86}
+.live code{font-family:var(--mono)}
+.live button{font:inherit;cursor:pointer;color:inherit}
+.live a:focus-visible,.live button:focus-visible,.live [tabindex]:focus-visible{outline:3px solid var(--accent);outline-offset:3px}
+
+/* Wide (1280 px and up): time runs left to right. */
+.live{width:min(1440px,100%);min-width:0;margin:0 auto}
+.live-bar code{min-width:0;overflow-wrap:anywhere}
+.live-band{border-radius:22px;padding:40px 40px 0;background-color:var(--band);background-image:radial-gradient(var(--band-dot) 1px,transparent 1px);background-size:16px 16px;overflow:hidden}
+.live-frame{position:relative;margin:0 auto;border:1px solid var(--line);border-bottom:0;border-radius:14px 14px 0 0;overflow:hidden;background:var(--card);box-shadow:0 30px 60px -40px #15151359}
+.live-bar{min-height:42px;display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;padding:6px 16px;border-bottom:1px solid var(--card-line);font-size:13px}
+.live-repo,.live-sep{color:var(--muted)}
+.live-bar code{color:var(--ink)}
+.live-agents{margin-left:auto;display:inline-flex;align-items:center;gap:6px;color:var(--slate);white-space:nowrap}
+.live-agents i{width:8px;height:8px;border-radius:50%;background:var(--rec-fg)}
+.live-tools{position:absolute;right:14px;top:54px;z-index:3;display:flex;gap:6px}
+.live-tools button{font-size:12px;font-weight:600;min-width:30px;height:30px;padding:0 10px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--ink)}
+.live-tools button:hover{border-color:var(--muted)}
+.live-tools .live-pause{min-width:60px}
+.live-tools button[aria-pressed=true]{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+.live-main{position:relative}
+/* The canvas. Each breakpoint sets these sizes; the renderer reads them, so
+   cards, rows and the flow speed stay in one place. --flow-k is the pan
+   speed in px per second of flow. */
+.live-canvas{--card-w:136px;--card-h:80px;--held-h:108px;--row-h:154px;--row-top:56px;--gutter:200px;--card-gap:12px;--flow-k:72;--card-min-text:12;--layout:wide;
+  position:relative;height:520px;overflow:hidden;background-color:var(--canvas);background-image:radial-gradient(var(--dot) 1px,transparent 1px);background-size:18px 18px;touch-action:pan-y}
+.live-canvas.panning{cursor:grabbing}
+.live-canvas:focus-visible{outline:3px solid var(--accent);outline-offset:-3px}
+.live-status{position:absolute;left:24px;top:16px;z-index:4;margin:0;font-size:14px;color:var(--slate)}
+.live-status strong{color:var(--ink)}
+.live-world{position:absolute;left:0;top:0;width:1px;height:1px;transform-origin:0 0;will-change:transform}
+.live .wires{position:absolute;left:0;top:0;width:1px;height:1px;overflow:visible;pointer-events:none}
+.live .wire path{fill:none;stroke-linecap:round;vector-effect:non-scaling-stroke;stroke-dasharray:1 1}
+.live .wire-held .wire-line{stroke:var(--held);stroke-width:2}
+.live .wire-message .wire-line{stroke:var(--muted);stroke-width:1.6}
+.live .wire-labels{position:absolute;left:0;top:0}
+/* Each lane's chain of work, under the cards and the cross-lane wires. */
+.live .chain line{stroke-width:2;vector-effect:non-scaling-stroke}
+.live .chain circle{stroke:none}
+.live .chain.lane-a line{stroke:var(--lane-a)}.live .chain.lane-a circle{fill:var(--lane-a)}
+.live .chain.lane-b line{stroke:var(--lane-b)}.live .chain.lane-b circle{fill:var(--lane-b)}
+.live .chain.lane-c line{stroke:var(--lane-c)}.live .chain.lane-c circle{fill:var(--lane-c)}
+.live .chain.idle line{stroke-dasharray:4 5;stroke-opacity:.5}
+.live .zoom-blocks .chain line{stroke-width:3}
+.live .source-chip b{color:var(--held);font-weight:700}
+.live .source-chip{position:absolute;width:max-content;max-width:240px;font:inherit;font-size:12px;line-height:1.25;text-align:left;padding:4px 8px;border-radius:8px;background:var(--raised);color:var(--slate);border:1px dashed var(--held);cursor:pointer;z-index:1}
+.live .wire-earlier{position:absolute;font-size:11px;font-weight:600;color:var(--held);background:var(--canvas);padding:0 4px;border-radius:4px;white-space:nowrap;transform-origin:0 50%}
+.live .wire-label{position:absolute;transform:translate(-50%,-50%);z-index:1;font:inherit;cursor:pointer;background:var(--card);border-radius:4px;padding:2px 10px;font-size:11px;font-weight:700;white-space:nowrap}
+.live .wire-label-held{color:var(--held);border:1.5px solid var(--held)}
+.live .wire-label-message{font-family:var(--mono);font-weight:500;color:var(--slate);border:1px solid var(--line);background:var(--card)}
+.live .cards{list-style:none;margin:0;padding:0}
+.live .card{position:absolute;width:var(--card-w);height:var(--card-h);padding:0;overflow:hidden;transform-origin:50% 50%;background:var(--card);border:1px solid var(--card-line);border-radius:6px;color:var(--ink)}
+.live .card>*,.live .card-hit>*{flex:none}
+.live .card-hit{all:unset;box-sizing:border-box;width:100%;height:100%;display:flex;flex-direction:column;gap:5px;padding:8px 10px;cursor:pointer;border-radius:10px;font:inherit}
+.live .card-hit:focus-visible{outline:3px solid var(--ink);outline-offset:2px}
+.live .card-hit[aria-expanded=true]{outline:2px solid var(--ink);outline-offset:1px}
+.live .card .verb{display:flex;align-items:center;gap:6px;font-size:12px;font-weight:600;line-height:1.25;color:var(--slate)}
+/* The hero draws each glyph as a CSS mask of a data: image, which the
+   dashboard's policy (img-src 'none') blocks; the renderer draws the same
+   shapes as inline SVG instead (GLYPHS in dashboard-live-view.js). */
+.live .card .glyph{flex:none;width:14px;height:14px;color:var(--glyph-color,currentColor)}
+.live .card.lane-a{--glyph-color:var(--lane-a)}.live .card.lane-b{--glyph-color:var(--lane-b)}.live .card.lane-c{--glyph-color:var(--lane-c)}
+.live .card code{align-self:flex-start;max-width:100%;background:var(--pill);border:1px solid var(--card-line);border-radius:4px;padding:1px 6px;font-size:12px;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;overflow-wrap:normal}
+.live .card .sub{font-size:12px;color:var(--muted);line-height:1.25;font-variant-numeric:tabular-nums}
+.live .card.command,.live .card.sent,.live .card.got{background:var(--canvas)}
+.live .card.command .verb,.live .card.sent .verb,.live .card.got .verb{color:var(--muted)}
+.live .card.held{height:var(--held-h);background:color-mix(in srgb,var(--coral) 10%,var(--card));border:1px solid var(--coral);color:var(--ink);--glyph-color:var(--held)}
+.live .card.held .who{display:none}
+.live .card.held .verb{color:var(--held)}
+.live .card.held code{background:color-mix(in srgb,var(--coral) 22%,var(--card));border-color:color-mix(in srgb,var(--coral) 45%,var(--card));color:var(--ink)}
+.live .card.held .sub{color:var(--held)}
+.live .card.saved{--ok:1;background:var(--card);border-color:color-mix(in srgb,var(--saved-line) calc(var(--ok)*60%),var(--card-line));--glyph-color:color-mix(in srgb,var(--rec-fg) calc(var(--ok)*100%),var(--slate))}
+.live .card.saved .verb{color:color-mix(in srgb,var(--rec-fg) calc(var(--ok)*100%),var(--slate))}
+/* Zoomed out: shorter cards, then lane-colored blocks. A block keeps its file
+   name in its title and its details on click. */
+.live .zoom-compact .card .sub,.live .zoom-compact .card .who{display:none}
+.live .zoom-blocks .card-hit>*{visibility:hidden}
+.live .zoom-blocks .card{border:0;background:color-mix(in srgb,var(--lane-a) 55%,var(--card))}
+.live .zoom-blocks .card.lane-b{background:color-mix(in srgb,var(--lane-b) 55%,var(--card))}
+.live .zoom-blocks .card.lane-c{background:color-mix(in srgb,var(--lane-c) 55%,var(--card))}
+.live .zoom-blocks .card.held{background:var(--coral)}
+.live .zoom-blocks .wire-label{font-size:11px;padding:1px 6px}
+/* Lane names stay pinned at the left, over the moving plane, behind a solid edge. */
+.live .gutter{position:absolute;left:0;top:0;bottom:0;width:var(--gutter);z-index:3;background:var(--canvas);border-right:1px solid var(--line);pointer-events:none}
+.live .lane-name{position:absolute;left:16px;right:8px;top:calc(var(--dy,0px) + var(--row-top) + var(--y,0px) * var(--s,1));pointer-events:auto;font:inherit;text-align:left;background:none;border:0;padding:4px 0 4px 18px;cursor:pointer;color:var(--ink);font-size:13px;font-weight:600;line-height:1.25}
+.live .lane-name::before{content:"";position:absolute;left:0;top:5px;width:4px;height:16px;border-radius:2px;background:var(--lane-a)}
+.live .lane-name.lane-b::before{background:var(--lane-b)}.live .lane-name.lane-c::before{background:var(--lane-c)}
+.live .lane-name .short{display:none}
+.live .lane-name .meta{display:block;margin-top:2px;font-size:12px;font-weight:400;color:var(--slate)}
+.live .lane-name::after{content:"";position:absolute;right:-6px;top:calc(var(--card-h) * var(--s,1) / 2 - 5px);width:10px;height:10px;box-sizing:border-box;border-radius:50%;border:2px solid var(--lane-a);background:var(--canvas)}
+.live .lane-name.lane-b::after{border-color:var(--lane-b)}.live .lane-name.lane-c::after{border-color:var(--lane-c)}
+.live .lane-name[aria-expanded=true]{text-decoration:underline}
+/* Details popover: small, light, anchored to what was clicked, inside the canvas. */
+.live .pop{position:absolute;z-index:5;width:min(300px,calc(100% - 16px));overflow:auto;background:var(--raised);color:var(--ink);border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 24px #1515131f;padding:10px 12px 12px;font-size:13px;line-height:1.4}
+.live .pop-close{position:absolute;right:4px;top:4px;width:32px;height:32px;border:0;border-radius:6px;background:transparent;color:var(--muted);font-size:18px;line-height:1}
+.live .pop-close:hover{background:var(--hover);color:var(--ink)}
+.live .pop-kind{font-weight:600;padding-right:30px;margin-bottom:6px}
+.live .pop dl{display:grid;grid-template-columns:auto 1fr;gap:4px 10px;margin:0}
+.live .pop dt{color:var(--muted);font-size:12px;padding-top:1px}
+.live .pop dd{margin:0;overflow-wrap:anywhere}
+/* The dashboard's own: what the canvas says before any step is recorded. */
+.live .live-empty{position:absolute;left:calc(var(--gutter) + 24px);right:24px;top:calc(var(--row-top) + 24px);z-index:2;margin:0;font-size:14px;color:var(--slate)}
+@media (max-width:1279px){
+  .live-band{padding:10px;border-radius:18px;background-size:14px 14px}
+  .live-frame{border-radius:14px;border-bottom:1px solid var(--line)}
+  .live-tools{position:static;flex-wrap:wrap;padding:6px 10px;border-bottom:1px solid var(--card-line);background:var(--card)}
+  .live-tools button{min-width:44px;min-height:44px;font-size:13px}
+}
+@media (max-width:759px){
+  .live-canvas{--card-w:96px;--card-h:100px;--held-h:150px;--row-h:200px;--row-top:48px;--gutter:84px;--card-gap:8px;--flow-k:46;--card-min-text:12;--layout:narrow;height:640px}
+  .live-status{left:10px;right:10px;top:8px;font-size:12px}
+  .live-status strong{font-weight:400;color:var(--slate)}
+  .live .lane-name{left:8px;font-size:12px;padding-left:16px}
+  .live .lane-name::before{width:10px;height:10px;top:7px}
+  .live .lane-name .full,.live .lane-name .meta{display:none}.live .lane-name .short{display:inline}
+  .live .card-hit{padding:7px}
+  .live .card code,.live .card .sub,.live .card.held .who,.live .wire-label,.live .wire-label-message,.live .wire-label-held,.live .card .verb{font-size:12px}
+  .live .card code{white-space:normal;padding:1px 3px}
+  .live .pop-close{width:44px;height:44px;right:0;top:0}
+  .live .pop dl{grid-template-columns:1fr}
+  .live .pop dt{padding-top:4px}
+  .live-repo,.live-sep{display:none}
+  .live-bar{padding:8px 10px;font-size:12px}
+}
+@media (prefers-reduced-motion:reduce){.live *{transition:none!important}}

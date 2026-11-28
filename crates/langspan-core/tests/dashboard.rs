@@ -808,6 +808,34 @@ fn a_view_without_identity_fields_from_an_older_coordinator_still_decodes() {
     assert_eq!(old.overlaps[0].agents.len(), 2);
 }
 
+/// The Live view reads only the log's tail, so the view carries the clock
+/// anchor recorded at boot (issue #491); a view from before it, or before
+/// one is recorded, has none.
+#[test]
+fn the_view_carries_the_newest_clock_anchor_and_decodes_without_one() {
+    let mut state = ready();
+    assert_eq!(view(&state, 0).clock_anchor, None);
+    let value = serde_json::to_value(view(&state, 0)).unwrap();
+    assert!(value.get("clock_anchor").is_none(), "absent, not null");
+    for (clock_ms, wall_ms) in [(500, 1_800_000_000_000), (900, 1_800_000_000_400)] {
+        let anchor = langspan_core::ClockAnchor {
+            generation: 1,
+            clock_ms,
+            wall_ms,
+        };
+        apply(&mut state, &Event::ClockAnchored { anchor }).unwrap();
+        assert_eq!(view(&state, 1_000).clock_anchor, Some(anchor));
+    }
+    let mut value = serde_json::to_value(view(&state, 1_000)).unwrap();
+    assert_eq!(
+        value["clock_anchor"],
+        serde_json::json!({"generation": 1, "clock_ms": 900, "wall_ms": 1_800_000_000_400u64})
+    );
+    value.as_object_mut().unwrap().remove("clock_anchor");
+    let old: Dashboard = serde_json::from_value(value).unwrap();
+    assert_eq!(old.clock_anchor, None);
+}
+
 #[test]
 fn a_parent_and_its_subagents_on_one_file_are_an_overlap_with_distinct_labels() {
     let mut state = ready();
