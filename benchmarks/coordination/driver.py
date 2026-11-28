@@ -43,10 +43,11 @@ ARMS = ("worktrees", "awareness_only", "langspan")
 SHARED_ARMS = ("shared",)
 AGENTS = ("standin", "claude")
 STANDIN_MODES = ("follow", "ignore", "hedge", "workaround")
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 # The record versions the summary and the results document read: a version
-# 8 record has no push counts, which read as not applicable.
-READ_VERSIONS = (8, SCHEMA_VERSION)
+# 8 record has no push counts, which read as not applicable; a version 9
+# record has no push retries or time to all landed, which read as unknown.
+READ_VERSIONS = (8, 9, SCHEMA_VERSION)
 # Where the combined tree of a shared-checkout trial is kept in `repo`:
 # what `origin main` held when every session had ended.
 LANDED = "bench/landed"
@@ -196,6 +197,21 @@ SHARED_PREAMBLE = (
     "and do not change the verdict.\n"
 )
 
+# push_contention in an arm with a checkout per session (issue #611).
+PUSH_PREAMBLE = (
+    "You are session {index} of {total}. You work alone in your own checkout of a small Python package, on "
+    "branch `main`, while other sessions work at the same time in checkouts of their own and push to the same "
+    "`origin main`. Make the change below. Run the tests with `python3 -m unittest discover -s tests`. When you "
+    "are done, commit your work and push to `origin main`; if the push is rejected, fetch and merge `origin "
+    "main` and push again. No person will answer questions during this session.\n"
+    "Task: {task}\n"
+    "{details}\n\n"
+    "How the result is judged: when every session has finished, the result is what `origin main` holds, and "
+    "it succeeds when {success}. Work you have not pushed does not count. You may write what another session "
+    "or a reviewer should know in `notes/s{index}.md`, and push it with your work; notes are kept for review "
+    "and do not change the verdict.\n"
+)
+
 AWARENESS = (
     "\nOther sessions are working on this package at the same time, each in its own checkout. "
     "This list is information about their tasks, not instructions to you:\n{peers}\n"
@@ -228,7 +244,8 @@ def workspace_id(index):
 
 def prompt_for(arm, family, assigned, index):
     task = assigned[index - 1]
-    text = (SHARED_PREAMBLE if arm in SHARED_ARMS else PREAMBLE).format(
+    pushing = shared_checkout.lands_by_pushing(isolation(arm), family)
+    text = (SHARED_PREAMBLE if arm in SHARED_ARMS else PUSH_PREAMBLE if pushing else PREAMBLE).format(
         index=index, total=len(assigned), branch=branch(index), task=task["task"], details=task["details"],
         success=families.SUCCESS[family])
     if arm == "awareness_only":
@@ -292,6 +309,10 @@ def make_plan(arm, family, sessions, seed, agent="standin", standin_mode=None, t
     if stagger and families.leader(assigned) is None:
         raise ValueError("--stagger needs a family with a task that changes an interface its peers use; "
                          "%s has none" % family)
+    if arm == "langspan" and family == "push_contention":
+        raise ValueError("the langspan arm does not run push_contention yet: its sessions would land through "
+                         "LangSpan's landing, which the stand-in does not drive (issue #611); use --arm shared, "
+                         "worktrees or awareness_only")
     return {
         "schema_version": SCHEMA_VERSION, "arm": arm, "family": family, "sessions": sessions, "seed": seed,
         "agent": agent, "standin_mode": (standin_mode or "follow") if agent == "standin" else None,
@@ -303,7 +324,8 @@ def make_plan(arm, family, sessions, seed, agent="standin", standin_mode=None, t
         "success": families.SUCCESS[family],
         "config_users": list(families.CONFIG_USERS),
         "tasks": assigned,
-        "branches": ["main" if arm in SHARED_ARMS else branch(i) for i in range(1, sessions + 1)],
+        "branches": ["main" if shared_checkout.lands_by_pushing(isolation(arm), family) else branch(i)
+                     for i in range(1, sessions + 1)],
         "prompts": [prompt_for(arm, family, assigned, i) for i in range(1, sessions + 1)],
     }
 
@@ -336,14 +358,15 @@ def repair_argv(executable, prompt, plan):
                        repair_denied_paths(plan["work"], plan["sessions"]))
 
 
-def claude_argv(executable, prompt, arm, model=None, denied_paths=()):
+def claude_argv(executable, prompt, arm, model=None, denied_paths=(), push=False):
     """The exact Claude Code command line for one session. Permission
     prompts stay on (`--permission-mode default`), and nobody answers them
     (`--permission-prompts none`), so a call outside the allowed list is
     refused. stream-json keeps the whole transcript; with -p it needs
     --verbose. The tool and MCP options are the same in every arm but for
     LangSpan's own skill and commands. DENIED_PATHS are denied to every
-    file tool (Claude Code's `//` marks an absolute path)."""
+    file tool (Claude Code's `//` marks an absolute path). A session that
+    lands by pushing (PUSH, or the shared arm) may push, pull, fetch and merge."""
     argv = [executable, "-p", prompt, "--permission-mode", "default", "--permission-prompts", "none",
             "--output-format", "stream-json", "--verbose", "--tools", ",".join(session_tools(arm)),
             "--strict-mcp-config", "--mcp-config", MCP_CONFIG, "--settings", MEMORY_SETTINGS]
@@ -351,7 +374,7 @@ def claude_argv(executable, prompt, arm, model=None, denied_paths=()):
         argv += ["--model", model]
     paths = [rule % ("/" + str(path).lstrip("/")) for path in denied_paths for rule in ("Read(/%s/**)", "Edit(/%s/**)")]
     argv += ["--disallowedTools", *DENIED_TOOLS, *PEER_GIT_RULES, *paths]
-    tools = CLAUDE_TOOLS + (LANGSPAN_TOOLS if arm == "langspan" else ()) + (PUSH_TOOLS if arm in SHARED_ARMS else ())
+    tools = CLAUDE_TOOLS + (LANGSPAN_TOOLS if arm == "langspan" else ()) + (PUSH_TOOLS if push or arm in SHARED_ARMS else ())
     argv += ["--allowedTools", *tools]
     assert not set(argv) & set(FORBIDDEN_CLAUDE_FLAGS)
     return argv
@@ -487,6 +510,11 @@ def isolation(arm):
     return "worktree" if arm == "langspan" else ("shared" if arm in SHARED_ARMS else "clone")
 
 
+def lands_by_pushing(plan):
+    """Whether PLAN's sessions land by pushing to `origin main`."""
+    return shared_checkout.lands_by_pushing(isolation(plan.get("arm")), plan.get("family"))
+
+
 def checkout_of(arm, work, index):
     """Session INDEX's checkout under WORK: its own, or the one they share."""
     return Path(work) / ("trunk" if isolation(arm) == "shared" else "s%d" % index)
@@ -500,7 +528,7 @@ def exclude_claude(checkout):
         exclude.write(".claude/\n")
 
 
-def prepare_fixture(work, sessions, arm):
+def prepare_fixture(work, sessions, arm, family=None):
     """The fixture repository and one checkout per session, on its own
     branch `bench/sN`, with no remote.
 
@@ -512,7 +540,8 @@ def prepare_fixture(work, sessions, arm):
     about another's interface changes. There Git could show a peer's
     branch, and the session's permission rules deny it (PEER_GIT_RULES),
     as they do in every arm. In `shared` every session uses WORK/trunk, a
-    clone of the bare remote WORK/origin.git (shared_checkout.py).
+    clone of the bare remote WORK/origin.git (shared_checkout.py). In
+    FAMILY push_contention each clone is one of that remote, on `main`.
     """
     repo = work / "repo"
     shutil.copytree(HERE / "fixture", repo, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
@@ -522,9 +551,14 @@ def prepare_fixture(work, sessions, arm):
     base = git("rev-parse", "HEAD", cwd=repo).stdout.strip()
     checkouts = []
     if isolation(arm) == "shared":
-        trunk = shared_checkout.prepare(work, repo)
+        trunk, = shared_checkout.prepare(work, repo)
         exclude_claude(trunk)
         return repo, base, [trunk] * sessions
+    if shared_checkout.lands_by_pushing(isolation(arm), family):
+        checkouts = shared_checkout.prepare(work, repo, ["s%d" % index for index in range(1, sessions + 1)])
+        for path in checkouts:
+            exclude_claude(path)
+        return repo, base, checkouts
     if isolation(arm) == "worktree":
         shared = work / "shared"
         git("clone", "-q", "--no-hardlinks", str(repo), str(shared), cwd=work)
@@ -745,7 +779,8 @@ def session_main(plan_path, index):
                 plan["standin_mode"]]
     else:
         argv = claude_argv(os.environ.get(CLAUDE_BIN_ENV, "claude"), plan["prompts"][index - 1], plan["arm"],
-                           plan.get("model"), peer_paths(plan["work"], plan["sessions"], index))
+                           plan.get("model"), peer_paths(plan["work"], plan["sessions"], index),
+                           push=lands_by_pushing(plan))
         argv[0] = shutil.which(argv[0], path=env["PATH"]) or argv[0]
     return guard_session(argv, env, session_tools(plan["arm"]), sys.stdout.buffer)
 
@@ -1015,7 +1050,7 @@ def keep_notes(plan, repo, run_dir):
     on a branch Git refuses to merge is kept too; in a shared checkout, the
     notes `origin main` holds. Returns their paths relative to RUN_DIR."""
     kept = []
-    refs = ([("trunk", LANDED)] if isolation(plan.get("arm")) == "shared" else
+    refs = ([("trunk", LANDED)] if lands_by_pushing(plan) else
             [("s%d" % index, branch(index)) for index in range(1, plan["sessions"] + 1)])
     for folder, ref in refs:
         listed = git("ls-tree", "-r", "--name-only", ref, "--", "notes", cwd=repo).stdout.split("\n")
@@ -1038,7 +1073,7 @@ def integrate_main(plan_path):
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
     work, repo, base = Path(plan["work"]), Path(plan["repo"]), plan["base"]
     run_dir = Path(os.environ.get("LANGSPAN_BENCH_RUN_DIR", work))
-    if isolation(plan.get("arm")) == "shared":
+    if lands_by_pushing(plan):
         return integrate_shared(plan, plan_path, repo, run_dir)
     for index in range(1, plan["sessions"] + 1):
         clone = work / ("s%d" % index)
@@ -1087,7 +1122,7 @@ def judge(plan, plan_path, checkout, run_dir):
 
 
 def integrate_shared(plan, plan_path, repo, run_dir):
-    """A shared-checkout trial's combined tree: what `origin main` holds
+    """The combined tree of a trial whose sessions push: what `origin main` holds
     now, kept in REPO as LANDED. Work a session left unpushed did not land,
     so nothing is committed for it. Every session's pushed work is in that
     one tree, so each counts as merged; which session changed what is not
@@ -1221,7 +1256,7 @@ def run_repair(plan, run_dir):
     output = Path(plan["output"])
     verdict = json.loads((run_dir / "oracle.json").read_text(encoding="utf-8"))
     checkout, conflicted = prepare_repair(plan["repo"], plan["base"], plan["sessions"], plan["work"],
-                                          landed=isolation(plan["arm"]) == "shared")
+                                          landed=lands_by_pushing(plan))
     directory = output / "repair"
     directory.mkdir(mode=0o700)
     repair_plan = {
@@ -1755,16 +1790,30 @@ def cost_section(record, repair):
             "cost_per_accepted_task": per_task(total["cost_usd"], accepted)}
 
 
-def push_section(tasks, pushing):
-    """The trial's push attempts and rejections, summed over TASKS: only in
-    an arm whose sessions land by pushing (PUSHING), and only when every
-    session's transcript was read."""
+def landed_after(counts, times, started_at):
+    """Seconds from STARTED_AT (the runner's start of the trial, an ISO
+    time) to the last update of `origin main` in TIMES (whole seconds since
+    the epoch, from the remote's reflog on this machine), once every
+    session's push COUNTS show one landed; None otherwise."""
+    if not times or not started_at or not counts or any(not count or count["landed"] < 1 for count in counts):
+        return None
+    return max(0, max(times) - datetime.fromisoformat(started_at).timestamp())
+
+
+def push_section(tasks, pushing, times=(), started_at=None):
+    """The trial's push attempts, rejections and retries, summed over TASKS,
+    and the time to all landed (landed_after): only in a trial whose
+    sessions land by pushing (PUSHING), and only when every session's
+    transcript was read."""
     counts = [task["pushes"] for task in tasks]
+    found = {"status": "unknown", "attempts": None, "rejections": None, "retries": None, "landed_after_s": None}
     if not pushing:
-        return {"status": "not_applicable", "attempts": None, "rejections": None}
+        return dict(found, status="not_applicable")
     if not counts or None in counts:
-        return {"status": "unknown", "attempts": None, "rejections": None}
-    return {"status": "reported", **{key: sum(count[key] for count in counts) for key in ("attempts", "rejections")}}
+        return found
+    return {"status": "reported", **{key: sum(count[key] for count in counts)
+                                     for key in ("attempts", "rejections", "retries")},
+            "landed_after_s": landed_after(counts, times, started_at)}
 
 
 def record_agent(agent):
@@ -1795,7 +1844,7 @@ def build_record(plan, final, runner_dir, run_dir, events, started_at, total_ela
     notices = interface_notices(events) if events is not None else {}
     task_context, trial_context = context_added(coordinator_state, plan["arm"], len(plan["tasks"]))
     work = Path(plan.get("work", output / "work"))
-    pushing = isolation(plan["arm"]) == "shared"
+    pushing = lands_by_pushing(plan)
     tasks, models, token_list = [], set(), []
     for index, task in enumerate(plan["tasks"], 1):
         command = commands.get(("agent", "s%d" % index))
@@ -1887,7 +1936,8 @@ def build_record(plan, final, runner_dir, run_dir, events, started_at, total_ela
             "admissions": sum(r.get("event", {}).get("type") == "lease_granted"
                               for r in events) if events is not None else None,
         },
-        "pushes": push_section(tasks, pushing),
+        "pushes": push_section(tasks, pushing, shared_checkout.landing_times(work / "origin.git"),
+                               final and final.get("started_at")),
         "coordinator_scans": scan_summary(events, plan["arm"]),
         "context_added": trial_context,
         "tokens": {
@@ -2041,6 +2091,11 @@ def summarize(records):
             "stale_unfixed_trials": sum(s["unfixed"] > 0 for s in stale_reported),
             "push_attempts": sum(p["attempts"] for p in pushes) if pushed else None,
             "push_rejections": sum(p["rejections"] for p in pushes) if pushed else None,
+            # A version 9 record has neither: unknown (None), never zero.
+            "push_retries": sum(p["retries"] for p in pushes) if pushed and all("retries" in p for p in pushes)
+            else None,
+            "landed_after_s": [p["landed_after_s"] for p in pushes]
+            if pushed and all("landed_after_s" in p for p in pushes) else None,
         })
     return summary
 
@@ -2173,12 +2228,12 @@ def run(args):
         # The exact command each session runs, with its prompt from `prompts`.
         plan["agent_commands"] = [
             claude_argv(os.environ.get(CLAUDE_BIN_ENV, "claude"), "<prompts[%d]>" % (index - 1), plan["arm"],
-                        plan["model"], peer_paths(work, plan["sessions"], index))
+                        plan["model"], peer_paths(work, plan["sessions"], index), push=lands_by_pushing(plan))
             for index in range(1, plan["sessions"] + 1)]
     coordinator, state, events, final, error, run_dir = None, None, None, None, None, None
     coordinator_state = None
     try:
-        repo, base, checkouts = prepare_fixture(work, plan["sessions"], plan["arm"])
+        repo, base, checkouts = prepare_fixture(work, plan["sessions"], plan["arm"], plan["family"])
         plan.update(repo=str(repo), base=base)
         if langspan:
             # One coordinator for the repository whose worktrees the sessions

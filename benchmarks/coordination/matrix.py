@@ -227,12 +227,27 @@ def stale_cells(record):
     return found["writes_admitted"], "none stale" if found["fixed_after_s"] is None else cell(found["fixed_after_s"])
 
 
+PUSH_COLUMNS = ("Push attempts", "Push rejections", "Push retries", "All landed after (s)")
+
+
 def push_cells(record):
-    """A trial's push attempts and rejections; a version 8 record has none."""
+    """A trial's push attempts, rejections and retries and its time to all
+    landed. A version 8 record has none; a version 9 record has no retries
+    or time (unknown)."""
     found = record.get("pushes") or {"status": "not_applicable"}
     if found["status"] != "reported":
-        return [found["status"].replace("_", " ")] * 2
-    return [found["attempts"], found["rejections"]]
+        return [found["status"].replace("_", " ")] * 4
+    after = found.get("landed_after_s", "unknown")
+    return [found["attempts"], found["rejections"], found.get("retries"), "not all landed" if after is None else after]
+
+
+def group_push_cells(group):
+    """A condition's push columns, as push_cells has them per trial."""
+    if group["push_attempts"] is None:
+        return ["not applicable"] * 4
+    after = group["landed_after_s"]
+    return [group["push_attempts"], group["push_rejections"], group["push_retries"],
+            None if after is None else ", ".join("not all landed" if value is None else cell(value) for value in after)]
 
 
 def table(header, rows):
@@ -242,7 +257,8 @@ def table(header, rows):
 
 def report(named, missing):
     """The results document for NAMED, a list of (trial directory name,
-    version 8 or 9 record), and MISSING, trial directories with no record."""
+    record of a version driver.READ_VERSIONS lists), and MISSING, trial
+    directories with no record."""
     records = [record for _, record in named]
     dry = sum(record["dry_run"] is True for record in records)
     lines = ["# Coordination benchmark results", ""]
@@ -263,8 +279,7 @@ def report(named, missing):
                      repair["status"] + (": " + repair["integrated_tests"] if repair["status"] == "ran" else ""),
                      *push_cells(record)])
     lines += table(["Trial", "Status", "Excluded", "Combined build", "Tasks accepted", "Stale-name writes admitted",
-                    "Last stale caller fixed (s)", "Tokens", "Turns", "Elapsed (s)", "Repair", "Push attempts",
-                    "Push rejections"], rows)
+                    "Last stale caller fixed (s)", "Tokens", "Turns", "Elapsed (s)", "Repair", *PUSH_COLUMNS], rows)
     if missing:
         lines += ["", "No record (the trial stopped before writing one; its directory, if it made one, is kept): "
                   + ", ".join(sorted(missing)) + "."]
@@ -283,11 +298,10 @@ def report(named, missing):
                      group["trials"], excluded, proportion(group["passed_without_repair"], group["compared"]),
                      proportion(group["correct_results"], group["compared"]), group["stale_writes_admitted"],
                      fixed or "none", tokens(group["run"]), tokens(group["repair"]), tokens(group["total"]),
-                     *(("not applicable" if group[key] is None else group[key])
-                       for key in ("push_attempts", "push_rejections"))])
+                     *group_push_cells(group)])
     lines += table(["Agent", "Family", "N", "Stagger (s)", "Arm", "Trials", "Excluded", "Combined build passed",
                     "Correct results", "Stale-name writes admitted", "Last stale caller fixed (s)", "Tokens, run",
-                    "Tokens, repair", "Tokens, total", "Push attempts", "Push rejections"], rows)
+                    "Tokens, repair", "Tokens, total", *PUSH_COLUMNS], rows)
     lines += ["", "No result here is a LangSpan advantage unless the counts above show it.",
               "", "## Versions and seeds", ""]
     for label, key in (("Agent CLI", "agent_cli"), ("Requested model", "requested_model"), ("Models", "models"),
@@ -372,6 +386,9 @@ def main(argv=None):
             print(json.dumps({"report": str(args.output), "trials": len(named), "without_record": len(missing)}))
             return 0
         planned = trials(args.families, args.sessions, args.seeds, args.arms)
+        for trial in planned:
+            # A trial the driver cannot plan stops the matrix before any trial runs.
+            driver.make_plan(trial["arm"], trial["family"], trial["sessions"], trial["seed"])
         if args.plan_only:
             print(json.dumps({"mode": "plan_only", "executed_commands": 0, "agent": args.agent,
                               "trials": len(planned), "sessions": sum(t["sessions"] for t in planned),
