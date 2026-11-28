@@ -49,13 +49,43 @@ function incident() {
   return [anchor(), registered(A), registered(B), op(A, 2000), held(B, A, 3000), read(B, 3500), op(B, 4000)];
 }
 
-test("one lane per local session with a timed step, labelled from its state row, with no IDs", () => {
+test("one lane per local session with a timed step, named by its task or workspace, with harness and branch, and no IDs", () => {
   const m = model(STATE, incident());
   assert.deepEqual(m.lanes, [
-    { label: "Agent · #12 invoice totals", short: "#12 invoice", agent: "Claude Code", checkout: "shared checkout", branch: "feat/billing" },
-    { label: "Agent · Agent B", short: "Agent B", agent: "Codex", checkout: "shared checkout", branch: "feat/billing" },
+    { label: "#12 invoice totals", short: "#12 invoice", meta: "Claude Code · feat/billing", agent: "Claude Code",
+      checkout: "shared checkout", branch: "feat/billing", workspace: "app" },
+    { label: "app", short: "app", meta: "Codex · feat/billing", agent: "Codex", checkout: "shared checkout", branch: "feat/billing", workspace: "app" },
   ]);
-  for (const lane of m.lanes) for (const text of Object.values(lane)) assert.ok(!/alice|bob|c0ffee/.test(text), text);
+  for (const lane of m.lanes) for (const text of Object.values(lane)) assert.ok(!/alice|bob|c0ffee|Agent [A-Z]\b/.test(text), text);
+});
+
+test("a session without a state row is named from its events' workspace and that workspace's branch, never a letter", () => {
+  seq = 0;
+  const state = { agents: [], workspaces: [{ workspace_id: "lsd-a11", branch_ref: "refs/heads/feat/x" }] };
+  const events = [anchor(), op("codex.gone", 2000, F), Object.assign(op("claude-code.bare", 3000, "b.ts"), { workspace_id: undefined })];
+  events[1].workspace_id = "lsd-a11";
+  assert.deepEqual(model(state, events).lanes.map((l) => [l.label, l.meta, l.workspace]), [
+    ["lsd-a11", "Codex · feat/x", "lsd-a11"], ["Claude Code session", "Claude Code", ""],
+  ]);
+});
+
+test("agents working counts sessions with a tool step in the last 10 minutes; a lease counts at the row before it; a registration never", () => {
+  seq = 0;
+  const lease = (id) => row({ type: "lease_granted", session_id: id, workspace_id: "app", paths: [F] });
+  const events = [anchor(), registered("codex.carol"), op(A, 2000), lease(B), op(A, 700_000, "b.ts"), lease(B)];
+  const p = Live.pace(model(STATE, events), events, { now_ms: 700_000 });
+  // At 700 s, A's edit and B's lease (placed at 700 s) are in the window; carol only registered.
+  assert.deepEqual([p.status.at(-1).agents, p.working], [2, [0]]);
+  assert.equal(model(STATE, events).status.agents, 2);
+  const idle = Live.pace(model(STATE, events), events, { now_ms: 700_000 + 600_000 });
+  assert.deepEqual([idle.status.at(-1).agents, idle.working], [0, []]);
+});
+
+test("trim keeps the newest rows and the newest clock anchor before them", () => {
+  const rows = [{ seq: 1, type: "clock_anchored" }, { seq: 2 }, { seq: 3, type: "clock_anchored" }, { seq: 4 }, { seq: 5 }];
+  assert.deepEqual(Live.trim(rows, 2).map((e) => e.seq), [3, 4, 5]);
+  assert.deepEqual(Live.trim(rows, 3).map((e) => e.seq), [3, 4, 5]);
+  assert.equal(Live.trim(rows, 9), rows);
 });
 
 test("a remote agent in the state is never a lane, and a session alone in its workspace has its own checkout", () => {
@@ -313,9 +343,10 @@ test("pace counts agents and the writes held in the 10 minutes before each card,
   seq = 0;
   const events = [anchor(), op(A, 2000), held(B, A, 3000), op(A, 700_000, "b.ts"), held(B, A, 701_000, "stale_base", "b.ts")];
   const p = paced(events);
-  assert.deepEqual(p.status.map((s) => [s.agents, s.held]), [[1, 0], [2, 1], [2, 0], [2, 1]]);
+  // At 700 s only A has worked in the last 10 minutes.
+  assert.deepEqual(p.status.map((s) => [s.agents, s.held]), [[1, 0], [2, 1], [1, 0], [2, 1]]);
   const later = paced(events, { now_ms: 701_000 + 600_000 });
-  assert.deepEqual(later.status.at(-1), { at: later.cards.at(-1).at, agents: 2, held: 0 });
+  assert.deepEqual(later.status.at(-1), { at: later.cards.at(-1).at, agents: 0, held: 0 });
 });
 
 test("pace of no events is an empty view that rests at zero", () => {

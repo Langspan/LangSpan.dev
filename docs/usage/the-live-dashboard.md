@@ -13,16 +13,19 @@ has two views, switched by the Live and Files buttons under the header. Live
 opens first once any step is recorded.
 
 **Live** shows recorded work as it happens, in the homepage hero's design.
-Each local session is a lane, named by its task line, with its harness,
-checkout and branch in its details. Each card is one recorded step in words:
+Each local session is a lane, named by its task line or else its workspace,
+with its harness and branch beneath; a session that has ended takes its
+workspace's branch. The title bar names the workspaces and branches of the
+agents working now. Each card is one recorded step in words:
 "Read", "Edited", "Ran a command", "Write held" with the reason, and "Saved
 after re-reading" or "Saved on retry". Edits of one file, or reads, in a row
 within 20 s share a card with a count, such as "3 edits". A line joins each
 of an agent's cards to its next, dashed after a pause of more than 30 s. A
 coral wire labelled "Held" runs from the change that caused a held write to
 the held card; nothing else draws a wire, and work on another machine never
-does. The line above the lanes counts agents and the writes held in the last
-10 minutes.
+does. The line above the lanes counts the agents working, those with a
+recorded tool step or lease in the last 10 minutes (a session that only
+started doesn't count), and the writes held in the same 10 minutes.
 
 - New work enters from the right while **Follow newest** is on. **Pause**
   stops the motion; any other interaction pauses it, and it resumes after 8
@@ -31,15 +34,18 @@ does. The line above the lanes counts agents and the writes held in the last
   pans and zooms. With the canvas focused, the arrow keys pan, `+` and `-`
   zoom, `0` fits, and `L` follows the newest work.
 - At most 6 lanes show at once (3 on a phone). With more agents, the canvas
-  opens on the busiest lanes; once it has focus, the wheel scrolls through
-  the lanes. Ctrl or Cmd with the wheel zooms.
+  opens on the lanes with the most work in view at the newest step, and
+  keeps to them as work arrives until you scroll; once it has focus, the
+  wheel scrolls through the lanes, and **Follow newest** scrolls back. Ctrl
+  or Cmd with the wheel zooms.
 - Click a card, a wire's label or a lane name for its recorded details: the
   file, the time, why a write was held, which agent changed the file, and what
   the held agent did next. Details never open on their own.
 - With reduced motion, or `?motion=static` added to the URL, the view shows
   the newest work without motion.
 
-The view keeps the newest 4,000 feed rows. Steps without a recorded time
+The view keeps the newest 4,000 feed rows. On opening it reads the log to
+its end before drawing, so a long log shows its current work, not its oldest. Steps without a recorded time
 (a session starting, a lease) are never cards; a lane's details list them.
 
 **Files** has four parts:

@@ -185,13 +185,17 @@ var LangSpanLiveView = (function () {
       if (!live) return y;
       return Math.max(Math.min(0, L.Hc - L.top - L.lanes * L.row * s), Math.min(0, y));
     }
-    // The opening scroll: the window of lanes with the most cards.
+    // The opening scroll: the window of lanes with the most cards in view
+    // when the camera rests at the newest work, then the one holding the
+    // newest card. Lanes busy only earlier never hide the current work.
     function openingY(L) {
-      const counts = T.lanes.map((_, i) => CARDS.filter((c) => c.lane === i).length);
+      const k = L.keys, x0 = k.length ? k[k.length - 1][1] : 0, newest = CARDS.length ? CARDS[CARDS.length - 1].lane : 0;
+      const seen = (c) => L.x[c.id] + L.W > x0 + L.G && L.x[c.id] < x0 + L.Wc;
+      const counts = T.lanes.map((_, i) => CARDS.filter((c) => c.lane === i && seen(c)).length);
       let best = 0, most = -1;
-      for (let k = 0; k + L.visible <= Math.max(L.lanes, L.visible); k++) {
-        const n = counts.slice(k, k + L.visible).reduce((a, b) => a + b, 0);
-        if (n > most) { most = n; best = k; }
+      for (let j = 0; j + L.visible <= Math.max(L.lanes, L.visible); j++) {
+        const n = 2 * counts.slice(j, j + L.visible).reduce((a, b) => a + b, 0) + (newest >= j && newest < j + L.visible ? 1 : 0);
+        if (n > most) { most = n; best = j; }
       }
       return clampY(L, -best * L.row, 1);
     }
@@ -331,12 +335,14 @@ var LangSpanLiveView = (function () {
         const full = document.createElement("span"), short = document.createElement("span");
         full.className = "full"; full.textContent = lane.label; short.className = "short"; short.textContent = lane.short;
         b.append(full, short);
+        if (lane.meta) { const meta = document.createElement("span"); meta.className = "meta"; meta.textContent = lane.meta; b.append(meta); }
         return b;
       }));
     }
     if (V.live) lanes();
 
     const cam = { mode: "flow", s: 1, x: 0, y: 0, fs: 1 };
+    let laneScrolled = false;
 
     // Pools: card buttons, wire paths and labels are reused as they scroll.
     const pool = new Map(), wirePool = new Map(), labelPool = new Map();
@@ -569,7 +575,8 @@ var LangSpanLiveView = (function () {
       }
       renderAt(elapsed);
     }
-    function follow() { if (V.live) laneY = cam.y; cam.mode = "flow"; cam.fs = 1; syncFollow(); renderAt(elapsed); }
+    // Follow newest scrolls back to the lanes with the newest work.
+    function follow() { if (V.live && L) { laneScrolled = false; laneY = V.openingY(L); } cam.mode = "flow"; cam.fs = 1; syncFollow(); renderAt(elapsed); }
 
     /* The clock. Left alone, a recording loops and live work plays up to the
        newest card and rests there. Any interaction pauses it; it resumes from
@@ -619,6 +626,7 @@ var LangSpanLiveView = (function () {
         // A plain wheel scrolls the page, or the lanes once the canvas has focus.
         if (!scrolls() || !canvas.contains(document.activeElement)) return;
         e.preventDefault();
+        laneScrolled = true;
         if (cam.mode === "flow") laneY = V.clampY(L, (laneY || 0) - e.deltaY, 1); else cam.y -= e.deltaY;
         renderAt(elapsed);
         return;
@@ -757,6 +765,8 @@ var LangSpanLiveView = (function () {
       if (lanesChanged) lanes();
       if (opener && !opener.isConnected) closePop(false);
       L = null; layout();
+      // Until the viewer scrolls the lanes, the view keeps to the newest work.
+      if (V.live && cam.mode === "flow" && !laneScrolled) laneY = V.openingY(L);
       if (isStatic() || first) elapsed = V.LOOP;
       else if (playing) elapsed = Math.max(elapsed, V.LOOP - CATCH_UP_S);
       renderAt(elapsed);

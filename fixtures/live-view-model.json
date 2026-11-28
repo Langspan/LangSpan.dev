@@ -17,11 +17,13 @@
  "model": {
   "lanes": [
    {
-    "label": "Agent · #7 API errors",
+    "label": "#7 API errors",
     "short": "#7 API",
+    "meta": "Codex · feat/api",
     "agent": "Codex",
     "checkout": "own checkout",
-    "branch": "feat/api"
+    "branch": "feat/api",
+    "workspace": "app"
    }
   ],
   "cards": [

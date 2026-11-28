@@ -197,6 +197,31 @@ test("live: with 12 lanes the canvas shows 6, opens on the busiest, and scrolls 
   assert.ok(V.openingY(N) <= 0 && V.openingY(N) >= -9 * NARROW.row);
 });
 
+test("live: the view opens on the lanes with the newest work, not on lanes that were busier earlier", () => {
+  // The dogfood log's shape: six sessions worked hard and stopped; three
+  // others work now, in lanes past the first window. Leases carry no time.
+  seq = 0;
+  const ev = [anchor()];
+  let t = 1000;
+  for (let k = 0; k < 20; k++) for (let i = 0; i < 6; i++) ev.push(edit(S(i), (t += 2000), "old" + i + "-" + k + ".rs"));
+  for (let i = 6; i < 9; i++) ev.push(row({ type: "lease_granted", session_id: S(i), workspace_id: "app", paths: ["x.rs"] }));
+  t += 3_600_000;
+  for (let k = 0; k < 3; k++) for (let i = 6; i < 9; i++) ev.push(edit(S(i), (t += 3000), "new" + i + "-" + k + ".rs"));
+  const timing = Live.pace(Live.model({ agents: [] }, ev), ev, { now_ms: t });
+  assert.equal(timing.status.at(-1).agents, 3);
+  assert.deepEqual(timing.working, [6, 7, 8]);
+  for (const base of [WIDE, NARROW]) {
+    const V = View.prepare(timing), L = V.layout(dims(base, timing));
+    const y = V.openingY(L), cam = V.flowView(L, V.frameState(timing.duration_s), 1, y);
+    const inView = (c) => {
+      const left = (L.x[c.id] - cam.x) * cam.s, top = L.top + c.lane * L.row * cam.s + cam.y;
+      return left + L.W > L.G && left < L.Wc && top >= L.top - 1 && top + V.cardH(L, c) <= L.Hc + 1;
+    };
+    assert.ok(inView(V.CARDS.at(-1)), `${base.narrow ? 390 : 1440}: the newest card is out of view`);
+    assert.ok(V.CARDS.filter(inView).length >= 3, `${base.narrow ? 390 : 1440}: ${V.CARDS.filter(inView).length} cards in view`);
+  }
+});
+
 test("live: a hold between lanes too far apart to show together is framed with a chip beside the held card", () => {
   seq = 0;
   const ev = [anchor()];

@@ -49,16 +49,40 @@ var LangSpanLive = (function () {
     return null;
   }
 
-  function laneOf(row, session, index, shared) {
-    const name = row && row.task ? String(row.task).slice(0, TASK_CHARS) : "Agent " + (index < 26 ? String.fromCharCode(65 + index) : index + 1);
+  // A lane is named by its task, or else its workspace, with the harness and
+  // branch beneath: from the session's state row, or, for a session that
+  // has ended, its events' workspace and that workspace's branch.
+  function laneOf(row, session, workspace, branches, shared) {
     const host = (row && row.host) || String(session).split(".")[0];
+    const agent = HOSTS[host] || host;
+    const name = row && row.task ? String(row.task).slice(0, TASK_CHARS) : workspace || agent + " session";
+    const ref = (row && row.branch_ref) || branches.get(workspace);
+    const branch = ref ? String(ref).replace(/^refs\/heads\//, "") : "";
     return {
-      label: "Agent · " + name,
+      label: name,
       short: name.split(" ").slice(0, 2).join(" "),
-      agent: HOSTS[host] || host,
+      meta: branch ? agent + " · " + branch : agent,
+      agent,
       checkout: shared ? "shared checkout" : "own checkout",
-      branch: row && row.branch_ref ? String(row.branch_ref).replace(/^refs\/heads\//, "") : "",
+      branch,
+      workspace: workspace || "",
     };
+  }
+
+  // Sessions working at `now`: with a recorded tool step in the WORKING_MS
+  // up to it. A lease carries no time, so it counts at the time of the
+  // newest timed row before it in the log.
+  const WORKING_MS = 10 * 60 * 1000;
+  function activity(events) {
+    const out = [];
+    let at = null;
+    for (const e of events) {
+      if (e.at_ms != null) at = e.at_ms;
+      if (!e.session_id) continue;
+      if (kindOf(e) || (e.type === "operation_observed" && e.at_ms != null)) out.push([e.at_ms, e.session_id]); // any result
+      else if (e.type === "lease_granted" && at != null) out.push([at, e.session_id]);
+    }
+    return (now) => new Set(out.filter(([ms]) => ms > now - WORKING_MS && ms <= now).map(([, s]) => s));
   }
 
   // The hero's card for one merged run of steps.
@@ -177,11 +201,13 @@ var LangSpanLive = (function () {
       wires.push({ kind: "held", label: "Held", from: from < 0 ? null : cards[from].id, from_lane: peer, to: cards[i].id, seq: [e.seq] });
     });
     const shared = (i) => work[i] !== undefined && work.filter((w) => w === work[i]).length > 1;
+    const branches = new Map(((state && state.workspaces) || []).map((w) => [w.workspace_id, w.branch_ref]));
+    const newest = runs.length ? Math.max(...runs.map((r) => r.steps[r.steps.length - 1].at_ms)) : 0;
     return {
-      lanes: sessions.map((s, i) => laneOf(rows.get(s), s, i, shared(i))),
+      lanes: sessions.map((s, i) => laneOf(rows.get(s), s, work[i], branches, shared(i))),
       cards,
       wires,
-      status: { agents: sessions.length, held: runs.filter((r) => r.kind === "held").length },
+      status: { agents: activity(events)(newest).size, held: runs.filter((r) => r.kind === "held").length },
       // With its lane, when its session has one, for that lane's details.
       untimed: events
         .filter((e) => e.at_ms == null && e.type !== "clock_anchored")
@@ -206,9 +232,12 @@ var LangSpanLive = (function () {
   function pace(m, events, opts = {}) {
     const P = PACING;
     const at = new Map(events.filter((e) => e.at_ms != null).map((e) => [e.seq, e.at_ms]));
+    const working = activity(events);
+    // Lanes are in the order their sessions' first steps appear, as in model.
+    const laneOf = new Map();
+    for (const e of events) if (kindOf(e) && !laneOf.has(e.session_id)) laneOf.set(e.session_id, laneOf.size);
     const stops = [];
     const status = [];
-    const lanes = new Set();
     const holds = [];
     const recent = (now) => holds.filter((ms) => ms > now - HELD_WINDOW_MS && ms <= now).length;
     let prev = null;
@@ -225,17 +254,18 @@ var LangSpanLive = (function () {
         stopEnd = round(t + stop);
         stops.push([t, stopEnd, c.kind]);
       }
-      lanes.add(c.lane);
       if (c.kind === "held") holds.push(first);
       const last = status[status.length - 1];
-      const held = recent(first);
-      if (!last || last.agents !== lanes.size || last.held !== held) status.push({ at: t, agents: lanes.size, held });
+      const [agents, held] = [working(first).size, recent(first)];
+      if (!last || last.agents !== agents || last.held !== held) status.push({ at: t, agents, held });
       prev = { at: t, end: at.get(c.seq[c.seq.length - 1]) };
       return { ...c, at: t };
     });
+    const now = opts.now_ms != null ? opts.now_ms : prev ? prev.end : 0;
+    const busy = working(now);
     if (prev && opts.now_ms != null) {
       const last = status[status.length - 1];
-      if (last.held !== recent(opts.now_ms)) status.push({ at: prev.at, agents: lanes.size, held: recent(opts.now_ms) });
+      if (last.agents !== busy.size || last.held !== recent(now)) status.push({ at: prev.at, agents: busy.size, held: recent(now) });
     }
     const byId = new Map(cards.map((c) => [c.id, c]));
     const wires = m.wires.map((w) => {
@@ -249,7 +279,17 @@ var LangSpanLive = (function () {
     return {
       name: "live", live: true, fps: 30, duration_s: end, frames: Math.round(end * 30), final_s: end,
       pacing: P, lanes: m.lanes, stops_s: stops, status, wires, cards, untimed: m.untimed,
+      // The lanes of the sessions working now, for the title bar.
+      working: [...busy].filter((s) => laneOf.has(s)).map((s) => laneOf.get(s)).sort((a, b) => a - b),
     };
+  }
+
+  // The newest `keep` rows, and the newest clock anchor if it is older.
+  function trim(events, keep) {
+    if (events.length <= keep) return events;
+    const anchor = events.filter((e) => e.type === "clock_anchored").pop();
+    const out = events.slice(-keep);
+    return anchor && !out.includes(anchor) ? [anchor, ...out] : out;
   }
 
   // Every row after `after`, page by page until one comes back empty. A page
@@ -267,5 +307,5 @@ var LangSpanLive = (function () {
     return { events, next: after, complete: false };
   }
 
-  return { model, pace, readFeed, PACING };
+  return { model, pace, readFeed, trim, PACING };
 })();

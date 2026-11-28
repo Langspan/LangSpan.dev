@@ -1334,9 +1334,10 @@ function unavailable(reason) {
 function tick() { refresh().then(refreshLive).finally(() => window.setTimeout(tick, 2000)); }
 
 // ---- Live view: /api/events through the shared renderer (issue #491) ------
-// Rows are read from the last cursor until a page comes back empty, at most
-// FEED_PAGES pages a poll; the page keeps the newest FEED_KEEP rows and the
-// newest clock anchor once it holds more than FEED_TRIM.
+// Rows are read from the last cursor until a page comes back empty, in runs
+// of FEED_PAGES pages, keeping the newest FEED_KEEP rows and the newest clock
+// anchor once the page holds more than FEED_TRIM. A long log is read to its
+// end before the view draws, so the view starts at the current work.
 const FEED_PAGES = 50, FEED_KEEP = 4000, FEED_TRIM = 6000;
 const feed = { events: [], next: 0 };
 let liveView = null;
@@ -1369,13 +1370,14 @@ async function refreshLive() {
   byId('views').hidden = false;
   let failed = '';
   try {
-    const got = await LangSpanLive.readFeed(eventsPage, feed.next, FEED_PAGES);
-    feed.events.push(...got.events);
-    feed.next = got.next;
-    if (feed.events.length > FEED_TRIM) {
-      const anchor = feed.events.filter((e) => e.type === 'clock_anchored').pop();
-      feed.events = feed.events.slice(-FEED_KEEP);
-      if (anchor && !feed.events.includes(anchor)) feed.events.unshift(anchor);
+    for (;;) {
+      const from = feed.next, got = await LangSpanLive.readFeed(eventsPage, from, FEED_PAGES);
+      feed.events.push(...got.events);
+      feed.next = got.next;
+      if (feed.events.length > FEED_TRIM) feed.events = LangSpanLive.trim(feed.events, FEED_KEEP);
+      if (got.complete || got.next <= from) break;
+      byId('live-empty').hidden = false;
+      byId('live-empty').textContent = 'Reading the coordinator’s log to its newest step (' + got.next + ' events so far)…';
     }
   } catch (error) {
     failed = error && error.name === 'AbortError' ? 'the dashboard server did not answer within 8 s' : str(error && error.message);
@@ -1388,11 +1390,15 @@ async function refreshLive() {
   empty.hidden = timing.cards.length > 0 && !failed;
   empty.textContent = failed ? 'The event feed could not be read: ' + failed + '. Trying again in 2 s.'
     : 'No recorded steps yet. Reads, edits and commands appear here as agents work.';
-  const workspaces = list(view.workspaces).map((w) => str(w.workspace_id));
-  const branches = [...new Set(timing.lanes.map((lane) => lane.branch).filter(Boolean))];
-  byId('live-repo').textContent = workspaces.length ? workspaces.slice(0, 2).join(', ') + (workspaces.length > 2 ? ' and more' : '') : 'No workspace';
-  byId('live-branch').textContent = branches.length === 1 ? branches[0] : plural(branches.length, 'branch', 'branches');
-  byId('live-agents').textContent = plural(timing.lanes.length, 'agent');
+  // The title names the workspaces and branches of the lanes working now
+  // (every lane when none is).
+  const shown = timing.working.length ? timing.working.map((i) => timing.lanes[i]) : timing.lanes;
+  const some = (items) => items.slice(0, 2).join(', ') + (items.length > 2 ? ' and ' + (items.length - 2) + ' more' : '');
+  const workspaces = [...new Set(shown.map((lane) => lane.workspace).filter(Boolean))];
+  const branches = [...new Set(shown.map((lane) => lane.branch).filter(Boolean))];
+  byId('live-repo').textContent = workspaces.length ? some(workspaces) : 'No workspace';
+  byId('live-branch').textContent = branches.length ? some(branches) : 'no branch recorded';
+  byId('live-agents').textContent = plural(timing.working.length, 'agent');
   if (!viewChoice) showView(timing.cards.length ? 'live' : 'files');
 }
 

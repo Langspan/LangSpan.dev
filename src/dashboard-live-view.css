@@ -106,6 +106,7 @@
 .live .lane-name::before{content:"";position:absolute;left:0;top:5px;width:4px;height:16px;border-radius:2px;background:var(--lane-a)}
 .live .lane-name.lane-b::before{background:var(--lane-b)}.live .lane-name.lane-c::before{background:var(--lane-c)}
 .live .lane-name .short{display:none}
+.live .lane-name .meta{display:block;margin-top:2px;font-size:12px;font-weight:400;color:var(--slate)}
 .live .lane-name::after{content:"";position:absolute;right:-6px;top:calc(var(--card-h) * var(--s,1) / 2 - 5px);width:10px;height:10px;box-sizing:border-box;border-radius:50%;border:2px solid var(--lane-a);background:var(--canvas)}
 .live .lane-name.lane-b::after{border-color:var(--lane-b)}.live .lane-name.lane-c::after{border-color:var(--lane-c)}
 .live .lane-name[aria-expanded=true]{text-decoration:underline}
@@ -131,7 +132,7 @@
   .live-status strong{font-weight:400;color:var(--slate)}
   .live .lane-name{left:8px;font-size:12px;padding-left:16px}
   .live .lane-name::before{width:10px;height:10px;top:7px}
-  .live .lane-name .full{display:none}.live .lane-name .short{display:inline}
+  .live .lane-name .full,.live .lane-name .meta{display:none}.live .lane-name .short{display:inline}
   .live .card-hit{padding:7px}
   .live .card code,.live .card .sub,.live .card.held .who,.live .wire-label,.live .wire-label-message,.live .wire-label-held,.live .card .verb{font-size:12px}
   .live .card code{white-space:normal;padding:1px 3px}
