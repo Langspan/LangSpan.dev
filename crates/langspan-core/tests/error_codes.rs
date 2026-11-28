@@ -37,6 +37,7 @@ fn usage_guide_lists_every_code_and_whether_it_is_retryable() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/usage.md");
     let guide = std::fs::read_to_string(path).unwrap();
     let (_, section) = guide.split_once("\n## Error codes\n").unwrap();
+    let section = section.split("\n## ").next().unwrap();
     let mut listed = Vec::new();
     for row in section.lines().filter(|line| line.starts_with("| `")) {
         let cells: Vec<&str> = row.split('|').map(str::trim).collect();

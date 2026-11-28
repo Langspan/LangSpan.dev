@@ -79,6 +79,7 @@ Denials
 Dependent
 DiskObservation
 EditRow
+ErrorCode
 Event
 FILE_MOVED
 FLAKY_DECAY_RUNS
