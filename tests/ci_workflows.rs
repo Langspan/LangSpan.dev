@@ -517,15 +517,14 @@ fn a_platform_check_passes_only_when_its_build_and_every_shard_passed() {
 const TRUSTED_RUNNER: &str = "(github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('[\"self-hosted\",\"langspan-trusted\"]') || 'ubuntu-24.04'";
 
 #[test]
-fn only_coverage_and_the_linux_dry_runs_use_the_self_hosted_runner_and_never_for_a_fork() {
-    let runs_on = format!("\n    runs-on: ${{{{ {TRUSTED_RUNNER} }}}}\n");
-    assert!(job(&workflow("coverage.yml"), "coverage").contains(&runs_on));
+fn only_the_linux_dry_runs_use_the_self_hosted_runner_and_never_for_a_fork() {
+    let hosted = "\n    runs-on: ${{ vars.LINUX_RUNNER || 'ubuntu-24.04' }}\n";
+    // Coverage stays on GitHub's runners until a timing test in
+    // tests/report.rs passes on the self-hosted machine (issue #581).
+    assert!(job(&workflow("coverage.yml"), "coverage").contains(hosted));
     // The four Linux shards stay on GitHub's runners: one self-hosted
     // runner takes one job at a time, so they would wait for each other.
-    assert!(
-        job(&workflow("check.yml"), "linux-tests")
-            .contains("\n    runs-on: ${{ vars.LINUX_RUNNER || 'ubuntu-24.04' }}\n")
-    );
+    assert!(job(&workflow("check.yml"), "linux-tests").contains(hosted));
     let bench = job(&workflow("bench.yml"), "dry-runs");
     assert!(bench.contains(&format!(
         "          - platform: linux\n            runner: ${{{{ {TRUSTED_RUNNER} }}}}\n"
@@ -550,7 +549,7 @@ fn only_coverage_and_the_linux_dry_runs_use_the_self_hosted_runner_and_never_for
             .collect::<Vec<_>>()
             .join("\n");
         let expected = match name.as_str() {
-            "coverage.yml" | "bench.yml" => 1,
+            "bench.yml" => 1,
             _ => 0,
         };
         assert_eq!(code.matches("self-hosted").count(), expected, "{name}");
