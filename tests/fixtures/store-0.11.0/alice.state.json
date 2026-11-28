@@ -1,0 +1,530 @@
+{
+  "clock_anchor": {
+    "clock_ms": 646191,
+    "generation": 1,
+    "wall_ms": 1795863220012
+  },
+  "first_writes": {
+    "claude-code.claude-1": 0,
+    "codex.codex-1": 2
+  },
+  "path_refusals": [
+    {
+      "at_ms": 646519,
+      "generation": 1,
+      "paths": [
+        "src/upload.rs"
+      ],
+      "workspace_id": "app"
+    },
+    {
+      "at_ms": 646432,
+      "generation": 1,
+      "paths": [
+        "GUIDE.md"
+      ],
+      "workspace_id": "app"
+    }
+  ],
+  "refusals": [
+    {
+      "wall_ms": 1795863220340,
+      "workspace_id": "app"
+    },
+    {
+      "wall_ms": 1795863220253,
+      "workspace_id": "app"
+    }
+  ],
+  "state": {
+    "activity": {
+      "claude-code.claude-1": {
+        "briefed": "f98785611c3eeb08",
+        "context": {
+          "bytes": 2412,
+          "largest_turn_bytes": 1322,
+          "turn_bytes": 613,
+          "turns": 11
+        },
+        "ended": true,
+        "generation": 1,
+        "known": [
+          {
+            "at_ms": 646583,
+            "path": "src/main.rs",
+            "state": {
+              "digest": "70e3bc8c325c537a95033393b8c1d92e8ea1efdb31250999cab21421ec78efbd",
+              "type": "present"
+            }
+          },
+          {
+            "at_ms": 646553,
+            "path": "src/upload.rs",
+            "state": {
+              "digest": "07b29bd8879c9f98cd1bb6d7f859d8725f6ac75ee04b4f2f23093b166b01f87b",
+              "type": "present"
+            }
+          },
+          {
+            "at_ms": 646455,
+            "path": "GUIDE.md",
+            "state": {
+              "digest": "d44df65e05ba9c9a4914741293a0f2a8c1f4b838d482e6db31e6310be1bfdb1e",
+              "type": "present"
+            }
+          },
+          {
+            "at_ms": 646384,
+            "path": "NOTES.md",
+            "state": {
+              "digest": "398f0caf7b66ab7c09f5d7f9a1da93f0b71e236820c1abf7414c905a086b00c6",
+              "type": "present"
+            }
+          }
+        ],
+        "last_hook_ms": 646355,
+        "last_ms": 648577,
+        "line_digests": [
+          "3a9b4ffdf960a0edab2035731339b07b"
+        ],
+        "looking": [
+          {
+            "at_ms": 646530,
+            "kind": "read",
+            "path": "src/upload.rs"
+          }
+        ],
+        "notices_told": [
+          {
+            "notice_id": "lsh1-interface-13a6234bc1d85b447970cbd75af5ebd3",
+            "via": "briefing"
+          }
+        ],
+        "session_id": "claude-code.claude-1",
+        "summary": "prompt 6230",
+        "told": [
+          1473179240476248978,
+          7977096936472434982,
+          1054427700527791803,
+          5163412699376750825,
+          4780427000625677673
+        ],
+        "told_at_ms": 648578,
+        "touched": [
+          {
+            "at_ms": 646582,
+            "path": "src/main.rs"
+          },
+          {
+            "at_ms": 646552,
+            "path": "src/upload.rs"
+          },
+          {
+            "at_ms": 646454,
+            "path": "GUIDE.md"
+          },
+          {
+            "at_ms": 646382,
+            "path": "NOTES.md"
+          }
+        ],
+        "wrote_since_boundary": true
+      },
+      "codex.codex-1": {
+        "briefed": "a55695eafb40d53c",
+        "context": {
+          "bytes": 1877,
+          "largest_turn_bytes": 1255,
+          "turn_bytes": 1255,
+          "turns": 2
+        },
+        "generation": 1,
+        "known": [
+          {
+            "at_ms": 650275,
+            "path": "OUTAGE.md",
+            "state": {
+              "digest": "ec5a4a87ffeec0f8f90ac9c41e414f8cadc12309b4bd506256d1ba49ff055305",
+              "type": "present"
+            }
+          },
+          {
+            "at_ms": 646614,
+            "path": "src/upload.rs",
+            "state": {
+              "digest": "56e915b2531b7f075cb2065d3b7e2a6e76934d6c63d8a2d94a6dd029f87cfe2e",
+              "type": "present"
+            }
+          }
+        ],
+        "last_hook_ms": 646398,
+        "last_ms": 650274,
+        "session_id": "codex.codex-1",
+        "told": [
+          10292298851998655912,
+          4864415203458381434,
+          10423871220953581281,
+          1250143529065867007,
+          17171313708893675043,
+          11890249663416559173,
+          4589115727421029150
+        ],
+        "told_at_ms": 656277,
+        "touched": [
+          {
+            "at_ms": 650274,
+            "path": "OUTAGE.md"
+          },
+          {
+            "at_ms": 646613,
+            "path": "src/upload.rs"
+          }
+        ],
+        "wrote_since_boundary": true
+      }
+    },
+    "checks": {
+      "app": [
+        {
+          "check_id": "lsh1-check-ca628eabbb363c4bd1510f423dd0c611",
+          "command": "sh -c grep -q retries src/upload.rs && grep -q bob CHANGELOG.md",
+          "duration_ms": 20,
+          "generation": 1,
+          "head_oid": "7fd963a867a05ea80be9581b5b8ef1ef90a06f0c",
+          "inputs": [
+            "b1a66e04e8b4f1ab7ea177ffda3a27cd9628e521",
+            "3cc86651d71a966ba45fbfe4f3795117e65ee876",
+            "1c84323224e8ae18e0e60a49697ca0bc88c09d55"
+          ],
+          "name": "unit",
+          "recorded_ms": 649539,
+          "result": {
+            "type": "passed"
+          },
+          "tree_oid": "bf21542abd097ee0735c31c3a0bd0fa12e3bccfc",
+          "workspace_id": "app"
+        }
+      ]
+    },
+    "generation": 1,
+    "intents": {},
+    "interface_notices": {
+      "app": [
+        {
+          "at_ms": 648471,
+          "by_session": "codex.codex-1",
+          "changes": [
+            {
+              "after": "pub fn upload(path: &str, retries: u32) -> bool",
+              "after_arity": {
+                "max": 2,
+                "min": 2,
+                "receiver": false
+              },
+              "before": "pub fn upload(path: &str) -> bool",
+              "before_arity": {
+                "max": 1,
+                "min": 1,
+                "receiver": false
+              },
+              "change": "signature_changed",
+              "kind": "function",
+              "name": "upload"
+            }
+          ],
+          "dependents": [
+            "src/main.rs"
+          ],
+          "generation": 1,
+          "notice_id": "lsh1-interface-13a6234bc1d85b447970cbd75af5ebd3",
+          "path": "src/upload.rs",
+          "workspace_id": "app"
+        }
+      ]
+    },
+    "landings": {
+      "app": [
+        {
+          "check_id": "lsh1-check-ca628eabbb363c4bd1510f423dd0c611",
+          "commit_oid": "7fd963a867a05ea80be9581b5b8ef1ef90a06f0c",
+          "inputs": [
+            "b1a66e04e8b4f1ab7ea177ffda3a27cd9628e521",
+            "3cc86651d71a966ba45fbfe4f3795117e65ee876",
+            "1c84323224e8ae18e0e60a49697ca0bc88c09d55"
+          ],
+          "landing_id": "lsh1-land-b579f5d6fe00ef80d0bcda39993e90f5",
+          "onto": "main",
+          "tree_oid": "bf21542abd097ee0735c31c3a0bd0fa12e3bccfc",
+          "workspace_id": "app"
+        }
+      ]
+    },
+    "leases": {
+      "lsh1-admit-0d1907ea80b8bc848766cb8dbba4fd54": {
+        "base_unknown": [
+          "NOTES.md"
+        ],
+        "expires_at_ms": 676371,
+        "generation": 1,
+        "lease_id": "lsh1-admit-0d1907ea80b8bc848766cb8dbba4fd54",
+        "operation": {
+          "input_digest": "b8377026f6047b26a53ae8a6e0c0d75d82a0bcd5411b1d69c7aa0ae9cd1c7408",
+          "operation_id": "lsh1-op-a9aefafb2aa51f2946b60539eca8ffb6",
+          "source": "claude-code",
+          "tool": "Write"
+        },
+        "paths": [
+          "NOTES.md"
+        ],
+        "session_id": "claude-code.claude-1",
+        "status": "completed",
+        "workspace_id": "app"
+      },
+      "lsh1-admit-4f915fed1fc4f26e621fd8806d0723a4": {
+        "base_unknown": [
+          "GUIDE.md"
+        ],
+        "expires_at_ms": 676421,
+        "generation": 1,
+        "lease_id": "lsh1-admit-4f915fed1fc4f26e621fd8806d0723a4",
+        "operation": {
+          "input_digest": "eb253de312b9ace9296b86234afec0bd6ddc58ac4c0fafb681e10fb77abcc693",
+          "operation_id": "lsh1-op-f7160fe867993495b9579f5aabf37dca",
+          "source": "claude-code",
+          "tool": "Write"
+        },
+        "paths": [
+          "GUIDE.md"
+        ],
+        "session_id": "claude-code.claude-1",
+        "status": "completed",
+        "workspace_id": "app"
+      },
+      "lsh1-admit-6411f0fc6b3d25ed68c0107de1dd53e3": {
+        "expires_at_ms": 676497,
+        "generation": 1,
+        "lease_id": "lsh1-admit-6411f0fc6b3d25ed68c0107de1dd53e3",
+        "operation": {
+          "input_digest": "3f82fffcd643ac7ce710ce3659469a8950c45090211595db4a5541e0a8dff052",
+          "operation_id": "lsh1-op-6a060af4a142336008bb20b834c2e837",
+          "source": "codex",
+          "tool": "apply_patch"
+        },
+        "paths": [
+          "src/upload.rs"
+        ],
+        "session_id": "codex.codex-1",
+        "status": "completed",
+        "workspace_id": "app"
+      },
+      "lsh1-admit-8652457c5707b8c6950a623271dd82b5": {
+        "base_unknown": [
+          "src/upload.rs"
+        ],
+        "expires_at_ms": 676444,
+        "generation": 1,
+        "lease_id": "lsh1-admit-8652457c5707b8c6950a623271dd82b5",
+        "operation": {
+          "input_digest": "3f82fffcd643ac7ce710ce3659469a8950c45090211595db4a5541e0a8dff052",
+          "operation_id": "lsh1-op-235d2077235d5a2a16397ae8fd374a5c",
+          "source": "codex",
+          "tool": "apply_patch"
+        },
+        "paths": [
+          "src/upload.rs"
+        ],
+        "session_id": "codex.codex-1",
+        "status": "completed",
+        "workspace_id": "app"
+      },
+      "lsh1-admit-a670c05831888af9e0dbe3b01d26d106": {
+        "base_unknown": [
+          "src/main.rs"
+        ],
+        "expires_at_ms": 676572,
+        "generation": 1,
+        "lease_id": "lsh1-admit-a670c05831888af9e0dbe3b01d26d106",
+        "operation": {
+          "input_digest": "f458e4b073bf8bbef70c791428db4e441deaf28897e913025ec9afb9bdcc14e4",
+          "operation_id": "lsh1-op-3d8e363e602d58cc4abc44f5c94f514f",
+          "source": "claude-code",
+          "tool": "Write"
+        },
+        "paths": [
+          "src/main.rs"
+        ],
+        "session_id": "claude-code.claude-1",
+        "status": "completed",
+        "workspace_id": "app"
+      },
+      "lsh1-admit-b8866e72893035d925026a05723b8fda": {
+        "expires_at_ms": 676603,
+        "generation": 1,
+        "lease_id": "lsh1-admit-b8866e72893035d925026a05723b8fda",
+        "operation": {
+          "input_digest": "3f82fffcd643ac7ce710ce3659469a8950c45090211595db4a5541e0a8dff052",
+          "operation_id": "lsh1-op-bbbbefa242fa602955ac509b229b9d0f",
+          "source": "codex",
+          "tool": "apply_patch"
+        },
+        "paths": [
+          "src/upload.rs"
+        ],
+        "session_id": "codex.codex-1",
+        "status": "completed",
+        "workspace_id": "app"
+      },
+      "lsh1-admit-c0659ad40286269042b5f3d90f725d2d": {
+        "expires_at_ms": 680264,
+        "generation": 1,
+        "lease_id": "lsh1-admit-c0659ad40286269042b5f3d90f725d2d",
+        "operation": {
+          "input_digest": "5ae3e68a5e08071ae21008559f255e21a9d6f3c2ac7358da8d3eb9bc46126327",
+          "operation_id": "lsh1-op-4db769fd5fd32f154f0ed7a09c3bf080",
+          "source": "codex",
+          "tool": "apply_patch"
+        },
+        "paths": [
+          "OUTAGE.md"
+        ],
+        "session_id": "codex.codex-1",
+        "status": "completed",
+        "workspace_id": "app"
+      },
+      "lsh1-admit-d0afcdaf257def58e3bc58a3ba826d14": {
+        "expires_at_ms": 676542,
+        "generation": 1,
+        "lease_id": "lsh1-admit-d0afcdaf257def58e3bc58a3ba826d14",
+        "operation": {
+          "input_digest": "ea74ac97902db4600bda5f660579c078923927bcec823f51acb3bbbfd8a6b59a",
+          "operation_id": "lsh1-op-28b91e7422a860e79dfda1417b7eac5f",
+          "source": "claude-code",
+          "tool": "Write"
+        },
+        "paths": [
+          "src/upload.rs"
+        ],
+        "session_id": "claude-code.claude-1",
+        "status": "completed",
+        "workspace_id": "app"
+      }
+    },
+    "remote_links": {
+      "app": {
+        "enabled": false,
+        "name": "Alice",
+        "participant": "07586f4b35806e8db7b50aad239dd383",
+        "remote": "origin",
+        "sequence": 2,
+        "share_task": true,
+        "signature": "cafe6de1e6d9b92e",
+        "withdrawn": true,
+        "workspace_id": "app"
+      }
+    },
+    "sessions": {
+      "claude-code.claude-1": {
+        "generation": 1,
+        "session_id": "claude-code.claude-1",
+        "workspace_id": "app"
+      },
+      "codex.codex-1": {
+        "generation": 1,
+        "session_id": "codex.codex-1",
+        "workspace_id": "app"
+      }
+    },
+    "workspace_git": {
+      "app": {
+        "branch_ref": "refs/heads/main",
+        "repository_id": "local-4e7a480aeb828cbfa850d63c9ecb73a0",
+        "workspace_id": "app"
+      }
+    },
+    "workspaces": {
+      "app": {
+        "root": "/tmp/ls-demo.QxCk6t/alice",
+        "workspace_id": "app"
+      }
+    },
+    "writes": {
+      "app": 13
+    }
+  },
+  "trails": {
+    "app": [
+      {
+        "at_ms": 656241,
+        "edited": [
+          {
+            "lines": [
+              {
+                "end_line": 3,
+                "start_line": 3
+              }
+            ],
+            "path": "src/main.rs"
+          },
+          {
+            "path": "src/upload.rs"
+          },
+          {
+            "lines": [
+              {
+                "end_line": 1,
+                "start_line": 1
+              }
+            ],
+            "path": "GUIDE.md"
+          },
+          {
+            "lines": [
+              {
+                "end_line": 1,
+                "start_line": 1
+              }
+            ],
+            "path": "NOTES.md"
+          }
+        ],
+        "generation": 1,
+        "read": [
+          "src/upload.rs"
+        ],
+        "session_id": "claude-code.claude-1",
+        "summary": "prompt 6230",
+        "taken_by": "codex.codex-1",
+        "workspace_id": "app"
+      }
+    ]
+  },
+  "write_runs": {
+    "app": [
+      {
+        "first": 1,
+        "last": 2,
+        "session_id": "claude-code.claude-1"
+      },
+      {
+        "first": 3,
+        "last": 4,
+        "session_id": "codex.codex-1"
+      },
+      {
+        "first": 5,
+        "last": 6,
+        "session_id": "claude-code.claude-1"
+      },
+      {
+        "first": 7,
+        "last": 7,
+        "session_id": "codex.codex-1"
+      },
+      {
+        "first": 12,
+        "last": 12,
+        "session_id": "codex.codex-1"
+      }
+    ]
+  }
+}

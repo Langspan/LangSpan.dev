@@ -76,6 +76,7 @@ events remain: upgrade the client to read them all.
 | 0.9.0 | 78 | none |
 | 0.9.1 | 78 | none |
 | 0.10.0 | 78 | none |
+| 0.11.0 | 78 | none |
 
 <!-- end generated -->
 
