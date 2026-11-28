@@ -273,6 +273,7 @@ fn long_peer_briefing() -> Briefing {
                 ],
                 overlap: Vec::new(),
                 target_overlap: Vec::new(),
+                same_task: false,
                 relation: None,
                 looking: Vec::new(),
             })

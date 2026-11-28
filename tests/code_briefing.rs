@@ -449,6 +449,8 @@ fn the_daemon_refuses_an_unbounded_code_context_query_and_records_none() {
 }
 
 const POINTS: &str = r#"task points at your files: "src/http.rs";"#;
+/// Issue #537: said first on a peer's line, once to each session.
+const SAME_TASK: &str = "same task as yours: take a different part or agree who does it;";
 
 /// The peer line about `who` in a briefing, which must be there.
 fn line_about<'a>(context: &'a str, who: &str) -> &'a str {
@@ -493,7 +495,9 @@ fn two_prompts_naming_one_function_tell_each_session_of_the_other_before_either_
         assert_bounded(&context);
         let line = line_about(&context, &format!("{first} session alice"));
         assert!(
-            line.contains(&format!(r#"in this checkout on branch "main": {POINTS}"#)),
+            line.contains(&format!(
+                r#"in this checkout on branch "main": {SAME_TASK} {POINTS}"#
+            )),
             "{line}"
         );
         assert!(
@@ -518,9 +522,12 @@ fn two_prompts_naming_one_function_tell_each_session_of_the_other_before_either_
         };
         let context = told.context.unwrap();
         assert_bounded(&context);
+        let line = line_about(&context, &format!("{second} session bob"));
+        assert!(line.contains(&format!("{SAME_TASK} {POINTS}")), "{context}");
+        // It names bob's task line, the prompt's first line only.
         assert!(
-            line_about(&context, &format!("{second} session bob")).contains(POINTS),
-            "{context}"
+            line.contains(r#"task: "fix the 400 from parse_header on empty values";"#),
+            "{line}"
         );
 
         // `status --json` shows each session's targets: paths only.

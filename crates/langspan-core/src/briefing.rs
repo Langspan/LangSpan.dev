@@ -8,6 +8,8 @@
 // `&Vec<_>`), so that each body moved out of the match unchanged.
 #![allow(clippy::ptr_arg)]
 
+mod same_task;
+
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
@@ -70,6 +72,12 @@ pub struct PeerWork {
     /// already in `overlap`. Advisory: it never holds a write (roadmap C8).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub target_overlap: Vec<String>,
+    /// This peer's last prompt points at a file the asking session's prompt
+    /// points at or holds, or the other way round: the same task, by those
+    /// records alone (issue #537). Told once; never for a subagent's line to
+    /// its parent. Advisory: it never holds a write.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub same_task: bool,
     /// How this peer is related to the asking session through a host
     /// subagent; absent for an unrelated session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -276,11 +284,13 @@ fn brief(
             })
             .unwrap_or_default()
     };
-    let (_, _, mine) = work_paths(session_id);
+    let (my_claims, _, mine) = work_paths(session_id);
+    let my_claims: BTreeSet<String> = my_claims.into_iter().collect();
+    let my_targets = prompt_targets(session_id);
     // What a peer's work or task is compared with: this session's work and
     // the files its own task points at.
     let mut mine_or_targeted = mine.clone();
-    mine_or_targeted.extend(prompt_targets(session_id));
+    mine_or_targeted.extend(my_targets.iter().cloned());
     let mut peers = Vec::new();
     for peer in state.sessions.values() {
         if peer.session_id == session_id || peer.generation != state.generation {
@@ -357,6 +367,8 @@ fn brief(
             .take(BRIEF_PATHS)
             .cloned()
             .collect();
+        let claims = editing.iter().cloned().collect();
+        let one_task = same_task::same_task((&my_targets, &my_claims), (&targets, &claims));
         editing.truncate(BRIEF_PATHS);
         recent.truncate(BRIEF_PATHS);
         let last_ms = activity.map(SessionActivity::last_seen_ms).unwrap_or(0);
@@ -410,6 +422,11 @@ fn brief(
                 recent,
                 overlap,
                 target_overlap,
+                // A subagent's task is the parent's own; an ended session
+                // has no task running.
+                same_task: one_task
+                    && !task_known
+                    && !activity.is_some_and(|activity| activity.ended),
                 relation,
                 looking,
             },
@@ -801,6 +818,10 @@ fn brief(
             signature.push_str("|targets:");
             signature.push_str(&peer.target_overlap.join(","));
         }
+        // Likewise only when present (issue #537).
+        if peer.same_task {
+            signature.push_str("|same_task");
+        }
         signature.push_str(if peer.ended { "|ended\n" } else { "\n" });
     }
     // Presence has a signature part of its own: alone it makes a briefing
@@ -900,6 +921,11 @@ fn peer_key(peer: &PeerWork) -> u64 {
 
 fn peer_path_key(peer: &PeerWork, kind: &str, path: &str) -> u64 {
     item_key(&["peer", &peer.session_id, kind, path])
+}
+
+/// That `peer` is on the asking session's task: told once per peer.
+fn same_task_key(peer: &PeerWork) -> u64 {
+    item_key(&["peer", &peer.session_id, "same_task"])
 }
 
 fn stale_key(stale: &StaleRead) -> u64 {
@@ -1005,6 +1031,9 @@ pub fn briefing_keys(briefing: &Briefing) -> Vec<u64> {
     keys.extend(briefing.interface_changes.iter().map(interface_key));
     for peer in &briefing.peers {
         keys.push(peer_key(peer));
+        if peer.same_task {
+            keys.push(same_task_key(peer));
+        }
         for kind in PEER_LISTS {
             keys.extend(
                 peer_paths(peer, kind)
@@ -1089,7 +1118,11 @@ fn keep_changes(
                 work_news = true;
             }
         }
-        let mut any = false;
+        // Told once; while it is news it names the peer's task line, which
+        // is kept below even if that line was told before.
+        peer.same_task = peer.same_task && keep(same_task_key(peer), false);
+        work_news |= peer.same_task;
+        let mut any = peer.same_task;
         let id = peer.session_id.clone();
         let mut list = |kind: &str, path: &str| {
             let key = item_key(&["peer", &id, kind, path]);
@@ -1111,7 +1144,7 @@ fn keep_changes(
         peer.editing.retain(|path| list("editing", path));
         peer.recent.retain(|recent| list("recent", &recent.path));
         peer.looking.retain(|looked| list("looking", &looked.path));
-        if !header_fresh {
+        if !header_fresh && !peer.same_task {
             // Its task was told: the line names the peer and what is new.
             peer.summary = None;
             peer.intent = None;
@@ -1226,6 +1259,7 @@ fn presence_only(peer: &PeerWork) -> bool {
         && peer.recent.is_empty()
         && peer.overlap.is_empty()
         && peer.target_overlap.is_empty()
+        && !peer.same_task
         && peer.summary.is_none()
         && peer.intent.is_none()
 }
