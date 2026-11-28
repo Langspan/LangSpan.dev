@@ -96,7 +96,10 @@ cat "$file" > "$out"
             ),
         );
         // A stand-in GitHub CLI, signed out unless the fixture writes a
-        // `gh-mode` of `verifies` or `rejects`. It needs the archive to exist.
+        // `gh-mode` of `verifies` or `rejects`, or `other-expired`: signed in
+        // to github.com, with another account's sign-in expired, so only a
+        // status check scoped to the active github.com account passes, as
+        // with the real gh. It needs the archive to exist.
         write_executable(
             &fixture.base.join("stubs/gh"),
             r#"#!/bin/sh
@@ -104,8 +107,11 @@ echo "$*" >> "$HOME/../gh.log"
 mode=$(cat "$HOME/../gh-mode" 2>/dev/null || echo signed-out)
 case "$1 $mode" in
 "auth signed-out") echo "You are not logged into any GitHub hosts." >&2; exit 1 ;;
+"auth other-expired")
+	[ "$*" = "auth status --active --hostname github.com" ] && exit 0
+	echo "X Failed to log in to github.example.com account old-login" >&2; exit 1 ;;
 "auth "*) exit 0 ;;
-"attestation verifies") [ -f "$3" ] && echo "Verification succeeded!" ;;
+"attestation verifies" | "attestation other-expired") [ -f "$3" ] && echo "Verification succeeded!" ;;
 "attestation "*) echo "stub gh: no attestation matched" >&2; exit 1 ;;
 *) exit 2 ;;
 esac
@@ -332,7 +338,7 @@ fn a_signed_in_gh_verifies_the_archive_before_it_is_installed() {
     );
     let calls = fixture.gh_calls();
     assert_eq!(calls.len(), 2, "{calls:?}");
-    assert_eq!(calls[0], "auth status");
+    assert_eq!(calls[0], "auth status --active --hostname github.com");
     // The downloaded copy in the script's temporary folder (macOS's mktemp
     // ignores TMPDIR, so only its absolute path and name are checked).
     let verify = &calls[1];
@@ -352,6 +358,29 @@ fn a_signed_in_gh_verifies_the_archive_before_it_is_installed() {
     let digest = sha256(&fixture.release("latest/langspan-v9.9.9-x86_64-unknown-linux-gnu.tar.gz"));
     assert!(
         stdout.contains(&format!("SHA-256 matches SHA256SUMS: {digest}")),
+        "{stdout}"
+    );
+    fixture.assert_clean();
+}
+
+#[test]
+fn another_accounts_expired_sign_in_does_not_skip_the_check() {
+    let fixture = Fixture::new("gh-other-expired");
+    fs::write(fixture.base.join("gh-mode"), "other-expired").unwrap();
+    let output = fixture.run("Linux", "x86_64", &[], false);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let calls = fixture.gh_calls();
+    assert_eq!(calls.len(), 2, "the attestation is checked: {calls:?}");
+    assert!(calls[1].starts_with("attestation verify /"), "{calls:?}");
+    assert!(
+        stdout.contains(&format!(
+            "Provenance verified by gh attestation verify: built by {SIGNER}"
+        )),
         "{stdout}"
     );
     fixture.assert_clean();
@@ -382,11 +411,11 @@ fn without_a_signed_in_gh_the_install_says_provenance_was_not_checked() {
     assert!(output.status.success());
     assert_eq!(
         fixture.gh_calls(),
-        ["auth status"],
+        ["auth status --active --hostname github.com"],
         "no verify when signed out"
     );
     assert!(
-        stdout.contains("Provenance not checked: gh is not signed in (run gh auth login)"),
+        stdout.contains("Provenance not checked: gh is not signed in to github.com, or is older than 2.49 (run gh auth login, or update gh)"),
         "{stdout}"
     );
 

@@ -172,8 +172,10 @@ bounded() {
 signer=Langspan/LangSpan.dev/.github/workflows/release.yml
 if ! command -v gh >/dev/null 2>&1; then
 	provenance="not checked: the GitHub CLI (gh) is not installed"
-elif ! bounded 30 gh auth status; then
-	provenance="not checked: gh is not signed in (run gh auth login)"
+# Only the active github.com account: a bare `gh auth status` fails when any
+# other account or host has a sign-in problem, which would skip the check.
+elif ! bounded 30 gh auth status --active --hostname github.com; then
+	provenance="not checked: gh is not signed in to github.com, or is older than 2.49 (run gh auth login, or update gh)"
 elif bounded 120 gh attestation verify "$tmp/$archive" -R Langspan/LangSpan.dev \
 	--signer-workflow "$signer"; then
 	provenance="verified by gh attestation verify: built by $signer"
