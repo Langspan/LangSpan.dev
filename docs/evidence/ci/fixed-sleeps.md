@@ -107,3 +107,35 @@ replaced sleeps keep their period as a `holds_for`, so the expected fall is
 small: only the waits that end once their condition holds (about a dozen
 of the 37) can be shorter, by at most the margin each sleep had over its
 condition. That is an estimate, not a measurement.
+
+## The short fixed sleeps
+
+A later pass looked at every `sleep(` under 200 ms in `tests/`, on
+2026-11-27 on the same laptop. Nearly all are the step of a loop that polls
+toward a deadline. Four aren't:
+
+- `notify.rs`: the fixture waited a fixed 100 ms for a notifier call that
+  might still be writing its file. The stand-in now writes under another
+  name and renames the file into place, so every `call.` file is whole, and
+  the wait returns as soon as the count is reached. Without the 100 ms,
+  `a_refusal_starts_one_notifier…` failed 3 times in 10 at the line after
+  it: the daemon logs `notice_sent` only once the notifier has exited. That
+  test now waits for the log line, then checks there is exactly one.
+- `report.rs:745` (100 ms, so that the report reaches the store worker
+  before the admission is sent): left as it is. Nothing visible shows that
+  the report has arrived, and the session fixing #581 is changing this test.
+- `daemon.rs:607` (a write every 50 ms for 3 s) and `hook_replies.rs:455`
+  (an event written in three pieces, 50 ms apart): left as they are. The
+  pauses are what these tests check.
+
+| Run | Result |
+| --- | --- |
+| `notify.rs`, `--stress-count 20`, while `graph`, `mcp` and `remote` ran 4 times on 16 threads beside it (load average 85 at the start, 42 at the end; that load ran for the first 82 s of the 130 s) | 20 of 20 passed |
+| The load run itself | 3 of 4 iterations passed; one `graph.rs` fixture hit its deadline for the daemon to answer (`tests/graph.rs:123`, "daemon did not become ready"). That is a polling deadline, not a sleep. |
+| The 14 files above, `--test-threads 1`, twice | 351.2 s (the `notify.rs` failure above, before its fix) and 485.4 s (all passed), 213 tests |
+
+The two runs of the same 14 files differ by 38% with only the other
+sessions' load changing. A before figure taken under that load couldn't
+show a fall in summed time, and this session couldn't check out the
+earlier copies of the files anyway. So the fall is still not stated as a
+measurement.
