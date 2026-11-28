@@ -31,8 +31,14 @@ adds no trust boundary.
 - **Scope: a repository.** A counter counts across every worktree of one
   repository (its repository ID), or one workspace outside Git. One daemon
   serves every repository of a user, so a counter for the whole domain would
-  give one repository another's numbers.
-- **Release.** A claim is shown to other sessions while its session runs.
+  give one repository another's numbers. Until the coordinator's first scan
+  of a workspace records either its repository or that it has none, a
+  reservation there is refused with `scope_unknown`: counting it alone would
+  let two new worktrees of one repository take the same number. A Git
+  checkout that counted alone because its scans failed joins its
+  repository's counter above every number it handed out.
+- **Release.** A claim is shown to other sessions while its session runs:
+  until the session ends or its process is known to have exited.
   The highest number of each key is kept after its holder ends, so no number
   is handed out twice, and nothing has to be released or taken over. A
   number reserved and never used leaves a gap.

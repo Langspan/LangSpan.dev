@@ -247,6 +247,7 @@ time:
 | `request_id_conflict` | No | The request ID belongs to a different command; use a new ID. |
 | `response_too_large` | No | The response exceeds 64 KiB; page it or ask for less. |
 | `root_derived_id` | No | User-level hooks derive the workspace's ID from its old root, which still exists; move or delete that checkout first. |
+| `scope_unknown` | New ID | The workspace has not been scanned yet, so its repository is unknown; reserve again in a few seconds. |
 | `secret_in_command` | No | The command holds what looks like a secret and was not recorded. |
 | `secret_in_test_name` | No | A test name holds what looks like a secret. |
 | `sender_not_in_workspace` | No | The sending or withdrawing session belongs to another workspace. |

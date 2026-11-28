@@ -138,6 +138,7 @@ error_codes! {
     RequestIdConflict = "request_id_conflict",
     ResponseTooLarge = "response_too_large",
     RootDerivedId = "root_derived_id",
+    ScopeUnknown = "scope_unknown",
     SecretInCommand = "secret_in_command",
     SecretInTestName = "secret_in_test_name",
     SenderNotInWorkspace = "sender_not_in_workspace",

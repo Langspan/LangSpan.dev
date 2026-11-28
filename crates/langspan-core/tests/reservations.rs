@@ -2,7 +2,10 @@
 //! sessions in separate worktrees of one repository get different numbers,
 //! and each one's briefing names the other's claim. Pure decisions and
 //! replay, in process.
-use langspan_core::{Briefing, Command, Event, Outcome, Reservation, State, apply, decide};
+use langspan_core::{
+    Briefing, Command, Event, LivenessStatus, Outcome, ProcessIdentity, Reservation, State, apply,
+    decide,
+};
 
 fn run(state: &mut State, id: &str, command: Command, at: u64) -> Outcome {
     let before = state.clone();
@@ -209,6 +212,143 @@ fn a_key_is_short_and_plain_and_the_keys_are_bounded() {
     // A key already counted still takes its next number.
     let outcome = reserve(&mut state, "again", "bob", "k0", 0);
     assert_eq!(reserved(&outcome).0.number, 2);
+}
+
+fn register(state: &mut State, workspace: &str, session: &str) {
+    run(
+        state,
+        &format!("w-{workspace}"),
+        Command::WorkspaceRegister {
+            workspace_id: workspace.into(),
+            root: format!("/repos/{workspace}"),
+        },
+        0,
+    );
+    run(
+        state,
+        &format!("s-{session}"),
+        Command::SessionRegister {
+            session_id: session.into(),
+            workspace_id: workspace.into(),
+            parent: None,
+            headless: false,
+        },
+        0,
+    );
+}
+
+fn scanned(state: &mut State, id: &str, workspace: &str, failure: Option<&str>) {
+    run(
+        state,
+        id,
+        Command::ObserveScan {
+            workspace_id: workspace.into(),
+            failure: failure.map(Into::into),
+            coverage: None,
+        },
+        1,
+    );
+}
+
+fn git(state: &mut State, id: &str, workspace: &str, repository: &str) {
+    run(
+        state,
+        id,
+        Command::ObserveWorkspaceGit {
+            workspace_id: workspace.into(),
+            repository_id: repository.into(),
+            branch_ref: Some("refs/heads/main".into()),
+        },
+        1,
+    );
+}
+
+#[test]
+fn a_workspace_not_yet_scanned_is_refused_until_its_repository_is_known() {
+    let mut state = State::default();
+    apply(&mut state, &Event::Booted { generation: 1 }).unwrap();
+    register(&mut state, "one", "alice");
+    register(&mut state, "two", "bob");
+    // Two new worktrees of one repository, neither scanned yet: counting each
+    // alone would give both 1.
+    for session in ["alice", "bob"] {
+        let before = state.clone();
+        match reserve(&mut state, &format!("early-{session}"), session, "adr", 0) {
+            Outcome::Error { code, message } => {
+                assert_eq!(code, "scope_unknown");
+                assert!(message.contains("reserve again"), "{message}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(state, before, "a refusal records nothing");
+    }
+    git(&mut state, "g1", "one", "repo-app");
+    git(&mut state, "g2", "two", "repo-app");
+    let first = reserve(&mut state, "r1", "alice", "adr", 0);
+    let second = reserve(&mut state, "r2", "bob", "adr", 0);
+    assert_eq!(
+        (reserved(&first).0.number, reserved(&second).0.number),
+        (1, 2)
+    );
+}
+
+#[test]
+fn a_workspace_outside_git_counts_alone_once_its_scan_failed() {
+    let mut state = State::default();
+    apply(&mut state, &Event::Booted { generation: 1 }).unwrap();
+    register(&mut state, "notes", "alice");
+    scanned(
+        &mut state,
+        "f1",
+        "notes",
+        Some("the workspace is not a Git working tree"),
+    );
+    let outcome = reserve(&mut state, "r1", "alice", "adr", 0);
+    let (claim, _) = reserved(&outcome);
+    assert_eq!((claim.scope.as_str(), claim.number), ("notes", 1));
+}
+
+#[test]
+fn a_checkout_that_counted_alone_joins_its_repository_above_its_own_numbers() {
+    let mut state = State::default();
+    apply(&mut state, &Event::Booted { generation: 1 }).unwrap();
+    register(&mut state, "one", "alice");
+    scanned(&mut state, "f1", "one", Some("git timed out"));
+    for id in ["a1", "a2", "a3"] {
+        reserve(&mut state, id, "alice", "adr", 0);
+    }
+    // The scan succeeds later: the repository's counter has not handed out
+    // 1 to 3, but this workspace has.
+    git(&mut state, "g1", "one", "repo-app");
+    let outcome = reserve(&mut state, "r1", "alice", "adr", 0);
+    let (claim, _) = reserved(&outcome);
+    assert_eq!((claim.scope.as_str(), claim.number), ("repo-app", 4));
+}
+
+#[test]
+fn a_session_whose_process_exited_is_neither_held_nor_briefed() {
+    let mut state = ready();
+    reserve(&mut state, "r1", "bob", "adr", 0);
+    assert_eq!(claims(&brief(&state, "alice")), [("adr", 1, "bob")]);
+    // No end report, but its process is known to have exited.
+    run(
+        &mut state,
+        "l1",
+        Command::ObserveSessionLiveness {
+            session_id: "bob".into(),
+            process: ProcessIdentity {
+                pid: 4242,
+                start_token: "boot-1".into(),
+            },
+            status: LivenessStatus::Exited,
+        },
+        11,
+    );
+    assert!(brief(&state, "alice").reserved.is_empty());
+    let outcome = reserve(&mut state, "r2", "alice", "adr", 0);
+    let (claim, held) = reserved(&outcome);
+    assert_eq!(claim.number, 2, "the counter keeps its highest number");
+    assert!(held.is_empty(), "an exited holder is not named: {held:?}");
 }
 
 #[test]

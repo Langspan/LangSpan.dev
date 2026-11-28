@@ -55,21 +55,28 @@ fn validate_key(key: &str) -> Result<(), CoreError> {
     Ok(())
 }
 
-/// The scope of `workspace_id`'s counters: every worktree of its repository.
-fn scope(state: &State, workspace_id: &str) -> String {
-    state
-        .workspace_git
-        .get(workspace_id)
-        .map_or_else(|| workspace_id.to_owned(), |git| git.repository_id.clone())
+/// The scope of `workspace_id`'s counters: every worktree of its repository,
+/// or the workspace alone once a scan has found no Git checkout there. `None`
+/// until the first scan's outcome is recorded: counting before then could
+/// give two new worktrees of one repository the same number.
+fn known_scope(state: &State, workspace_id: &str) -> Option<String> {
+    match state.workspace_git.get(workspace_id) {
+        Some(git) => Some(git.repository_id.clone()),
+        None => state
+            .scan_failures
+            .contains_key(workspace_id)
+            .then(|| workspace_id.to_owned()),
+    }
 }
 
-/// Whether `session_id` is running in this generation.
+fn scope(state: &State, workspace_id: &str) -> String {
+    known_scope(state, workspace_id).unwrap_or_else(|| workspace_id.to_owned())
+}
+
+/// Whether `session_id` is running in this generation: not ended, and its
+/// process not known to have exited.
 fn live(state: &State, session_id: &str) -> bool {
-    current_session(state, session_id).is_ok()
-        && state
-            .activity
-            .get(session_id)
-            .is_none_or(|activity| !activity.ended)
+    current_session(state, session_id).is_ok() && !crate::sessions::finished(state, session_id)
 }
 
 pub(crate) fn decide_reserve(
@@ -81,9 +88,21 @@ pub(crate) fn decide_reserve(
 ) -> Result<Decision, CoreError> {
     let session = current_session(state, session_id)?;
     validate_key(key)?;
-    let scope = scope(state, &session.workspace_id);
+    let scope = known_scope(state, &session.workspace_id).ok_or_else(|| {
+        error(
+            ErrorCode::ScopeUnknown.as_str(),
+            "LangSpan has not yet scanned this workspace, so it cannot tell which repository counts its numbers; reserve again in a few seconds",
+        )
+    })?;
     let counters = state.reservations.get(&scope);
     let counter = counters.and_then(|counters| counters.get(key));
+    // A Git checkout whose first scans failed counted on its own; its
+    // repository's counter starts above what it handed out.
+    let own = state
+        .reservations
+        .get(&session.workspace_id)
+        .and_then(|counters| counters.get(key))
+        .map_or(0, |counter| counter.highest);
     if counter.is_none() && counters.is_some_and(|counters| counters.len() >= MAX_RESERVATION_KEYS)
     {
         return Err(error(
@@ -93,6 +112,7 @@ pub(crate) fn decide_reserve(
     }
     let number = after
         .max(counter.map_or(0, |counter| counter.highest))
+        .max(own)
         .checked_add(1)
         .ok_or_else(|| {
             error(
