@@ -2,15 +2,17 @@
 //! `langspan recall` and `langspan_recall` (roadmap E2) through the real
 //! CLI, hooks, daemon and MCP adapter, in a real Git repository.
 
+mod support;
+use support::git;
+
 use serde_json::{Value, json};
 use std::{
     fs,
-    io::Write,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    process::{Child, Command as Process, Stdio},
+    process::Command as Process,
     sync::atomic::{AtomicU64, Ordering},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use langspan::protocol::{MAX_FRAME_BYTES, Request};
@@ -24,7 +26,7 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 
 struct World {
     base: PathBuf,
-    daemon: Option<Child>,
+    daemon: Option<support::Owned>,
 }
 
 impl World {
@@ -42,9 +44,9 @@ impl World {
         fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
         let world = Self { base, daemon: None };
         fs::write(world.work().join("src/lib.rs"), "pub fn lib() {}\n").unwrap();
-        world.git(&["init", "-q", "-b", "main"]);
-        world.git(&["add", "."]);
-        world.git(&["commit", "-q", "-m", "start"]);
+        git(&world.work(), &["init", "-q", "-b", "main"]);
+        git(&world.work(), &["add", "."]);
+        git(&world.work(), &["commit", "-q", "-m", "start"]);
         world
     }
     fn work(&self) -> PathBuf {
@@ -54,27 +56,10 @@ impl World {
         self.base.join("state")
     }
     fn start(&mut self) {
-        self.daemon = Some(
-            Process::new(env!("CARGO_BIN_EXE_langspan"))
-                .env("LANGSPAN_AUTOSTART", "off")
-                .args(["daemon", "--state-dir"])
-                .arg(self.state())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap(),
-        );
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while self.cli(&["status"]).0 != 0 {
-            assert!(Instant::now() < deadline, "daemon did not become ready");
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        self.daemon = Some(support::coordinator(&self.state()));
     }
     fn stop(&mut self) {
-        if let Some(mut child) = self.daemon.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+        drop(self.daemon.take());
     }
     fn cli_full(&self, args: &[&str]) -> (i32, String, String) {
         let output = Process::new(env!("CARGO_BIN_EXE_langspan"))
@@ -113,45 +98,18 @@ impl World {
         let (code, out) = self.cli(&args);
         assert_eq!(code, 0, "{out}");
     }
-    fn git(&self, args: &[&str]) {
-        let output = Process::new("git")
-            .arg("-C")
-            .arg(self.work())
-            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
     /// A session starts through the real Claude Code hook.
     fn session_start(&self, session: &str) {
-        let mut child = Process::new(env!("CARGO_BIN_EXE_langspan"))
-            .env("LANGSPAN_AUTOSTART", "off")
-            .args(["hook", "claude-code", "--state-dir"])
-            .arg(self.state())
-            .args(["--workspace", "app", "--root"])
-            .arg(self.work())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(
-                json!({"session_id": session, "cwd": self.work(),
-                       "hook_event_name": "SessionStart", "source": "startup"})
-                .to_string()
-                .as_bytes(),
-            )
-            .unwrap();
-        assert!(child.wait().unwrap().success());
+        let output = support::hook_call(
+            &self.state(),
+            "claude-code",
+            "app",
+            &self.work(),
+            &[],
+            &json!({"session_id": session, "cwd": self.work(),
+                   "hook_event_name": "SessionStart", "source": "startup"}),
+        );
+        assert!(output.status.success());
     }
     /// The type of each event recorded after `after`, and the last sequence.
     fn events_after(&self, after: u64) -> (Vec<String>, u64) {

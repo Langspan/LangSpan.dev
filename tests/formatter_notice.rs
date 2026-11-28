@@ -6,12 +6,15 @@
 //! The pre-tool hook tells the formatting session, once, which other sessions'
 //! uncommitted files the command may rewrite. It never refuses the command.
 
+mod support;
+use support::git;
+
 use serde_json::{Value, json};
 use std::{
     fs,
     io::Write,
     os::unix::fs::PermissionsExt,
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::{Child, Command as Process, Stdio},
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
@@ -36,19 +39,6 @@ struct Run {
     context: String,
     /// A permission decision, if the reply made one.
     decision: Option<String>,
-}
-
-fn git(root: &Path, arguments: &[&str]) -> String {
-    let output = Process::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(arguments)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "git {arguments:?}: {output:?}");
-    String::from_utf8(output.stdout).unwrap()
 }
 
 impl Fixture {

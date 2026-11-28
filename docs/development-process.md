@@ -450,6 +450,15 @@ the check prints the new number; lower the row by hand in the same pull
 request. Return a typed error instead, as `client::ClientError` and
 `git::GitError` do (issue #368).
 
+The test files have one number of their own, checked by the same test in
+Rust rather than by the script: how many files under `tests/`, outside
+`tests/support/`, define their own `fn git(` or `fn hook(`. It may not go
+above `OWN_GIT_OR_HOOK_FILES` in `tests/ratchets.rs`; a failure names the
+files. Use `support::git` for a Git command in a test repository,
+`support::coordinator` to start a coordinator and `support::hook_call` for
+one hook call. When the count falls, the test prints it; lower the
+constant in the same pull request (issue #374).
+
 ### Self-hosted runner
 
 The owner runs one Linux machine (8 cores, 16 GB) as a self-hosted runner
