@@ -187,8 +187,9 @@ fn section(
 /// The changes in one file the session edited and the target changed or
 /// deleted (`tip` empty): each symbol whose body the session changed since
 /// `base` that the target also changed, moved (`moved_to` names where) or
-/// removed. A file without a complete parse at every version, or where the
-/// session's change is in no symbol, is told whole.
+/// removed. A file without a complete parse at every version, where the
+/// session changed code outside every symbol or no symbol's body, or where a
+/// symbol it changed shares its name and kind with another, is told whole.
 fn compare(
     path: &str,
     base: &[u8],
@@ -202,13 +203,29 @@ fn compare(
     };
     let mut items = Vec::new();
     let mut mine = 0;
+    let mut whole = outside(base, &base_graph) != outside(now, &now_graph);
     for symbol in &now_graph.symbols {
-        let Some(before) = find(&base_graph, &symbol.name, symbol.kind) else {
-            continue;
-        };
-        if body(now, symbol) == body(base, before) {
+        let (name, kind) = (symbol.name.as_str(), symbol.kind);
+        let mut before = bodies(base, &base_graph, name, kind);
+        if before.is_empty() {
             continue;
         }
+        let mut edited = bodies(now, &now_graph, name, kind);
+        before.sort();
+        edited.sort();
+        if before == edited {
+            continue;
+        }
+        // Unqualified names repeat (two impls' `value`): which definition
+        // is which cannot be told, so the file is told whole.
+        let tip_count = bodies(tip, &tip_graph, name, kind).len();
+        if before.len() > 1 || edited.len() > 1 || tip_count > 1 {
+            whole = true;
+            continue;
+        }
+        let Some(before) = find(&base_graph, name, kind) else {
+            continue;
+        };
         mine += 1;
         let name = symbol.name.clone();
         items.push(match find(&tip_graph, &symbol.name, symbol.kind) {
@@ -220,10 +237,35 @@ fn compare(
             },
         });
     }
-    if mine == 0 && base != tip {
+    if (whole || mine == 0) && base != tip {
         items.push(Item::FileChanged(digest(tip)));
     }
     items
+}
+
+/// The bodies of `graph`'s symbols named `name` of `kind`.
+fn bodies<'a>(source: &'a [u8], graph: &FileGraph, name: &str, kind: SymbolKind) -> Vec<&'a [u8]> {
+    let named = graph
+        .symbols
+        .iter()
+        .filter(|s| s.name == name && s.kind == kind);
+    named
+        .map(|symbol| body(source, symbol).unwrap_or_default())
+        .collect()
+}
+
+/// `source` without the bytes of any symbol: imports, attributes and other
+/// code no symbol covers. Symbols nest, so ranges overlap.
+fn outside(source: &[u8], graph: &FileGraph) -> Vec<u8> {
+    let mut ranges: Vec<_> = graph.symbols.iter().map(|s| s.bytes.clone()).collect();
+    ranges.sort_by_key(|range| range.start);
+    let (mut rest, mut at) = (Vec::new(), 0);
+    for range in ranges {
+        rest.extend_from_slice(source.get(at..range.start).unwrap_or_default());
+        at = at.max(range.end);
+    }
+    rest.extend_from_slice(source.get(at..).unwrap_or_default());
+    rest
 }
 
 /// A complete parse of `source` as `path`'s language; `None` for a file of
@@ -401,6 +443,56 @@ mod tests {
             items(&now, &tip, None).as_slice(),
             [Item::FileChanged(_)]
         ));
+    }
+
+    #[test]
+    fn an_upstream_change_outside_symbols_the_session_also_edited_there_is_told() {
+        let base = format!("use a::X;\n{BASE}");
+        let now = base
+            .replace("use a::X;", "use a::{X, Y};")
+            .replace("pub a: u32,", "pub a: u32,\n    pub b: u32,");
+        let tip = base.replace("use a::X;", "use b::X;");
+        let changed = compare(
+            "src/lib.rs",
+            base.as_bytes(),
+            now.as_bytes(),
+            tip.as_bytes(),
+            &|_, _| None,
+        );
+        assert!(
+            matches!(changed.as_slice(), [Item::FileChanged(_)]),
+            "{changed:?}"
+        );
+    }
+
+    #[test]
+    fn a_changed_symbol_whose_name_repeats_is_told_with_its_file() {
+        let base = "struct A;\nstruct B;\nimpl A {\n    fn value() -> u32 {\n        1\n    }\n}\n\
+                    impl B {\n    fn value() -> u32 {\n        2\n    }\n}\n";
+        // The session also changes `A` itself, so it has symbol work there.
+        let now = base
+            .replace("struct A;", "struct A(u8);")
+            .replace("        2\n", "        3\n");
+        let tip = base.replace("        2\n", "        4\n");
+        let compare = |base: &str, now: &str, tip: &str| {
+            compare(
+                "src/lib.rs",
+                base.as_bytes(),
+                now.as_bytes(),
+                tip.as_bytes(),
+                &|_, _| None,
+            )
+        };
+        let changed = compare(base, &now, &tip);
+        assert!(
+            matches!(changed.as_slice(), [Item::FileChanged(_)]),
+            "{changed:?}"
+        );
+        // Same-named code the session left alone is not its work.
+        let base = format!("{base}{BASE}");
+        let now = base.replace("pub a: u32,", "pub a: u32,\n    pub b: u32,");
+        let tip = base.replace("        2\n", "        4\n");
+        assert_eq!(compare(&base, &now, &tip), []);
     }
 
     #[test]
