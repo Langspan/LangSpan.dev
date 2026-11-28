@@ -25,6 +25,7 @@ fn peer(id: &str, paths: &[String]) -> PeerWork {
         same_task: false,
         relation: None,
         looking: Vec::new(),
+        place_told: false,
     }
 }
 

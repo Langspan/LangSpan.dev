@@ -10,12 +10,16 @@ the session was last told: a peer's new file, its new task line, a new notice.
 Briefings also name files the session read before a peer reported editing them
 in the same checkout.
 
-A briefing of changes only opens with "What changed since your last
+A briefing of changes only opens with "LangSpan, changes since your last
 briefing" and ends with one line that counts what it left out:
 
 ```text
-(4 unchanged item(s) from earlier briefings not repeated; the langspan_brief tool or `langspan brief claude-code.SESSION --request-id NEW_ID` shows the full view.)
+(4 unchanged item(s) not repeated; langspan_brief or `langspan brief claude-code.SESSION --request-id NEW_ID` shows all.)
 ```
+
+It names a peer in another worktree by its session alone once it has said
+where that peer works (its worktree and branch) in this context. A new branch,
+or the full view at a new, resumed or compacted session, says it again.
 
 Three items are told again after they were told, once each time the session
 reads or edits one of their files: another session's hold on a file in this

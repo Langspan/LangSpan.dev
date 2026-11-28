@@ -313,8 +313,8 @@ fn the_code_section_and_a_long_peer_briefing_share_the_cap() {
     assert_eq!(again.coverage, "briefed", "{}", again.stdout);
     let context = again.context.unwrap();
     assert!(context.len() <= 2400, "{}: {context}", context.len());
-    assert!(context.contains("What changed since your last briefing"));
-    assert!(context.contains("unchanged item(s) from earlier briefings"));
+    assert!(context.contains("changes since your last briefing"));
+    assert!(context.contains("unchanged item(s) not repeated"));
     assert_upload_section(&context);
     let retold = peers_in(&context);
     assert!(retold.iter().all(|peer| !shown.contains(peer)), "{context}");
@@ -347,7 +347,7 @@ fn a_changes_only_briefing_and_the_code_section_share_the_cap() {
     let context = again.context.unwrap();
     assert!(context.len() <= 2400, "{}: {context}", context.len());
     assert!(
-        context.contains("What changed since your last briefing"),
+        context.contains("changes since your last briefing"),
         "{context}"
     );
     assert!(context.contains("more session(s) not shown"), "{context}");

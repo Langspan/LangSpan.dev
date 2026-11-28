@@ -631,6 +631,29 @@ fn v3_same_task_briefing_matches_the_committed_golden_vector() {
     assert_eq!(encode(&response).unwrap(), older.as_bytes());
 }
 
+/// Issue #624: a peer whose worktree and branch the session was already
+/// told. Additive and defaulted, as `same_task` is: a coordinator without
+/// the field reads as untold, so its reader says the place again, and a
+/// briefing without it encodes as it did before. It comes only with a
+/// briefing of changes only, which `briefing_memory` already gates.
+#[test]
+fn v10_place_told_briefing_matches_the_committed_golden_vector() {
+    let wire = include_bytes!("../fixtures/place-told-briefing-response-v10.json");
+    let response: Response = serde_json::from_slice(wire).unwrap();
+    let langspan_core::Outcome::Briefing { briefing } = &response.outcome else {
+        panic!("{response:?}");
+    };
+    assert!(briefing.peers[0].place_told);
+    assert_eq!(encode(&response).unwrap(), wire);
+    let older = String::from_utf8_lossy(wire).replace(r#","place_told":true"#, "");
+    let response: Response = serde_json::from_str(&older).unwrap();
+    let langspan_core::Outcome::Briefing { briefing } = &response.outcome else {
+        panic!("{response:?}");
+    };
+    assert!(!briefing.peers[0].place_told);
+    assert_eq!(encode(&response).unwrap(), older.as_bytes());
+}
+
 #[test]
 fn v3_presence_requests_and_briefing_match_the_committed_golden_vectors() {
     use langspan_core::PresenceKind;

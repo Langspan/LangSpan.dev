@@ -88,6 +88,10 @@ pub struct PeerWork {
     /// refuses or delays anything.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub looking: Vec<PresencePath>,
+    /// The session was told this peer's worktree and branch in this context
+    /// (issue #624), so its line can name it alone. Changes only; absent: untold.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub place_told: bool,
 }
 
 /// A peer that belongs to the same host conversation as the asking session.
@@ -429,6 +433,7 @@ fn brief(
                     && !activity.is_some_and(|activity| activity.ended),
                 relation,
                 looking,
+                place_told: false,
             },
         ));
     }
@@ -919,6 +924,12 @@ fn peer_key(peer: &PeerWork) -> u64 {
     ])
 }
 
+/// Where a peer works (issue #624): told with any line of it; not an item.
+fn place_key(peer: &PeerWork) -> u64 {
+    let branch = peer.branch_ref.as_deref().unwrap_or("");
+    item_key(&["place", &peer.session_id, &peer.workspace_root, branch])
+}
+
 fn peer_path_key(peer: &PeerWork, kind: &str, path: &str) -> u64 {
     item_key(&["peer", &peer.session_id, kind, path])
 }
@@ -1030,6 +1041,7 @@ pub fn briefing_keys(briefing: &Briefing) -> Vec<u64> {
     keys.extend(briefing.interface_changes.iter().map(interface_key));
     for peer in &briefing.peers {
         keys.push(peer_key(peer));
+        keys.push(place_key(peer));
         if peer.same_task {
             keys.push(same_task_key(peer));
         }
@@ -1108,6 +1120,7 @@ fn keep_changes(
             .filter(|path| peer.same_workspace && peer.editing.contains(path))
             .cloned()
             .collect();
+        peer.place_told = told.contains(&place_key(peer));
         let header = peer_key(peer);
         let header_fresh = keep(header, false);
         if header_fresh {
@@ -1177,6 +1190,8 @@ fn keep_changes(
                     && peer.recent.is_empty())
         });
     }
+    // Each peer still in has its place told with its line.
+    shown.extend(briefing.peers.iter().map(place_key));
     briefing.unchanged = u32::try_from(unchanged).unwrap_or(u32::MAX);
     shown
 }

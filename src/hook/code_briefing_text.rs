@@ -276,6 +276,7 @@ fn long_peer_briefing() -> Briefing {
                 same_task: false,
                 relation: None,
                 looking: Vec::new(),
+                place_told: false,
             })
             .collect(),
         omitted_peers: 0,

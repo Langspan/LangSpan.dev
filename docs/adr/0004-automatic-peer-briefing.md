@@ -191,10 +191,28 @@ context) and to an explicit request (`langspan brief SESSION` or the MCP tool
   one briefing's items, and messages, check results and the other one-time
   items are still acknowledged at decision.
 - *The pointer.* A briefing that left anything out says so: it opens with
-  "What changed since your last briefing", and in place of the closing
-  paragraph about holds, which the full view gave, it ends with one line that
-  counts the unchanged items and names `langspan_brief` and `langspan brief
-  SESSION --request-id NEW_ID` for the full view.
+  "LangSpan, changes since your last briefing", still labelled as data, and in
+  place of the closing paragraph about holds, which the full view gave, it ends
+  with one line that counts the unchanged items and names `langspan_brief` and
+  `langspan brief SESSION --request-id NEW_ID` for the full view. Both lines
+  were shortened on 28 November 2026 (issue #624): they come with most turns.
+- *Where a peer works, once (added 28 November 2026, issue #624).* A peer's
+  worktree and branch are kept apart from its line, under a key of their own
+  that is not an item and is never counted as unchanged. In a briefing of
+  changes only, a peer whose place the session was told has `place_told`,
+  and its line names the session alone ("in this checkout" stays, since a
+  file it edits there is held). A new branch or worktree is a new key, told
+  again. The full view at any session start, including a compacted or resumed
+  context, replaces the told keys, so the place is said again there. The
+  field is additive and defaulted on the wire (golden vector
+  `place-told-briefing-response-v10.json`); it comes only in a briefing of
+  changes only, which the `briefing_memory` capability already gates, so an
+  older coordinator's briefing reads as untold and says the place in full.
+  In the benchmark's dry runs (one run per family, N = 5, seed 7) this and
+  the shorter pointer cut the context added per trial from 22,961 to 14,964
+  bytes in `push_contention`, 37,927 to 24,737 in `discovered_change` and
+  25,000 to 19,314 in `rename_vs_new_caller`, with every trial's combined
+  tests passing and no refusals before or after.
 - *Older records.* A delivery stored before this change has no keys: the next
   briefing is the full view. Keys are kept per generation, like the rest of a
   session's activity, so after a daemon restart a session is told the full

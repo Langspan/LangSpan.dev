@@ -43,7 +43,7 @@
 {"type":"interface_alerted","session_id":"erin","notice_ids":["iface"]}
 {"type":"interface_notices_told","session_id":"erin","notice_ids":["iface"],"via":"briefing"}
 {"type":"interface_notices_told","session_id":"bob","notice_ids":["iface"],"via":"between_steps"}
-{"type":"briefing_delivered","session_id":"bob","signature":"32913a5f3dc1f239","told":[16855862699291930776,2398305748137872996],"told_at_ms":90}
+{"type":"briefing_delivered","session_id":"bob","signature":"32913a5f3dc1f239","told":[16855862699291930776,16092222621797301036,2398305748137872996],"told_at_ms":90}
 {"type":"inflight_delivered","session_id":"erin","keys":["d9fe8ae0e686acb5"]}
 {"type":"context_added","session_id":"bob","bytes":512,"turn":true,"generation":1}
 {"type":"message_sent","message":{"message_id":"msg-1","workspace_id":"work","from":"alice","to":{"kind":"session","session_id":"bob"},"text":"upload takes a stream now","paths":["src/api.rs"]},"at_ms":100,"generation":1}
@@ -70,7 +70,7 @@
 {"type":"tests_recorded","workspace_id":"work","check_id":"auto-1","name":"fast","tree_oid":"1111111111111111111111111111111111111111","command":"cargo test","command_id":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","results":{"passed":["api::uploads","net::times_out"],"all_passed":true},"rerun":true,"at_ms":132}
 {"type":"check_reported","session_ids":["alice"],"notice":{"check_id":"auto-1","name":"fast","tree_oid":"1111111111111111111111111111111111111111","result":{"type":"failed","exit_code":101},"duration_ms":900,"tail":"test net::times_out ... FAILED","failures":[{"test":"net::times_out"}]}}
 {"type":"flaky_test_forgotten","workspace_id":"work","test":"net::times_out"}
-{"type":"briefing_delivered","session_id":"alice","signature":"e570324e363bbf76+0000000000000000000400000000080400200000000000","told":[5122270038844973103,4740437054453460583,12163789538057641963,10021502573866829698],"told_at_ms":134}
+{"type":"briefing_delivered","session_id":"alice","signature":"e570324e363bbf76+0000000000000000000400000000080400200000000000","told":[5122270038844973103,11362358401314979109,4740437054453460583,12163789538057641963,10021502573866829698],"told_at_ms":134}
 {"type":"check_delivered","session_id":"alice","check_id":"auto-1"}
 {"type":"auto_check_disabled","workspace_id":"work"}
 {"type":"turn_taken","turn":{"turn_id":"turn-alice","workspace_id":"work","onto":"main","session_id":"alice","taken_ms":140,"expires_at_ms":60140,"generation":1}}
@@ -88,7 +88,7 @@
 {"type":"checkout_changed","change":{"change_id":"checkout","workspace_id":"work","from_branch":"refs/heads/main","to_branch":"refs/heads/main","from_head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","to_head":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","files":2,"at_ms":10202,"generation":1}}
 {"type":"checkout_run_observed","run":{"run_id":"checkout-run","workspace_id":"work","session_id":"alice","command":"git pull","to_branch":"refs/heads/main","to_head":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","started_ms":10193,"finished_ms":10203,"generation":1}}
 {"type":"uncoordinated_changed","change":{"change_id":"unreported","workspace_id":"work","sessions":["codex.0198c0de-0000-7000-8000-000000000001"],"files":[{"path":"src/upload.rs","state":{"type":"present","digest":"4444444444444444444444444444444444444444444444444444444444444444"}}],"at_ms":10204,"generation":1}}
-{"type":"briefing_delivered","session_id":"codex.0198c0de-0000-7000-8000-000000000001","signature":"2dfeca274ee17b00+0000000000000000000400000000080400200000000000","told":[5122270038844973103,4740437054453460583,12163789538057641963,10021502573866829698,16855862699291930776,2398305748137872996],"told_at_ms":10205}
+{"type":"briefing_delivered","session_id":"codex.0198c0de-0000-7000-8000-000000000001","signature":"2dfeca274ee17b00+0000000000000000000400000000080400200000000000","told":[5122270038844973103,11362358401314979109,4740437054453460583,12163789538057641963,10021502573866829698,16855862699291930776,16092222621797301036,2398305748137872996],"told_at_ms":10205}
 {"type":"uncoordinated_delivered","workspace_id":"work","change_id":"unreported","session_id":"codex.0198c0de-0000-7000-8000-000000000001"}
 {"type":"told_forgotten","session_id":"bob","keys":[2398305748137872996]}
 {"type":"intent_ended","session_id":"alice"}
@@ -96,7 +96,7 @@
 {"type":"trail_recorded","trail":{"session_id":"alice","workspace_id":"work","summary":"change upload to take a stream","read":["src/api.rs"],"edited":[{"path":"src/api.rs","lines":[{"start_line":10,"end_line":14}]}],"checks":[{"name":"fast","result":{"type":"failed","exit_code":101}},{"name":"tests","result":{"type":"passed"}}],"uncommitted":["src/api.rs"],"at_ms":10302,"generation":1}}
 {"type":"session_adopted","adoption":{"from":"alice","session_id":"bob","workspace_id":"work","reason":{"kind":"handoff","message_id":"msg-1"},"at_ms":10303,"generation":1}}
 {"type":"session_registered","session":{"session_id":"dana","workspace_id":"work","generation":1}}
-{"type":"briefing_delivered","session_id":"dana","signature":"a2b75e7ee297f4da+0000000000000000000400000000080400200000000000","told":[5122270038844973103,4740437054453460583,12163789538057641963,10021502573866829698,4097930131021135676,2398305748137872996],"told_at_ms":10305}
+{"type":"briefing_delivered","session_id":"dana","signature":"a2b75e7ee297f4da+0000000000000000000400000000080400200000000000","told":[5122270038844973103,11362358401314979109,4740437054453460583,12163789538057641963,10021502573866829698,4097930131021135676,16092222621797301036,2398305748137872996],"told_at_ms":10305}
 {"type":"trail_taken","workspace_id":"work","from":"alice","session_id":"dana"}
 {"type":"uncoordinated_delivered","workspace_id":"work","change_id":"unreported","session_id":"dana"}
 {"type":"workspace_moved","workspace":{"workspace_id":"spare","root":"/repos/spare-moved"},"from_root":"/repos/spare"}
