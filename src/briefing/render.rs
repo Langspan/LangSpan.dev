@@ -780,6 +780,39 @@ fn keep_placed<T>(items: &mut Vec<T>, placed: &[bool]) {
 /// items that text shows in full (review comment 4711375989): a line left
 /// out or cut short, a path past a cut, and presence that did not fit are
 /// not in it, so the hook can have them told again.
+/// Appends a line for each number other sessions reserved (ADR 0040) that
+/// fits whole under `limit` with `reserve` bytes to spare, keeps only those
+/// in `placed`, and returns how many were left out. The key is plain by
+/// construction; the session and workspace IDs are cleaned.
+fn place_reserved(
+    text: &mut String,
+    placed: &mut langspan_core::Briefing,
+    reserve: usize,
+    limit: usize,
+) -> usize {
+    let mut skipped = 0;
+    let mut shown = Vec::new();
+    for claim in &placed.reserved {
+        let line = format!(
+            "Session {} reserved {} {} in workspace {}; take another with `langspan reserve` rather than reusing it.",
+            clean(&claim.session_id, 128),
+            claim.key,
+            claim.number,
+            clean(&claim.workspace_id, 128)
+        );
+        let fits = text.len() + line.len() + 1 + reserve <= limit;
+        if fits {
+            text.push_str(&line);
+            text.push('\n');
+        } else {
+            skipped += 1;
+        }
+        shown.push(fits);
+    }
+    keep_placed(&mut placed.reserved, &shown);
+    skipped
+}
+
 pub(crate) fn render_peers_placed(
     briefing: &langspan_core::Briefing,
     limit: usize,
@@ -977,27 +1010,7 @@ pub(crate) fn render_peers_placed(
             keep_placed(&mut placed.stale_reads, &shown);
         }
     }
-    // Numbers other sessions reserved (ADR 0040). The key is plain by
-    // construction; the session ID is cleaned. Placed when it fits whole.
-    let mut shown = Vec::new();
-    for claim in &briefing.reserved {
-        let line = format!(
-            "Session {} reserved {} {} in workspace {}; take another with `langspan reserve` rather than reusing it.",
-            clean(&claim.session_id, 128),
-            claim.key,
-            claim.number,
-            clean(&claim.workspace_id, 128)
-        );
-        let fits = text.len() + line.len() + 1 + footer.len() + 96 <= limit;
-        if fits {
-            text.push_str(&line);
-            text.push('\n');
-        } else {
-            skipped += 1;
-        }
-        shown.push(fits);
-    }
-    keep_placed(&mut placed.reserved, &shown);
+    skipped += place_reserved(&mut text, &mut placed, footer.len() + 96, limit);
     // A notice line is placed when it fits whole: one cut short may have
     // lost what makes it news, so it is told again.
     let mut shown = Vec::new();

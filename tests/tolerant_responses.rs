@@ -81,6 +81,8 @@ const STRICT: &[&str] = &[
     "recap-outcome-v10.json /outcome/recap/teammates/N/publication/work/N",
     "recent-briefing-response-v3.json /outcome/briefing/recent/interface_changes/N/changes/N",
     "remembered-outcome-v10.json /outcome/note",
+    "reserved-outcome-v10.json /outcome/held/N",
+    "reserved-outcome-v10.json /outcome/reservation",
     "remote-link-outcome-v10.json /outcome/link",
     "remote-outbox-outcome-v10.json /outcome/publication",
     "remote-outbox-outcome-v10.json /outcome/publication/work/N",
