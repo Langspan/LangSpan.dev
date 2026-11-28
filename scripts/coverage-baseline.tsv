@@ -107,7 +107,11 @@ src/mcp.rs	84.5
 src/mcp/frame.rs	95.7
 src/notify.rs	88.4
 src/observer.rs	92.1
+src/ownership/attribution.rs	88.8
 src/ownership/commit.rs	91.5
+src/ownership/commit_diff.rs	98.0
+src/ownership/commit_mine.rs	89.2
+src/ownership/status_mine.rs	96.4
 src/process.rs	91.5
 src/protocol.rs	99.4
 src/reformat.rs	96.3
