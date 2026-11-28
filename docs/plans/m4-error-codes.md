@@ -57,11 +57,12 @@ touches 27 core files other tasks also edit. So:
    (`scan_outcome_not_recorded`, workspace id, detail) to stderr when the store
    returns an error, instead of dropping it.
 5. `docs/usage.md`: a "Error codes" section with a table of every code, what
-   it means, and whether it is retryable (the same request can succeed later
-   with no change: for example `workspace_busy`, `index_unavailable`,
-   `storage_error`, `coordination_unavailable`, `read_timeout`,
-   `workspace_changed`), with each code's class decided from the message the
-   code is written with.
+   it means, and how to retry it: with the same request ID when nothing was
+   recorded or the outcome is unknown (`index_unavailable`, `storage_error`,
+   `coordination_unavailable`, `read_timeout`), with a new request ID when the
+   coordinator recorded the refusal as the request's receipt (`workspace_busy`,
+   `workspace_in_use`, `session_live`), or not at all, with each code's class
+   decided from where the code is written and whether a receipt holds it.
 
 As landed, step 3 covers only the files in this task's reservation. Main
 added `src/daemon/report_worker.rs` (#581) during the wait for admission; it
@@ -92,7 +93,9 @@ through `relayed()` unchanged.
      and it equals `tests/golden/error_codes.txt` line for line. Written first
      (fails to compile), then passes; delete one code once and watch it fail.
    - `usage_guide_lists_every_code`: the table in `docs/usage.md` names
-     exactly the committed codes, each marked retryable or not.
+     exactly the committed codes, each marked `Same ID`, `New ID` or `No`.
+   - In `tests/store.rs`: a `workspace_busy` refusal replays for its request
+     ID after the admission completes, and a new ID then succeeds.
 2. `src/daemon.rs` unit test for the scan-outcome log is not cheap (the write
    only fails on a storage fault); the log line is checked by reading the
    change, and the existing storage-fault tests must stay green. Said so in

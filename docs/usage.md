@@ -123,23 +123,30 @@ wire, so a client shows the message of a code it doesn't know. The list is
 committed in `crates/langspan-core/tests/golden/error_codes.txt`; removing or
 renaming a code changes it.
 
-Retryable means the same request can succeed later with nothing changed: the
-cause is temporary, such as a busy workspace or an index that hasn't caught up.
-Retry with the same request ID. Any other code needs a changed request or a
-step first, which the message names.
+Retry says how the same request can succeed later with nothing changed but
+time:
 
-| Code | Retryable | Meaning |
+- **Same ID**: nothing was recorded, or the outcome is unknown. Send the
+  identical request with the same request ID; if it was recorded after all,
+  that returns the recorded outcome instead of doing it twice.
+- **New ID**: the coordinator recorded this refusal under the request ID, and
+  the same ID returns it again even after the cause has cleared. Wait for what
+  the message names, then send the request with a new request ID.
+- **No**: the request needs a change or another step first, which the message
+  names.
+
+| Code | Retry | Meaning |
 | --- | --- | --- |
 | `adoption_chain` | No | Too many earlier adoptions or subagents lead to that session; commit part of the work first. |
 | `adoption_changed` | No | The adoption's record no longer matches the coordinator's state; adopt again with a new request ID. |
 | `already_adopted` | No | Another session already adopted that session's work. |
 | `already_published` | No | The repository already publishes through another workspace. |
 | `already_retracted` | No | The message was already withdrawn. |
-| `coordination_unavailable` | Yes | The coordinator did not answer in time, or its queue is unavailable; the outcome is unknown. |
+| `coordination_unavailable` | Same ID | The coordinator did not answer in time, or its queue is unavailable; the outcome is unknown. |
 | `different_repository` | No | The new root is a checkout of another repository. |
 | `index_export_failed` | No | The index export file could not be created or written. |
 | `index_import_refused` | No | The index file could not be imported, or the workspace has no complete scan yet. |
-| `index_unavailable` | Yes | The source index is busy or not available. |
+| `index_unavailable` | Same ID | The source index is busy or not available. |
 | `internal` | No | A request reached a part of the coordinator that does not answer it; report it as a bug. |
 | `invalid_adoption` | No | A session cannot adopt its own work. |
 | `invalid_alert` | No | An interface alert names 1 to 8 notices. |
@@ -226,12 +233,12 @@ step first, which the message names.
 | `policy_fixed` | No | That coordination policy is fixed. |
 | `presence_off` | No | This session's presence is off. |
 | `process_identity_mismatch` | No | The session already names another process. |
-| `read_timeout` | Yes | The request was not received before the I/O deadline. |
+| `read_timeout` | Same ID | The request was not received before the I/O deadline. |
 | `receipt_unreadable` | No | The request ID's earlier outcome cannot be read by this build; use a new request ID. |
 | `recipient_not_found` | No | The recipient is not a session of this workspace. |
 | `remote_not_enabled` | No | The workspace does not publish. |
 | `remote_sharing_on` | No | The workspace publishes, or its ref is not yet removed; disable it first. |
-| `report_busy` | Yes | Other reports are being read; ask again when they finish. |
+| `report_busy` | Same ID | Other reports are being read; ask again when they finish. |
 | `report_unavailable` | No | The report reader has stopped; restart the coordinator with `langspan daemon`. |
 | `request_id_conflict` | No | The request ID belongs to a different command; use a new ID. |
 | `response_too_large` | No | The response exceeds 64 KiB; page it or ask for less. |
@@ -241,14 +248,14 @@ step first, which the message names.
 | `sender_not_in_workspace` | No | The sending or withdrawing session belongs to another workspace. |
 | `session_conflict` | No | The session ID is bound to another workspace. |
 | `session_ended` | No | The session has ended. |
-| `session_live` | Yes | That session has not ended yet. |
+| `session_live` | New ID | That session has not ended yet. |
 | `session_not_found` | No | The session is not registered. |
 | `snapshot_mismatch` | No | Compaction found a snapshot that does not match the daemon's state; nothing was deleted. |
 | `stale_lease` | No | The lease belongs to a previous daemon generation. |
 | `stale_liveness_observation` | No | A liveness observation is older than the evidence held. |
 | `stale_session` | No | The session belongs to a previous daemon generation; register it again. |
 | `status_part` | No | A status record part is applied only as its whole record. |
-| `storage_error` | Yes | The state database could not be read or written. |
+| `storage_error` | Same ID | The state database could not be read or written. |
 | `storage_operation` | No | The core refuses a command the daemon's stores answer. |
 | `symbol_ambiguous` | No | The name is defined more than once; name its file. |
 | `symbol_not_found` | No | No indexed definition has that name. |
@@ -263,8 +270,8 @@ step first, which the message names.
 | `unknown_session` | No | A checkout run names an unregistered session. |
 | `unknown_workspace` | No | The workspace is not registered. |
 | `unsupported_version` | No | The request's protocol version is not served; restart the daemon after upgrading. |
-| `workspace_busy` | Yes | Another session's admission or landing holds the workspace. |
-| `workspace_changed` | Yes | The workspace moved, switched or was removed after the report was observed. |
+| `workspace_busy` | New ID | Another session's admission or landing holds the workspace. |
+| `workspace_changed` | No | The workspace moved, switched or was removed after the report was observed; observe the current registration again. |
 | `workspace_conflict` | No | The ID or root is bound to another workspace, or overlaps one. |
-| `workspace_in_use` | Yes | A current admission in an overlapping workspace covers this root. |
+| `workspace_in_use` | New ID | A current admission in an overlapping workspace covers this root. |
 | `workspace_not_found` | No | The workspace is not registered. |
