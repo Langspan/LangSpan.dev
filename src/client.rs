@@ -1,7 +1,40 @@
 //! Synchronous local IPC used by the CLI and MCP adapter.
 
+/// Why a call to the coordinator failed, in the classes a caller acts on.
+/// Its text is the message the call gives people.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClientError {
+    /// No coordinator answered at the state directory, or it went away
+    /// during the call.
+    Unavailable(String),
+    /// The caller's deadline passed before the answer arrived.
+    TimedOut(String),
+    /// The coordinator answered with an error, or cannot carry the request.
+    Refused(String),
+    /// The answer could not be read, or does not belong to the request.
+    Corrupt(String),
+}
+
+impl std::fmt::Display for ClientError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unavailable(message)
+            | Self::TimedOut(message)
+            | Self::Refused(message)
+            | Self::Corrupt(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for ClientError {}
+
+fn corrupt(error: impl std::fmt::Display) -> ClientError {
+    ClientError::Corrupt(error.to_string())
+}
+
 #[cfg(unix)]
 mod unix {
+    use super::{ClientError, corrupt};
     use crate::protocol::{Capabilities, PROTOCOL_VERSION, Request, Response, encode, read_frame};
     use langspan_core::Outcome;
     use rustix::{
@@ -18,8 +51,17 @@ mod unix {
 
     const CALL_TIMEOUT: Duration = Duration::from_secs(5);
 
-    pub fn call(state_dir: &Path, request: &Request) -> Result<Response, crate::Error> {
+    pub fn call(state_dir: &Path, request: &Request) -> Result<Response, ClientError> {
         call_until(state_dir, request, Instant::now() + CALL_TIMEOUT)
+    }
+
+    /// `TimedOut` for an I/O error of that kind, otherwise `Unavailable`.
+    fn lost(error: &io::Error, message: String) -> ClientError {
+        if error.kind() == io::ErrorKind::TimedOut {
+            ClientError::TimedOut(message)
+        } else {
+            ClientError::Unavailable(message)
+        }
     }
 
     /// Like `call`, bounded by the caller's total deadline instead of the default.
@@ -27,8 +69,8 @@ mod unix {
         state_dir: &Path,
         request: &Request,
         deadline: Instant,
-    ) -> Result<Response, crate::Error> {
-        remaining(deadline)?;
+    ) -> Result<Response, ClientError> {
+        remaining(deadline).map_err(|e| lost(&e, e.to_string()))?;
         // Owner and agent text is redacted here, before it leaves the client.
         let mut request = request.clone();
         crate::text::redact::redact_command(&mut request.command);
@@ -57,7 +99,7 @@ mod unix {
         if let Some((version, named)) = again {
             let capabilities = Capabilities::negotiate(version, named.as_deref());
             if !crate::protocol::fits_with(capabilities, &request.command) {
-                return Err(crate::protocol::older_daemon(version).into());
+                return Err(ClientError::Refused(crate::protocol::older_daemon(version)));
             }
             request.version = version;
             request.capabilities = named;
@@ -65,9 +107,9 @@ mod unix {
             response = exchange(state_dir, &request, deadline)?.0;
         }
         if response.version != request.version {
-            return Err(
-                "daemon response does not match the request identity or protocol version".into(),
-            );
+            return Err(corrupt(
+                "daemon response does not match the request identity or protocol version",
+            ));
         }
         Ok(response)
     }
@@ -79,17 +121,20 @@ mod unix {
         state_dir: &Path,
         request: &Request,
         deadline: Instant,
-    ) -> Result<(Response, Option<Vec<String>>), crate::Error> {
-        let bytes = encode(request)?;
+    ) -> Result<(Response, Option<Vec<String>>), ClientError> {
+        let bytes = encode(request).map_err(|e| ClientError::Refused(e.to_string()))?;
         crate::local::check_endpoint(state_dir).map_err(|error| {
-            format!("coordination unavailable: {error}; start `langspan daemon --state-dir <dir>`")
+            ClientError::Unavailable(format!(
+                "coordination unavailable: {error}; start `langspan daemon --state-dir <dir>`"
+            ))
         })?;
         let socket = state_dir.join("daemon.sock");
         let stream = connect(&socket, deadline).map_err(|error| {
-            format!(
+            let message = format!(
                 "coordination unavailable at {}: {error}; start `langspan daemon --state-dir <dir>`",
                 socket.display()
-            )
+            );
+            lost(&error, message)
         })?;
         // A coordinator that stops during the call resets or closes the
         // connection. That is the same unavailability as a refused connect,
@@ -101,12 +146,13 @@ mod unix {
                 read_frame(stream)
             })
             .map_err(|error| {
-                format!(
+                let message = format!(
                     "coordination unavailable at {}: {error}; once `langspan daemon --state-dir <dir>` is running, retry with the same request_id",
                     socket.display()
-                )
+                );
+                lost(&error, message)
             })?;
-        let mut value: serde_json::Value = serde_json::from_slice(&frame)?;
+        let mut value: serde_json::Value = serde_json::from_slice(&frame).map_err(corrupt)?;
         // A response's fields this build does not know, such as how many
         // events a later daemon left out (`withheld`), are ignored as it is
         // read (`tolerant_responses`).
@@ -114,21 +160,21 @@ mod unix {
             .as_object_mut()
             .and_then(|f| f.shift_remove("capabilities"))
         {
-            Some(names) => Some(serde_json::from_value::<Vec<String>>(names)?),
+            Some(names) => Some(serde_json::from_value::<Vec<String>>(names).map_err(corrupt)?),
             None => None,
         };
-        let response: Response = serde_json::from_value(value)?;
+        let response: Response = serde_json::from_value(value).map_err(corrupt)?;
         // A daemon answers a request it could not read (or a frame it did
         // not take) without the request ID, as an error: it never reached
         // the command, so nothing took effect and the error is the answer.
         let unread =
             response.request_id.is_empty() && matches!(response.outcome, Outcome::Error { .. });
         if response.request_id != request.request_id && !unread {
-            return Err(
-                "daemon response does not match the request identity or protocol version".into(),
-            );
+            return Err(corrupt(
+                "daemon response does not match the request identity or protocol version",
+            ));
         }
-        remaining(deadline)?;
+        remaining(deadline).map_err(|e| lost(&e, e.to_string()))?;
         Ok((response, granted))
     }
 
@@ -326,11 +372,67 @@ mod unix {
             // then closes without answering.
             let peer = std::thread::spawn(move || drop(listener.accept().unwrap()));
             let request = crate::protocol::Request::new("read", langspan_core::Command::Dashboard);
-            let error = call(&dir, &request).unwrap_err().to_string();
+            let error = call(&dir, &request).unwrap_err();
             peer.join().unwrap();
             std::fs::remove_dir_all(&dir).unwrap();
+            assert!(matches!(error, ClientError::Unavailable(_)), "{error:?}");
+            let error = error.to_string();
             assert!(error.starts_with("coordination unavailable at "), "{error}");
             assert!(error.contains("retry with the same request_id"), "{error}");
+        }
+
+        #[test]
+        fn a_past_deadline_is_timed_out_before_anything_is_sent() {
+            let request = crate::protocol::Request::new("read", langspan_core::Command::Dashboard);
+            let error = call_until(Path::new("/nonexistent"), &request, Instant::now()).unwrap_err();
+            assert!(matches!(error, ClientError::TimedOut(_)), "{error:?}");
+            assert_eq!(
+                error.to_string(),
+                "coordination I/O deadline elapsed; retry with the same request_id"
+            );
+        }
+
+        #[test]
+        fn a_refused_status_page_is_told_from_an_unreadable_one() {
+            use langspan_core::{Outcome, StatusRecord};
+            let refused = crate::client::read_all(|_| {
+                Ok(Outcome::Error {
+                    code: "busy".into(),
+                    message: "later".into(),
+                })
+            })
+            .unwrap_err();
+            assert!(matches!(refused, ClientError::Refused(_)), "{refused:?}");
+            assert_eq!(refused.to_string(), "busy: later");
+            let corrupt = crate::client::read_all(|_| {
+                Ok(Outcome::StatusRecords {
+                    records: vec![StatusRecord::Part {
+                        text: "{".into(),
+                        offset: 5,
+                        last: false,
+                    }],
+                    next: None,
+                })
+            })
+            .unwrap_err();
+            assert!(matches!(corrupt, ClientError::Corrupt(_)), "{corrupt:?}");
+            assert!(
+                corrupt
+                    .to_string()
+                    .starts_with("a status record part starts at byte 5"),
+                "{corrupt}"
+            );
+        }
+
+        #[test]
+        fn a_state_directory_without_a_daemon_is_unavailable() {
+            let request = crate::protocol::Request::new("read", langspan_core::Command::Dashboard);
+            let error = call(Path::new("/nonexistent/langspan-state"), &request).unwrap_err();
+            assert!(matches!(error, ClientError::Unavailable(_)), "{error:?}");
+            assert!(
+                error.to_string().starts_with("coordination unavailable"),
+                "{error}"
+            );
         }
 
         /// Roadmap D7 (review comment 4707749784), H9 (review comment
@@ -739,7 +841,7 @@ pub fn call_until(
     state_dir: &std::path::Path,
     request: &crate::protocol::Request,
     _deadline: std::time::Instant,
-) -> Result<crate::protocol::Response, crate::Error> {
+) -> Result<crate::protocol::Response, ClientError> {
     call(state_dir, request)
 }
 
@@ -758,8 +860,8 @@ const MAX_RECORD_BYTES: usize = 8 * 1024 * 1024;
 /// changes while its parts are read is read again from its start. `ask`
 /// answers one command; the daemon's own threads and clients share this.
 pub fn read_all(
-    mut ask: impl FnMut(langspan_core::Command) -> Result<langspan_core::Outcome, crate::Error>,
-) -> Result<langspan_core::State, crate::Error> {
+    mut ask: impl FnMut(langspan_core::Command) -> Result<langspan_core::Outcome, ClientError>,
+) -> Result<langspan_core::State, ClientError> {
     use langspan_core::{Command, Outcome, StatusRecord};
     let mut state = langspan_core::State::default();
     let mut part = String::new();
@@ -770,8 +872,14 @@ pub fn read_all(
             page_bytes: None,
         })? {
             Outcome::StatusRecords { records, next } => (records, next),
-            Outcome::Error { code, message } => return Err(format!("{code}: {message}").into()),
-            other => return Err(format!("unexpected reply to a status page: {other:?}").into()),
+            Outcome::Error { code, message } => {
+                return Err(ClientError::Refused(format!("{code}: {message}")));
+            }
+            other => {
+                return Err(corrupt(format!(
+                    "unexpected reply to a status page: {other:?}"
+                )));
+            }
         };
         for record in records {
             let record = match record {
@@ -779,26 +887,26 @@ pub fn read_all(
                     if offset == 0 {
                         part.clear();
                     } else if u64::try_from(part.len()).ok() != Some(offset) {
-                        return Err(format!(
+                        return Err(corrupt(format!(
                             "a status record part starts at byte {offset}, but {} byte(s) of it were read; read the state again",
                             part.len()
-                        )
-                        .into());
+                        )));
                     }
                     if part.len() + text.len() > MAX_RECORD_BYTES {
-                        return Err(format!(
+                        return Err(corrupt(format!(
                             "a status record is larger than {MAX_RECORD_BYTES} bytes"
-                        )
-                        .into());
+                        )));
                     }
                     part.push_str(&text);
                     if !last {
                         continue;
                     }
                     let record: StatusRecord = serde_json::from_str(&std::mem::take(&mut part))
-                        .map_err(|error| format!("a status record's parts do not join: {error}"))?;
+                        .map_err(|error| {
+                            corrupt(format!("a status record's parts do not join: {error}"))
+                        })?;
                     if matches!(record, StatusRecord::Part { .. }) {
-                        return Err("a status record part holds another part".into());
+                        return Err(corrupt("a status record part holds another part"));
                     }
                     record
                 }
@@ -811,14 +919,18 @@ pub fn read_all(
             };
             record
                 .apply(&mut state)
-                .map_err(|error| format!("{}: {}", error.code, error.message))?;
+                .map_err(|error| {
+                    ClientError::Refused(format!("{}: {}", error.code, error.message))
+                })?;
         }
         match next {
             Some(cursor) => after = Some(cursor),
             None => return Ok(state),
         }
     }
-    Err(format!("status records did not end within {MAX_STATUS_PAGES} pages").into())
+    Err(corrupt(format!(
+        "status records did not end within {MAX_STATUS_PAGES} pages"
+    )))
 }
 
 /// One read-only request to the coordinator at `state_dir`, as `ask` gives
@@ -828,7 +940,7 @@ fn read(
     state_dir: &std::path::Path,
     generation: &mut u64,
     command: langspan_core::Command,
-) -> Result<langspan_core::Outcome, crate::Error> {
+) -> Result<langspan_core::Outcome, ClientError> {
     let response = call(state_dir, &crate::protocol::Request::new("read", command))?;
     *generation = response.generation;
     Ok(response.outcome)
@@ -836,7 +948,7 @@ fn read(
 
 /// Every record of the state, as `read_all` reads it from the coordinator
 /// at `state_dir`. The generation is the one the last page was answered in.
-pub fn full_state(state_dir: &std::path::Path) -> Result<langspan_core::State, crate::Error> {
+pub fn full_state(state_dir: &std::path::Path) -> Result<langspan_core::State, ClientError> {
     let mut generation = 0;
     let mut state = read_all(|command| read(state_dir, &mut generation, command))?;
     state.set_generation(generation);
@@ -850,14 +962,16 @@ pub fn full_state(state_dir: &std::path::Path) -> Result<langspan_core::State, c
 /// a view that may have left it out. Names are those of
 /// `StatusSummary::omitted`.
 pub fn status_with(
-    mut ask: impl FnMut(langspan_core::Command) -> Result<langspan_core::Outcome, crate::Error>,
+    mut ask: impl FnMut(langspan_core::Command) -> Result<langspan_core::Outcome, ClientError>,
     needed: &[&str],
-) -> Result<(langspan_core::State, langspan_core::StatusSummary), crate::Error> {
+) -> Result<(langspan_core::State, langspan_core::StatusSummary), ClientError> {
     use langspan_core::{Command, Outcome};
     let (mut view, mut summary) = match ask(Command::Status)? {
         Outcome::Status { state, summary } => (state, summary.unwrap_or_default()),
-        Outcome::Error { code, message } => return Err(format!("{code}: {message}").into()),
-        other => return Err(format!("unexpected reply to status: {other:?}").into()),
+        Outcome::Error { code, message } => {
+            return Err(ClientError::Refused(format!("{code}: {message}")));
+        }
+        other => return Err(corrupt(format!("unexpected reply to status: {other:?}"))),
     };
     if summary
         .omitted
@@ -874,7 +988,7 @@ pub fn status_with(
 pub fn status_from(
     state_dir: &std::path::Path,
     needed: &[&str],
-) -> Result<(langspan_core::State, langspan_core::StatusSummary), crate::Error> {
+) -> Result<(langspan_core::State, langspan_core::StatusSummary), ClientError> {
     let mut generation = 0;
     status_with(|command| read(state_dir, &mut generation, command), needed)
 }
@@ -883,6 +997,8 @@ pub fn status_from(
 pub fn call(
     _state_dir: &std::path::Path,
     _request: &crate::protocol::Request,
-) -> Result<crate::protocol::Response, crate::Error> {
-    Err("this initial transport requires Unix sockets; Windows support is not implemented".into())
+) -> Result<crate::protocol::Response, ClientError> {
+    Err(ClientError::Unavailable(
+        "this initial transport requires Unix sockets; Windows support is not implemented".into(),
+    ))
 }

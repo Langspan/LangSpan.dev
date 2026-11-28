@@ -46,8 +46,8 @@ pub fn resolve_workspace(
             ),
         ));
     }
-    let anchor_git = crate::git::identity(&anchor, deadline).map_err(unsupported)?;
-    let current_git = crate::git::identity(&cwd, deadline).map_err(unsupported)?;
+    let anchor_git = crate::git::identity(&anchor, deadline).map_err(|e| unsupported(e.into()))?;
+    let current_git = crate::git::identity(&cwd, deadline).map_err(|e| unsupported(e.into()))?;
     if anchor_git.common_dir != current_git.common_dir {
         return Err(unsupported(
             "host cwd is outside the installed repository and its linked worktrees".into(),
