@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/langspan-core", "crates/langspan-graph"]
+members = ["crates/langspan-core", "crates/langspan-graph", "crates/langspan-windows"]
 resolver = "3"
 
 [workspace.package]
@@ -27,6 +27,10 @@ rusqlite = { version = "=0.43.0", features = ["bundled"] }
 rmcp = { version = "=3.11.0", default-features = false, features = ["server", "macros", "transport-io"] }
 tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "io-std", "io-util", "net", "sync", "process", "signal", "time"] }
 rustix = { version = "=1.1.6", features = ["fs", "process", "net", "event", "time"] }
+
+# Safe wrappers for the Win32 calls LangSpan needs on Windows (#85).
+[target.'cfg(windows)'.dependencies]
+langspan-windows = { path = "crates/langspan-windows" }
 
 [dev-dependencies]
 rmcp = { version = "=3.11.0", default-features = false, features = ["client", "transport-child-process"] }

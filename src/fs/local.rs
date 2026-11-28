@@ -1,9 +1,11 @@
 //! Owner-only filesystem primitives for the local transport.
 
 #[cfg(unix)]
+use std::fs::OpenOptions;
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io,
     path::{Path, PathBuf},
 };
@@ -46,7 +48,7 @@ pub fn check_private_directory(metadata: &fs::Metadata) -> Result<(), crate::Err
     check_owner(metadata, true)
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub fn prepare_directory(path: &Path) -> Result<PathBuf, crate::Error> {
     private_directory(path)?;
     let path = fs::canonicalize(path)?;
@@ -104,7 +106,7 @@ pub fn private_file(path: &Path, create: bool) -> Result<File, crate::Error> {
     Ok(file)
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub fn check_existing_file(path: &Path) -> Result<(), crate::Error> {
     match fs::symlink_metadata(path) {
         Ok(_) => {
@@ -114,6 +116,67 @@ pub fn check_existing_file(path: &Path) -> Result<(), crate::Error> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error.into()),
     }
+}
+
+/// Owner-only on Windows: owned by the current user, with a protected DACL
+/// that grants access only to this user and SYSTEM (ADR 0039's 0700 and 0600).
+#[cfg(windows)]
+fn check_owner(file: &File, directory: bool) -> Result<(), crate::Error> {
+    if !langspan_windows::is_owner_only(file)? {
+        return Err("state files must belong to the current user and be owner-only (an ACL that grants only this user and SYSTEM, with nothing inherited)".into());
+    }
+    let metadata = file.metadata()?;
+    if directory && !metadata.is_dir() || !directory && !metadata.is_file() {
+        return Err("state path has an unexpected file type".into());
+    }
+    Ok(())
+}
+
+/// An owner-only directory, created with any missing parents if missing.
+/// A symbolic link or junction, another owner or an ACL open to others is
+/// refused.
+#[cfg(windows)]
+pub fn private_directory(path: &Path) -> Result<(), crate::Error> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => check_owner(&langspan_windows::open_no_follow(path)?, true)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            create_private_directories(path)?;
+            check_owner(&langspan_windows::open_no_follow(path)?, true)?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
+/// Like `DirBuilder::recursive` with mode 0700: every directory created on
+/// the way is owner-only, and one that appears meanwhile is accepted here
+/// and checked by the caller.
+#[cfg(windows)]
+fn create_private_directories(path: &Path) -> io::Result<()> {
+    if path.as_os_str().is_empty() || path.is_dir() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        create_private_directories(parent)?;
+    }
+    match langspan_windows::create_private_directory(path) {
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists && path.is_dir() => Ok(()),
+        result => result,
+    }
+}
+
+/// No Unix socket on Windows yet: the local transport is slice (c) of #85,
+/// which decides the endpoint and any limit on its path.
+#[cfg(windows)]
+pub fn check_socket_fits(_path: &Path) -> Result<(), crate::Error> {
+    Ok(())
+}
+
+#[cfg(windows)]
+pub fn private_file(path: &Path, create: bool) -> Result<File, crate::Error> {
+    let file = langspan_windows::open_private_file(path, create)?;
+    check_owner(&file, false)?;
+    Ok(file)
 }
 
 #[cfg(unix)]
@@ -164,6 +227,88 @@ fn check_peer(uid: u32) -> Result<(), crate::Error> {
         .into());
     }
     Ok(())
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "langspan-local-{name}-{}-{nanos}",
+                std::process::id()
+            ));
+            fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn a_state_directory_is_created_owner_only_with_its_parents() {
+        let scratch = Scratch::new("directory");
+        let state = scratch.0.join("a").join("b").join("state");
+        private_directory(&state).unwrap();
+        private_directory(&state).unwrap();
+        for directory in [
+            scratch.0.join("a"),
+            scratch.0.join("a").join("b"),
+            state.clone(),
+        ] {
+            let handle = langspan_windows::open_no_follow(&directory).unwrap();
+            assert!(
+                langspan_windows::is_owner_only(&handle).unwrap(),
+                "{}",
+                directory.display()
+            );
+        }
+        let prepared = prepare_directory(&state).unwrap();
+        assert!(prepared.is_dir());
+    }
+
+    #[test]
+    fn a_directory_open_to_others_is_refused() {
+        let scratch = Scratch::new("open");
+        let open = scratch.0.join("open");
+        fs::create_dir(&open).unwrap();
+        let error = private_directory(&open).unwrap_err();
+        assert!(error.to_string().contains("owner-only"), "{error}");
+    }
+
+    #[test]
+    fn a_state_file_is_created_owner_only_and_an_open_one_is_refused() {
+        let scratch = Scratch::new("file");
+        let state = scratch.0.join("state");
+        private_directory(&state).unwrap();
+        let path = state.join("graph.db");
+        check_existing_file(&path).unwrap();
+        private_file(&path, true).unwrap();
+        private_file(&path, false).unwrap();
+        check_existing_file(&path).unwrap();
+
+        let open = scratch.0.join("open.json");
+        fs::write(&open, b"{}").unwrap();
+        let error = private_file(&open, false).unwrap_err();
+        assert!(error.to_string().contains("owner-only"), "{error}");
+        assert!(check_existing_file(&open).is_err());
+
+        assert!(
+            private_file(&state, false).is_err(),
+            "a directory is not a state file"
+        );
+    }
 }
 
 #[cfg(all(test, unix))]
