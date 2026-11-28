@@ -99,12 +99,16 @@ cat "$file" > "$out"
         // `gh-mode` of `verifies` or `rejects`, or `other-expired`: signed in
         // to github.com, with another account's sign-in expired, so only a
         // status check scoped to the active github.com account passes, as
-        // with the real gh. It needs the archive to exist.
+        // with the real gh. It needs the archive to exist. Like the real gh,
+        // it fails a verify without --hostname when GH_HOST is set.
         write_executable(
             &fixture.base.join("stubs/gh"),
             r#"#!/bin/sh
 echo "$*" >> "$HOME/../gh.log"
 mode=$(cat "$HOME/../gh-mode" 2>/dev/null || echo signed-out)
+case " $* " in " attestation "*" --hostname github.com "*) ;; " attestation "*)
+	[ -n "$GH_HOST" ] && { echo "An unsupported host was detected." >&2; exit 1; } ;;
+esac
 case "$1 $mode" in
 "auth signed-out") echo "You are not logged into any GitHub hosts." >&2; exit 1 ;;
 "auth other-expired")
@@ -177,7 +181,12 @@ esac
     }
 
     fn run_args_path(&self, os: &str, arch: &str, args: &[&str], path: &str) -> Output {
-        Command::new("/bin/sh")
+        self.command(os, arch, args, path).output().unwrap()
+    }
+
+    fn command(&self, os: &str, arch: &str, args: &[&str], path: &str) -> Command {
+        let mut command = Command::new("/bin/sh");
+        command
             .arg(repo("scripts/install.sh"))
             .args(args)
             .env_clear()
@@ -186,9 +195,8 @@ esac
             .env("PATH", path)
             .env("TMPDIR", self.base.join("tmp"))
             .env("FAKE_OS", os)
-            .env("FAKE_ARCH", arch)
-            .output()
-            .unwrap()
+            .env("FAKE_ARCH", arch);
+        command
     }
 
     fn gh_calls(&self) -> Vec<String> {
@@ -345,7 +353,7 @@ fn a_signed_in_gh_verifies_the_archive_before_it_is_installed() {
     assert!(verify.starts_with("attestation verify /"), "{verify}");
     assert!(
         verify.ends_with(&format!(
-            "/langspan-v9.9.9-x86_64-unknown-linux-gnu.tar.gz -R Langspan/LangSpan.dev --signer-workflow {SIGNER}"
+            "/langspan-v9.9.9-x86_64-unknown-linux-gnu.tar.gz -R Langspan/LangSpan.dev --signer-workflow {SIGNER} --hostname github.com"
         )),
         "{verify}"
     );
@@ -377,6 +385,31 @@ fn another_accounts_expired_sign_in_does_not_skip_the_check() {
     let calls = fixture.gh_calls();
     assert_eq!(calls.len(), 2, "the attestation is checked: {calls:?}");
     assert!(calls[1].starts_with("attestation verify /"), "{calls:?}");
+    assert!(
+        stdout.contains(&format!(
+            "Provenance verified by gh attestation verify: built by {SIGNER}"
+        )),
+        "{stdout}"
+    );
+    fixture.assert_clean();
+}
+
+#[test]
+fn an_enterprise_gh_host_does_not_redirect_the_check() {
+    let fixture = Fixture::new("gh-enterprise-host");
+    fs::write(fixture.base.join("gh-mode"), "verifies").unwrap();
+    let path = format!("{}:/usr/bin:/bin", fixture.base.join("stubs").display());
+    let output = fixture
+        .command("Linux", "x86_64", &[], &path)
+        .env("GH_HOST", "enterprise.example.com")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(
         stdout.contains(&format!(
             "Provenance verified by gh attestation verify: built by {SIGNER}"

@@ -176,8 +176,10 @@ if ! command -v gh >/dev/null 2>&1; then
 # other account or host has a sign-in problem, which would skip the check.
 elif ! bounded 30 gh auth status --active --hostname github.com; then
 	provenance="not checked: gh is not signed in to github.com, or is older than 2.49 (run gh auth login, or update gh)"
+# --hostname too: a GH_HOST naming an enterprise host would otherwise send
+# the check there, not to github.com, where the sign-in and release are.
 elif bounded 120 gh attestation verify "$tmp/$archive" -R Langspan/LangSpan.dev \
-	--signer-workflow "$signer"; then
+	--signer-workflow "$signer" --hostname github.com; then
 	provenance="verified by gh attestation verify: built by $signer"
 else
 	head -c 2000 "$tmp/gh.out" >&2
