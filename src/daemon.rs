@@ -908,6 +908,14 @@ mod unix {
         )
     }
 
+    /// Why a request that does not parse as a typed request is refused.
+    fn invalid_request() -> String {
+        format!(
+            "expected a typed request of protocol version {} to {PROTOCOL_VERSION}; unknown fields are rejected, so send only the fields that version defines",
+            protocol::OLDEST_PROTOCOL_VERSION
+        )
+    }
+
     pub(super) fn error(
         id: String,
         generation: u64,
@@ -1623,12 +1631,7 @@ mod unix {
                     }
                     named = field("capabilities")
                         .and_then(|names| serde_json::from_value(names.clone()).ok());
-                    error(
-                        String::new(),
-                        0,
-                        "invalid_request",
-                        "expected a typed version 1 request; unknown fields are rejected",
-                    )
+                    error(String::new(), 0, "invalid_request", invalid_request())
                 }
             },
             Ok(Err(e)) => error(String::new(), 0, "invalid_frame", e.to_string()),

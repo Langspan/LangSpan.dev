@@ -16,7 +16,8 @@ Include:
 
 - the version (`langspan --version`) and how you installed it;
 - your operating system and architecture;
-- the host and its version (Claude Code or Codex), if one is involved;
+- the host and its version (Claude Code, Codex, Antigravity or Cursor), if one
+  is involved;
 - the steps that show the problem, and what you expected instead.
 
 ## What happens next
@@ -38,8 +39,8 @@ local coordinator and its socket, the dashboard, remote publication through
 Git refs, and the release archives published on this repository's Releases
 page.
 
-Out of scope: Claude Code, Codex and other hosts themselves; report those to
-their vendors.
+Out of scope: Claude Code, Codex, Antigravity, Cursor and other hosts
+themselves; report those to their vendors.
 
 What LangSpan does and does not protect against, including the limits of
 cooperative admission, is in
