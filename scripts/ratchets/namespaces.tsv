@@ -78,6 +78,7 @@ namespace	definitions	application
 namespace	briefing	application
 namespace	today	application
 namespace	count	application
+namespace	tokens	application
 namespace	report	application
 namespace	status_line	application
 namespace	notify	application
@@ -99,6 +100,7 @@ allow	landing	definitions
 allow	landing	integrate
 allow	landing	rewrite
 allow	count	today
+allow	tokens	today
 allow	dashboard	count
 allow	report	today
 allow	cursor	hook

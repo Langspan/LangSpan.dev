@@ -95,7 +95,7 @@ fn lines_of(stdout: &str, stderr: &str) -> Vec<(i32, String, String)> {
 /// of this test's own executable run in `dir`; killed after 60 seconds.
 fn row(command: usize, dir: &Path) -> Vec<String> {
     std::fs::create_dir_all(dir).unwrap();
-    let home = dir.join("home");
+    let home = dir.join("owner");
     let name = concat!(module_path!(), "::one_command_in_process");
     let name = name.split_once("::").unwrap().1;
     let mut child = Command::new(std::env::current_exe().unwrap())

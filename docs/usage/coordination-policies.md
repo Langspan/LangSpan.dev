@@ -16,7 +16,7 @@ prints the table in effect, `--json` as rows, and the MCP tool
 
 One more pause is not in the table yet: a rename held once
 ([issue #213](https://github.com/Langspan/LangSpan.dev/issues/213),
-[ADR 0035](../adr/0035-semantic-layer.md)). A Claude Code or Codex write
+[ADR 0042](../adr/0042-semantic-layer.md)). A Claude Code or Codex write
 that renames or removes an exported name (deleting its file with Codex's
 `*** Delete File:` removes every name in it), while another worktree of the
 repository has uncommitted files that mention it, is refused once

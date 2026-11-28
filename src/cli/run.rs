@@ -6,6 +6,7 @@ use crate::help::HELP;
 use crate::land::{integrate, landing_queue};
 use crate::local::{
     adopt, commit_mine, demo, events_verify, notify, refusal_count, status_line, status_mine,
+    tokens,
 };
 use crate::request::request;
 use crate::serve::{daemon, dashboard, mcp};
@@ -116,6 +117,7 @@ pub(crate) async fn run(input: Vec<String>) -> Result<u8, langspan::Error> {
         ["events", "verify"] if command.is_empty() => {
             return events_verify(&state_dir, &options, json);
         }
+        ["tokens"] => return tokens(&mut options, json),
         ["notify", action] if command.is_empty() => {
             return notify(&state_dir, action, &mut options, json);
         }

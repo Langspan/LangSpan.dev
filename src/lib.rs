@@ -91,6 +91,7 @@ pub mod notify;
 pub mod report;
 pub mod status_line;
 pub mod today;
+pub mod tokens;
 
 // hook
 pub mod antigravity;

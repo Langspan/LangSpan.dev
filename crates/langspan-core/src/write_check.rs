@@ -8,7 +8,7 @@
 //! the hook already checks every write. Pure: the daemon reads the files,
 //! the line journal and the source index and passes what it found; this
 //! module decides what may be claimed from it. Symbol answers are matched by
-//! name (ADR 0035), and they inform; nothing here refuses a write.
+//! name (ADR 0042), and they inform; nothing here refuses a write.
 
 use std::collections::{BTreeMap, BTreeSet};
 

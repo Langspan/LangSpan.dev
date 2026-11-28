@@ -18,7 +18,7 @@ in `/`. The login service sets `PATH` to the one setup ran
 with, so automatic checks find the same tools, and keeps any of
 `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and `GEMINI_CLI_HOME` set then, so its host
 checks read the directories setup installed into.
-[ADR 0035](../adr/0035-one-command-setup.md) records the details.
+[ADR 0040](../adr/0040-one-command-setup.md) records the details.
 
 To run it in the foreground instead, from the LangSpan repository root:
 

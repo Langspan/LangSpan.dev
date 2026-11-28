@@ -39,11 +39,11 @@ impl Drop for Scratch {
     }
 }
 
-/// Runs the binary in `dir` with `dir/home` as its home, no coordinator
-/// autostart, `state` as its state directory and stdin closed; kills it
-/// after 30 seconds.
+/// Runs the binary in `dir` with `dir/owner` as its home (as in
+/// `option_table::prepare`), no coordinator autostart, `state` as its state
+/// directory and stdin closed; kills it after 30 seconds.
 fn run(dir: &Path, state: &Path, args: &[String]) -> Output {
-    let home = dir.join("home");
+    let home = dir.join("owner");
     std::fs::create_dir_all(&home).unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_langspan"));
     support::in_home(&mut command, &home)

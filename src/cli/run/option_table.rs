@@ -86,6 +86,7 @@ pub(crate) const COMMANDS: &[&str] = &[
     "today",
     "report w",
     "count",
+    "tokens --onto main",
     "policy w",
     "policy set w conflict refuse --request-id r1",
     "remember w text --request-id r1",
@@ -195,6 +196,7 @@ pub(crate) const OPTIONS: &[(&str, Option<&str>)] = &[
     ("--before", Some("5")),
     ("--keep-days", Some("90")),
     ("--month", Some("2026-01")),
+    ("--days", Some("3")),
     ("--format", Some("agents")),
     ("--file", Some("AGENTS.md")),
     ("--tools", Some("all")),
@@ -241,12 +243,14 @@ const HELP_START: &str = "LangSpan — local cooperative coordination";
 const NOT_VALID: &str = "option {option} is not valid for this command";
 
 /// Makes `dir` ready for `form`: the root, two homes and the state
-/// directory each command line expects. `dir/home` is the home it runs in.
+/// directory each command line expects. `dir/owner` is the home it runs in,
+/// not `dir/home`: a pinned message showing a path under it would then read
+/// as a real home path to `scripts/content-check.py`.
 pub(crate) fn prepare(form: &str, dir: &Path) {
     std::fs::create_dir_all(dir.join("root")).unwrap();
     // A home with a host configuration, so that `install` and `setup`
     // check their options before they find nothing to install.
-    std::fs::create_dir_all(dir.join("home/.claude")).unwrap();
+    std::fs::create_dir_all(dir.join("owner/.claude")).unwrap();
     std::fs::create_dir_all(dir.join("home2/.claude")).unwrap();
     // An empty owner-only directory: no coordinator answers there. For
     // `daemon` and `setup`, which would start one or a login service, a
