@@ -905,6 +905,34 @@
     "message": "Session is not registered; attach it to a workspace first"
   }
 }
+## reserve-before-scan
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "scope_unknown",
+    "message": "LangSpan has not yet scanned this workspace, so it cannot tell which repository counts its numbers; reserve again in a few seconds"
+  }
+}
+## scan-app-outside-git
+{
+  "events": [
+    {
+      "type": "scan_failed",
+      "failure": {
+        "workspace_id": "app",
+        "detail": "the workspace is not a Git working tree",
+        "at_ms": 200220,
+        "generation": 1
+      }
+    }
+  ],
+  "outcome": {
+    "type": "scan_observed",
+    "workspace_id": "app",
+    "failed": true
+  }
+}
 ## reserve-alice
 {
   "events": [
