@@ -129,9 +129,9 @@ playback fields (`fixtures/live-view-model.json` pins it):
 
 A row without a time (`session_registered`, lease events, a `message_sent`
 recorded before messages kept one) is never a card; it goes to the inspector
-in seq order, and the view never invents its time. Daemon times become wall
-times through the newest `clock_anchored` row; `at_ms` is monotonic across
-generations. A page of the feed can hold fewer rows than asked, so the view
+in seq order, and the view never invents its time. A row's daemon time becomes
+a wall time through its own generation's `clock_anchored` row, the newest one
+before it; a row before every anchor read has no time. A page of the feed can hold fewer rows than asked, so the view
 reads until a page comes back empty, at most a bounded number of pages per
 poll. Path text from the feed is data; the renderer places it with
 `textContent`. Later slices of the issue: the renderer ported from the hero

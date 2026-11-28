@@ -33,11 +33,15 @@ var LangSpanLive = (function () {
 
   const localTime = (ms) => new Date(ms).toTimeString().slice(0, 8);
 
-  // A daemon time as wall-clock text, from the newest clock anchor; null
-  // without one.
+  // A row's daemon time as wall-clock text, from the clock anchor of its
+  // own generation: the newest one before it. Null without one, since a
+  // later generation's anchor need not hold for an earlier clock.
   function clock(events, format) {
-    const anchor = events.filter((e) => e.type === "clock_anchored").pop();
-    return (at) => (anchor && at != null ? format(anchor.wall_ms + (at - anchor.clock_ms)) : null);
+    const anchors = events.filter((e) => e.type === "clock_anchored");
+    return (e) => {
+      const anchor = anchors.findLast((a) => a.seq < e.seq);
+      return anchor && e.at_ms != null ? format(anchor.wall_ms + (e.at_ms - anchor.clock_ms)) : null;
+    };
   }
 
   // What a timed row of a local session draws as, or null.
@@ -67,7 +71,7 @@ var LangSpanLive = (function () {
     const n = c.steps.length;
     const path = first.paths[0];
     const all = first.paths.join(", ");
-    const [t0, t1] = [time(first.at_ms), time(c.steps[n - 1].at_ms)];
+    const [t0, t1] = [time(first), time(c.steps[n - 1])];
     const span = n > 1 && t0 !== null ? t0 + "–" + t1 : t0;
     const out = { id, lane: c.lane, kind: c.kind, seq: c.steps.map((e) => e.seq), time: t0 };
     const rows = [];
@@ -120,7 +124,7 @@ var LangSpanLive = (function () {
     const work = [];
     const runs = [];
     const last = [];
-    const open = []; // per lane: held path -> its run, until saved
+    const open = []; // per lane: held path -> {reread}, until saved
     for (const e of events) {
       let kind = kindOf(e);
       if (!kind) continue;
@@ -142,7 +146,7 @@ var LangSpanLive = (function () {
         }
       }
       // An edit saves every hold on any of its files; it started from the
-      // current files only if each of those holds was re-read.
+      // current files only if each held file among them was re-read.
       const holds = kind === "edit" ? e.paths.filter((p) => open[l].has(p)).map((p) => open[l].get(p)) : [];
       if (holds.length) {
         for (const p of e.paths) open[l].delete(p);
@@ -155,7 +159,7 @@ var LangSpanLive = (function () {
         continue;
       }
       const run = { lane: l, kind, steps: [e], again, reread: holds.length > 0 && holds.every((h) => h.reread) };
-      if (kind === "held") for (const p of e.paths) open[l].set(p, run);
+      if (kind === "held") for (const p of e.paths) open[l].set(p, { reread: false });
       runs.push(run);
       last[l] = run;
     }
