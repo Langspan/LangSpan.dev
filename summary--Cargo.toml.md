@@ -1,5 +1,5 @@
-`hash: wc:1443`
+`hash: wc:1598`
 
-- Workspace with two internal crates: `langspan-core` and `langspan-graph`.
-- Root package `langspan` (edition 2024) is non-published and depends on core/graph plus serde, rusqlite, rmcp, tokio, and rustix.
-- Enforces `unsafe_code = forbid` and strict clippy bans (e.g., `dbg_macro`, `todo`).
+- Workspace with internal crates `langspan-core` and `langspan-graph` and resolver 3.
+- Root package `langspan` v0.8.0 (edition 2024, rust 1.100), not published.
+- Dependencies include `rusqlite` (bundled), `rmcp` server transport, `tokio`, and `rustix`; lint policy forbids unsafe code.

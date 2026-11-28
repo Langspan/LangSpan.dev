@@ -1,5 +1,5 @@
-`hash: wc:5161`
+`hash: wc:4999`
 
-- Defines wiki hierarchy with top-level pages: Home, Architecture, CLI and Integration, Setup and Development, For Agents.
-- Includes child pages for coordination flow, storage/events, CLI reference, MCP, installation, engineering workflow.
-- For Agents section contains fully inlined AGENTS.md and llms.txt starter content (no generation blocks).
+- Defines 13-page wiki structure across Home, Architecture, CLI/Integration, Setup/Development, and For Agents.
+- Uses instruction blocks for generated pages and inlines complete AGENTS.md + llms.txt starter content.
+- Keeps For Agents as the final top-level page with AGENTSmd and llmstxt child pages.

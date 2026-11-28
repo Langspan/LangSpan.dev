@@ -1,8 +1,6 @@
-`hash: wc:5517`
+`hash: wc:8229`
 
-- Architecture overview states Rust implementation split across pure `langspan-core`, SQLite event/receipt store, Unix-socket daemon, CLI, and stdio MCP adapter.
-- Source index is in `crates/langspan-graph`.
-- Notes protocol/schema compatibility: wire protocol version 10 with backward shapes, SQLite schema marker 4, rollback compatibility policy.
-- Emphasizes caller authority split between coordination commands and owner grants.
-- Includes milestone decision history via ADRs and evidence-oriented acceptance framing.
-
+- Describes product shape: local-first headless coordination with CLI, MCP, and optional UI.
+- Components: pure `langspan-core`, SQLite event store, Unix-socket daemon, CLI, MCP adapter, and derived index in `crates/langspan-graph`.
+- Documents module-map layering, compatibility policy, protocol v10 capability model, and schema marker v4.
+- Summarizes milestone ADR decisions and evidence expectations for acceptance.

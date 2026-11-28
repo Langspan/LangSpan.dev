@@ -1,19 +1,19 @@
 {
   "templatePath": ".github/agentic-wiki/PAGES.md",
-  "templateHash": "wc:5161",
+  "templateHash": "wc:4999",
   "pages": [
-    { "title": "Home", "slug": "Home", "level": 1, "parentSlug": null, "sidebarSections": [] },
-    { "title": "Architecture", "slug": "Architecture", "level": 1, "parentSlug": null, "sidebarSections": [] },
-    { "title": "Coordination Flow", "slug": "Coordination-Flow", "level": 2, "parentSlug": "Architecture", "sidebarSections": [] },
-    { "title": "Storage and Events", "slug": "Storage-and-Events", "level": 2, "parentSlug": "Architecture", "sidebarSections": [] },
-    { "title": "CLI and Integration", "slug": "CLI-and-Integration", "level": 1, "parentSlug": null, "sidebarSections": [] },
-    { "title": "CLI Reference", "slug": "CLI-Reference", "level": 2, "parentSlug": "CLI-and-Integration", "sidebarSections": [] },
-    { "title": "MCP Server", "slug": "MCP-Server", "level": 2, "parentSlug": "CLI-and-Integration", "sidebarSections": [] },
-    { "title": "Setup and Development", "slug": "Setup-and-Development", "level": 1, "parentSlug": null, "sidebarSections": [] },
-    { "title": "Installation", "slug": "Installation", "level": 2, "parentSlug": "Setup-and-Development", "sidebarSections": [] },
-    { "title": "Engineering Workflow", "slug": "Engineering-Workflow", "level": 2, "parentSlug": "Setup-and-Development", "sidebarSections": [] },
-    { "title": "For Agents", "slug": "For-Agents", "level": 1, "parentSlug": null, "sidebarSections": [] },
-    { "title": "AGENTS.md", "slug": "AGENTSmd", "level": 2, "parentSlug": "For-Agents", "sidebarSections": [] },
-    { "title": "llms.txt", "slug": "llmstxt", "level": 2, "parentSlug": "For-Agents", "sidebarSections": [] }
+    {"title": "Home", "slug": "Home", "level": 1, "parentSlug": null, "sidebarSections": []},
+    {"title": "Architecture", "slug": "Architecture", "level": 1, "parentSlug": null, "sidebarSections": []},
+    {"title": "Coordination Flow", "slug": "Coordination-Flow", "level": 2, "parentSlug": "Architecture", "sidebarSections": []},
+    {"title": "Storage and Events", "slug": "Storage-and-Events", "level": 2, "parentSlug": "Architecture", "sidebarSections": []},
+    {"title": "CLI and Integration", "slug": "CLI-and-Integration", "level": 1, "parentSlug": null, "sidebarSections": []},
+    {"title": "CLI Reference", "slug": "CLI-Reference", "level": 2, "parentSlug": "CLI-and-Integration", "sidebarSections": []},
+    {"title": "MCP Server", "slug": "MCP-Server", "level": 2, "parentSlug": "CLI-and-Integration", "sidebarSections": []},
+    {"title": "Setup and Development", "slug": "Setup-and-Development", "level": 1, "parentSlug": null, "sidebarSections": []},
+    {"title": "Installation", "slug": "Installation", "level": 2, "parentSlug": "Setup-and-Development", "sidebarSections": []},
+    {"title": "Engineering Workflow", "slug": "Engineering-Workflow", "level": 2, "parentSlug": "Setup-and-Development", "sidebarSections": []},
+    {"title": "For Agents", "slug": "For-Agents", "level": 1, "parentSlug": null, "sidebarSections": []},
+    {"title": "AGENTS.md", "slug": "AGENTSmd", "level": 2, "parentSlug": "For-Agents", "sidebarSections": []},
+    {"title": "llms.txt", "slug": "llmstxt", "level": 2, "parentSlug": "For-Agents", "sidebarSections": []}
   ]
 }

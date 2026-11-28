@@ -1,109 +1,112 @@
 {
   "Home": {
     "sourceFiles": [
-      { "path": "README.md", "hash": "wc:13932" },
-      { "path": "docs/usage.md", "hash": "wc:5080" },
-      { "path": "Cargo.toml", "hash": "wc:1443" }
+      {"path": "README.md", "hash": "wc:13932"},
+      {"path": "docs/usage.md", "hash": "wc:5080"},
+      {"path": "Cargo.toml", "hash": "wc:1598"}
     ],
-    "templateHash": "wc:5161:Home",
-    "generatedAt": "2026-11-27T17:11:36Z"
+    "templateHash": "wc:4999:Home",
+    "generatedAt": "2026-11-28T01:33:54Z"
   },
   "Architecture": {
     "sourceFiles": [
-      { "path": "docs/architecture.md", "hash": "wc:5517" },
-      { "path": "src/daemon.rs", "hash": "wc:87291" },
-      { "path": "src/mcp.rs", "hash": "wc:110684" },
-      { "path": "src/protocol.rs", "hash": "wc:30363" }
+      {"path": "docs/architecture.md", "hash": "wc:8229"},
+      {"path": "src/lib.rs", "hash": "wc:1860"},
+      {"path": "src/daemon.rs", "hash": "wc:94182"},
+      {"path": "src/mcp.rs", "hash": "wc:110658"},
+      {"path": "src/protocol.rs", "hash": "wc:30612"}
     ],
-    "templateHash": "wc:5161:Architecture",
-    "generatedAt": "2026-11-27T17:11:36Z"
+    "templateHash": "wc:4999:Architecture",
+    "generatedAt": "2026-11-28T01:33:54Z"
   },
   "Coordination-Flow": {
     "sourceFiles": [
-      { "path": "crates/langspan-core/src/admission.rs", "hash": "wc:41152" },
-      { "path": "src/protocol.rs", "hash": "wc:30363" }
+      {"path": "crates/langspan-core/src/admission.rs", "hash": "wc:41152"},
+      {"path": "src/protocol.rs", "hash": "wc:30612"},
+      {"path": "src/cli/run.rs", "hash": "wc:6096"}
     ],
-    "templateHash": "wc:5161:Coordination-Flow",
-    "generatedAt": "2026-11-27T17:11:36Z"
+    "templateHash": "wc:4999:Coordination-Flow",
+    "generatedAt": "2026-11-28T01:33:54Z"
   },
   "Storage-and-Events": {
     "sourceFiles": [
-      { "path": "src/store.rs", "hash": "wc:133393" },
-      { "path": "docs/architecture.md", "hash": "wc:5517" }
+      {"path": "src/store.rs", "hash": "wc:63683"},
+      {"path": "src/protocol.rs", "hash": "wc:30612"},
+      {"path": "docs/architecture.md", "hash": "wc:8229"}
     ],
-    "templateHash": "wc:5161:Storage-and-Events",
-    "generatedAt": "2026-11-27T17:11:36Z"
+    "templateHash": "wc:4999:Storage-and-Events",
+    "generatedAt": "2026-11-28T01:33:54Z"
   },
   "CLI-and-Integration": {
     "sourceFiles": [
-      { "path": "src/main.rs", "hash": "wc:2154" },
-      { "path": "src/cli/run.rs", "hash": "wc:6086" },
-      { "path": "src/mcp.rs", "hash": "wc:110684" }
+      {"path": "src/main.rs", "hash": "wc:2154"},
+      {"path": "src/cli/run.rs", "hash": "wc:6096"},
+      {"path": "src/daemon.rs", "hash": "wc:94182"},
+      {"path": "src/mcp.rs", "hash": "wc:110658"}
     ],
-    "templateHash": "wc:5161:CLI-and-Integration",
-    "generatedAt": "2026-11-27T17:11:36Z"
+    "templateHash": "wc:4999:CLI-and-Integration",
+    "generatedAt": "2026-11-28T01:33:54Z"
   },
   "CLI-Reference": {
     "sourceFiles": [
-      { "path": "src/cli/run.rs", "hash": "wc:6086" },
-      { "path": "docs/usage.md", "hash": "wc:5080" }
+      {"path": "src/cli/run.rs", "hash": "wc:6096"},
+      {"path": "docs/usage.md", "hash": "wc:5080"}
     ],
-    "templateHash": "wc:5161:CLI-Reference",
-    "generatedAt": "2026-11-27T17:11:36Z"
+    "templateHash": "wc:4999:CLI-Reference",
+    "generatedAt": "2026-11-28T01:33:54Z"
   },
   "MCP-Server": {
     "sourceFiles": [
-      { "path": "src/mcp.rs", "hash": "wc:110684" },
-      { "path": "src/tool_names.rs", "hash": "wc:1712" },
-      { "path": "docs/usage/mcp.md", "hash": "wc:7581" }
+      {"path": "src/mcp.rs", "hash": "wc:110658"},
+      {"path": "docs/usage/mcp.md", "hash": "wc:7710"}
     ],
-    "templateHash": "wc:5161:MCP-Server",
-    "generatedAt": "2026-11-27T17:11:36Z"
+    "templateHash": "wc:4999:MCP-Server",
+    "generatedAt": "2026-11-28T01:33:54Z"
   },
   "Setup-and-Development": {
     "sourceFiles": [
-      { "path": "docs/engineering.md", "hash": "wc:12661" },
-      { "path": "docs/development-process.md", "hash": "wc:19746" },
-      { "path": "docs/security/threat-model.md", "hash": "wc:204724" }
+      {"path": "docs/engineering.md", "hash": "wc:13749"},
+      {"path": "docs/development-process.md", "hash": "wc:30385"}
     ],
-    "templateHash": "wc:5161:Setup-and-Development",
-    "generatedAt": "2026-11-27T17:11:36Z"
+    "templateHash": "wc:4999:Setup-and-Development",
+    "generatedAt": "2026-11-28T01:33:54Z"
   },
   "Installation": {
     "sourceFiles": [
-      { "path": "docs/install.md", "hash": "wc:7142" },
-      { "path": "README.md", "hash": "wc:13932" }
+      {"path": "docs/install.md", "hash": "wc:7142"},
+      {"path": "README.md", "hash": "wc:13932"}
     ],
-    "templateHash": "wc:5161:Installation",
-    "generatedAt": "2026-11-27T17:11:36Z"
+    "templateHash": "wc:4999:Installation",
+    "generatedAt": "2026-11-28T01:33:54Z"
   },
   "Engineering-Workflow": {
     "sourceFiles": [
-      { "path": "docs/engineering.md", "hash": "wc:12661" },
-      { "path": "docs/engineering-standard.md", "hash": "wc:4548" }
+      {"path": "docs/engineering.md", "hash": "wc:13749"},
+      {"path": "docs/engineering-standard.md", "hash": "wc:4548"},
+      {"path": "docs/development-process.md", "hash": "wc:30385"}
     ],
-    "templateHash": "wc:5161:Engineering-Workflow",
-    "generatedAt": "2026-11-27T17:11:36Z"
+    "templateHash": "wc:4999:Engineering-Workflow",
+    "generatedAt": "2026-11-28T01:33:54Z"
   },
   "For-Agents": {
     "sourceFiles": [
-      { "path": ".github/agentic-wiki/PAGES.md", "hash": "wc:5161" }
+      {"path": ".github/agentic-wiki/PAGES.md", "hash": "wc:4999"}
     ],
-    "templateHash": "wc:5161:For-Agents",
-    "generatedAt": "2026-11-27T17:11:36Z"
+    "templateHash": "wc:4999:For-Agents",
+    "generatedAt": "2026-11-28T01:33:54Z"
   },
   "AGENTSmd": {
     "sourceFiles": [
-      { "path": ".github/agentic-wiki/PAGES.md", "hash": "wc:5161" }
+      {"path": ".github/agentic-wiki/PAGES.md", "hash": "wc:4999"}
     ],
-    "templateHash": "wc:5161:AGENTSmd",
-    "generatedAt": "2026-11-27T17:11:36Z"
+    "templateHash": "wc:4999:AGENTSmd",
+    "generatedAt": "2026-11-28T01:33:54Z"
   },
   "llmstxt": {
     "sourceFiles": [
-      { "path": ".github/agentic-wiki/PAGES.md", "hash": "wc:5161" }
+      {"path": ".github/agentic-wiki/PAGES.md", "hash": "wc:4999"}
     ],
-    "templateHash": "wc:5161:llmstxt",
-    "generatedAt": "2026-11-27T17:11:36Z"
+    "templateHash": "wc:4999:llmstxt",
+    "generatedAt": "2026-11-28T01:33:54Z"
   }
 }
