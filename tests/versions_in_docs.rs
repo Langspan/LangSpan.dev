@@ -4,7 +4,9 @@
 //! `PROTOCOL_VERSION` and `OLDEST_PROTOCOL_VERSION` in `src/protocol.rs`, and
 //! `SCHEMA_VERSION` in `src/store.rs`. Changing a constant without these
 //! documents fails here. A document split into pages (`docs/usage.md` and the
-//! pages under `docs/usage/`) is read as one.
+//! pages under `docs/usage/`) is read as one. The threat model also names
+//! releases (`vX.Y.Z`); each must be a release in `CHANGELOG.md`, which must
+//! list the crate's own version.
 
 use std::fs;
 use std::path::Path;
@@ -183,6 +185,86 @@ fn check(code: Versions) -> Vec<String> {
         .iter()
         .flat_map(|name| problems(name, &document(root, name), code))
         .collect()
+}
+
+/// The releases in `CHANGELOG.md`, as `vX.Y.Z`, from its headings:
+/// `## [X.Y.Z](...)`, or `## X.Y.Z (date)` for the first release.
+fn released(changelog: &str) -> Vec<String> {
+    changelog
+        .lines()
+        .filter_map(|line| line.strip_prefix("## "))
+        .filter_map(|line| {
+            let line = line.strip_prefix('[').unwrap_or(line);
+            line.split([']', ' ']).next()
+        })
+        .map(|version| format!("v{version}"))
+        .collect()
+}
+
+/// Every `vX.Y.Z` the text names, except a format example ("like `v1.2.3`").
+fn named_releases(text: &str) -> Vec<String> {
+    let words = words(text);
+    words
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| {
+            index
+                .checked_sub(1)
+                .and_then(|i| words.get(i))
+                .is_none_or(|w| w != "like")
+        })
+        .map(|(_, word)| word)
+        .filter(|word| {
+            word.strip_prefix('v').is_some_and(|rest| {
+                let parts: Vec<_> = rest.split('.').collect();
+                parts.len() == 3 && parts.iter().all(|part| part.parse::<u32>().is_ok())
+            })
+        })
+        .cloned()
+        .collect()
+}
+
+fn release_problems(name: &str, text: &str, released: &[String]) -> Vec<String> {
+    named_releases(text)
+        .into_iter()
+        .filter(|version| !released.contains(version))
+        .map(|version| format!("{name} names {version}, which is not a release in CHANGELOG.md"))
+        .collect()
+}
+
+#[test]
+fn the_release_finder_skips_a_format_example() {
+    let text = "Releases since v0.1.0. Observed on v0.9.0 (run 1). Must look like `v1.2.3`.";
+    assert_eq!(named_releases(text), ["v0.1.0", "v0.9.0"]);
+    let changelog = "# Changelog\n\n## [0.9.0](https://x) (2026-11-28)\n\n### Bug Fixes\n\n\
+        ## 0.1.0 (2026-11-25)\n";
+    assert_eq!(released(changelog), ["v0.9.0", "v0.1.0"]);
+    assert!(release_problems("doc", text, &released(changelog)).is_empty());
+    assert_eq!(
+        release_problems("doc", text, &["v0.9.0".to_string()]),
+        ["doc names v0.1.0, which is not a release in CHANGELOG.md"]
+    );
+}
+
+#[test]
+fn the_threat_model_names_only_published_releases() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let changelog = fs::read_to_string(root.join("CHANGELOG.md")).expect("read CHANGELOG.md");
+    let released = released(&changelog);
+    assert!(
+        released.contains(&format!("v{}", env!("CARGO_PKG_VERSION"))),
+        "CHANGELOG.md has no release for the crate's version {}",
+        env!("CARGO_PKG_VERSION")
+    );
+    let name = "docs/security/threat-model.md";
+    let text = fs::read_to_string(root.join(name)).expect("read the threat model");
+    assert!(!named_releases(&text).is_empty(), "{name} names no release");
+    let problems = release_problems(name, &text, &released);
+    assert!(
+        problems.is_empty(),
+        "Name only published releases:\n{}",
+        problems.join("\n")
+    );
 }
 
 #[test]
