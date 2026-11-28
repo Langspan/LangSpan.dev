@@ -2115,6 +2115,65 @@ fn cargo_audit_takes_its_ignores_from_deny_toml() {
     );
 }
 
+/// The advisory dry run (issue #312): a manual run of check.yml with
+/// `advisory_dry_run` audits a lockfile holding a known advisory after the
+/// real one, so the `Linux` job fails on it and nightly-report files under
+/// a title of its own. Read from the files: what it verifies is the
+/// workflow's and check.sh's text; the dispatched run is the evidence
+/// (docs/evidence/ci/advisories.md).
+#[test]
+fn an_advisory_dry_run_fails_linux_on_a_known_advisory_and_reports_apart() {
+    let text = workflow("check.yml");
+    assert!(
+        text.contains(concat!(
+            "      advisory_dry_run:\n",
+            "        description: Audit a lockfile with a known advisory, so Linux fails and nightly-report runs\n",
+            "        type: boolean\n",
+            "        default: false\n",
+        )),
+        "check.yml lacks the advisory_dry_run input"
+    );
+    // Only the Linux build's check step sets it, and only from the input.
+    let setting = "LANGSPAN_ADVISORY_DRY_RUN: ${{ inputs.advisory_dry_run && '1' || '' }}\n";
+    assert_eq!(text.matches("LANGSPAN_ADVISORY_DRY_RUN").count(), 1);
+    assert!(job(&text, "linux").contains(&format!("          {setting}")));
+
+    let check = read("scripts/check.sh");
+    let real = "  cargo audit --deny warnings $audit_flags\n";
+    let dry = concat!(
+        "  if [ \"${LANGSPAN_ADVISORY_DRY_RUN:-}\" = 1 ]; then\n",
+        "    # shellcheck disable=SC2086 # each flag and id is one word\n",
+        "    cargo audit --deny warnings $audit_flags --file tests/fixtures/advisory-dry-run/known-advisory.lock\n",
+        "  fi\n",
+    );
+    let (at_real, at_dry) = (check.find(real), check.find(dry));
+    assert!(
+        matches!((at_real, at_dry), (Some(r), Some(d)) if r < d),
+        "check.sh audits the fixture after the real lockfile"
+    );
+
+    // Not named Cargo.lock, so no tool reads it as this repository's.
+    let fixture = read("tests/fixtures/advisory-dry-run/known-advisory.lock");
+    assert!(
+        fixture.contains("name = \"smallvec\"\nversion = \"1.6.0\"\n"),
+        "{fixture}"
+    );
+    assert!(!read("deny.toml").contains("RUSTSEC-2021-0003"));
+
+    let report = job(&text, "nightly-report");
+    for line in [
+        "    if: (github.event_name == 'schedule' || inputs.advisory_dry_run) && failure()\n",
+        "          TITLE: Nightly Rust checks on main failed\n",
+        "          DRY_RUN: ${{ inputs.advisory_dry_run == true }}\n",
+        "          DRY_RUN_TITLE: Advisory dry run of the nightly report\n",
+        "            TITLE=$DRY_RUN_TITLE\n",
+        "export TITLE\n",
+    ] {
+        assert!(report.contains(line), "nightly-report lacks {line}");
+    }
+    assert!(!report.contains("actions/checkout"));
+}
+
 #[test]
 fn an_advisory_ignore_needs_a_reason_and_a_review_date_still_ahead() {
     let good = concat!(
