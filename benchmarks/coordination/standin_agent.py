@@ -416,10 +416,12 @@ def main(argv):
                 # an agent that follows it fixes its call.
                 informed = revised = True
                 edited += apply_edits(session, task["standin"]["follow"])
-        if plan.get("isolation") == "shared" and edited:
-            # One checkout for every session: land by committing only its
-            # own files and pushing, as its prompt asks.
-            shared_checkout.commit_and_push(sorted(set(edited)), index)
+        if shared_checkout.lands_by_pushing(plan.get("isolation"), plan.get("family")) and edited:
+            # Land by committing only its own files and pushing, as its
+            # prompt asks. Each rejection means a peer landed, and each peer
+            # lands once, so as many tries as sessions always land.
+            shared_checkout.commit_and_push(sorted(set(edited)), index,
+                                            attempts=max(shared_checkout.MAX_PUSH_ATTEMPTS, plan["sessions"]))
         session.fire("Stop", stop_hook_active=False)
         session.fire("SessionEnd", reason="other")
     print(json.dumps({

@@ -2383,7 +2383,8 @@ class DryRun(Temporary):
         self.assertTrue(all(t["detail"].startswith("change_not_made") for t in record["tasks"]), record["tasks"])
 
     def check_arm(self, arm, sizes, modes=("ignore", "follow")):
-        for family in tasks.FAMILIES:
+        # push_contention's sessions land by pushing: test_shared.py runs its dry runs.
+        for family in [family for family in tasks.FAMILIES if family != "push_contention"]:
             # Peer task text informs the awareness arm, except where no task
             # text names the change: there only LangSpan's notices can.
             informs = arm == "langspan" or (arm == "awareness_only" and family != "discovered_change")
