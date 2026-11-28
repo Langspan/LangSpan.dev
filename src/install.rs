@@ -14,6 +14,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub use crate::hosts::port::{PRESENCE_MINUTES, Presence};
 pub use crate::vendor::{Vendor, quote};
 
 pub const EVENTS: [&str; 3] = ["PreToolUse", "PostToolUse", "PostToolUseFailure"];
@@ -313,44 +314,7 @@ pub struct Registration {
     pub outline_reads: bool,
 }
 
-/// The presence options of an installed hook command (roadmap A13).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Presence {
-    /// False: the session's reads, searches and shell paths are never shown.
-    pub shown: bool,
-    /// How old a peer's presence the session is shown; `None` is the
-    /// default, `PRESENCE_MINUTES`.
-    pub minutes: Option<u64>,
-}
-
-/// The presence window, in minutes, when none is given.
-pub const PRESENCE_MINUTES: u64 = langspan_core::PRESENCE_WINDOW_MS / 60_000;
-
-impl Default for Presence {
-    fn default() -> Self {
-        Self {
-            shown: true,
-            minutes: None,
-        }
-    }
-}
-
 impl Presence {
-    /// How old a peer's presence the session is shown, in milliseconds.
-    pub fn window_ms(self) -> u64 {
-        self.minutes.unwrap_or(PRESENCE_MINUTES) * 60_000
-    }
-
-    /// `--presence-minutes`: 1 to 30, the briefing horizon. The default
-    /// is written as no option at all.
-    pub fn minutes(value: &str) -> Result<Option<u64>, String> {
-        match value.parse::<u64>() {
-            Ok(PRESENCE_MINUTES) => Ok(None),
-            Ok(minutes @ 1..=30) => Ok(Some(minutes)),
-            _ => Err("--presence-minutes must be a whole number of minutes from 1 to 30".into()),
-        }
-    }
-
     fn words(self) -> Vec<String> {
         let mut words = Vec::new();
         if !self.shown {
@@ -1329,6 +1293,35 @@ fn write_bytes(
     _before_rename: &mut dyn FnMut(),
 ) -> Result<Written, crate::Error> {
     Err("hook installation is implemented for Unix in this slice".into())
+}
+
+/// The project file in `dir` (canonical) holding a LangSpan hook for
+/// `vendor` that names `dir` as its root and `state_dir`, with that hook's
+/// registration, its root canonical. Also used by `doctor`.
+pub fn install_at(
+    vendor: crate::install::Vendor,
+    state_dir: &Path,
+    dir: &Path,
+) -> Option<(PathBuf, crate::install::Registration)> {
+    let canonical = |dir: &Path| fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    vendor.project_hook_files().iter().find_map(|file| {
+        let path = dir.join(file);
+        let Ok(Some(settings)) = crate::install::read(&path) else {
+            return None;
+        };
+        crate::install::managed_hooks(&settings, |_| true)
+            .iter()
+            .filter_map(|hook| crate::install::parse_project_hook(vendor, hook))
+            .map(|mut registration| {
+                registration.root = canonical(&registration.root);
+                registration
+            })
+            .find(|registration| {
+                registration.root == dir
+                    && crate::install::same_directory(&registration.state_dir, state_dir)
+            })
+            .map(|registration| (path, registration))
+    })
 }
 
 #[cfg(test)]

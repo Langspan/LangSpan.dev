@@ -368,6 +368,7 @@ SinceInterface
 SinceLanding
 SinceMessage
 SinceQuery
+SnapshotRecord
 SourceOrigin
 StaleFile
 StaleRead

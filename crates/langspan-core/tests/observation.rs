@@ -2,21 +2,24 @@
 //! renew, complete, expire or reactivate admission.
 
 use langspan_core::{
-    Command, Conflict, Decision, Event, LeaseRelation, LeaseStatus, Outcome, State, ToolResult,
-    apply, decide, expiry_events,
+    Command, Conflict, Decision, Event, LeaseRelation, LeaseStatus, Outcome, SnapshotRecord, State,
+    ToolResult, apply, decide, expiry_events,
 };
 
-/// Everything that decides admission. An observation may update the advisory
-/// record of what a session last touched; it may change nothing else.
-fn authority(state: &State) -> State {
+/// Everything that decides admission, as the stored snapshot holds it. An
+/// observation may update the advisory record of what a session last
+/// touched; it may change nothing else.
+fn authority(state: &State) -> serde_json::Value {
     let mut state = state.clone();
     state.activity.clear();
     // Counted writes mark automatic-check reruns, and who wrote when marks
     // a check's comparison with its baseline; they grant nothing.
     state.writes.clear();
-    state.first_writes.clear();
-    state.write_runs.clear();
-    state
+    let mut record = serde_json::to_value(SnapshotRecord::of(&state)).unwrap();
+    let fields = record.as_object_mut().unwrap();
+    fields.remove("first_writes");
+    fields.remove("write_runs");
+    record
 }
 
 fn paths(values: &[&str]) -> Vec<String> {

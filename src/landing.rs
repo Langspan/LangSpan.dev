@@ -463,7 +463,7 @@ pub fn ask(
 /// landing it already made, so a view that left landings out to fit a
 /// frame would run the same landing again.
 fn read_state(state_dir: &Path) -> Result<State, crate::Error> {
-    client::status_from(state_dir, &["landings"]).map(|(state, _)| state)
+    Ok(client::status_from(state_dir, &["landings"])?.0)
 }
 
 /// The registered root of `workspace`.
@@ -520,7 +520,7 @@ fn shell_word(text: &str) -> String {
 /// of at most 120 characters. Redaction comes first, so the cut cannot leave
 /// part of a secret too short to be recognised.
 pub fn command_line(argv: &[String]) -> String {
-    crate::hook::redact(&argv.join(" "))
+    crate::text::redact::redact(&argv.join(" "))
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .take(120)

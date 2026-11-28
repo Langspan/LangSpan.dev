@@ -15,11 +15,29 @@ const REMOTE_DEADLINE: Duration = Duration::from_secs(20);
 /// quiet participant from a disconnected one.
 const REMOTE_HEARTBEAT: Duration = Duration::from_secs(120);
 
+/// For tests only, in a debug build: a worker thread panics as it starts
+/// when `LANGSPAN_TEST_PANIC_IN_THREAD` names it, so a test can see what a
+/// panic in each worker does (issue #360). A release build never reads the
+/// variable.
+#[cfg(debug_assertions)]
+#[allow(clippy::panic, reason = "the test-only switch exists to panic")]
+pub(super) fn panic_in_thread_for_test() {
+    let thread = std::thread::current();
+    if let Some(name) = thread.name()
+        && std::env::var("LANGSPAN_TEST_PANIC_IN_THREAD").as_deref() == Ok(name)
+    {
+        panic!("LANGSPAN_TEST_PANIC_IN_THREAD named thread {name}");
+    }
+}
+#[cfg(not(debug_assertions))]
+pub(super) fn panic_in_thread_for_test() {}
+
 /// Check the agent hosts in the daemon's home at start and every
 /// `every` after (roadmap A7). Reads directory entries and LangSpan's
 /// own entries in host files, never writes them; what it finds reaches
 /// the state owner as one request naming the uncovered hosts.
 pub(super) fn host_worker(sender: mpsc::SyncSender<Job>, directory: PathBuf, every: Duration) {
+    panic_in_thread_for_test();
     let home = match crate::install::detect::UserHome::new(None) {
         Ok(home) => home,
         Err(error) => {
@@ -171,7 +189,7 @@ fn remote_pass(
         let attempt = ATTEMPT
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             .to_string();
-        crate::hook::wire_id(kind, &[&link.workspace_id, subject, &generation, &attempt])
+        crate::ids::wire_id(kind, &[&link.workspace_id, subject, &generation, &attempt])
     };
     let deadline = Instant::now() + REMOTE_DEADLINE;
     let received = crate::remote::fetch(root, link, deadline).map_err(network("fetch"))?;
@@ -332,7 +350,7 @@ fn remote_withdraw(
     else {
         ask(
             sender,
-            crate::hook::wire_id(
+            crate::ids::wire_id(
                 "remote-withdrawn",
                 &[
                     &link.workspace_id,
@@ -360,7 +378,7 @@ fn remote_withdraw(
                 // it and enabling again never reuses the number.
                 if let Some(Outcome::Error { code, message }) = ask(
                     sender,
-                    crate::hook::wire_id(
+                    crate::ids::wire_id(
                         "remote-published",
                         &[
                             &link.workspace_id,
@@ -413,6 +431,7 @@ pub(super) fn remote_worker(
     generation: u64,
     pass: Duration,
 ) {
+    panic_in_thread_for_test();
     let mut linked = std::collections::BTreeMap::<String, Linked>::new();
     loop {
         std::thread::sleep(pass);

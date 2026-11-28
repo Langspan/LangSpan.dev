@@ -39,8 +39,7 @@ Limit open work so that each pull request merges quickly:
   [module map](architecture.md#module-map), with the files that hold them
   today:
   - `protocol`, the wire protocol: `src/protocol.rs` and its clients;
-  - `briefing`: `src/hook/render.rs`, `src/since.rs`, `src/recent.rs` and
-    `src/trail.rs`;
+  - `briefing`: `src/briefing.rs` and `src/briefing/`;
   - `install`: `src/install.rs`, `src/user_install.rs` and `src/install/detect.rs`;
   - `cli`, its argument list and flags table: `src/main.rs` and `src/cli/`;
   - `graph`, the source graph: `src/graph.rs`, `src/graph/`,
@@ -113,10 +112,19 @@ again on `main`, but the queue doesn't wait for it, because waiting doubled
 the time a pull request spent in the queue before the tests ran in shards.
 Requiring it now, so that the ruleset lists `Linux`, `macOS`, `Workflows`
 and `Content`, is the owner's decision. Nor is coverage, the nightly
-run, or the release build. A macOS failure on a push to `main` opens an
-issue titled "macOS Rust checks on main failed", or comments on it while it
-is open, naming the commit and the tests that failed (at most 50). Treat it
-like a failing check on `main` and fix it the same day.
+run, or the release build. When the `Linux` or `macOS` check fails on a
+push to `main`, job `main-red` in `check.yml` opens the issue "main-red:
+macOS checks failing on main" (or Linux), labelled `main-red`, or comments
+on it while it is open. The issue names the commit, the run, the failing jobs,
+the tests that failed every try (at most 50), the first error lines of the
+failing jobs' logs (at most 15) and the pull requests merged since that
+platform's last green run on `main`. When the platform is green on `main`
+again, the job closes the issue with the green run's link. Nothing is
+reverted automatically. Treat the issue like a failing check on `main` and
+fix it the same day. To see the issue a run would file without filing it,
+start `check.yml` by hand with `main_red_dry_run` set to the platform and,
+optionally, `main_red_run` set to the run to report on; the job prints the
+body in its log and summary.
 
 While the Linux check on `main` fails, merge only the fix for that failure.
 
@@ -191,7 +199,7 @@ the event (`LANGSPAN_CHECK_LANE`):
   (`tests/cli_transcript.rs`, `tests/cli_golden.rs`), so that output that
   differs on Linux shows on the pull request. The `macOS` check passes at once and says that the
   full run happens in the merge queue. Target: a result **under 3
-  minutes** from push. The job stops at 10 minutes.
+  minutes** from push. The job stops at 6 minutes.
 - **The full lane: a merge-queue commit, a push to `main`, the nightly run
   and a manual run.** On Linux and macOS side by side: everything in the
   fast lane, every other test (the `ci` profile, which leaves none out),
@@ -218,8 +226,13 @@ the event (`LANGSPAN_CHECK_LANE`):
   shards' flaky and failed tests for the issues below. Four shards come
   from the measured test time
   ([evidence](evidence/ci/shards.md)). Target: **under 8 minutes** in the
-  merge queue. A build job stops at 35 minutes there and at 30 on `main`
-  and nightly, and a shard at 15. Only the
+  merge queue. A build job stops at 15 minutes there and at 30 on `main`
+  and nightly, and a shard at 15. A build that restores no cache takes
+  longer than 6 minutes and can take longer than 15, so a pull request
+  that changes `rust-toolchain.toml` or a tool version in
+  `scripts/install-ci-tools.sh` raises both limits in `check.yml`, and the
+  next pull request lowers them once `main` has saved the new cache
+  ([evidence](evidence/ci/lanes.md)). Only the
   nightly run also builds the release binary and runs the demonstration on
   it; nothing else reads it, and the release workflow builds its own. The queue
   merges a pull request only when its full Linux lane passes, so nothing
@@ -240,29 +253,39 @@ timed-out run, or one that built no tests
 with `cold` set restores nothing, to measure a build from nothing; on
 `main`, it still saves an entry that `main` lacks.
 
-In the full lane, the benchmark harness's dry runs (the `dry_run_*` tests
-in `tests/benchmark_harness.rs`) run only when the change touches one of
-the following paths: `benchmarks/`, `tests/benchmark_harness.rs`, the
+The benchmark harness's dry runs (the `dry_run_*` tests in
+`tests/benchmark_harness.rs`, 92 to 132 s each on macOS) never run in
+`check.yml`, so the merge queue never waits on them; there the harness's
+other tests, about 11 s on an Apple M-series laptop, are its smoke test.
+The workflow `bench.yml` ("Benchmark dry runs", not a required check) runs
+them on Linux and macOS for a pull request or push to `main` that touches
+one of the following paths, and otherwise passes at once and says why: `benchmarks/`, `tests/benchmark_harness.rs`, the
 daemon, hook and briefing code they drive (`src/daemon.rs`, `src/daemon/`,
-`src/hook.rs`, `src/hook/`, `src/claude_code.rs`, `src/recent.rs` and all
-of `crates/langspan-core/src/`, so code moved into a new module there
-still counts), or what builds and runs the suite
+`src/hook.rs`, `src/hook/`, `src/briefing.rs`, `src/briefing/`,
+`src/text.rs`, `src/text/`, `src/claude_code.rs` and all of
+`crates/langspan-core/src/`, so code moved into a new module there still
+counts), or what builds and runs the suite
 (`Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `.config/nextest.toml`,
-`check.yml`, `scripts/check.sh`, `scripts/test-foreign-home.sh`,
-`scripts/ci-changes.sh`). The dry runs took about 11 minutes of an
-18-minute macOS job under `cargo test`. A change that touches only Markdown
-builds nothing in either lane.
+`check.yml`, `bench.yml`, `scripts/check.sh`, `scripts/test-foreign-home.sh`,
+`scripts/ci-changes.sh`). A change that touches only Markdown builds
+nothing in either lane of `check.yml`.
 
-- **A merge-queue commit** is judged on every change from the queue's base
-  on `main` to that commit, so a benchmark change in a pull request queued
-  ahead runs the dry runs.
 - **A push to `main`** that adds one commit, as a squash merge does,
   follows the same rule for the dry runs. A push of several commits runs
-  them.
-- **The nightly run** (03:23 UTC on `main`) and **a manual run** run
-  everything. If the nightly run fails, it opens an issue titled "Nightly
-  Rust checks on main failed", or comments on that issue while it is open.
-  Treat that issue like a failing check on `main`.
+  them. Since the queue doesn't run them, `main` can hold a change that
+  breaks them; this run and the nightly one show it.
+- **The nightly runs** on `main` (`check.yml` at 03:23 UTC, `bench.yml`
+  with the dry runs at 03:53) and **a manual run** run everything. If one
+  fails, it opens an issue titled "Nightly Rust checks on main failed" or
+  "Nightly benchmark dry runs on main failed", or comments on that issue
+  while it is open. Treat that issue like a failing check on `main`.
+- **An advisory dry run** shows that path without an advisory on `main`:
+  `gh workflow run check.yml --ref BRANCH -f advisory_dry_run=true`. The
+  Linux build audits the real lockfile, then
+  `tests/fixtures/advisory-dry-run/known-advisory.lock` (RUSTSEC-2021-0003),
+  and fails on it; `nightly-report` then opens or comments on an issue
+  titled "Advisory dry run of the nightly report", never the real one.
+  Close that issue afterwards ([evidence](evidence/ci/advisories.md)).
 
 The two times are targets the lanes should meet, not gates: a run over
 them still passes. `bash scripts/measure-ci.sh` reports them from GitHub's
@@ -283,7 +306,8 @@ unset, each job uses GitHub's standard runner.
 
 When a dry run is skipped, the test log shows
 `skipped: no benchmark or briefing change`. A local `sh scripts/check.sh`
-runs every test unless `LANGSPAN_BENCH_DRY_RUNS=skip` is set.
+runs every test unless `LANGSPAN_BENCH_DRY_RUNS=skip` is set, which
+`check.yml` always sets.
 [`scripts/ci-changes.sh`](../scripts/ci-changes.sh) owns the path list;
 change the list there and here together.
 
@@ -332,8 +356,9 @@ has reached still take longer (issue #311).
 ### Coverage
 
 The `Coverage` workflow ([`coverage.yml`](../.github/workflows/coverage.yml))
-runs `bash scripts/coverage.sh` every night on `main` (04:41 UTC), and on a
-pull request that changes the measurement. It isn't a required check. The
+runs `bash scripts/coverage.sh` on every push to `main`, every night on
+`main` (04:41 UTC), and on a pull request that changes the measurement. It
+isn't a required check. The
 script runs the suite once under cargo-llvm-cov and cargo-nextest, with the
 profile written continuously, so coordinators that tests stop with SIGKILL
 still count. It counts production lines only (`src/` and `crates/*/src/`,
@@ -342,26 +367,32 @@ source with `#[path]`); in-file unit tests still cover them. The exports
 name sources relative to the checkout, so a downloaded artifact reads the
 same in yours. The run summary has the per-file table.
 
-The floor: production lines 90% covered or more, and none of the ten files
-with the most production lines more than 2 points under its row in
+The floor: production lines 90% covered or more, and no file more than 2
+points under its row in
 [`scripts/coverage-baseline.tsv`](../scripts/coverage-baseline.tsv), one
-row per file. A file among those ten without a row is named in the summary.
+row per file. Every row is checked. The run also fails for a row whose file
+no longer exists, a row whose file measures no production lines, and a file
+of 100 production lines or more without a row. Under 100 lines one line is
+more than a point, so the 2-point margin would be a line or two of noise.
 A nightly run under the floor, or with a failing test, opens or comments on
 the issue "Nightly Rust checks on main failed".
 
 To raise the baseline, run `bash scripts/coverage.sh` (or download the
-`coverage` artifact of a nightly run into `target/coverage`), then
+`coverage` artifact of a run on `main` into `target/coverage`), then
 `python3 -I -B scripts/coverage-report.py --write-baseline . target/coverage`,
-which rewrites one row per measured file. Commit only the rows of files your
-change raised or added. A pull request that splits or moves a file replaces
-its rows with the new files' rows. Lowering a row needs the reason in the
-pull request.
+which rewrites one row per measured file of 100 production lines or more.
+Commit only the rows of files your change raised or added. A pull request
+that splits or moves a file moves its rows with it: the old row goes, and
+each new file of 100 lines or more gets a row. Lowering a row needs the
+reason in the pull request.
+A refactor that moves or renames files moves their rows in the same pull
+request; `tests/coverage_report.rs` fails on a row whose file is gone.
 
 ### Ratchets
 
 `tests/ratchets.rs` runs `python3 -I -B scripts/ratchets.py --check .` in
 the full lane. It measures production code only: `#[cfg(test)]` items and
-files outside `src/` and `crates/*/src/` don't count. It checks five
+files outside `src/` and `crates/*/src/` don't count. It checks six
 numbers, each against `scripts/ratchets/baseline/<source path>.tsv`:
 
 - **File size.** A file may not grow past its `lines` row. A file without a
@@ -371,6 +402,13 @@ numbers, each against `scripts/ratchets/baseline/<source path>.tsv`:
 - **Public surface.** A crate may not have more declared `pub` items than
   the sum of its files' `pub` rows. `pub use` and `pub(crate)` don't count,
   so moving an item between files of a crate passes.
+- **Public fields.** A struct named in a `fields STRUCT N` row of its
+  file may not have more than N `pub` fields; `pub(crate)` fields don't
+  count. A row is added by hand, `--record` keeps it, and a struct the row
+  names that is gone fails. `State`'s row in
+  `crates/langspan-core/src/state.rs` heads for zero (issue #373), so code
+  outside the core reads its fields through accessors and cannot write
+  them.
 - **Index and slice expressions.** A crate may not have more `x[i]`
   expressions than the sum of its files' `index` rows, or more `x[a..b]`
   expressions than the sum of their `slice` rows. Either can panic on
@@ -398,6 +436,14 @@ the pull request that moved the code. `--tighten` never raises a number,
 and it deletes a baseline that has nothing left to record. The checker's
 own tests are in `scripts/ratchets/test_*.py`.
 
+One more number is kept per crate rather than per file: the count of
+production function and closure signatures that return
+`Result<_, String>`, in `scripts/ratchets/string-errors.tsv` (rows
+`CRATE<TAB>N`). A crate may not go above its row. When the count falls,
+the check prints the new number; lower the row by hand in the same pull
+request. Return a typed error instead, as `client::ClientError` and
+`git::GitError` do (issue #368).
+
 ### Repository settings
 
 [`.github/desired-settings.json`](../.github/desired-settings.json) records
@@ -424,20 +470,28 @@ release. While its checks run, hold other merges so they don't restart the
 checks. The project's release app opens the release pull request, so its
 checks run like any other pull request's.
 
-After a release, add its golden stores (ADR 0015): build `langspan` from
-the new tag with `--locked`, run `bash scripts/golden-stores.sh VERSION BINARY`,
-write the stores' state snapshots with `LANGSPAN_UPDATE_GOLDEN=1` on
+After a release, add its golden stores (ADR 0015): run
+`bash scripts/golden-stores.sh VERSION`, which builds `langspan` from the new
+tag with `--locked` and runs that tag's demonstration with it, then write
+the stores' state snapshots with `LANGSPAN_UPDATE_GOLDEN=1` on
 `tests/golden_stores.rs`, and say in the pull request how the stores were
 made. `every_release_has_a_golden_store_directory` fails for a changelog
 version with no `tests/fixtures/store-VERSION/`, whether or not the release
-changed the event set or the schema.
+changed the event set or the schema. As for the frozen list below, the
+version being released counts only once its `v` tag exists, since its stores
+are built from the tag.
 
-Add its frozen event-type list in the same pull request: copy the sorted
-`type` of each `fixtures/*-event-v10.json` at the new tag into
+Add its frozen event-type list in the first pull request after the tag,
+since the release pull request can't hold it: copy the sorted `type` of each
+`fixtures/*-event-v10.json` at the new tag into
 `fixtures/event-types/VERSION.txt`, add its row to `RELEASES` in
 `tests/protocol.rs` with the capabilities its requests name, and run
 `python3 scripts/gen-docs.py`. `every_published_release_has_a_frozen_list`
-fails for a changelog version without one.
+fails for a changelog version without one. The version being released counts
+only once its `v` tag exists, so the release pull request passes; from the
+tag on, the test fails locally and in the merge queue, which fetch the tags,
+until the list lands. A pull request run has no tags, and checks that version
+from the next release on.
 
 Before 1.0, a breaking change (`feat!:`) raises the minor version.
 [CONTRIBUTING.md](../CONTRIBUTING.md) lists how each title type affects the

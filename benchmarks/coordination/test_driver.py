@@ -19,6 +19,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
 import unittest
 
@@ -1727,23 +1728,33 @@ class StandinHooks(Temporary):
         # The same holds behind the `hook-log` wrapper, whose hook the
         # stand-in's SIGKILL does not reach, and for a child that ignores
         # the SIGTERM sent first.
+        # On a loaded machine the wrapper's interpreter can take longer than
+        # the bound to start the hook; that attempt didn't reach the case
+        # under test, so it runs again with the bound doubled. Every attempt
+        # whose child ran gets the full check.
         original = standin_agent.HOOK_SECONDS
-        standin_agent.HOOK_SECONDS = 0.5
         self.addCleanup(setattr, standin_agent, "HOOK_SECONDS", original)
         for trap in ("", "trap '' TERM; "):
             for kind, command in self.commands(
                     "echo $$ > %s; " + trap + "while :; do printf x >> %s; sleep 0.05; done & wait"):
                 with self.subTest(kind=kind, trap=trap):
-                    name = "%s-%d" % (kind, len(trap))
-                    heartbeat, group = self.root / ("heartbeat-" + name), self.root / ("group-" + name)
-                    session, _ = self.session(command % (shlex.quote(str(group)), shlex.quote(str(heartbeat))), 1)
-                    try:
-                        denied = session.fire("PreToolUse", "Write", {"file_path": "x"}, "edit-1")
-                        self.assertFalse(denied)
-                        self.assertGreater(heartbeat.stat().st_size, 0, "the hook's child never ran")
-                        self.assert_stopped(group, heartbeat)
-                    finally:
-                        self.kill_groups(group)
+                    for bound in (0.5, 1, 2, 4, 8, 16):
+                        standin_agent.HOOK_SECONDS = bound
+                        name = "%s-%d-%s" % (kind, len(trap), bound)
+                        heartbeat, group = self.root / ("heartbeat-" + name), self.root / ("group-" + name)
+                        session, _ = self.session(command % (shlex.quote(str(group)), shlex.quote(str(heartbeat))), 1)
+                        try:
+                            denied = session.fire("PreToolUse", "Write", {"file_path": "x"}, "edit-1")
+                            self.assertFalse(denied)
+                            ran = heartbeat.exists() and heartbeat.stat().st_size > 0
+                            if not (ran and group.exists() and group.read_text().strip()):
+                                continue
+                            self.assert_stopped(group, heartbeat)
+                            break
+                        finally:
+                            self.kill_groups(group)
+                    else:
+                        self.fail("the hook's child never ran within a %s s bound" % bound)
 
     def test_a_hook_that_exits_leaves_no_background_child_running(self):
         # A hook can start a child with its streams redirected and exit 0.
@@ -1808,6 +1819,45 @@ class StandinHooks(Temporary):
         size = heartbeat.stat().st_size
         time.sleep(0.2)
         self.assertEqual(heartbeat.stat().st_size, size, "%s grew after its writer exited" % heartbeat)
+
+    def test_a_signal_while_the_hook_starts_still_ends_its_group(self):
+        # A process test: signal delivery and process groups are what it
+        # checks. On a loaded Linux runner the runner's SIGTERM arrived after
+        # the hook had started but before the stand-in had recorded it, so
+        # the stand-in died and the hook's group ran on. The child here
+        # sends itself SIGTERM in that window, every time: right after the
+        # real `Popen` returns, once the hook's heartbeat has a write.
+        child = textwrap.dedent("""\
+            import os, signal, sys, time
+            sys.path.insert(0, sys.argv[1])
+            import standin_agent
+            group, heartbeat, command, cwd = sys.argv[2:]
+            real = standin_agent.subprocess.Popen
+            def popen(*args, **kwargs):
+                process = real(*args, **kwargs)
+                with open(group, "w") as file:
+                    file.write(str(process.pid))
+                deadline = time.monotonic() + 10
+                # The shell creates the file before its first write.
+                while not (os.path.exists(heartbeat) and os.path.getsize(heartbeat)) and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                os.kill(os.getpid(), signal.SIGTERM)
+                return process
+            standin_agent.subprocess.Popen = popen
+            signal.signal(signal.SIGTERM, standin_agent.stop_on_signal)
+            standin_agent.run_hook(command, "", cwd)
+            """)
+        heartbeat, group = self.root / "heartbeat", self.root / "group"
+        command = "while :; do printf x >> %s; sleep 0.05; done" % shlex.quote(str(heartbeat))
+        standin = subprocess.Popen([sys.executable, "-I", "-B", "-c", child, str(HERE), str(group), str(heartbeat),
+                                    command, str(self.root)], stdout=subprocess.DEVNULL, start_new_session=True)
+        try:
+            self.assertEqual(standin.wait(timeout=30), -signal.SIGTERM)
+            self.assertGreater(heartbeat.stat().st_size, 0, "the hook never ran")
+            self.assert_stopped(group, heartbeat)
+        finally:
+            self.kill_groups(group, standin.pid)
+            standin.wait()
 
     def test_terminating_the_standin_stops_the_hook_it_is_running(self):
         # The runner ends an attempt by signaling the stand-in's process
@@ -1990,8 +2040,10 @@ class WatcherDryRun(Temporary):
                     self.assertFalse(session.fire("SessionStart", source="startup"))
                     prompt = {"session_id": session.session_id, "cwd": session.cwd,
                               "hook_event_name": "UserPromptSubmit", "prompt": "Task: shorten the summary"}
+                    # As an interactive host runs it (#534), whatever session runs this test.
                     watcher = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
-                                               stderr=subprocess.PIPE, cwd=session.cwd, start_new_session=True)
+                                               stderr=subprocess.PIPE, cwd=session.cwd, start_new_session=True,
+                                               env={**os.environ, "CLAUDE_CODE_ENTRYPOINT": "cli"})
                     self.addCleanup(lambda process=watcher: process.returncode is None
                                     and standin_agent.kill_group(process))
                     watcher.stdin.write(json.dumps(prompt).encode())

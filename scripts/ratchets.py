@@ -9,7 +9,9 @@ docs/development-process.md#ratchets.
 
 Each measured file may have a baseline, scripts/ratchets/baseline/<file>.tsv,
 with tab-separated rows: `lines N`, `pub N`, `index N`, `slice N` (the last
-three summed per crate), `fn NAME N` and, in a module's root file of the
+three summed per crate), `fn NAME N`, `fields STRUCT N` (the `pub` fields of
+`struct STRUCT` in that file; a row is only ever added by hand) and, in a
+module's root file of the
 `langspan` crate, `edge MODULE`. In that crate each namespace of
 scripts/ratchets/namespaces.tsv (a top-level module of src/), and each file with
 a role, is a node; paths through `crate::`, `super::`, `self::`, child modules
@@ -18,7 +20,10 @@ or an alias. An edge in a cycle, pointing outward, between namespaces of one
 layer without an `allow` row, outside an `only` list or from a pipeline file to
 an adapter beside it fails without an edge row; so does a top-level file that
 isn't a namespace, a file deeper than src/<namespace>/<sub>/<file>.rs and an
-alias nothing uses. Only production code is
+alias nothing uses. A crate's fn and closure return types `-> Result<T, String>`
+may not outnumber its row `CRATE N` in scripts/ratchets/string-errors.tsv
+(no row allows none); lower the row by hand when the count shrinks. Only
+production code is
 measured: `#[cfg(test)]` items and files outside `src/` are skipped. The
 scanner is lexical, not a Rust parser; it is exact for rustfmt-formatted code.
 """
@@ -32,6 +37,7 @@ BASELINE_DIR = os.path.join("scripts", "ratchets", "baseline")
 LAYERS = ("utility", "infrastructure", "application", "interface")
 LAYER_MARK = re.compile(r"^//\s*layer:\s*(\S*)\s*$", re.M)
 NAMESPACES = "scripts/ratchets/namespaces.tsv"
+STRING_ERRORS = "scripts/ratchets/string-errors.tsv"
 ROLES = ("adapter", "feature")
 ROLE_MARK = re.compile(r"^//\s*role:\s*(\S*)\s*$", re.M)
 MAX_DEPTH = 3  # src/<namespace>/<sub>/<file>.rs
@@ -151,6 +157,8 @@ _FN = re.compile(
     r"^[ \t]*(?:pub(?:\([^)]*\))?\s+)?(?:(?:const|async|unsafe|extern)\s+)*fn\s+(\w+)",
     re.M,
 )
+_STRUCT = re.compile(r"^[ \t]*(?:pub(?:\([^)]*\))?\s+)?struct\s+(\w+)\b", re.M)
+_PUB_FIELD = re.compile(r"^[ \t]*pub\s+(?:r#)?\w+\s*:", re.M)
 _PUB = re.compile(
     r"^\s*pub\s+(?:(?:const|async|unsafe|extern)\s+)*"
     r"(?:fn|struct|enum|trait|type|const|static|mod|union)\b"
@@ -159,6 +167,7 @@ _PUB = re.compile(
 # array type, literal or slice pattern, and `!` before a macro's. A `"` ends a
 # string literal and a `\x01` a comment (see strip's mark); rustfmt keeps a comment
 # between an operand and its `[`, so the operand is matched across one.
+_RESULT = re.compile(r"->\s*(?:\w+::)*Result\s*<")
 _INDEX = re.compile(r"(\w+|[)\]?\"])(?:[\s\x01]*\x01[\s\x01]*)?\[")
 # Keywords that start an array, slice type or slice pattern after a comment. A raw
 # identifier such as `r#match` is an operand, so `indexing` checks for its `r#`.
@@ -252,6 +261,15 @@ class Source:
     def pub_items(self):
         return sum(1 for line in self.text.split("\n") if _PUB.match(line))
 
+    def pub_fields(self, name):
+        """The number of `pub` fields of production `struct NAME`, or None if there is none."""
+        s = self.text
+        for m in _STRUCT.finditer(s):
+            end = _block_end(s, m.end())
+            if m.group(1) == name and end is not None and s[end] == "{":
+                return len(_PUB_FIELD.findall(s, end, _matching_brace(s, end)))
+        return None
+
     def indexing(self):
         """(index, slice): `x[i]` and `x[a..b]` expressions, which can panic."""
         if self._indexing is not None:
@@ -271,6 +289,29 @@ class Source:
                 counts[0] += 1
         self._indexing = tuple(counts)
         return self._indexing
+
+    def string_errors(self):
+        """Production fn and closure return types `-> Result<T, String>`."""
+        count, s = 0, self.text
+        for m in _RESULT.finditer(s):
+            depth, j, comma = 0, m.end(), None
+            while j < len(s):
+                if s.startswith("->", j):
+                    j += 2
+                    continue
+                c = s[j]
+                if c in "<([":
+                    depth += 1
+                elif c in ">)]":
+                    if not depth:
+                        break
+                    depth -= 1
+                elif c == "," and not depth:
+                    comma = j
+                j += 1
+            if comma is not None and s[comma + 1 : j].strip() == "String":
+                count += 1
+        return count
 
     def count(self, metric):
         """The production number a crate-wide ratchet sums: pub, index or slice."""
@@ -615,14 +656,15 @@ def _components(edges):
 
 
 class Baseline:
-    def __init__(self, lines=None, pub=0, fns=None, edges=None, index=0, slice=0):
+    def __init__(self, lines=None, pub=0, fns=None, edges=None, index=0, slice=0, fields=None):
         self.lines, self.pub, self.index, self.slice = lines, pub, index, slice
         self.fns = dict(fns or {})
+        self.fields = dict(fields or {})
         self.edges = set(edges or ())
 
     def empty(self):
         counts = any(getattr(self, m) for m in COUNTS)
-        return self.lines is None and not counts and not self.fns and not self.edges
+        return self.lines is None and not counts and not self.fns and not self.edges and not self.fields
 
     def dump(self):
         rows = []
@@ -630,6 +672,7 @@ class Baseline:
             rows.append(f"lines\t{self.lines}")
         rows += [f"{m}\t{getattr(self, m)}" for m in COUNTS if getattr(self, m)]
         rows += [f"fn\t{n}\t{v}" for n, v in sorted(self.fns.items())]
+        rows += [f"fields\t{n}\t{v}" for n, v in sorted(self.fields.items())]
         rows += [f"edge\t{m}" for m in sorted(self.edges)]
         return "".join(r + "\n" for r in rows)
 
@@ -649,6 +692,8 @@ def parse_baseline(text, where):
                 setattr(b, row[0], int(row[1]))
             elif row[0] == "fn" and len(row) == 3:
                 b.fns[row[1]] = int(row[2])
+            elif row[0] == "fields" and len(row) == 3:
+                b.fields[row[1]] = int(row[2])
             elif row[0] == "edge" and len(row) == 2:
                 b.edges.add(row[1])
             else:
@@ -656,7 +701,7 @@ def parse_baseline(text, where):
         except ValueError:
             raise RatchetError(
                 f"{where}:{number}: expected `lines N`, `pub N`, `index N`, `slice N`, "
-                f"`fn NAME N` or `edge MODULE`, tab-separated; got {line!r}"
+                f"`fn NAME N`, `fields STRUCT N` or `edge MODULE`, tab-separated; got {line!r}"
             ) from None
     return b
 
@@ -707,6 +752,41 @@ def load_namespaces(root):
         return None
     with open(path, encoding="utf-8") as f:
         return parse_namespaces(f.read(), NAMESPACES)
+
+
+def load_string_errors(root):
+    """{crate: N} from string-errors.tsv rows `CRATE N`; a crate without a row allows none."""
+    path, out = os.path.join(root, STRING_ERRORS), {}
+    if not os.path.exists(path):
+        return out
+    with open(path, encoding="utf-8") as f:
+        for number, line in enumerate(f.read().split("\n"), 1):
+            row = line.split("\t")
+            if not line.strip() or line.startswith("#"):
+                continue
+            if len(row) != 2 or not row[1].isdigit():
+                raise RatchetError(f"{STRING_ERRORS}:{number}: expected `CRATE N`, tab-separated; got {line!r}")
+            out[row[0]] = int(row[1])
+    return out
+
+
+def _string_errors(ws, allowed):
+    """(failures, improvements) of each crate's `Result<_, String>` count against its row."""
+    failures, improvements, totals = [], [], {}
+    for path, source in sorted(ws.sources.items()):
+        totals.setdefault(ws.crate_of[path], []).append((path, source.string_errors()))
+    what = "`Result<_, String>` signatures"
+    for crate, counts in sorted(totals.items()):
+        actual, base = sum(n for _, n in counts), allowed.get(crate, 0)
+        if actual > base:
+            files = ", ".join(f"{p} {n}" for p, n in counts if n)
+            failures.append(
+                f"crate {crate}: {actual} {what}, baseline {base}, {actual - base} more; in: {files}. "
+                "Return a typed error instead of String"
+            )
+        elif actual < base:
+            improvements.append(f"crate {crate}: {actual} {what}, baseline {base}; set its row in {STRING_ERRORS} to {actual}")
+    return failures, improvements
 
 
 def load_baselines(root):
@@ -768,6 +848,16 @@ def check(root):
         for name, base in sorted(b.fns.items()):
             if fns.get(name, 0) < base:
                 improvements.append(f"{path}: fn {name} is {fns.get(name, 0)} lines, baseline {base}; {tighten}")
+        for name, base in sorted(b.fields.items()):
+            count = source.pub_fields(name)
+            if count is None:
+                failures.append(f"{path}: no struct {name}, which its `fields` row counts; move the row "
+                                "to the baseline of the file that defines it")
+            elif count > base:
+                failures.append(f"{path}: struct {name} has {count} pub fields, baseline {base}; make the "
+                                "new fields pub(crate), with a read accessor where callers outside need one")
+            elif count < base:
+                improvements.append(f"{path}: struct {name} has {count} pub fields, baseline {base}; {tighten}")
     for metric, (what, how) in COUNTS.items():
         base = {p: getattr(baselines[p], metric) if p in baselines else 0 for p in ws.sources}
         for crate, (actual, allowed) in sorted(_totals(ws, baselines, metric).items()):
@@ -807,6 +897,8 @@ def check(root):
             improvements.append(f"{path}: edge {module} -> {row} is no longer debt; "
                                 + TIGHTEN.format(path=path))
     failures += ws.layout()
+    grown, shrunk = _string_errors(ws, load_string_errors(root))
+    failures, improvements = failures + grown, improvements + shrunk
     for path in sorted(set(baselines) - set(ws.sources)):
         improvements.append(f"{path}: no longer measured; {TIGHTEN.format(path=path)} to delete its baseline")
     return failures, improvements
@@ -830,6 +922,9 @@ def tighten(root, path):
         b.fns[name] = min(base, fns.get(name, 0))
         if b.fns[name] <= MAX_FN_LINES:
             del b.fns[name]
+    for name, base in b.fields.items():
+        count = source.pub_fields(name)
+        b.fields[name] = base if count is None else min(base, count)
     for metric in COUNTS:
         actual, allowed = _totals(ws, baselines, metric)[ws.crate_of[path]]
         mine = getattr(b, metric)
@@ -848,12 +943,15 @@ def record(root, path):
     source = ws.sources[path]
     lines = source.production_lines()
     module = ws.module_of(path)
+    kept = (load_baselines(root).get(path) or Baseline()).fields
+    counts = {n: source.pub_fields(n) for n in kept}
     save_baseline(root, path, Baseline(
         lines=lines if lines > MAX_FILE_LINES else None,
         pub=source.pub_items(),
         index=source.count("index"),
         slice=source.count("slice"),
         fns={n: v for n, v in source.functions().items() if v > MAX_FN_LINES},
+        fields={n: kept[n] if counts[n] is None else counts[n] for n in kept},
         edges=set(ws.debt().get(module, {})) if module and ws.module_root(module) == path else (),
     ))
 

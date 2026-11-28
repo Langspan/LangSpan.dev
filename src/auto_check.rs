@@ -174,7 +174,7 @@ pub enum Message {
 /// A check's command may not carry what looks like a secret: it is stored
 /// in the event log as it is, to be run again.
 pub fn refuse_secrets(argv: &[String]) -> Result<(), String> {
-    if crate::hook::contains_secret(&argv.join(" ")) {
+    if crate::text::redact::contains_secret(&argv.join(" ")) {
         return Err(
             "this command looks like it holds a secret (a token, password or key); LangSpan stores the command to run it again, so pass the secret through your environment or a script instead. Nothing was changed".into(),
         );
@@ -669,11 +669,13 @@ fn still_enabled(
     of: &Registration,
 ) -> bool {
     let ask = |command| match record(Some(of), "read".into(), command) {
-        Some(Outcome::Error { code, message }) => {
-            Err(crate::Error::from(format!("{code}: {message}")))
-        }
+        Some(Outcome::Error { code, message }) => Err(crate::client::ClientError::Refused(
+            format!("{code}: {message}"),
+        )),
         Some(outcome) => Ok(outcome),
-        None => Err(crate::Error::from("the state owner is gone")),
+        None => Err(crate::client::ClientError::Unavailable(
+            "the state owner is gone".into(),
+        )),
     };
     crate::client::status_with(ask, &["auto_checks"]).is_ok_and(|(state, _)| {
         state.auto_checks.get(&check.workspace_id) == Some(check)
@@ -1143,7 +1145,7 @@ fn tail(bytes: &[u8], cut: bool) -> String {
         None if cut => &[],
         _ => bytes,
     };
-    let text = crate::hook::redact(&String::from_utf8_lossy(bytes));
+    let text = crate::text::redact::redact(&String::from_utf8_lossy(bytes));
     let lines: Vec<String> = text
         .lines()
         .map(|line| {

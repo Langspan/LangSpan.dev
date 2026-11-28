@@ -872,3 +872,58 @@ fn a_parent_and_its_subagents_on_one_file_are_an_overlap_with_distinct_labels() 
         assert_eq!(row_of(&d, &format!("local:{id}")).len(), 1, "{id}");
     }
 }
+
+/// The `/api/events` page, version 2 (issue #491): each row also carries the
+/// typed facts the Live view's cards and wires read, and nothing free-form.
+/// The golden vector pins the wire; a version 1 page still decodes.
+#[test]
+fn an_event_page_carries_the_live_view_facts_as_ids_enums_and_numbers() {
+    use langspan_core::{DashboardEvent, DashboardEvents};
+    let events = [
+        r#"{"type":"clock_anchored","anchor":{"generation":2,"clock_ms":5000,"wall_ms":1800000000000}}"#,
+        r#"{"type":"session_registered","session":{"session_id":"codex.bob.sub","workspace_id":"app","generation":2,"parent":"codex.bob"}}"#,
+        r#"{"type":"write_refused","session_id":"codex.bob.sub","workspace_id":"app","kind":"stale_base","paths":["src/api.rs"],"peer_session_id":"claude-code.alice","input_digest":"SECRET-DIGEST","at_ms":6000,"generation":2}"#,
+        r#"{"type":"source_observed","session_id":"codex.bob.sub","files":[{"path":"src/api.rs","state":{"type":"missing"}}],"origin":"read","at_ms":6100,"generation":2}"#,
+        r#"{"type":"operation_observed","observation":{"observation_id":"o1","session_id":"codex.bob.sub","workspace_id":"app","operation_id":"op1","source":"codex","tool":"Edit","paths":["src/api.rs"],"result":"succeeded","lease_id":"l1","lease_relation":"current","concurrent_holders":[],"observed_at_ms":6200,"generation":2}}"#,
+    ];
+    let bob = Some("codex.bob.sub");
+    let api = || vec!["src/api.rs".to_owned()];
+    let rows = [
+        (None, None, None, vec![]),
+        (bob, Some("app"), None, vec![]),
+        (bob, Some("app"), Some(6000), api()),
+        (bob, None, Some(6100), api()),
+        (bob, Some("app"), Some(6200), api()),
+    ];
+    let page = DashboardEvents::new(
+        0,
+        events
+            .iter()
+            .zip(rows)
+            .zip(1..)
+            .map(|((json, (session, workspace, at, paths)), seq)| {
+                let event: Event = serde_json::from_str(json).unwrap();
+                let kind = serde_json::to_value(&event).unwrap()["type"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned();
+                DashboardEvent::new(seq, &kind, session, workspace, at, paths).detail(&event)
+            })
+            .collect(),
+    );
+    let wire = include_str!("../../../fixtures/dashboard-events-v2.json");
+    let golden: serde_json::Value = serde_json::from_str(wire).unwrap();
+    assert_eq!(serde_json::to_value(&page).unwrap(), golden);
+    assert_eq!(serde_json::from_str::<DashboardEvents>(wire).unwrap(), page);
+    assert!(
+        !wire.contains("SECRET"),
+        "the digest is not a Live view fact"
+    );
+    // A version 1 page, without the new fields, still decodes.
+    let old: DashboardEvents = serde_json::from_str(
+        r#"{"version":1,"next":3,"events":[{"seq":3,"type":"write_refused","session_id":"s1","at_ms":5,"paths":["a.rs"],"more_paths":0}]}"#,
+    )
+    .unwrap();
+    assert_eq!(old.events[0].peer_session_id, None);
+    assert_eq!(old.events[0].refusal, None);
+}

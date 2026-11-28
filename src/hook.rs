@@ -18,18 +18,18 @@ mod observe;
 mod prompt;
 mod reads;
 mod rename_hold;
-mod render;
 mod shell_hooks;
 mod tool_call;
 mod workspace;
-pub use crate::file_state::{MAX_VERSION_BYTES, file_state};
-use crate::file_state::{file_content, version_of};
-pub use crate::ids::{file_key, user_workspace_id, valid_host_id, wire_id, workspace_request_id};
-pub use crate::input::{MAX_EVENT_BYTES, read_stdin_until};
+pub use crate::briefing::BRIEFING_LIMIT;
+use crate::briefing::render;
+use crate::file_state::{file_content, file_state, version_of};
+pub(crate) use crate::hosts::port::REASON_LIMIT;
+pub use crate::hosts::port::{Config, Identities, LifecycleKind, Phase, Reply, ShellCall};
+use crate::ids::{file_key, valid_host_id};
+pub use crate::ids::{user_workspace_id, wire_id, workspace_request_id};
+pub use crate::input::read_stdin_until;
 pub use crate::text::age;
-pub use crate::text::redact::{
-    contains_secret, redact, redact_check, redact_command, refuse_secret,
-};
 pub(crate) use crate::text::{SUMMARY_LIMIT, clean, quoted, truncate};
 pub(crate) use admit::*;
 pub(crate) use deny::*;
@@ -43,118 +43,26 @@ pub use prompt::{
     prompt_target_paths,
 };
 pub use reads::*;
-pub use render::{
-    BRIEFING, CHECK_RESULT, CONFLICT, FLAKY_LABEL, STALE_SOURCE, UNCOORDINATED, UNREAD_LINES,
-    about_note, checkout_text, compose_context, has_content, note_about, render_briefing,
-    render_code_briefing, uncoordinated_text, unplaced_keys,
-};
+#[cfg(test)]
+use render::interface_change_text;
+pub use render::{BRIEFING, UNCOORDINATED, compose_context, render_briefing, render_code_briefing};
 #[cfg(test)]
 use render::{
-    CHECKS_LIMIT, CODE_SHARE, CODE_SKIPPED, COMPARISON_LIMIT, INFLIGHT_PARTIAL, MORE_FAILURES,
-    PEER_LINE_LIMIT, PEERS_MINIMUM, PEERS_NOT_SHOWN, definitions_text, has_peer_content,
-    inflight_line, render_checks, render_comparison, render_peers_placed,
+    CHECK_RESULT, CHECKS_LIMIT, CODE_SHARE, CODE_SKIPPED, COMPARISON_LIMIT, INFLIGHT_PARTIAL,
+    MORE_FAILURES, PEER_LINE_LIMIT, PEERS_MINIMUM, PEERS_NOT_SHOWN, definitions_text,
+    has_peer_content, inflight_line, render_checks, render_comparison, render_peers_placed,
 };
+use render::{CONFLICT, STALE_SOURCE, UNREAD_LINES, has_content, unplaced_keys};
 use render::{
     compose_context_placed, compose_context_within, reply_context_bytes, shows_all_inflight,
 };
 pub(crate) use render::{
-    interface_change_text, interface_impact_line, render_briefing_placed, session_label,
-    shown_notice_ids,
+    interface_impact_line, render_briefing_placed, session_label, shown_notice_ids,
 };
 use shell_hooks::shell_looked_at;
 pub use shell_hooks::{SHELL_TOOL, shell_operation};
 pub use tool_call::*;
 pub use workspace::*;
-pub(crate) const REASON_LIMIT: usize = 600;
-#[derive(Debug, Clone)]
-pub struct Config {
-    pub state_dir: PathBuf,
-    pub workspace_id: String,
-    pub root: PathBuf,
-    pub ttl_ms: u64,
-    pub budget: Duration,
-    /// Record the first line of the owner's prompt as this session's task,
-    /// so peers can be told what it is working on.
-    pub share_prompt: bool,
-    /// At each prompt, tell the model where names the prompt mentions are
-    /// defined. The prompt text is used for one local index query only.
-    pub code_briefing: bool,
-    /// Show peers where this session looks: its reads, the path scope of
-    /// its searches and the paths its shell commands read (roadmap A13).
-    /// Off (`--presence off`), none of them is shown; reads are still
-    /// recorded as versions for the session's own stale checks.
-    pub presence: bool,
-    /// How old a peer's presence this session is shown, in milliseconds
-    /// (`--presence-minutes`).
-    pub presence_window_ms: u64,
-    /// A whole read of a large indexed file is refused once with the
-    /// file's outline (`--outline-reads on`, roadmap A11). Off by default.
-    pub outline_reads: bool,
-    /// The host whose hook this is.
-    pub vendor: crate::install::Vendor,
-    /// Installed once per user rather than per project: `workspace_id` and
-    /// `root` are unset and come from each event's working directory.
-    pub user_level: bool,
-}
-
-impl Config {
-    /// A project-level hook's configuration with the `langspan hook`
-    /// command's defaults for every option. Callers that set an option
-    /// override it with `Config { field: value, ..Config::new(..) }`, so a
-    /// new option does not break them.
-    pub fn new(
-        state_dir: PathBuf,
-        workspace_id: impl Into<String>,
-        root: PathBuf,
-        vendor: crate::install::Vendor,
-    ) -> Self {
-        Self {
-            state_dir,
-            workspace_id: workspace_id.into(),
-            root,
-            ttl_ms: 30_000,
-            budget: Duration::from_millis(1500),
-            share_prompt: true,
-            code_briefing: true,
-            presence: true,
-            presence_window_ms: crate::install::Presence {
-                shown: true,
-                minutes: None,
-            }
-            .window_ms(),
-            outline_reads: false,
-            vendor,
-            user_level: false,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Reply {
-    pub stdout: String,
-    pub coverage: &'static str,
-    pub detail: String,
-}
-
-impl Reply {
-    pub fn none(coverage: &'static str, detail: impl Into<String>) -> Self {
-        Self {
-            stdout: String::new(),
-            coverage,
-            detail: detail.into(),
-        }
-    }
-}
-
-/// Logical identities for one host tool call, encoded for the request-ID grammar.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Identities {
-    pub session_id: String,
-    pub operation_id: String,
-    pub register: String,
-    pub admit: String,
-    pub complete: String,
-}
 
 pub fn identities_for(source: &str, host_session: &str, tool_use_id: &str) -> Identities {
     let fields = [source, host_session, tool_use_id];
@@ -174,23 +82,6 @@ pub(crate) fn prompt_event_id(id: Option<&str>) -> Option<&str> {
     id.filter(|id| valid_host_id(id) && id.len() <= 64)
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum Phase {
-    Pre,
-    Post(ToolResult),
-    /// The host reported that the session read these files. Nothing is
-    /// admitted; the versions become what the session is known to have seen.
-    Read,
-    /// A shell command is about to run. `paths` are the files it will write
-    /// when the command parsed; `unknown` says why it did not.
-    ShellPre {
-        unknown: Option<&'static str>,
-        /// Started in the background: it may outlive its call.
-        background: bool,
-    },
-    /// A shell command has finished: what it changed is found by comparison.
-    ShellPost,
-}
 /// What a write states about each file: its edits, and whole contents.
 type Writes<'a> = (&'a [(String, crate::regions::Edit)], &'a [(String, String)]);
 
@@ -236,29 +127,6 @@ enum BreakCheck {
     Now,
 }
 
-/// The command of a shell call, as the host sent it.
-#[derive(Debug, Clone)]
-pub struct ShellCall {
-    pub command: String,
-    pub cwd: Option<String>,
-}
-
-/// Session lifecycle events shared by the hosts: the points where a session
-/// is discovered and where peer context can reach the model before it acts.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LifecycleKind {
-    Start,
-    /// The prompt as the host submitted it. What of it is recorded (its
-    /// summary) or looked up in the source index (its names, never
-    /// recorded) is decided in `lifecycle` from the settings of the
-    /// workspace the event resolves to, so a linked worktree's own opt-outs
-    /// hold (`resolve_workspace`). It never leaves this process otherwise.
-    Prompt {
-        prompt: Option<String>,
-    },
-    End,
-}
-
 struct Session<'a> {
     config: &'a Config,
     deadline: Instant,
@@ -289,14 +157,8 @@ impl Session<'_> {
         let request = Request::new(id, command);
         let response =
             client::call_until(&self.config.state_dir, &request, by).map_err(|error| {
-                let text = error.to_string();
-                let coverage = if text.contains("deadline") || text.contains("timed out") {
-                    "timeout"
-                } else {
-                    "unavailable"
-                };
                 self.unreachable.set(true);
-                Failure::Transport(coverage, text)
+                Failure::Transport(coverage(&error), error.to_string())
             })?;
         match &response.outcome {
             Outcome::Error { code, message } if code == "coordination_unavailable" => {
@@ -423,6 +285,29 @@ impl Session<'_> {
                 json!({"event":"liveness_unavailable", "coverage":diagnostic.coverage, "detail":diagnostic.detail})
             );
         }
+    }
+}
+
+/// The coverage a hook reports for a call that did not reach the daemon.
+fn coverage(error: &client::ClientError) -> &'static str {
+    match error {
+        client::ClientError::TimedOut(_) => "timeout",
+        _ => "unavailable",
+    }
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::{client::ClientError, coverage};
+
+    #[test]
+    fn only_a_timed_out_call_is_reported_as_a_timeout() {
+        // A path that names a deadline no longer reads as one.
+        let path = "coordination unavailable at /tmp/deadline/daemon.sock: refused".to_owned();
+        assert_eq!(coverage(&ClientError::TimedOut("late".into())), "timeout");
+        assert_eq!(coverage(&ClientError::Unavailable(path)), "unavailable");
+        assert_eq!(coverage(&ClientError::Refused("x".into())), "unavailable");
+        assert_eq!(coverage(&ClientError::Corrupt("x".into())), "unavailable");
     }
 }
 

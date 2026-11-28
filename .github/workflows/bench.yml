@@ -1,0 +1,131 @@
+name: Benchmark dry runs
+# The coordination benchmark harness's dry runs (tests/benchmark_harness.rs,
+# the tests named dry_run_…) took 92 to 132 s each on macOS, so they run
+# here and never in check.yml, whose checks the merge queue waits on (issue
+# #286; docs/development-process.md#which-tests-run-when). Not a required
+# check, and no merge_group trigger, so the queue never waits on it.
+#
+# A pull request or push to main runs them when the change touches a path
+# scripts/ci-changes.sh lists (the harness, the briefing, hook and daemon
+# code it drives, and what builds or runs it); otherwise the job passes at
+# once and says why. The list lives in that script alone, so there is no
+# `paths` filter here. Every night and on demand they run whatever changed;
+# a nightly failure opens or updates one issue (job nightly-report).
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: "53 3 * * *"
+# No token permission unless a job asks for it; only nightly-report writes,
+# and only issues.
+permissions: {}
+env:
+  # As in check.yml, so the build cache restored below matches.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_INCREMENTAL: 0
+  # No retry on a pull request, so a flaky dry run shows; two elsewhere.
+  NEXTEST_RETRIES: ${{ github.event_name == 'pull_request' && '0' || '2' }}
+concurrency:
+  group: bench-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  dry-runs:
+    name: Dry runs ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    # A cold build of the tests, then the dry runs: about 7 minutes of test
+    # time on macOS, three at a time.
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [linux, macos]
+        include:
+          - platform: linux
+            runner: ${{ vars.LINUX_RUNNER || 'ubuntu-24.04' }}
+          - platform: macos
+            runner: ${{ vars.MACOS_RUNNER || 'macos-26' }}
+    steps:
+      # Two commits deep, as in check.yml: a pull request's change is
+      # HEAD^1..HEAD of its merge commit.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Decide what the change touches
+        id: changes
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          BASE_SHA: ""
+          HEAD_SHA: ""
+        run: bash scripts/ci-changes.sh
+      - name: Pass at once when the change touches nothing the dry runs drive
+        if: steps.changes.outputs.dry_runs != 'run' && github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
+        run: |
+          line="No benchmark, briefing, hook or daemon change (scripts/ci-changes.sh): the dry runs run every night on main."
+          echo "$line"
+          echo "$line" >> "$GITHUB_STEP_SUMMARY"
+      - name: Install the toolchain from rust-toolchain.toml
+        id: run
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || steps.changes.outputs.dry_runs == 'run'
+        run: |
+          rustup toolchain install
+          rustc --version
+      # Main's entry from check.yml's build job for this platform, read
+      # only: the path list and key are check.yml's (CACHE_PATHS), and only
+      # check.yml on main saves (docs/security/threat-model.md#ci-build-cache).
+      - name: Restore the build cache
+        if: steps.run.outcome == 'success'
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+            ~/.cache/langspan-ci-tools/cargo-nextest
+          key: rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.platform }}-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock', 'scripts/install-ci-tools.sh') }}
+          restore-keys: rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.platform }}-${{ hashFiles('rust-toolchain.toml') }}-
+      - name: Install the test runner
+        if: steps.run.outcome == 'success'
+        run: |
+          bash scripts/install-ci-tools.sh "$HOME/.cache/langspan-ci-tools" cargo-nextest
+          echo "$HOME/.cache/langspan-ci-tools" >> "$GITHUB_PATH"
+      - name: Run the benchmark dry runs
+        if: steps.run.outcome == 'success'
+        run: cargo nextest run --locked --profile ci --test benchmark_harness -E 'test(/^dry_run_/)'
+  # A nightly run that fails opens one issue, or comments on it while it is
+  # still open. Only this job can write, and only issues; it checks out
+  # nothing and runs no repository code. The title is fixed text and the
+  # body only the commit and the run's link.
+  nightly-report:
+    name: Nightly dry-run failure report
+    needs: [dry-runs]
+    if: github.event_name == 'schedule' && failure()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update the nightly dry-run failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TITLE: Nightly benchmark dry runs on main failed
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.sha }}
+        run: |
+          body=$(printf 'The benchmark harness dry runs failed on main at %s.\n\nRun: %s\n\nThey run here, not in the merge queue, so main can hold the change that broke them. Fix the failure the same day (docs/development-process.md).' "$SHA" "$RUN_URL")
+          number=$(gh issue list --state open --search "\"$TITLE\" in:title" --json number,title \
+            --jq 'map(select(.title == env.TITLE)) | .[0].number // empty')
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body "$body"
+          else
+            # No label: a missing label would fail the create and lose
+            # the report.
+            gh issue create --title "$TITLE" --body "$body"
+          fi

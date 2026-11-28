@@ -31,6 +31,11 @@ fn successful_git_with_warnings_does_not_become_a_complete_observation() {
     );
     fs::remove_dir_all(&root).unwrap();
     let error = result.expect_err("Git warning must invalidate the complete snapshot");
+    assert!(
+        matches!(error, langspan::git::GitError::Failed(_)),
+        "{error:?}"
+    );
+    let error = error.to_string();
     assert!(error.contains("warning"), "{error}");
     assert!(
         !error.contains("private-warning-marker"),

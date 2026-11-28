@@ -12,7 +12,7 @@ use langspan_core::{REPORT_HISTORY_EVENTS, Report, ReportCounts, TODAY_EVENTS};
 use crate::today::{cut_line, utc};
 
 /// The MCP result's size, the same cap as a hook briefing.
-pub const MCP_BYTES: usize = crate::hook::BRIEFING_LIMIT;
+pub const MCP_BYTES: usize = crate::briefing::BRIEFING_LIMIT;
 /// The longest session ID shown, in characters, before its ellipsis.
 const SESSION_CHARS: usize = 48;
 /// What a cell shows for a field the host cannot report.

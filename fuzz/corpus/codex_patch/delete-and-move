@@ -1,0 +1,11 @@
+*** Begin Patch
+*** Delete File: old.txt
+*** Update File: a.rs
+*** Move to: b.rs
+@@ fn main
+ fn main() {
+-    a();
++    b();
+ }
+*** End of File
+*** End Patch

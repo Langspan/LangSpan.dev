@@ -206,6 +206,8 @@ fn code_split_into_new_core_daemon_or_hook_modules_runs_the_dry_runs() {
         "src/text/redact.rs",
         "src/briefing.rs",
         "src/briefing/render.rs",
+        // The workflow that runs them.
+        ".github/workflows/bench.yml",
     ] {
         let repo = Repo::new();
         repo.commit("README.md");
@@ -289,7 +291,7 @@ fn the_full_lane_builds_once_per_platform_and_tests_the_archive_in_every_shard()
             // shard can't leave a test in none.
             "          LANGSPAN_TEST_PARTITION: time:${{ matrix.shard }}/${{ strategy.job-total }}\n"
                 .into(),
-            format!("          LANGSPAN_BENCH_DRY_RUNS: ${{{{ needs.{build}.outputs.dry_runs }}}}\n"),
+            "          LANGSPAN_BENCH_DRY_RUNS: skip\n".into(),
             format!("          name: junit-{platform}-${{{{ matrix.shard }}}}\n"),
         ] {
             assert!(shards.contains(&line), "{tests} lacks {line}");
@@ -309,6 +311,74 @@ fn the_full_lane_builds_once_per_platform_and_tests_the_archive_in_every_shard()
             "{tests} uses the build cache"
         );
     }
+}
+
+/// The benchmark dry runs take 92 to 132 s each, so the required checks
+/// never run them: every job of check.yml skips them, and bench.yml runs
+/// them instead.
+#[test]
+fn check_yml_never_runs_the_benchmark_dry_runs() {
+    let text = workflow("check.yml");
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains("LANGSPAN_BENCH_DRY_RUNS:"))
+        .collect();
+    // Both build jobs and both shard jobs.
+    assert_eq!(lines.len(), 4, "{lines:?}");
+    for line in lines {
+        assert_eq!(line.trim(), "LANGSPAN_BENCH_DRY_RUNS: skip");
+    }
+    assert!(
+        !text.contains("outputs.dry_runs"),
+        "check.yml reads dry_runs"
+    );
+}
+
+/// bench.yml runs the dry runs for a pull request or push to main that
+/// touches what they drive (scripts/ci-changes.sh decides), every night and
+/// on demand, on Linux and macOS, and never in the merge queue.
+#[test]
+fn bench_yml_runs_the_dry_runs_off_the_merge_queue() {
+    let text = workflow("bench.yml");
+    let on = text
+        .split("\non:\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\npermissions:").next())
+        .expect("bench.yml has a top-level `on:` block");
+    for event in [
+        "  pull_request:",
+        "  push:",
+        "  schedule:",
+        "  workflow_dispatch:",
+    ] {
+        assert!(on.lines().any(|l| l == event), "bench.yml lacks {event}");
+    }
+    assert!(on.contains("    branches: [main]\n"), "{on}");
+    assert!(!on.contains("merge_group"), "the merge queue waits on it");
+    assert!(text.contains("\npermissions: {}\n"));
+    let runs = job(&text, "dry-runs");
+    for line in [
+        "        run: bash scripts/ci-changes.sh\n",
+        "      contents: read\n",
+        "        platform: [linux, macos]\n",
+        "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || steps.changes.outputs.dry_runs == 'run'",
+        "cargo nextest run --locked --profile ci --test benchmark_harness -E 'test(/^dry_run_/)'",
+    ] {
+        assert!(runs.contains(line), "dry-runs lacks {line}");
+    }
+    assert!(!runs.contains("LANGSPAN_BENCH_DRY_RUNS"), "{runs}");
+    assert!(
+        !runs.contains("actions/cache/save"),
+        "only main's check.yml saves"
+    );
+    let report = job(&text, "nightly-report");
+    assert!(report.contains("\n    needs: [dry-runs]\n"), "{report}");
+    assert!(report.contains("github.event_name == 'schedule' && failure()"));
+    assert!(report.contains("      issues: write\n"));
+    assert!(
+        !report.contains("actions/checkout"),
+        "the issue writer runs repository code"
+    );
 }
 
 #[test]
@@ -478,7 +548,7 @@ fn a_pull_request_runs_the_fast_lane_and_a_queued_commit_every_test() {
     for id in ["linux", "macos"] {
         assert!(
             job(&text, id).contains(
-                "\n    timeout-minutes: ${{ github.event_name == 'pull_request' && 10 || github.event_name == 'merge_group' && 35 || 30 }}\n"
+                "\n    timeout-minutes: ${{ github.event_name == 'pull_request' && 6 || github.event_name == 'merge_group' && 15 || 30 }}\n"
             ),
             "the {id} job has no time limit by lane"
         );
@@ -1169,6 +1239,39 @@ fn cargo_audit_has_its_own_cache_and_the_build_cache_paths_stay_put() {
     assert!(save.contains("key: ${{ steps.keys.outputs.audit }}"));
 }
 
+#[test]
+fn ci_downloads_cargo_nextest_checked_against_a_pinned_digest_for_each_platform() {
+    let script = read("scripts/install-ci-tools.sh");
+    assert!(
+        script.contains(
+            "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$nextest"
+        ),
+        "the installer doesn't download cargo-nextest's upstream release"
+    );
+    for platform in ["  Linux-x86_64)\n", "  Darwin-arm64)\n"] {
+        let block = script
+            .split(platform)
+            .nth(1)
+            .and_then(|rest| rest.split(";;").next())
+            .unwrap_or_else(|| panic!("the installer has no {platform:?} case"));
+        let sha = block
+            .split("nextest_sha=")
+            .nth(1)
+            .and_then(|rest| rest.lines().next())
+            .unwrap_or_else(|| panic!("{platform:?} pins no nextest_sha"));
+        assert!(
+            sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_hexdigit()),
+            "{platform:?} nextest_sha {sha:?} isn't a SHA-256"
+        );
+    }
+    // A digest check before anything is unpacked, as for cargo-deny.
+    assert!(script.contains("\"$nextest_sha\""));
+    assert!(
+        !script.contains("build cargo-nextest"),
+        "the installer still compiles cargo-nextest"
+    );
+}
+
 /// The steps of a job, each from its `- ` line to the next.
 fn steps(job: &str) -> Vec<String> {
     job.split("\n      - ")
@@ -1519,28 +1622,439 @@ fn the_macos_failure_report_names_the_tests_that_failed_every_try_and_no_other()
 }
 
 #[test]
-fn a_macos_failure_on_main_opens_or_updates_one_issue() {
+fn a_red_or_green_main_runs_the_main_red_report_for_each_platform_with_issues_write_only() {
     let text = workflow("check.yml");
-    // The names come from every shard, through the macOS check.
-    assert!(
-        job(&text, "macos-result").contains("\n      failed: ${{ steps.result.outputs.failed }}\n")
-    );
-    let report = job(&text, "macos-report");
+    let report = job(&text, "main-red");
     for line in [
-        "\n    needs: [macos-result]\n",
-        "\n    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && (needs.macos-result.result == 'failure' || needs.macos-result.result == 'cancelled')\n",
-        "\n      issues: write\n",
-        "TITLE: macOS Rust checks on main failed",
-        "SHA: ${{ github.sha }}",
-        "FAILED: ${{ needs.macos-result.outputs.failed }}",
-        "gh issue comment \"$number\"",
-        "gh issue create --title \"$TITLE\"",
+        "\n    needs: [linux-result, macos-result]\n",
+        // A push to main, or a manual run that asks for a dry run.
+        "\n    if: always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && (inputs.main_red_dry_run == 'Linux' || inputs.main_red_dry_run == 'macOS')))\n",
+        "\n    permissions:\n      issues: write\n    concurrency:\n",
+        "\n      group: main-red-${{ github.event_name }}-${{ matrix.platform }}\n      cancel-in-progress: false\n",
+        "\n        platform: [Linux, macOS]\n",
+        "\n          persist-credentials: false\n",
+        // Each platform reports its own result job; a dry run reports a
+        // failure of the run it names and writes nothing.
+        "\n          RESULT: ${{ github.event_name == 'workflow_dispatch' && 'failure' || (matrix.platform == 'Linux' && needs.linux-result.result || needs.macos-result.result) }}\n",
+        "\n          RUN_ID: ${{ inputs.main_red_run || github.run_id }}\n",
+        "\n          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' }}\n",
+        "\n        run: python3 -I -B scripts/ci-main-red.py",
     ] {
-        assert!(report.contains(line), "macos-report lacks {line}");
+        assert!(report.contains(line), "main-red lacks {line}");
     }
-    // It runs no repository code: nothing is checked out.
-    assert!(!report.contains("actions/checkout"), "{report}");
-    assert!(!report.contains("contents:"), "{report}");
+    // Only the platform a dry run names runs the script.
+    assert_eq!(
+        report
+            .matches(
+                "if: github.event_name == 'push' || inputs.main_red_dry_run == matrix.platform"
+            )
+            .count(),
+        2,
+        "{report}"
+    );
+    // The token can write issues and nothing else.
+    let permissions = report.split("    permissions:\n").nth(1).unwrap();
+    let scopes: Vec<_> = permissions
+        .lines()
+        .take_while(|l| l.starts_with("      "))
+        .collect();
+    assert_eq!(scopes, ["      issues: write"], "{report}");
+    // The dry-run inputs default to no dry run, so the release workflow's
+    // `gh workflow run check.yml` starts none.
+    let on = text.split("\npermissions:").next().unwrap();
+    assert!(on.contains("      main_red_dry_run:\n        description: "));
+    assert!(on.contains(
+        "        type: choice\n        options: [\"off\", Linux, macOS]\n        default: \"off\"\n"
+    ));
+    assert!(on.contains("      main_red_run:\n        description: "));
+    // The old macOS-only report is gone; no other job gained issues: write.
+    assert!(!text.contains("\n  macos-report:\n"));
+    let writers: Vec<_> = ["flaky-report", "nightly-report", "main-red"]
+        .iter()
+        .filter(|id| job(&text, id).contains("issues: write"))
+        .collect();
+    assert_eq!(writers.len(), 3);
+    assert_eq!(text.matches("issues: write").count(), 3, "{text}");
+}
+
+/// What one run of scripts/ci-main-red.py did against the gh stub.
+struct MainRed {
+    ok: bool,
+    stdout: String,
+    stderr: String,
+    /// Every gh call, one per line.
+    calls: String,
+    /// What the issue writes read on stdin.
+    body: String,
+    summary: String,
+    /// The fixtures whose flood the stub wrote to the end.
+    finished: String,
+}
+
+impl MainRed {
+    fn writes(&self) -> Vec<&str> {
+        self.calls
+            .lines()
+            .filter(|c| {
+                [
+                    "issue create",
+                    "issue comment",
+                    "issue close",
+                    "label create",
+                ]
+                .iter()
+                .any(|w| c.starts_with(w))
+            })
+            .collect()
+    }
+}
+
+/// Runs scripts/ci-main-red.py with tests/fixtures/ci-main-red/gh first on
+/// PATH, for run 200 of repository o/r. `files` go into the stub's override
+/// directory (the open issues are `issue-list.json`). A process test: what
+/// it verifies is the script driving a child gh and what it hands to it.
+fn main_red(platform: &str, result: &str, dry_run: bool, files: &[(&str, &str)]) -> MainRed {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = temp_dir("main-red");
+    let bin = dir.join("bin");
+    let over = dir.join("override");
+    fs::create_dir_all(&bin).unwrap();
+    for (name, text) in files {
+        let path = over.join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+    let fixtures = root().join("tests/fixtures/ci-main-red");
+    fs::copy(fixtures.join("gh"), bin.join("gh")).unwrap();
+    fs::set_permissions(bin.join("gh"), fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let log = dir.join("calls");
+    let summary = dir.join("summary.md");
+    let out = Command::new("python3")
+        .args(["-I", "-B"])
+        .arg(root().join("scripts/ci-main-red.py"))
+        .env("PATH", path)
+        .env("GH_STUB_FIXTURES", &fixtures)
+        .env("GH_STUB_OVERRIDE", &over)
+        .env("GH_STUB_LOG", &log)
+        .env("GITHUB_STEP_SUMMARY", &summary)
+        .env("PLATFORM", platform)
+        .env("RESULT", result)
+        .env("RUN_ID", "200")
+        .env("REPO", "o/r")
+        .env("SERVER_URL", "https://github.com")
+        .env("DRY_RUN", if dry_run { "true" } else { "false" })
+        .env_remove("GH_TOKEN")
+        .output()
+        .expect("python3 runs scripts/ci-main-red.py");
+    let read_or_empty = |p: &Path| fs::read_to_string(p).unwrap_or_default();
+    let run = MainRed {
+        ok: out.status.success(),
+        stdout: String::from_utf8(out.stdout).unwrap(),
+        stderr: String::from_utf8(out.stderr).unwrap(),
+        calls: read_or_empty(&log),
+        body: read_or_empty(&dir.join("calls.body")),
+        summary: read_or_empty(&summary),
+        finished: read_or_empty(&dir.join("calls.finished")),
+    };
+    let _ = fs::remove_dir_all(&dir);
+    run
+}
+
+const MACOS_TITLE: &str = "main-red: macOS checks failing on main";
+const LINUX_TITLE: &str = "main-red: Linux checks failing on main";
+
+fn open_issues(issues: &[(u32, &str)]) -> String {
+    let rows: Vec<_> = issues
+        .iter()
+        .map(|(n, t)| format!(r#"{{"number": {n}, "title": "{t}"}}"#))
+        .collect();
+    format!("[{}]", rows.join(", "))
+}
+
+#[test]
+fn a_red_platform_with_no_open_issue_opens_one_labelled_main_red_with_the_whole_report() {
+    let run = main_red("macOS", "failure", false, &[]);
+    assert!(run.ok, "{}", run.stderr);
+    let writes = run.writes();
+    assert_eq!(writes.len(), 2, "{}", run.calls);
+    assert!(
+        writes[0].starts_with("label create main-red --repo o/r "),
+        "{writes:?}"
+    );
+    assert_eq!(
+        writes[1],
+        format!("issue create --repo o/r --title {MACOS_TITLE} --label main-red --body-file -")
+    );
+    // The last green run is the newest earlier push run on main whose
+    // `macOS` check passed: 198, since 199's macOS failed and 201 is later
+    // (GitHub filters by `created`; the stub doesn't, so the script must too).
+    assert!(run.calls.contains(
+        "api repos/o/r/actions/workflows/check.yml/runs?branch=main&event=push&status=completed&per_page=20&created=%3C2026-11-27T10:00:00Z\n"
+    ));
+    assert!(
+        run.calls.contains("--pattern junit-macos-*"),
+        "{}",
+        run.calls
+    );
+    let body = &run.body;
+    for part in [
+        // The commit and the run.
+        "[`c0ffee0`](https://github.com/o/r/commit/c0ffee0000000000000000000000000000000003)",
+        "https://github.com/o/r/actions/runs/200",
+        // The failing jobs, the aggregate check last, not a lookalike.
+        "- [macOS tests 2](https://github.com/o/r/actions/runs/200/job/2): failure\n- [macOS](https://github.com/o/r/actions/runs/200/job/3): failure\n",
+        // The failed tests from the JUnit reports.
+        "- `cli_golden every_option_against_every_command`\n",
+        // The first error lines, without the log's timestamps.
+        "\n~~~~text\n--- macOS tests 2\nFAIL [   2.001s] cli_golden every_option_against_every_command\n",
+        "thread 'every_option_against_every_command' panicked at tests/cli_golden.rs:40:5:\n",
+        // The merged pull requests since the last green run.
+        "[run 198](https://github.com/o/r/actions/runs/198)",
+        "- #501 `feat: a thing (#501)`\n",
+        "- #502 `fix: ping @someone about x (#298) (#502)`\n",
+    ] {
+        assert!(body.contains(part), "the body lacks {part:?}:\n{body}");
+    }
+    for absent in [
+        "macOSX lookalike",
+        "Linux build",
+        "help_is_pinned",
+        "The body.",
+    ] {
+        assert!(!body.contains(absent), "the body has {absent:?}:\n{body}");
+    }
+    assert!(body.contains("optional in the merge queue"), "{body}");
+}
+
+#[test]
+fn the_error_lines_are_capped_fenced_and_cleaned_as_log_data() {
+    let mut log =
+        String::from("2026-11-27T10:01:00.0000000Z \u{1b}[31merror\u{1b}[0m: in colour\n");
+    log.push_str(
+        &fs::read_to_string(
+            root().join("tests/fixtures/ci-main-red/api/repos_o_r_actions_jobs_2_logs"),
+        )
+        .unwrap(),
+    );
+    let run = main_red(
+        "macOS",
+        "failure",
+        false,
+        &[("api/repos_o_r_actions_jobs_2_logs", &log)],
+    );
+    assert!(run.ok, "{}", run.stderr);
+    let block = run
+        .body
+        .split("\n~~~~text\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\n~~~~\n").next())
+        .unwrap_or_else(|| panic!("no fenced log block:\n{}", run.body));
+    let lines: Vec<_> = block.lines().filter(|l| !l.starts_with("--- ")).collect();
+    assert_eq!(lines.len(), 15, "{block}");
+    assert_eq!(lines[0], "error: in colour");
+    assert!(lines.iter().all(|l| l.chars().count() <= 300), "{block}");
+    assert!(lines.iter().any(|l| l.starts_with("error: xxx")), "{block}");
+    // A fence in the log can't close the block.
+    assert!(!block.contains("~~~"), "{block}");
+    assert!(block.contains("repeated failure 9\n") || block.ends_with("repeated failure 9"));
+    assert!(!block.contains("repeated failure 10"), "{block}");
+    assert!(run.body.contains("More error lines are in the job logs."));
+}
+
+#[test]
+fn a_red_platform_with_an_open_issue_comments_on_it() {
+    let issues = open_issues(&[
+        (8, "main-red: macOS checks failing on main, again"),
+        (7, MACOS_TITLE),
+    ]);
+    let run = main_red("macOS", "cancelled", false, &[("issue-list.json", &issues)]);
+    assert!(run.ok, "{}", run.stderr);
+    assert_eq!(run.writes(), ["issue comment 7 --repo o/r --body-file -"]);
+    assert!(run.body.contains("ended with cancelled"), "{}", run.body);
+}
+
+#[test]
+fn a_green_platform_closes_its_open_issue_with_the_green_runs_link_and_no_other() {
+    let issues = open_issues(&[(7, MACOS_TITLE), (9, LINUX_TITLE)]);
+    let run = main_red("Linux", "success", false, &[("issue-list.json", &issues)]);
+    assert!(run.ok, "{}", run.stderr);
+    let writes = run.writes();
+    assert_eq!(writes.len(), 1, "{}", run.calls);
+    assert!(
+        writes[0].starts_with("issue close 9 --repo o/r --comment "),
+        "{writes:?}"
+    );
+    assert!(writes[0].contains("https://github.com/o/r/actions/runs/200"));
+    assert!(writes[0].contains("c0ffee0000000000000000000000000000000003"));
+
+    // Green with no open issue for the platform: no write at all.
+    let issues = open_issues(&[(7, MACOS_TITLE)]);
+    let run = main_red("Linux", "success", false, &[("issue-list.json", &issues)]);
+    assert!(run.ok, "{}", run.stderr);
+    assert!(run.writes().is_empty(), "{}", run.calls);
+
+    // A run whose checks were skipped decides nothing.
+    let run = main_red("macOS", "skipped", false, &[("issue-list.json", &issues)]);
+    assert!(run.ok, "{}", run.stderr);
+    assert!(run.writes().is_empty(), "{}", run.calls);
+}
+
+#[test]
+fn a_dry_run_prints_the_issue_and_writes_nothing() {
+    let run = main_red("macOS", "failure", true, &[]);
+    assert!(run.ok, "{}", run.stderr);
+    assert!(run.writes().is_empty(), "{}", run.calls);
+    assert!(
+        run.stdout.starts_with(&format!(
+            "Dry run: would open \"{MACOS_TITLE}\" labelled main-red with this body:\n"
+        )),
+        "{}",
+        run.stdout
+    );
+    assert!(
+        run.stdout
+            .contains("- `cli_golden every_option_against_every_command`")
+    );
+    assert!(run.summary.contains("would open"), "{}", run.summary);
+    assert!(
+        run.summary
+            .contains("cli_golden every_option_against_every_command")
+    );
+}
+
+#[test]
+fn a_report_says_what_it_could_not_find_rather_than_failing() {
+    // No green Linux run among those listed, no Linux JUnit report and no
+    // readable Linux log: the issue still opens, saying so for each.
+    let runs = r#"{"workflow_runs": [{"id": 200, "head_sha": "c0ffee0000000000000000000000000000000003", "html_url": "https://github.com/o/r/actions/runs/200", "created_at": "2026-11-27T10:00:00Z"}]}"#;
+    let run = main_red(
+        "Linux",
+        "failure",
+        false,
+        &[("api/repos_o_r_actions_workflows_check_yml_runs", runs)],
+    );
+    assert!(run.ok, "{}", run.stderr);
+    assert_eq!(run.writes().len(), 2, "{}", run.calls);
+    for part in [
+        "- [Linux build](https://github.com/o/r/actions/runs/200/job/4): failure\n- [Linux](https://github.com/o/r/actions/runs/200/job/5): failure\n",
+        "No failed test was recorded",
+        "Could not read the log of Linux build",
+        "No green Linux run on main among the last 20",
+    ] {
+        assert!(
+            run.body.contains(part),
+            "the body lacks {part:?}:\n{}",
+            run.body
+        );
+    }
+    assert!(
+        !run.body.contains("optional in the merge queue"),
+        "{}",
+        run.body
+    );
+
+    // A download that fails for another reason says so, rather than that
+    // no test failed.
+    let run = main_red(
+        "macOS",
+        "failure",
+        true,
+        &[(
+            "download-error",
+            "HTTP 403: Resource not accessible by integration\n",
+        )],
+    );
+    assert!(run.ok, "{}", run.stderr);
+    assert!(
+        run.stdout.contains(
+            "Could not download the JUnit reports: gh run download exited 1: HTTP 403: Resource not accessible by integration"
+        ),
+        "{}",
+        run.stdout
+    );
+    assert!(!run.stdout.contains("No failed test was recorded"));
+
+    // A run id that isn't a number is refused before any call.
+    let out = Command::new("python3")
+        .args(["-I", "-B"])
+        .arg(root().join("scripts/ci-main-red.py"))
+        .env("PLATFORM", "macOS")
+        .env("RESULT", "failure")
+        .env("RUN_ID", "200; rm -rf /")
+        .env("REPO", "o/r")
+        .env("SERVER_URL", "https://github.com")
+        .env("DRY_RUN", "true")
+        .env("GH_STUB_LOG", "/nonexistent/calls")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("RUN_ID"), "{stderr}");
+}
+
+/// 64 MiB: twice the log cap and four times the cap on other output.
+const FLOOD: &str = "67108864";
+
+#[test]
+fn a_log_over_its_cap_is_read_to_the_cap_and_its_download_stopped() {
+    // The first error lines come from the start of the log; the 64 MiB
+    // after them are never read, so the stub never writes them all.
+    let run = main_red(
+        "macOS",
+        "failure",
+        false,
+        &[("api/repos_o_r_actions_jobs_2_logs.flood", FLOOD)],
+    );
+    assert!(run.ok, "{}", run.stderr);
+    assert!(
+        run.body
+            .contains("\n~~~~text\n--- macOS tests 2\nFAIL [   2.001s] cli_golden"),
+        "{}",
+        run.body
+    );
+    assert!(!run.body.contains("Could not read the log"), "{}", run.body);
+    assert_eq!(run.finished, "", "the log download ran to its end");
+}
+
+#[test]
+fn other_gh_output_over_its_cap_is_refused_and_its_call_stopped() {
+    // A jobs list too long to be the jobs list is not buffered whole: the
+    // call stops at the cap and the report says so.
+    let run = main_red(
+        "macOS",
+        "failure",
+        false,
+        &[("api/repos_o_r_actions_runs_200_jobs.flood", FLOOD)],
+    );
+    assert!(run.ok, "{}", run.stderr);
+    assert!(
+        run.body.contains(
+            "Could not list the jobs: gh api printed more than 16777216 bytes; stopped it"
+        ),
+        "{}",
+        run.body
+    );
+    assert_eq!(run.finished, "", "the jobs download ran to its end");
+}
+
+#[test]
+fn a_flood_on_stderr_is_drained_and_its_first_line_reported() {
+    // Reading stdout to its end while stderr fills its pipe would deadlock;
+    // stderr is drained alongside, capped, and its first line reported.
+    let run = main_red(
+        "macOS",
+        "failure",
+        false,
+        &[("api/repos_o_r_actions_jobs_2_logs.flood-stderr", FLOOD)],
+    );
+    assert!(run.ok, "{}", run.stderr);
+    assert!(
+        run.body
+            .contains("Could not read the log of macOS tests 2: noise line"),
+        "{}",
+        run.body
+    );
 }
 
 /// Runs scripts/advisory-ignores.py over `dir` with `args`; returns
@@ -1599,6 +2113,65 @@ fn cargo_audit_takes_its_ignores_from_deny_toml() {
         !root().join(".cargo/audit.toml").exists(),
         "cargo-audit's ignores come from deny.toml alone"
     );
+}
+
+/// The advisory dry run (issue #312): a manual run of check.yml with
+/// `advisory_dry_run` audits a lockfile holding a known advisory after the
+/// real one, so the `Linux` job fails on it and nightly-report files under
+/// a title of its own. Read from the files: what it verifies is the
+/// workflow's and check.sh's text; the dispatched run is the evidence
+/// (docs/evidence/ci/advisories.md).
+#[test]
+fn an_advisory_dry_run_fails_linux_on_a_known_advisory_and_reports_apart() {
+    let text = workflow("check.yml");
+    assert!(
+        text.contains(concat!(
+            "      advisory_dry_run:\n",
+            "        description: Audit a lockfile with a known advisory, so Linux fails and nightly-report runs\n",
+            "        type: boolean\n",
+            "        default: false\n",
+        )),
+        "check.yml lacks the advisory_dry_run input"
+    );
+    // Only the Linux build's check step sets it, and only from the input.
+    let setting = "LANGSPAN_ADVISORY_DRY_RUN: ${{ inputs.advisory_dry_run && '1' || '' }}\n";
+    assert_eq!(text.matches("LANGSPAN_ADVISORY_DRY_RUN").count(), 1);
+    assert!(job(&text, "linux").contains(&format!("          {setting}")));
+
+    let check = read("scripts/check.sh");
+    let real = "  cargo audit --deny warnings $audit_flags\n";
+    let dry = concat!(
+        "  if [ \"${LANGSPAN_ADVISORY_DRY_RUN:-}\" = 1 ]; then\n",
+        "    # shellcheck disable=SC2086 # each flag and id is one word\n",
+        "    cargo audit --deny warnings $audit_flags --file tests/fixtures/advisory-dry-run/known-advisory.lock\n",
+        "  fi\n",
+    );
+    let (at_real, at_dry) = (check.find(real), check.find(dry));
+    assert!(
+        matches!((at_real, at_dry), (Some(r), Some(d)) if r < d),
+        "check.sh audits the fixture after the real lockfile"
+    );
+
+    // Not named Cargo.lock, so no tool reads it as this repository's.
+    let fixture = read("tests/fixtures/advisory-dry-run/known-advisory.lock");
+    assert!(
+        fixture.contains("name = \"smallvec\"\nversion = \"1.6.0\"\n"),
+        "{fixture}"
+    );
+    assert!(!read("deny.toml").contains("RUSTSEC-2021-0003"));
+
+    let report = job(&text, "nightly-report");
+    for line in [
+        "    if: (github.event_name == 'schedule' || inputs.advisory_dry_run) && failure()\n",
+        "          TITLE: Nightly Rust checks on main failed\n",
+        "          DRY_RUN: ${{ inputs.advisory_dry_run == true }}\n",
+        "          DRY_RUN_TITLE: Advisory dry run of the nightly report\n",
+        "            TITLE=$DRY_RUN_TITLE\n",
+        "export TITLE\n",
+    ] {
+        assert!(report.contains(line), "nightly-report lacks {line}");
+    }
+    assert!(!report.contains("actions/checkout"));
 }
 
 #[test]
@@ -1770,6 +2343,12 @@ fn ci_installs_the_runners_the_real_tool_tests_need_and_requires_them() {
 fn coverage_runs_nightly_reports_a_drop_and_is_not_a_required_check() {
     let text = workflow("coverage.yml");
     assert!(text.contains("\n  schedule:\n"), "{text}");
+    // Every push to main is measured too, so the gate has current main.
+    assert!(text.contains("\n  push:\n    branches: [main]\n"), "{text}");
+    assert!(
+        text.contains("cancel-in-progress: ${{ github.event_name == 'pull_request' }}"),
+        "a run on main is never cancelled"
+    );
     assert!(
         !text.contains("merge_group"),
         "coverage is no merge-queue gate"
@@ -1866,42 +2445,54 @@ fn coverage_report(dir: &Path, out: &Path, args: &[&str]) -> (bool, String, Stri
     )
 }
 
+/// The files `eleven` measures between the first and the eleventh.
+const MIDDLE: [&str; 9] = [
+    "src/f01.rs",
+    "src/f02.rs",
+    "src/f03.rs",
+    "src/f04.rs",
+    "crates/langspan-core/src/f05.rs",
+    "src/f06.rs",
+    "src/f07.rs",
+    "src/f08.rs",
+    "src/daemon/f09.rs",
+];
+
 /// Eleven files, src/f00.rs the largest; each 95% covered.
 fn eleven(first: Measured, eleventh: Measured) -> Vec<Measured> {
-    const NAMES: [&str; 9] = [
-        "src/f01.rs",
-        "src/f02.rs",
-        "src/f03.rs",
-        "src/f04.rs",
-        "crates/langspan-core/src/f05.rs",
-        "src/f06.rs",
-        "src/f07.rs",
-        "src/f08.rs",
-        "src/daemon/f09.rs",
-    ];
     let mut files = vec![first];
-    files.extend(NAMES.iter().map(|name| Measured(name, 200, 190, 0)));
+    files.extend(MIDDLE.iter().map(|name| Measured(name, 200, 190, 0)));
     files.push(eleventh);
     files
 }
 
-const BASELINE: &str = "src/f00.rs\t95.0\nsrc/f10.rs\t95.0\n";
+/// A 95.0 row for each of `eleven`'s files, src/f00.rs at `first`.
+fn rows(first: &str) -> String {
+    let mut rows = format!("src/f00.rs\t{first}\n");
+    for name in MIDDLE.iter().chain(&["src/f10.rs"]) {
+        rows += &format!("{name}\t95.0\n");
+    }
+    rows
+}
 
 #[test]
-fn coverage_holds_when_the_total_and_the_largest_files_hold() {
+fn coverage_holds_when_the_total_and_every_row_hold() {
     let dir = temp_dir("coverage-holds");
     // Integration tests cover 372 of 400 lines, 2 points under the 95.0
-    // baseline; in-file unit tests cover 8 more, so 95.0 again.
-    let files = eleven(
+    // baseline; in-file unit tests cover 8 more, so 95.0 again. The
+    // eleventh file, the smallest, is held to its row too: 93.0 is 2 under.
+    let mut files = eleven(
         Measured("src/f00.rs", 400, 372, 8),
-        Measured("src/f10.rs", 100, 80, 0),
+        Measured("src/f10.rs", 100, 93, 0),
     );
-    let out = coverage_fixture(&dir, &files, BASELINE);
+    // Under 100 production lines, a file needs no row.
+    files.push(Measured("src/small.rs", 99, 50, 0));
+    let out = coverage_fixture(&dir, &files, &rows("95.0"));
     let (ok, stdout, stderr) = coverage_report(&dir, &out, &[]);
     assert!(ok, "{stdout}{stderr}");
-    // 2,170 of 2,300 production lines; the test-module lines aren't counted.
+    // 2,233 of 2,399 production lines; the test-module lines aren't counted.
     assert!(
-        stdout.contains("Production lines covered: 94.3% (2170 of 2300); the floor is 90%."),
+        stdout.contains("Production lines covered: 93.1% (2233 of 2399); the floor is 90%."),
         "{stdout}"
     );
     assert!(
@@ -1912,44 +2503,47 @@ fn coverage_holds_when_the_total_and_the_largest_files_hold() {
         stdout.contains("| `src/f00.rs` | 400 | 380 | 95.0 | 95.0 |"),
         "{stdout}"
     );
-    // The eleventh largest may fall further: only the ten largest are held.
     assert!(
-        stdout.contains("| `src/f10.rs` | 100 | 80 | 80.0 | 95.0 |"),
+        stdout.contains("| `src/f10.rs` | 100 | 93 | 93.0 | 95.0 |"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("| `src/small.rs` | 99 | 50 | 50.5 | none |"),
         "{stdout}"
     );
     assert!(!stdout.contains("tests/support"), "{stdout}");
     assert!(!stdout.contains("/rustc/"), "{stdout}");
-    // A file among the largest with no row is named, not failed.
-    assert!(
-        stdout.contains("`src/f01.rs` has no baseline row"),
-        "{stdout}"
-    );
     let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn coverage_fails_under_the_total_floor_or_two_points_under_a_largest_file() {
+fn coverage_fails_under_the_total_floor_or_two_points_under_any_row() {
     let dir = temp_dir("coverage-drops");
-    // 2.1 points under its baseline.
+    // The largest file is 2.1 points under its row; the eleventh, outside
+    // the ten largest, 3 points.
     let files = eleven(
         Measured("src/f00.rs", 1000, 929, 0),
-        Measured("src/f10.rs", 100, 95, 0),
+        Measured("src/f10.rs", 100, 92, 0),
     );
-    let out = coverage_fixture(&dir, &files, BASELINE);
+    let out = coverage_fixture(&dir, &files, &rows("95.0"));
     let (ok, stdout, stderr) = coverage_report(&dir, &out, &[]);
     assert!(!ok, "{stdout}");
-    let message = "`src/f00.rs` covers 92.9% of its production lines, more than 2 points under its baseline of 95.0%";
-    assert!(stdout.contains(message), "{stdout}");
-    assert!(stderr.contains(message), "{stderr}");
+    for (file, now) in [("src/f00.rs", "92.9"), ("src/f10.rs", "92.0")] {
+        let message = format!(
+            "`{file}` covers {now}% of its production lines, more than 2 points under its baseline of 95.0%"
+        );
+        assert!(stdout.contains(&message), "{stdout}");
+        assert!(stderr.contains(&message), "{stderr}");
+    }
     let _ = fs::remove_dir_all(&dir);
 
     // Exactly 2 points under holds.
     let dir = temp_dir("coverage-two-points");
     let files = eleven(
         Measured("src/f00.rs", 1000, 930, 0),
-        Measured("src/f10.rs", 100, 95, 0),
+        Measured("src/f10.rs", 100, 93, 0),
     );
-    let out = coverage_fixture(&dir, &files, BASELINE);
+    let out = coverage_fixture(&dir, &files, &rows("95.0"));
     let (ok, stdout, _) = coverage_report(&dir, &out, &[]);
     assert!(ok, "{stdout}");
     let _ = fs::remove_dir_all(&dir);
@@ -1959,7 +2553,7 @@ fn coverage_fails_under_the_total_floor_or_two_points_under_a_largest_file() {
         Measured("src/f00.rs", 4000, 3200, 0),
         Measured("src/f10.rs", 100, 95, 0),
     );
-    let out = coverage_fixture(&dir, &files, "src/f00.rs\t80.0\n");
+    let out = coverage_fixture(&dir, &files, &rows("80.0"));
     let (ok, stdout, stderr) = coverage_report(&dir, &out, &[]);
     assert!(!ok, "{stdout}");
     let message = "the total, 84.8% of production lines, is under the 90% floor";
@@ -1968,12 +2562,85 @@ fn coverage_fails_under_the_total_floor_or_two_points_under_a_largest_file() {
 }
 
 #[test]
+fn coverage_fails_for_a_row_without_its_file_or_a_large_file_without_a_row() {
+    // src/f05.rs was split: its row stays behind and the new file has none.
+    let dir = temp_dir("coverage-moved");
+    let mut files = eleven(
+        Measured("src/f00.rs", 400, 380, 0),
+        Measured("src/f10.rs", 100, 95, 0),
+    );
+    files.push(Measured("src/f05/part.rs", 100, 95, 0));
+    // A row whose file exists but measures no production lines.
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("src/tests_only.rs"), "#[cfg(test)]\nmod t {}\n").unwrap();
+    let baseline = rows("95.0") + "src/f05.rs\t95.0\nsrc/tests_only.rs\t90.0\n";
+    let out = coverage_fixture(&dir, &files, &baseline);
+    let (ok, stdout, stderr) = coverage_report(&dir, &out, &[]);
+    assert!(!ok, "{stdout}");
+    for message in [
+        "`src/f05.rs` has a baseline row but no longer exists; move its row to the files its lines went to",
+        "`src/tests_only.rs` has a baseline row but no production lines measured; remove the row",
+        "`src/f05/part.rs` has 100 production lines and no baseline row; add one",
+    ] {
+        assert!(stdout.contains(message), "{stdout}");
+        assert!(stderr.contains(message), "{stderr}");
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn coverage_fails_for_a_row_whose_record_keeps_no_production_lines() {
+    // The export has a record for src/tests_only.rs, but --prepare drops
+    // every line of it as test-only: the row fails as if the record were
+    // absent, and the file isn't counted as 100% covered.
+    let dir = temp_dir("coverage-emptied");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("src/tests_only.rs"), "#[cfg(test)]\nmod t {}\n").unwrap();
+    let mut files = eleven(
+        Measured("src/f00.rs", 400, 380, 0),
+        Measured("src/f10.rs", 100, 95, 0),
+    );
+    files.push(Measured("src/tests_only.rs", 2, 2, 0));
+    let baseline = rows("95.0") + "src/tests_only.rs\t90.0\n";
+    let out = coverage_fixture(&dir, &files, &baseline);
+    let prepared = fs::read_to_string(out.join("production.lcov")).unwrap();
+    assert!(
+        kept_lines(&prepared, "src/tests_only.rs").is_empty(),
+        "{prepared}"
+    );
+    let (ok, stdout, stderr) = coverage_report(&dir, &out, &[]);
+    assert!(!ok, "{stdout}");
+    let message =
+        "`src/tests_only.rs` has a baseline row but no production lines measured; remove the row";
+    assert!(stdout.contains(message), "{stdout}");
+    assert!(stderr.contains(message), "{stderr}");
+    assert!(!stdout.contains("| `src/tests_only.rs` |"), "{stdout}");
+    let _ = fs::remove_dir_all(&dir);
+
+    // Every record emptied: no production lines at all, which fails like an
+    // export with no records instead of passing at 100%.
+    let dir = temp_dir("coverage-all-emptied");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("src/tests_only.rs"), "#[cfg(test)]\nmod t {}\n").unwrap();
+    let files = [Measured("src/tests_only.rs", 2, 2, 0)];
+    let out = coverage_fixture(&dir, &files, "");
+    for args in [&[][..], &["--write-baseline"]] {
+        let (ok, stdout, stderr) = coverage_report(&dir, &out, args);
+        assert!(!ok, "{args:?}: {stdout}");
+        assert!(stderr.contains("no production lines"), "{args:?}: {stderr}");
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn writing_the_coverage_baseline_records_one_row_per_file() {
     let dir = temp_dir("coverage-write");
-    let files = eleven(
+    let mut files = eleven(
         Measured("src/f00.rs", 400, 390, 0),
         Measured("src/f10.rs", 100, 95, 0),
     );
+    // Under 100 production lines: no row.
+    files.push(Measured("src/small.rs", 99, 50, 0));
     let out = coverage_fixture(&dir, &files, "src/gone.rs\t99.0\n");
     let (ok, stdout, stderr) = coverage_report(&dir, &out, &["--write-baseline"]);
     assert!(ok, "{stdout}{stderr}");
@@ -1983,6 +2650,7 @@ fn writing_the_coverage_baseline_records_one_row_per_file() {
     assert_eq!(rows[0], "crates/langspan-core/src/f05.rs\t95.0");
     assert!(rows.contains(&"src/f00.rs\t97.5"), "{written}");
     assert!(!written.contains("gone.rs"), "{written}");
+    assert!(!written.contains("small.rs"), "{written}");
     // The written baseline holds at once.
     let (ok, stdout, _) = coverage_report(&dir, &out, &[]);
     assert!(ok, "{stdout}");

@@ -32,6 +32,11 @@ rustix = { version = "=1.1.6", features = ["fs", "process", "net", "event", "tim
 rmcp = { version = "=3.11.0", default-features = false, features = ["client", "transport-child-process"] }
 proptest = { version = "=1.12.0", default-features = false, features = ["std"] }
 
+# Against the real Claude Code CLI; ignored, and the owner runs it (issue #534).
+[[test]]
+name = "claude_headless"
+path = "tests/live/claude_headless.rs"
+
 [profile.release]
 lto = "thin"
 strip = true

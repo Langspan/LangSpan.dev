@@ -10,7 +10,10 @@ cache, the release build and the macOS checks are in
 [pipeline.md](pipeline.md). The full lane's times before and after it
 built the tests once per platform and ran them in shards are in
 [shards.md](shards.md), and how evenly the shards finish once assigned by
-measured test time in [balance.md](balance.md).
+measured test time in [balance.md](balance.md). Each lane's median against
+its target after the shards, the lanes' time limits and what runs only at
+night are in [lanes.md](lanes.md). A dry run of the advisory gate and the
+nightly report is in [advisories.md](advisories.md).
 
 ## Workflow completion, the merge-queue gate and job times
 

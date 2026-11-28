@@ -208,6 +208,56 @@ class PublicSurface(unittest.TestCase):
         self.assertEqual(self.ws.baseline("src/a.rs"), "pub\t1\n")
 
 
+class PublicFields(unittest.TestCase):
+    STRUCT = (
+        "pub struct S {\n    pub a: u8,\n    pub(crate) b: u8,\n    // pub c: u8,\n    pub d: Vec<u8>,\n}\n"
+        "pub struct T {\n    pub e: u8,\n}\n"
+    )
+
+    def setUp(self):
+        self.ws = Workspace(self)
+        self.ws.write("crates/core/src/lib.rs", self.STRUCT)
+        self.ws.write("scripts/ratchets/baseline/crates/core/src/lib.rs.tsv", "pub\t2\nfields\tS\t2\n")
+
+    def test_pub_fields_count_only_that_structs_pub_fields(self):
+        source = ratchets.Source(self.STRUCT)
+        self.assertEqual((source.pub_fields("S"), source.pub_fields("T")), (2, 1))
+        self.assertIsNone(source.pub_fields("U"))
+
+    def test_a_new_pub_field_fails(self):
+        self.ws.write("crates/core/src/lib.rs", self.STRUCT.replace("pub(crate) b", "pub b"))
+        failures, _ = self.ws.check()
+        self.assertEqual(len(failures), 1)
+        self.assertIn("crates/core/src/lib.rs: struct S has 3 pub fields, baseline 2", failures[0])
+
+    def test_a_field_made_crate_private_tightens_and_never_raises(self):
+        self.ws.write("crates/core/src/lib.rs", self.STRUCT.replace("pub a", "pub(crate) a"))
+        failures, improvements = self.ws.check()
+        self.assertEqual(failures, [])
+        self.assertIn("struct S has 1 pub fields, baseline 2", improvements[0])
+        self.ws.tighten("crates/core/src/lib.rs")
+        self.assertEqual(self.ws.baseline("crates/core/src/lib.rs"), "pub\t2\nfields\tS\t1\n")
+        self.ws.write("crates/core/src/lib.rs", self.STRUCT)
+        self.ws.tighten("crates/core/src/lib.rs")
+        self.assertIn("fields\tS\t1\n", self.ws.baseline("crates/core/src/lib.rs"))
+
+    def test_a_row_at_zero_is_kept(self):
+        self.ws.write("crates/core/src/lib.rs", "pub struct S {\n    pub(crate) a: u8,\n}\n")
+        self.ws.tighten("crates/core/src/lib.rs")
+        self.assertEqual(self.ws.baseline("crates/core/src/lib.rs"), "pub\t1\nfields\tS\t0\n")
+        self.assertEqual(self.ws.check(), ([], []))
+
+    def test_recording_keeps_the_row_at_the_current_count(self):
+        self.ws.write("crates/core/src/lib.rs", self.STRUCT.replace("pub(crate) b", "pub b"))
+        self.ws.record("crates/core/src/lib.rs")
+        self.assertIn("fields\tS\t3\n", self.ws.baseline("crates/core/src/lib.rs"))
+
+    def test_a_struct_that_is_gone_fails(self):
+        self.ws.write("crates/core/src/lib.rs", "pub struct T {\n    pub e: u8,\n}\n")
+        failures, _ = self.ws.check()
+        self.assertTrue(any("no struct S, which its `fields` row counts" in f for f in failures), failures)
+
+
 class Indexing(unittest.TestCase):
     def setUp(self):
         self.ws = Workspace(self)
@@ -642,6 +692,54 @@ class Namespaces(unittest.TestCase):
             self.namespaces("namespace\tb\t-", row)
             with self.assertRaisesRegex(ratchets.RatchetError, "namespaces.tsv:3: .*" + re.escape(what)):
                 self.ws.check()
+
+
+class StringErrors(unittest.TestCase):
+    SOURCE = (
+        "fn one() -> Result<(), String> { Ok(()) }\n"
+        "fn two() -> Result<Vec<(u8, u8)>, String> { Ok(Vec::new()) }\n"
+        "fn three(f: impl Fn() -> u8) -> Result<Box<dyn Fn() -> u8>, String> { todo() }\n"
+        "fn four() {\n    let ask = |x: u8| -> Result<u8, String> { Ok(x) };\n}\n"
+        "fn other() -> Result<String, Error> { todo() }\n"
+        "fn io() -> io::Result<String> { todo() }\n"
+        "// fn comment() -> Result<(), String>\n"
+        "#[cfg(test)]\nmod tests {\n    fn test() -> Result<(), String> { Ok(()) }\n}\n"
+    )
+
+    def setUp(self):
+        self.ws = Workspace(self)
+        self.ws.write("src/a.rs", self.SOURCE)
+        self.ws.write("src/b.rs", "")
+        self.ws.write(ratchets.STRING_ERRORS, "langspan\t4\n")
+
+    def test_the_fixture_counts_production_signatures_only(self):
+        self.assertEqual(ratchets.Source(self.SOURCE).string_errors(), 4)
+        self.assertEqual(self.ws.check(), ([], []))
+
+    def test_a_new_string_error_fails_for_its_crate(self):
+        self.ws.write("src/b.rs", "fn five() -> Result<u8, String> { Ok(0) }\n")
+        failures, _ = self.ws.check()
+        self.assertEqual(len(failures), 1)
+        self.assertIn("crate langspan: 5 `Result<_, String>` signatures, baseline 4", failures[0])
+        self.assertIn("src/b.rs 1", failures[0])
+
+    def test_a_crate_without_a_row_allows_none(self):
+        self.ws.write("crates/core/src/lib.rs", "fn five() -> Result<u8, String> { Ok(0) }\n")
+        failures, _ = self.ws.check()
+        self.assertIn("crate core: 1 `Result<_, String>` signatures, baseline 0", failures[0])
+
+    def test_fewer_string_errors_names_the_row_to_lower(self):
+        self.ws.write("src/a.rs", "fn one() -> Result<(), String> { Ok(()) }\n")
+        failures, improvements = self.ws.check()
+        self.assertEqual(failures, [])
+        self.assertEqual(len(improvements), 1)
+        self.assertIn("crate langspan: 1 `Result<_, String>` signatures, baseline 4", improvements[0])
+        self.assertIn(f"set its row in {ratchets.STRING_ERRORS} to 1", improvements[0])
+
+    def test_a_malformed_row_names_the_line(self):
+        self.ws.write(ratchets.STRING_ERRORS, "langspan 4\n")
+        with self.assertRaisesRegex(ratchets.RatchetError, "string-errors.tsv:1: expected"):
+            self.ws.check()
 
 
 class Interface(unittest.TestCase):

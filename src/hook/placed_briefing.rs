@@ -22,6 +22,7 @@ fn peer(id: &str, paths: &[String]) -> PeerWork {
             .collect(),
         overlap: Vec::new(),
         target_overlap: Vec::new(),
+        same_task: false,
         relation: None,
         looking: Vec::new(),
     }

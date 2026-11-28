@@ -298,10 +298,10 @@ pub fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(
         }
         // Briefings, refused edits and source versions
         Outcome::Briefing { briefing } => {
-            if !crate::hook::has_content(briefing) {
+            if !crate::briefing::render::has_content(briefing) {
                 println!("No relevant peer work.");
             } else {
-                println!("{}", crate::hook::render_briefing(briefing));
+                println!("{}", crate::briefing::render::render_briefing(briefing));
             }
         }
         Outcome::StaleBase { stale } => {
@@ -527,7 +527,7 @@ pub fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(
         Outcome::CheckoutObserved { change } => println!(
             "Checkout change recorded for {}: {}.",
             change.workspace_id,
-            crate::hook::checkout_text(
+            crate::briefing::render::checkout_text(
                 change.from_branch.as_deref(),
                 change.to_branch.as_deref(),
                 change.from_head.as_deref(),

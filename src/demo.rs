@@ -8,7 +8,7 @@
 //! directory. It never reads or writes the user's state directory, host
 //! settings or workspaces: the coordinator's `HOME` is the temporary one.
 
-use crate::{autostart, claude_code, client, hook};
+use crate::{autostart, claude_code, client, hosts::port};
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -167,7 +167,7 @@ impl Drop for Scratch {
 /// One example session's hook calls, as Claude Code sends them.
 struct Session<'a> {
     name: &'static str,
-    config: &'a hook::Config,
+    config: &'a port::Config,
 }
 
 /// One edit of `HELD`: the text it replaces and the text that replaces it.
@@ -176,7 +176,7 @@ const ALICE_CHANGE: Change = ("token.to_owned()", "token.trim().to_owned()");
 const BOB_CHANGE: Change = ("token.trim().to_owned()", "token.trim().to_lowercase()");
 
 impl Session<'_> {
-    fn call(&self, phase: &str, tool: &str, tool_use_id: &str, input: Value) -> hook::Reply {
+    fn call(&self, phase: &str, tool: &str, tool_use_id: &str, input: Value) -> port::Reply {
         let event = json!({
             "session_id": self.name,
             "transcript_path": "/dev/null",
@@ -189,7 +189,7 @@ impl Session<'_> {
         });
         claude_code::run(event.to_string().as_bytes(), self.config)
     }
-    fn edit(&self, phase: &str, tool_use_id: &str, (old, new): Change) -> hook::Reply {
+    fn edit(&self, phase: &str, tool_use_id: &str, (old, new): Change) -> port::Reply {
         let input = json!({
             "file_path": self.config.root.join(HELD),
             "old_string": old,
@@ -231,7 +231,7 @@ impl Session<'_> {
 }
 
 /// The demo stopped because the hook answered otherwise than expected.
-fn unexpected(name: &str, expected: &str, reply: &hook::Reply) -> crate::Error {
+fn unexpected(name: &str, expected: &str, reply: &port::Reply) -> crate::Error {
     format!(
         "the demo expected {name}'s call on {HELD} to be {expected}, but the hook answered {} ({}). Report this as a LangSpan bug.",
         reply.coverage, reply.detail
@@ -244,7 +244,7 @@ fn unexpected(name: &str, expected: &str, reply: &hook::Reply) -> crate::Error {
 pub fn run(executable: &Path, out: &mut dyn Write) -> Result<(), crate::Error> {
     let mut scratch = Scratch::create()?;
     scratch.start(executable)?;
-    let config = hook::Config {
+    let config = port::Config {
         state_dir: scratch.state_dir(),
         workspace_id: "demo".into(),
         root: scratch.root(),
@@ -315,7 +315,7 @@ pub fn run(executable: &Path, out: &mut dyn Write) -> Result<(), crate::Error> {
 }
 
 /// The reason in a Claude Code `deny` answer, or `None` for any other.
-fn denial_reason(reply: &hook::Reply) -> Option<String> {
+fn denial_reason(reply: &port::Reply) -> Option<String> {
     let answer: Value = serde_json::from_str(&reply.stdout).ok()?;
     let output = answer.get("hookSpecificOutput")?;
     (output.get("permissionDecision")? == "deny")
@@ -387,7 +387,7 @@ mod tests {
 
     #[test]
     fn only_a_deny_answer_has_a_reason() {
-        let reply = |decision: &str| hook::Reply {
+        let reply = |decision: &str| port::Reply {
             stdout: json!({"hookSpecificOutput": {
                 "permissionDecision": decision,
                 "permissionDecisionReason": "held",
@@ -399,7 +399,7 @@ mod tests {
         assert_eq!(denial_reason(&reply("deny")).as_deref(), Some("held"));
         assert_eq!(denial_reason(&reply("ask")), None);
         for stdout in ["", "not json"] {
-            let reply = hook::Reply {
+            let reply = port::Reply {
                 stdout: stdout.into(),
                 ..reply("deny")
             };
