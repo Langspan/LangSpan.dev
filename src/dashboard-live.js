@@ -354,8 +354,17 @@ var LangSpanLive = (function () {
     let [end, total, latest] = [newest, 0, null];
     while (end > 0 && total < keep) {
       const start = Math.max(0, end - page);
-      // Every row in (start, end] fits one page; rows after `end` were read.
-      const rows = (await fetchPage(start, page)).events.filter((e) => e.seq <= end);
+      // The rows in (start, end], read on until a page reaches `end`: the
+      // store ends a page at 48 KiB, often well short of `page` rows. Rows
+      // after `end` were read already.
+      const rows = [];
+      for (let after = start; after < end; ) {
+        const got = await fetchPage(after, page);
+        if (!got.events.length) break;
+        if (got.next <= after) throw new Error("the event feed did not advance past " + after);
+        rows.push(...got.events.filter((e) => e.seq <= end));
+        after = got.next;
+      }
       chunks.unshift(rows);
       total += rows.length;
       const timed = rows.filter((e) => e.at_ms != null);
@@ -368,5 +377,24 @@ var LangSpanLive = (function () {
     return { events: trim(events, events.length - Math.max(0, from)), next: newest };
   }
 
-  return { model, pace, readFeed, readTail, trim, PACING };
+  // The rows with `anchor`, the view's clock anchor (`clock_anchor`), as the
+  // newest anchor row when the rows' own newest is not it: a tail rarely
+  // holds the boot's anchor. The rows as given without one.
+  function withAnchor(events, anchor) {
+    const { clock_ms, wall_ms } = anchor || {};
+    if (typeof clock_ms !== "number" || typeof wall_ms !== "number") return events;
+    const own = events.filter((e) => e.type === "clock_anchored").pop();
+    if (own && own.clock_ms === clock_ms && own.wall_ms === wall_ms) return events;
+    const seq = events.length ? events[events.length - 1].seq : 0;
+    return [...events, { seq, type: "clock_anchored", paths: [], more_paths: 0, clock_ms, wall_ms }];
+  }
+
+  // The daemon's clock at wall time `wall_ms`, from the rows' newest clock
+  // anchor; undefined without one.
+  function daemonNow(events, wall_ms) {
+    const anchor = events.filter((e) => e.type === "clock_anchored").pop();
+    return anchor ? anchor.clock_ms + (wall_ms - anchor.wall_ms) : undefined;
+  }
+
+  return { model, pace, readFeed, readTail, trim, withAnchor, daemonNow, PACING };
 })();

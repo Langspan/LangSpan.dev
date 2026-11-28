@@ -401,12 +401,14 @@ test("readFeed stops at its page bound, and on a page that doesn't advance", asy
 });
 
 // A coordinator's /api/events over `log`: the rows after `after`, at most
-// `limit`, counting every row it serves.
-function server(log) {
+// `limit` and at most `cap`, counting every row it serves. The store ends a
+// page at 48 KiB, so a real page often holds far fewer rows than asked: 133
+// of 1000 in a dogfood log's burst of branch observations.
+function server(log, cap = Infinity) {
   const served = { rows: 0, pages: 0 };
   const fetchPage = async (after, limit) => {
     const start = log.findIndex((e) => e.seq > after);
-    const events = start < 0 ? [] : log.slice(start, start + limit);
+    const events = start < 0 ? [] : log.slice(start, start + Math.min(limit, cap));
     served.rows += events.length;
     served.pages += 1;
     return { events, next: events.length ? events.at(-1).seq : after };
@@ -441,6 +443,41 @@ test("the first read of a 50,000-event log takes only the last 10 minutes, witho
     assert.equal(m.lanes.length, 2);
     assert.deepEqual(m.cards.at(-1).seq, [newest.seq]);
   }
+});
+
+test("a tail read through pages the store cut short still holds every newest row", async () => {
+  const log = longLog(50_000, 1000, 3);
+  const { fetchPage, served } = server(log, 133);
+  const tail = await Live.readTail(fetchPage, TAIL);
+  const newest = log.at(-1);
+  assert.deepEqual(tail, { events: log.filter((e) => e.at_ms >= newest.at_ms - TAIL.window_ms), next: newest.seq });
+  // Each 1000-seq span is about 333 rows here, three short pages and the
+  // probes; the last page of a span can run past it into rows already read.
+  assert.ok(served.pages <= 3 * 4 + 2 * 18, served.pages + " pages read");
+});
+
+test("the view's clock anchor times a tail that holds none, and replaces an older one", () => {
+  const log = longLog(900, 1000);
+  const tail = log.slice(-601);
+  assert.ok(!tail.some((e) => e.type === "clock_anchored"));
+  const given = { generation: 1, clock_ms: 0, wall_ms: 1_800_000_000_000 };
+  const events = Live.withAnchor(tail, given);
+  assert.deepEqual(events.slice(0, -1), tail);
+  assert.deepEqual(events.at(-1), { seq: tail.at(-1).seq, type: "clock_anchored", paths: [], more_paths: 0, clock_ms: 0, wall_ms: 1_800_000_000_000 });
+  // Wall time now, 2 s after the newest edit, through the anchor.
+  const now = Live.daemonNow(events, given.wall_ms + log.at(-1).at_ms + 2000);
+  assert.equal(now, log.at(-1).at_ms + 2000);
+  const p = Live.pace(model(STATE, events), events, { now_ms: now });
+  assert.equal(p.cards.at(-1).time, utc(given.wall_ms + log.at(-1).at_ms));
+  assert.deepEqual(p.working, [0, 1]);
+  // The tail's own anchor stands when it is the view's; an older one gives
+  // way; without either the tail is untimed.
+  const own = [{ seq: 5, type: "clock_anchored", clock_ms: 0, wall_ms: given.wall_ms, paths: [], more_paths: 0 }, ...tail];
+  assert.equal(Live.withAnchor(own, given), own);
+  const old = [{ ...own[0], clock_ms: -5 }, ...tail];
+  assert.equal(Live.withAnchor(old, given).at(-1).clock_ms, 0);
+  assert.equal(Live.withAnchor(tail, undefined), tail);
+  assert.equal(Live.daemonNow(tail, 1), undefined);
 });
 
 test("a busy tail stops at its row bound, a short log is read whole with its anchor, and an empty one is empty", async () => {

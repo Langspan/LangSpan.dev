@@ -186,8 +186,9 @@ a timed step, and Files is the matrix, without the session's task line or
 intent, which are the agent's prompt: a row names its harness and branch, or
 its workspace. The first read takes only the log's tail, so a long log draws
 at once: the newest seq is found with one-row pages (doubling, then halving,
-about 2·log2 of it), and pages of 1000 seqs are read back from it until one
-reaches a timed row 10 minutes before the newest, the log's start, or 4,000
+about 2·log2 of it), and spans of 1000 seqs are read back from it, each
+read forward page by page to its end, since the store ends a page at
+48 KiB, often well short of 1000 rows, until one reaches a timed row 10 minutes before the newest, the log's start, or 4,000
 rows. The boot's clock anchor is then far back, so the view carries the
 state's newest one as `clock_anchor`, optional and additive: absent before
 one is recorded, and an older view decodes without it. After that the page

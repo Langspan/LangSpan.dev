@@ -1398,12 +1398,8 @@ async function refreshLive() {
     failed = error && error.name === 'AbortError' ? 'the dashboard server did not answer within 8 s' : str(error && error.message);
   }
   // The tail rarely holds the boot's clock anchor; the view carries it.
-  const recorded = feed.events.filter((e) => e.type === 'clock_anchored').pop();
-  const given = view.clock_anchor || {};  const kept = num(given.clock_ms) !== null && num(given.wall_ms) !== null && (!recorded || recorded.clock_ms !== given.clock_ms)
-    ? { type: 'clock_anchored', seq: feed.next, paths: [], more_paths: 0, clock_ms: given.clock_ms, wall_ms: given.wall_ms } : null;
-  const events = kept ? [...feed.events, kept] : feed.events;
-  const anchor = kept || recorded;
-  const now = anchor ? anchor.clock_ms + (Date.now() - anchor.wall_ms) : undefined;
+  const events = LangSpanLive.withAnchor(feed.events, view.clock_anchor);
+  const now = LangSpanLive.daemonNow(events, Date.now());
   const timing = LangSpanLive.pace(LangSpanLive.model(view, events), events, { now_ms: now });
   if (liveView) liveView.update(timing); else liveView = LangSpanLiveView.mount(byId('live-view'), timing);
   const empty = byId('live-empty');
