@@ -29,8 +29,9 @@ const END: &str = "<!-- langspan-managed:skill:v1 end -->";
 
 /// The opening words of every message the skill quotes, from the code that
 /// writes them. A test requires the skill to quote exactly these.
-pub const MESSAGES: [&str; 9] = [
+pub const MESSAGES: [&str; 10] = [
     crate::briefing::render::BRIEFING,
+    crate::briefing::render::BRIEFING_CHANGES,
     crate::briefing::render::UNCOORDINATED,
     crate::briefing::render::STALE_SOURCE,
     crate::briefing::render::UNREAD_LINES,

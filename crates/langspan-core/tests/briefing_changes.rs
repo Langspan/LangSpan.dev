@@ -443,7 +443,7 @@ fn an_item_the_hook_could_not_place_is_news_again_at_the_next_prompt() {
     else {
         panic!("not a forget");
     };
-    assert_eq!(forgotten, 2, "Carol's line and her file");
+    assert_eq!(forgotten, 3, "Carol's line, where she works and her file");
     let next = prompt(&mut state, "alice", 3_000);
     assert!(next.changed, "{next:?}");
     assert_eq!(names(&next), ["carol"]);
@@ -799,4 +799,99 @@ fn a_stale_read_after_a_read_in_the_briefings_millisecond_is_told() {
     edited(&mut state, "bob", "src/a.rs", 3_000);
     let again = prompt(&mut state, "alice", 4_000);
     assert_eq!(again.stale_reads.len(), 1, "{again:?}");
+}
+
+/// `ready` with Dan in a linked worktree of the same repository.
+fn with_worktree_peer() -> State {
+    let mut state = ready();
+    let git = |state: &mut State, workspace: &str, branch: &str, now: u64| {
+        ok(run(
+            state,
+            &format!("g-{workspace}-{}", branch.replace('/', "-")),
+            Command::ObserveWorkspaceGit {
+                workspace_id: workspace.into(),
+                repository_id: "repo-app".into(),
+                branch_ref: Some(branch.into()),
+            },
+            now,
+        ));
+    };
+    ok(run(
+        &mut state,
+        "w-tree",
+        Command::WorkspaceRegister {
+            workspace_id: "tree".into(),
+            root: "/repos/app-tree".into(),
+        },
+        0,
+    ));
+    git(&mut state, "main", "refs/heads/main", 0);
+    git(&mut state, "tree", "refs/heads/feature", 0);
+    ok(run(
+        &mut state,
+        "s-dan",
+        Command::SessionRegister {
+            session_id: "dan".into(),
+            workspace_id: "tree".into(),
+            parent: None,
+            headless: false,
+        },
+        0,
+    ));
+    state
+}
+
+fn dan(briefing: &Briefing) -> &langspan_core::PeerWork {
+    let found = briefing.peers.iter().find(|peer| peer.session_id == "dan");
+    found.unwrap_or_else(|| panic!("no line for dan: {briefing:?}"))
+}
+
+/// Issue #624: a session told where a peer works (its worktree and branch)
+/// is not told again in that context; a new branch, or a full view after
+/// the host's context was compacted or resumed, says it again.
+#[test]
+fn where_a_peer_works_is_told_once_per_context() {
+    let mut state = with_worktree_peer();
+    edited(&mut state, "dan", "src/a.rs", 1_000);
+    assert!(!dan(&prompt(&mut state, "alice", 2_000)).place_told);
+    edited(&mut state, "dan", "src/b.rs", 3_000);
+    let next = prompt(&mut state, "alice", 4_000);
+    assert!(dan(&next).place_told, "{next:?}");
+    // Its key is not an item: the count of what was left out is unchanged.
+    assert_eq!(next.unchanged, 2, "{next:?}");
+
+    ok(run(
+        &mut state,
+        "g-tree-other",
+        Command::ObserveWorkspaceGit {
+            workspace_id: "tree".into(),
+            repository_id: "repo-app".into(),
+            branch_ref: Some("refs/heads/other".into()),
+        },
+        5_000,
+    ));
+    edited(&mut state, "dan", "src/c.rs", 6_000);
+    assert!(!dan(&prompt(&mut state, "alice", 7_000)).place_told);
+
+    // A full view, as a start or a compacted context gets, says it again.
+    assert!(!dan(&brief_as(&mut state, "alice", 8_000, false, false)).place_told);
+    edited(&mut state, "dan", "src/d.rs", 9_000);
+    assert!(dan(&prompt(&mut state, "alice", 10_000)).place_told);
+}
+
+/// A hook's briefing (issue #531): the place is told only once the hook
+/// confirms it placed the peer's line.
+#[test]
+fn where_a_peer_works_is_told_only_once_its_line_is_placed() {
+    let mut state = with_worktree_peer();
+    edited(&mut state, "dan", "src/a.rs", 1_000);
+    let first = hook_brief(&mut state, "alice", 2_000, true);
+    assert!(!dan(&first).place_told);
+    edited(&mut state, "dan", "src/b.rs", 3_000);
+    // Not confirmed: the line was not placed, so the place is not told.
+    assert!(!dan(&hook_brief(&mut state, "alice", 4_000, true)).place_told);
+    let placed = hook_brief(&mut state, "alice", 5_000, true);
+    ok(confirm(&mut state, "alice", &placed, 5_000));
+    edited(&mut state, "dan", "src/c.rs", 6_000);
+    assert!(dan(&hook_brief(&mut state, "alice", 7_000, true)).place_told);
 }
