@@ -130,11 +130,13 @@ fn doctor_names_a_user_level_mcp_server_without_its_hooks() {
 }
 
 /// Needs a real coordinator: `land-queue` and `doctor` read its state.
+/// The coordinator gets the test's home too, so its host worker never
+/// reads the machine's own host files.
 #[test]
 fn queue_cancel_and_doctor_against_a_coordinator() {
     let base = Base::new();
     let mut daemon = Process::new(env!("CARGO_BIN_EXE_langspan"));
-    daemon
+    support::in_home(&mut daemon, &base.home())
         .env("LANGSPAN_AUTOSTART", "off")
         .arg("daemon")
         .arg("--state-dir")
