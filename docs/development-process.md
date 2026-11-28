@@ -524,7 +524,8 @@ then on it fails until the previous release's stores and list are in.
 
 After publishing, the release workflow's `release-fixtures` job runs
 `bash scripts/release-fixtures.sh VERSION` on the tag, and
-`release-fixtures-pr` opens a draft pull request with the result. The
+`release-fixtures-pr` opens a pull request with the result, ready for
+review, as the release app so its checks run. The
 script runs `scripts/golden-stores.sh VERSION`, which builds `langspan` from
 the tag with `--locked` and runs that tag's demonstration with it; writes the
 stores' state snapshots with `LANGSPAN_UPDATE_GOLDEN=1` on
@@ -535,7 +536,7 @@ adds the release's row to `RELEASES` in `tests/protocol.rs`, a copy of the
 newest row, when the release reads the same event types, speaks the same
 protocol version and names the same capabilities; otherwise it fails saying
 which differ (issue #590). To finish the pull request, review the new
-snapshots and mark it ready. If the job fails, run the script by hand at the
+snapshots and merge it. If the job fails, run the script by hand at the
 tag (`git checkout vVERSION`). When only the row is missing, the script has
 written everything else: add the row with the protocol version and the
 capabilities the release's requests name. Then open the pull request

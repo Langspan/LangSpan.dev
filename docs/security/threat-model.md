@@ -1025,7 +1025,7 @@ Each job of `release.yml` and what its token may write:
 | `sbom-attestation` | `id-token: write` and `attestations: write`, to sign. | Nothing it compiles. |
 | `publish` | `contents: write`, `id-token: write` and `attestations: write`. | Upload of the built assets, signing, and publication of the draft. |
 | `release-fixtures` | Nothing (`contents: read`). | `scripts/release-fixtures.sh` from the tag: the tag's `--locked` build, its demonstration and its `golden_stores` test; hands on a patch. |
-| `release-fixtures-pr` | Nothing with `GITHUB_TOKEN` (`permissions: {}`); the release GitHub App's token, with `contents: write` and `pull-requests: write`. | `git apply` of that patch, refused if it touches a path other than the release's stores, frozen list or `docs/*.md`; a push to `release-fixtures/vX.Y.Z` and a draft pull request. Nothing from the checkout runs. |
+| `release-fixtures-pr` | Nothing with `GITHUB_TOKEN` (`permissions: {}`); the release GitHub App's token, with `contents: write` and `pull-requests: write`. | `git apply` of that patch, refused if it touches a path other than the release's stores, frozen list or `docs/*.md`; a push to `release-fixtures/vX.Y.Z` and a pull request, ready for review. Nothing from the checkout runs. |
 | `verify-published` | Nothing (`contents: read`, `attestations: read`). | The published install script and binary, downloaded from the release. |
 | `withdraw` | `contents: write` and `issues: write`, to edit release flags and open an issue. | `gh release` and `gh issue`; no checkout. |
 
