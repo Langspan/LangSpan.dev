@@ -2790,3 +2790,78 @@ fn a_subagent_on_its_parents_request_is_not_the_same_task_to_the_parent() {
     let parent = brief(&mut state, "alice", "p1", 20);
     assert!(!peer(&parent, "alice.a1").same_task, "{parent:?}");
 }
+
+// Review comment 4724596946: a match that lapses and returns is the same
+// peer on the same task; it is not told again, whatever made it lapse.
+
+/// Bob is told alice's task, `lapse` removes the match for one delivered
+/// briefing (a whole view or changes only), and `restore` brings it back.
+fn told_once_across_a_lapse(
+    whole_view: bool,
+    lapse: impl Fn(&mut State),
+    restore: impl Fn(&mut State),
+) {
+    let mut state = ready();
+    prompted(&mut state, "alice", "rework the session store", 100);
+    hold(&mut state, "alice", "src/store.rs", 100);
+    edited(&mut state, "alice", "src/other.rs", 100);
+    prompted(&mut state, "bob", "add expiry to the session store", 100);
+    targets(&mut state, "bob", &["src/store.rs"], 100);
+    let tell = |state: &mut State, id: &str, now: u64| {
+        if whole_view {
+            brief(state, "bob", id, now)
+        } else {
+            brief_changes(state, "bob", id, now)
+        }
+    };
+    assert!(told_same_task(&tell(&mut state, "b1", 200), "alice"));
+    lapse(&mut state);
+    let gap = tell(&mut state, "b2", 70_000);
+    assert!(!told_same_task(&gap, "alice"), "{gap:?}");
+    restore(&mut state);
+    let back = brief_changes(&mut state, "bob", "b3", 71_000);
+    assert!(!told_same_task(&back, "alice"), "told again: {back:?}");
+}
+
+#[test]
+fn a_peer_whose_hold_lapses_and_returns_is_not_told_same_task_again() {
+    // The 60-second lease expires before 70_000; alice then admits again.
+    for whole_view in [false, true] {
+        told_once_across_a_lapse(
+            whole_view,
+            |_| {},
+            |state| hold(state, "alice", "src/store.rs", 70_500),
+        );
+    }
+}
+
+#[test]
+fn a_session_whose_targets_lapse_and_return_is_not_told_same_task_again() {
+    // Bob's next prompt points elsewhere, and the one after it back.
+    for whole_view in [false, true] {
+        told_once_across_a_lapse(
+            whole_view,
+            |state| {
+                hold(state, "alice", "src/store.rs", 69_000);
+                targets(state, "bob", &["src/footer.rs"], 69_000);
+            },
+            |state| targets(state, "bob", &["src/store.rs"], 70_500),
+        );
+    }
+}
+
+#[test]
+fn another_peer_on_the_same_task_is_told_after_the_first_one_ended() {
+    let mut state = ready();
+    prompted(&mut state, "alice", "rework the session store", 100);
+    hold(&mut state, "alice", "src/store.rs", 100);
+    prompted(&mut state, "bob", "add expiry to the session store", 100);
+    targets(&mut state, "bob", &["src/store.rs"], 100);
+    let first = brief_changes(&mut state, "bob", "b1", 200);
+    assert!(told_same_task(&first, "alice"), "{first:?}");
+    end(&mut state, "alice", 300);
+    prompted(&mut state, "carol", "rework the session store", 400);
+    hold(&mut state, "carol", "src/store.rs", 400);
+    let carols = brief_changes(&mut state, "bob", "b2", 500);
+    assert!(told_same_task(&carols, "carol"), "{carols:?}");
+}

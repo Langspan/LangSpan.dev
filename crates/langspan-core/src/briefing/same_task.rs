@@ -4,6 +4,45 @@
 
 use std::collections::BTreeSet;
 
+use crate::{LivenessStatus, State};
+
+/// That peer `session_id` is on the asking session's task: told once per
+/// peer.
+pub(super) fn key(session_id: &str) -> u64 {
+    super::item_key(&["peer", session_id, "same_task"])
+}
+
+/// `keys`, with each same-task key in `told` of a peer still running.
+/// Told once per peer, it outlasts a briefing in which the match lapsed (a
+/// hold expired, or a prompt pointed elsewhere) and goes when the peer ends.
+pub(super) fn keep_told(
+    state: &State,
+    session_id: &str,
+    told: &BTreeSet<u64>,
+    mut keys: Vec<u64>,
+) -> Vec<u64> {
+    for peer in state.sessions.values() {
+        let ended = state
+            .activity
+            .get(&peer.session_id)
+            .is_some_and(|activity| activity.ended)
+            || state
+                .session_liveness
+                .get(&peer.session_id)
+                .is_some_and(|liveness| liveness.status == LivenessStatus::Exited);
+        let key = key(&peer.session_id);
+        if peer.session_id != session_id
+            && peer.generation == state.generation
+            && !ended
+            && told.contains(&key)
+            && !keys.contains(&key)
+        {
+            keys.push(key);
+        }
+    }
+    keys
+}
+
 /// One session's side: where its last recent prompt points (its prompt
 /// targets), and the files it holds (its claims).
 pub(super) type Work<'a> = (&'a BTreeSet<String>, &'a BTreeSet<String>);

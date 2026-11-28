@@ -923,9 +923,8 @@ fn peer_path_key(peer: &PeerWork, kind: &str, path: &str) -> u64 {
     item_key(&["peer", &peer.session_id, kind, path])
 }
 
-/// That `peer` is on the asking session's task: told once per peer.
 fn same_task_key(peer: &PeerWork) -> u64 {
-    item_key(&["peer", &peer.session_id, "same_task"])
+    same_task::key(&peer.session_id)
 }
 
 fn stale_key(stale: &StaleRead) -> u64 {
@@ -1355,7 +1354,7 @@ pub(crate) fn decide_brief(
     let told: BTreeSet<u64> = activity
         .map(|activity| activity.told.iter().copied().collect())
         .unwrap_or_default();
-    let keys = briefing_keys(&briefing);
+    let keys = same_task::keep_told(state, session_id, &told, briefing_keys(&briefing));
     let (told_next, shown) = if *changes_only {
         let since = activity.map_or(0, |activity| activity.told_at_ms);
         // The session read or edited `path` after it was last told:

@@ -264,8 +264,10 @@ wire, so an older daemon's briefing reads as false), and the line starts with
 `same task as yours: take a different part or agree who does it;` and keeps the
 peer's task line even when that line was told before. It has its own told key
 and joins the delivery signature only when true, so each session is told it
-once. Like targets, it is a file match: two tasks naming different functions
-in one file are reported as the same task.
+once. That key stays told while the peer runs, even through a briefing in
+which the match lapsed (a hold expired, or a prompt pointed elsewhere), and
+goes when the peer ends. Like targets, it is a file match: two tasks naming
+different functions in one file are reported as the same task.
 
 **Presence (added later, roadmap A13).** Where a session is looking is shown
 to its peers before it writes. Reads come from the existing `source_observed`
