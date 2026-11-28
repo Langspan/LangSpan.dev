@@ -111,6 +111,7 @@ pub(crate) const COMMANDS: &[&str] = &[
     "notify status",
     "statusline",
     "events",
+    "events verify",
     "compact",
     "changes w",
     "request REQUEST",

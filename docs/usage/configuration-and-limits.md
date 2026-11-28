@@ -123,6 +123,25 @@ logging a `compacted` line.
   still place every remaining event on a day.
 - `remote sent` lists every publication within the window and says from which
   date it is complete.
+
+## Checking the event log
+
+Each event carries the digest of the one before it and its own JSON, so a
+later edit of the log shows. `langspan events verify` recomputes the chain
+from the store file, read-only and without the coordinator:
+
+```text
+$ langspan events verify
+ok: 52911 events, head 9b1f…
+```
+
+Write the head down somewhere else to check later that nothing before it
+changed. An edited, deleted or unchained row is named by sequence (`broken at
+event N`) and the command exits 1; `--json` gives `ok`, `events`, `head` and
+`broken_at`. The chain survives compaction. It shows a change; it does not
+stop your own account from making one. A store from before this build is
+chained the first time the coordinator of this build opens it; until then,
+`verify` says to start it.
 - Ages are wall-clock times recorded with each event and receipt; records
   from before this version count from the upgrade.
 - The freed space is reused by SQLite; the file does not shrink.

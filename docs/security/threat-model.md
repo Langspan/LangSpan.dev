@@ -997,6 +997,21 @@ daemon's own environment, only delays the commit (at most 10 s) for a test.
 | Denial of service | A compaction runs in the single writer and blocks other requests while it replays the events after the previous snapshot (0.6 s for 500,000 small events in one measurement). The daemon runs it only when configured, once a day. An unacknowledged message, open admission or push turn holds the snapshot before it, so old events can remain; the report names what holds it. |
 | Elevation of privilege | Compaction makes no admission or decision and changes no state the daemon holds: the snapshot must equal it. |
 
+## The event log's hash chain
+
+[ADR 0025](../adr/0025-distribution-lifecycle-and-store-beyond-the-first-release.md)
+(J9): each event row carries the SHA-256 of the previous digest and its JSON,
+and `langspan events verify` recomputes it. No new listener, file or network
+call: `verify` opens the owner-only store read-only, in the CLI's own process,
+and prints the head digest only to its own stdout. A broken chain is reported,
+never acted on; nothing reaches agents, and nothing is held or refused.
+
+| Concern | Behavior and remaining boundary |
+| --- | --- |
+| Tampering | An edited, deleted, inserted or unchained row before the head is named by sequence. A same-user process can rewrite every later digest, or delete the newest rows, without a break; only a head written down elsewhere shows that. The chain detects; it does not prevent. |
+| Repudiation | The chain makes the log's history checkable against a recorded head. It names no author: it is not a signature. |
+| Denial of service | `verify` reads the whole log once, in its own process, on a read-only connection that never blocks the daemon's writes (WAL). The upgrade chains the whole log once, in one transaction, when this build first opens the store. |
+
 ## Worktrees, processes and passive observations
 
 **Worktree separation.** Ordinary overlapping roots and same-root aliases remain

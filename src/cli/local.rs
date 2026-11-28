@@ -1,6 +1,6 @@
 //! The commands answered on this machine without a daemon request:
 //! `commit --mine`, `status --mine`, `adopt`, `statusline`, `count`,
-//! `notify` and `demo`.
+//! `events verify`, `notify` and `demo`.
 
 use crate::check::unique;
 use crate::flags::number;
@@ -96,6 +96,24 @@ pub(crate) fn refusal_count(
         println!("{}", answer.text(&month.label()));
     }
     Ok(0)
+}
+
+/// `events verify`: recompute the event log's hash chain, read-only, without
+/// the coordinator (J9). Exits 1 when the chain is broken.
+pub(crate) fn events_verify(
+    state_dir: &std::path::Path,
+    options: &BTreeMap<String, String>,
+    json: bool,
+) -> Result<u8, langspan::Error> {
+    no_unused_options(options)?;
+    let verdict = langspan::store::chain::verify(&state_dir.join("state.sqlite3"))
+        .map_err(|error| format!("could not verify the event log: {error}"))?;
+    if json {
+        println!("{}", serde_json::to_string(&verdict)?);
+    } else {
+        println!("{}", verdict.text());
+    }
+    Ok(if verdict.ok { 0 } else { 1 })
 }
 
 /// `tokens --onto BRANCH [--days N] [--root DIR]`: Claude Code tokens per

@@ -312,6 +312,10 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
   status --all [--after CURSOR]  Read every record, history included, one page at a
                                  time; pass the page's `next` as --after for the next
   events [--after SEQ] [--limit N] Read ordered events (default limit 100; maximum 1000)
+  events verify                  Recompute the event log's hash chain from the store
+                                 file, without the coordinator; prints ok and the
+                                 head digest, or the first sequence whose digest is
+                                 wrong, and exits 1
   compact [--keep-days N] [--apply]
                                  Delete events and receipts older than N days (default
                                  90, 7..3650) after snapshotting the state they built.
