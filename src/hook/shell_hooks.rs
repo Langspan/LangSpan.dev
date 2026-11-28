@@ -123,8 +123,19 @@ impl Session<'_> {
         call: Option<&ShellCall>,
         pre_tool_context: bool,
     ) -> Reply {
+        // A push to the default branch is routed to landing, every time,
+        // before anything else (ADR 0007). A denied command does not run,
+        // so no run is recorded.
+        let mut routed = None;
+        if let Some(call) = call {
+            match super::push_route::route(self.config, call, self.deadline) {
+                super::push_route::Routed::Denied(reply) => return reply,
+                super::push_route::Routed::Passed(detail) => routed = Some(detail),
+                super::push_route::Routed::NotAPush => {}
+            }
+        }
         // A commit that would carry another live session's lines is held
-        // once, before anything else (ADR 0026).
+        // once (ADR 0026).
         let mut guarded = None;
         if let Some(call) = call {
             match crate::commit::guard_hook(self.config, &ids.session_id, call, self.deadline) {
@@ -201,7 +212,7 @@ impl Session<'_> {
         };
         let started = crate::shell::start(&self.config.state_dir, &ids.operation_id, &record);
         let mut reply = self.shell_decided(decided, note, started, &record);
-        if let Some(detail) = guarded {
+        for detail in [routed, guarded].into_iter().flatten() {
             reply.detail = format!("{}; {detail}", reply.detail);
         }
         // A formatter that may rewrite another session's uncommitted files:
