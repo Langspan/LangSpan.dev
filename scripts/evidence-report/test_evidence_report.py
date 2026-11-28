@@ -28,7 +28,7 @@ def fixture(name):
 
 def recorded():
     issues = [i["number"] for i in fixture("gh-issue-list.json")]
-    return report.normalize(fixture("gh-pr-list.json"), issues)
+    return report.normalize(fixture("gh-pr-list.json"), issues, "o/r")
 
 
 def counts(number, people=("alice", "bob")):
@@ -68,6 +68,32 @@ class Touches(unittest.TestCase):
         self.assertEqual(sum(counts(102, people=("bob",)).values()), 2)
         self.assertEqual(sum(counts(102, people=("carol",)).values()), 1)  # the label
 
+    def test_only_a_closed_issue_in_the_same_repository_is_matched_against_needs_owner(self):
+        def closing(owner, name):
+            pr = {"number": 1, "mergedAt": "2026-11-23T07:35:49Z", "closingIssuesReferences": [
+                {"number": 90, "repository": {"name": name, "owner": {"login": owner}}}
+            ]}
+            record = report.normalize([pr], [90], "o/r")
+            return record["pulls"][0]["closes"], report.touches(record["pulls"][0], {"alice"}, [90])["needs-owner"]
+
+        self.assertEqual(closing("other", "r"), ([], 0))
+        self.assertEqual(closing("o", "other"), ([], 0))
+        self.assertEqual(closing("O", "R"), ([90], 1))  # repository names ignore case too
+
+    def test_logins_match_whatever_their_capitalization(self):
+        self.assertEqual(counts(101, people=("Alice",)), counts(101, people=("alice",)))
+        self.assertEqual(sum(counts(101, people=("ALICE",)).values()), 2)
+        record = recorded()
+        for pr in record["pulls"]:  # a record GitHub wrote with other capitals
+            pr["merged_by"] = pr["merged_by"].upper()
+            for item in pr["reviews"] + pr["comments"]:
+                item["author"] = item["author"].upper()
+            for commit in pr["commits"]:
+                commit["authors"] = [a.upper() for a in commit["authors"]]
+        self.assertEqual(
+            report.render(record, ["Bob", "alice"], "s"), report.render(recorded(), ["bob", "alice"], "s")
+        )
+
     def test_the_recorded_form_keeps_no_text_and_is_in_merge_order(self):
         record = recorded()
         text = json.dumps(record)
@@ -87,7 +113,7 @@ class Render(unittest.TestCase):
         self.assertEqual(report.week("2027-01-04T00:00:00Z"), "2027-W01")
 
     def test_no_merged_change_has_no_ratio(self):
-        text = report.render({"version": 1, "needs_owner_issues": [], "pulls": []}, ["alice"], "s")
+        text = report.render({"version": report.VERSION, "needs_owner_issues": [], "pulls": []}, ["alice"], "s")
         self.assertIn("| all | 0 | 0 | - |", text)
 
 
@@ -141,8 +167,9 @@ class Command(unittest.TestCase):
 
     def test_an_unreadable_or_old_record_says_what_failed(self):
         with open(self.path("old.json"), "w", encoding="utf-8") as file:
-            json.dump({"version": 0, "pulls": []}, file)
-        for path, says in ((self.path("missing.json"), "cannot read"), (self.path("old.json"), "not a version 1 record")):
+            # Version 1 kept other repositories' closed issues in "closes".
+            json.dump({"version": 1, "needs_owner_issues": [], "pulls": []}, file)
+        for path, says in ((self.path("missing.json"), "cannot read"), (self.path("old.json"), "not a version 2 record")):
             status, out, err = run(["--from", path, "--person", "alice"])
             self.assertEqual((status, out), (2, ""))
             self.assertIn(says, err)
@@ -150,7 +177,7 @@ class Command(unittest.TestCase):
     def test_a_record_of_the_wrong_shape_says_so_instead_of_failing(self):
         for pulls in ("x", [{"number": 1}], [{"number": 1, "merged_at": "May", "merged_by": "", "labels": [], "closes": [], "reviews": [], "comments": [], "commits": []}]):
             with open(self.path("bad.json"), "w", encoding="utf-8") as file:
-                json.dump({"version": 1, "needs_owner_issues": [], "pulls": pulls}, file)
+                json.dump({"version": report.VERSION, "needs_owner_issues": [], "pulls": pulls}, file)
             status, out, err = run(["--from", self.path("bad.json"), "--person", "alice"])
             self.assertEqual((status, out), (2, ""), err)
             self.assertIn("has an unexpected shape", err)

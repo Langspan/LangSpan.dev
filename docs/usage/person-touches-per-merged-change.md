@@ -11,9 +11,10 @@ python3 -I -B scripts/evidence-report.py --repo OWNER/NAME --person LOGIN \
 python3 -I -B scripts/evidence-report.py --from touches.json --person LOGIN
 ```
 
-`--person` names a login whose actions count, and can be repeated. Nothing
-else is a person: bots, review apps and other logins are not counted. One
-touch is any of these by a named person:
+`--person` names a login whose actions count, and can be repeated. Logins
+are compared without regard to case, as on GitHub. Nothing else is a
+person: bots, review apps and other logins are not counted. One touch is
+any of these by a named person:
 
 | Kind | What GitHub recorded |
 | --- | --- |
@@ -22,7 +23,7 @@ touch is any of these by a named person:
 | `review` | Any other review. |
 | `comment` | A conversation comment on the pull request. |
 | `commit` | A commit authored by the person with no agent author (`noreply@anthropic.com`), other than a merge (headline starting `Merge `). |
-| `needs-owner` | Once per pull request that has, or closes an issue that has, the `needs-owner` label. |
+| `needs-owner` | Once per pull request that has, or closes an issue in the same repository that has, the `needs-owner` label. A closed issue in another repository is not looked up. |
 
 A review or comment whose body contains "Generated with [Claude Code]" was
 posted by an agent through the person's account and is not counted. One an
@@ -32,8 +33,9 @@ high, never too low, for that reason.
 The report has a table by ISO week of the merge (UTC) and one row per pull
 request: merged changes, touches, touches per change and each kind's count.
 Each count comes from those records alone; no text is read for meaning and
-no model is asked. The report prints numbers, dates and the logins given; it
-prints no title, comment or other repository text. Its first lines state
+no model is asked. The report prints numbers, dates and the logins given,
+in lowercase; it prints no title, comment or other repository text. Its
+first lines state
 that the counts reflect the whole process (LangSpan plus planning,
 reservations and the merge queue), not LangSpan alone.
 
@@ -44,8 +46,9 @@ says "the newest N only" when the limit was reached, plus up to 1,000
 comments and commits are those gh returns for each pull request.
 
 `--save FILE` writes what was read: for each pull request its number, merge
-time, who merged it, labels, closed issues, and each review's, comment's and
-commit's author logins with whether it was an agent's. It keeps no text.
+time, who merged it, labels, the issues it closes in the same repository,
+and each review's, comment's and commit's author logins with whether it was
+an agent's. It keeps no text.
 `--from FILE` reports from that file without calling GitHub, so the same
 file gives the same report. A file from another version of the script is
 refused with "save it again with --save". It exits 2 when gh fails or a file

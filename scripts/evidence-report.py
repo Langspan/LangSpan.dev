@@ -17,8 +17,9 @@ A person-touch is one of these, by a login given with `--person`:
   review     any other review
   comment    a conversation comment on the pull request
   commit     a commit authored by the person with no agent author, not a merge
-  needs-owner  once per pull request that has, or closes an issue that has,
-             the `needs-owner` label
+  needs-owner  once per pull request that has, or closes an issue in the same
+             repository that has, the `needs-owner` label
+Logins are compared without regard to case, as GitHub compares them.
 A review or comment whose body carries AGENT_MARKER was posted by an agent
 through the person's account and is not a touch. Bodies are only searched
 for the marker: the recorded form keeps no text, and the report prints only
@@ -33,7 +34,8 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 
-VERSION = 1
+# 2: "closes" holds only issues in the queried repository.
+VERSION = 2
 AGENT_MARKER = "Generated with [Claude Code]"
 AGENT_EMAILS = {"noreply@anthropic.com"}
 NEEDS_OWNER = "needs-owner"
@@ -57,12 +59,23 @@ def login(actor):
     return (actor or {}).get("login") or ""
 
 
+def local_closes(pr, repo):
+    """The numbers of the issues in `repo` that the pull request closes.
+    Another repository's issue numbers would match unrelated local issues."""
+    numbers = []
+    for issue in pr.get("closingIssuesReferences") or []:
+        where = issue.get("repository") or {}
+        if f"{login(where.get('owner'))}/{where.get('name') or ''}".lower() == repo.lower():
+            numbers.append(issue["number"])
+    return sorted(numbers)
+
+
 def agent_text(body):
     return AGENT_MARKER in (body or "")
 
 
-def normalize(pulls, needs_owner_issues):
-    """The recorded form of `gh pr list --json PR_FIELDS` output."""
+def normalize(pulls, needs_owner_issues, repo):
+    """The recorded form of `gh pr list --repo REPO --json PR_FIELDS` output."""
     recorded = []
     for pr in pulls:
         commits = []
@@ -81,7 +94,7 @@ def normalize(pulls, needs_owner_issues):
                 "merged_at": pr["mergedAt"],
                 "merged_by": login(pr.get("mergedBy")),
                 "labels": sorted(label["name"] for label in pr.get("labels") or []),
-                "closes": sorted(i["number"] for i in pr.get("closingIssuesReferences") or []),
+                "closes": local_closes(pr, repo),
                 "reviews": [
                     {"author": login(r.get("author")), "state": r.get("state"), "agent": agent_text(r.get("body"))}
                     for r in pr.get("reviews") or []
@@ -98,18 +111,21 @@ def normalize(pulls, needs_owner_issues):
 
 
 def touches(pr, people, needs_owner_issues):
-    """Each kind's count of person-touches on one recorded pull request."""
+    """Each kind's count of person-touches on one recorded pull request.
+    Both the logins in `people` and the recorded ones are lowered here, so a
+    saved record replays the same whatever capitalization it holds."""
+    people = {person.lower() for person in people}
     count = dict.fromkeys(KINDS, 0)
-    if pr["merged_by"] in people:
+    if pr["merged_by"].lower() in people:
         count["merge"] = 1
     for review in pr["reviews"]:
-        if review["author"] in people and not review["agent"]:
+        if review["author"].lower() in people and not review["agent"]:
             count["approval" if review["state"] == "APPROVED" else "review"] += 1
-    count["comment"] = sum(1 for c in pr["comments"] if c["author"] in people and not c["agent"])
+    count["comment"] = sum(1 for c in pr["comments"] if c["author"].lower() in people and not c["agent"])
     count["commit"] = sum(
         1
         for c in pr["commits"]
-        if not c["agent"] and not c["merge"] and people.intersection(c["authors"])
+        if not c["agent"] and not c["merge"] and people.intersection(a.lower() for a in c["authors"])
     )
     if NEEDS_OWNER in pr["labels"] or set(pr["closes"]) & set(needs_owner_issues):
         count["needs-owner"] = 1
@@ -134,7 +150,7 @@ def row(label, merged, count):
 
 
 def render(record, people, source):
-    people = set(people)
+    people = {person.lower() for person in people}
     weeks = {}
     changes = []
     for pr in record["pulls"]:
@@ -189,7 +205,7 @@ def fetch(repo, since, limit):
     issues = gh(
         ["issue", "list", "--repo", repo, "--state", "all", "--label", NEEDS_OWNER, "--limit", str(MAX_LIMIT), "--json", "number"]
     )
-    return normalize(pulls, [i["number"] for i in issues]), len(pulls) >= limit
+    return normalize(pulls, [i["number"] for i in issues], repo), len(pulls) >= limit
 
 
 def load(path):
