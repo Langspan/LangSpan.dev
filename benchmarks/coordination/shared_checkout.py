@@ -25,7 +25,14 @@ MAX_PUSH_ATTEMPTS = 3
 LOCK_RETRIES = 20
 LOCK_WAIT_SECONDS = 0.1
 OUTPUT_BYTES = 4000
-PUSH = re.compile(r"\bgit\s+push\b")
+# Words that can come before the program a simple command runs.
+PREFIXES = {"!", "{", "}", "if", "then", "else", "elif", "do", "while", "until", "time", "command", "exec",
+            "nohup", "env"}
+ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+# Git's global options that take the next word as their value.
+GIT_OPTION_ARGS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"}
+SHELLS = {"sh", "bash", "zsh"}
+SHELL_COMMAND = re.compile(r"-[a-z]*c[a-z]*")
 # Git's own words for a push the remote refused.
 REJECTED = re.compile(r"\[(?:remote )?rejected\]|failed to push")
 LOCKED = re.compile(r"index\.lock|cannot lock ref|Unable to create")
@@ -67,6 +74,48 @@ def result_text(content):
     return content if isinstance(content, str) else ""
 
 
+def simple_commands(command):
+    """COMMAND's simple commands, each as its list of words: the shell's
+    quoting and comments applied, split at `;`, `&&`, `||`, `|`, `&`,
+    parentheses, redirections and newlines. A command the shell could not
+    parse (an unclosed quote) runs nothing, so it has none."""
+    lexer = shlex.shlex(command, posix=True, punctuation_chars="();<>|&\n")
+    lexer.whitespace, lexer.whitespace_split = " \t\r", True
+    commands, words = [], []
+    try:
+        for token in lexer:
+            if token and set(token) <= set(lexer.punctuation_chars):
+                commands, words = commands + [words], []
+            else:
+                words.append(token)
+    except ValueError:
+        return []
+    return [words for words in commands + [words] if words]
+
+
+def runs_git_push(command):
+    """Whether the shell COMMAND runs `git push` as one of its simple
+    commands, also through `git -C DIR`, an environment prefix or `sh -c`.
+    Text that only mentions it, such as a commit message, is not a push."""
+    for words in simple_commands(command):
+        while words and (words[0] in PREFIXES or ASSIGNMENT.match(words[0])
+                         or (words[0].startswith("-") and len(words) > 1)):
+            words = words[1:]
+        program = words[0].rsplit("/", 1)[-1] if words else ""
+        if program in SHELLS and len(words) > 2 and SHELL_COMMAND.fullmatch(words[1]):
+            if runs_git_push(words[2]):
+                return True
+            continue
+        if program != "git":
+            continue
+        rest = words[1:]
+        while rest and rest[0].startswith("-"):
+            rest = rest[2:] if rest[0] in GIT_OPTION_ARGS else rest[1:]
+        if rest[:1] == ["push"]:
+            return True
+    return False
+
+
 def push_counts(events):
     """Push attempts and rejections in a transcript's EVENTS: every Bash
     call whose command runs `git push`, a compound command's too, and each
@@ -77,7 +126,7 @@ def push_counts(events):
             tool_input = block.get("input") if isinstance(block.get("input"), dict) else {}
             command = tool_input.get("command")
             if block.get("type") == "tool_use" and block.get("name") == "Bash" and isinstance(command, str) \
-                    and PUSH.search(command):
+                    and runs_git_push(command):
                 attempts += 1
                 pushes.add(block.get("id"))
             elif block.get("type") == "tool_result" and block.get("tool_use_id") in pushes:

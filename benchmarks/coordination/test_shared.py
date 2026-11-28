@@ -56,6 +56,50 @@ class SharedUnit(unittest.TestCase):
         plain[1]["message"]["content"][0]["content"] = REJECTED
         self.assertEqual(shared.push_counts(plain), {"attempts": 1, "rejections": 1})
 
+    def test_only_a_command_that_runs_git_push_is_a_push_attempt(self):
+        # Pure parsing: no shell or Git runs. Text that only mentions a push
+        # (a quoted argument, a comment, another program's argument) is not
+        # an attempt; each form that runs one is.
+        mentions = [
+            "git commit -m 'Retry git push after fixing tests' -- shelf/a.py",
+            'git commit -m "git push" -- shelf/a.py',
+            "echo git push",
+            "git log --grep 'git push'",
+            "git status # then git push",
+            "git commit -m 'unbalanced",
+            "git pushed",
+            "gitpush",
+            "git -c push.default=simple status",
+            "",
+        ]
+        runs = [
+            "git push",
+            "git push origin main",
+            "git pull --no-edit origin main && git push origin main",
+            "git add a; git push",
+            "git status || git push",
+            "git commit -m 'x'\ngit push",
+            "cd trunk && git push",
+            "GIT_TRACE=1 git push",
+            "git -C trunk push",
+            "git -c user.name=b push origin main",
+            "git --git-dir=.git push",
+            "(git push)",
+            "if true; then git push; fi",
+            "env GIT_TRACE=1 git push",
+            "bash -c 'git push origin main'",
+            "/usr/bin/git push",
+        ]
+        for command in mentions:
+            with self.subTest(command=command):
+                self.assertFalse(shared.runs_git_push(command))
+        for command in runs:
+            with self.subTest(command=command):
+                self.assertTrue(shared.runs_git_push(command))
+        # The finding's own scenario, through the transcript count.
+        events = bash("a", "git commit -m 'Retry git push after fixing tests' -- shelf/a.py", "1 file changed")
+        self.assertEqual(shared.push_counts(events), {"attempts": 0, "rejections": 0})
+
     def test_a_rejected_push_is_counted_and_retried_until_it_lands(self):
         # Real Git: what is verified is Git's own rejection and the retry.
         repo = self.root / "repo"
