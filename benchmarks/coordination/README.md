@@ -46,6 +46,34 @@ told:
 Edit admission stays per worktree: a session is never held or refused because
 of a peer's worktree.
 
+### The shared checkout (`shared`)
+
+The `shared` arm ([#543](https://github.com/Langspan/LangSpan.dev/issues/543))
+is not one of the compared arms: `matrix.py run` runs it only when `--arms`
+names it. Every session works in one checkout, `work/trunk`, on `main`, cloned
+from a bare integration remote `work/origin.git`, with no coordination tool.
+Each session's prompt asks it to commit only the files it changed and push to
+`origin main`, fetching and merging and pushing again after a rejection; the
+session may run `git push`, `git pull`, `git fetch` and `git merge`. The
+stand-in does the same as Bash calls, at most three pushes. The combined
+result is what `origin main` holds when every session has ended (kept in
+`repo` as `bench/landed`); work a session left unpushed did not land.
+
+The record (version 9) counts, per task and per trial, the Bash calls that ran
+`git push` (`pushes.attempts`) and those whose result shows Git refusing the
+push (`pushes.rejections`), from the session's transcript. Other arms record
+`pushes.status: "not_applicable"` with null counts. The results document has a
+push attempts and a push rejections column per trial and per condition;
+tokens, turns and elapsed time come from the same record. Because one tree
+holds every session's edits, duplicate work is not measured (null) in this
+arm.
+
+Not built yet: the `langspan_shared` arm (the same checkout with LangSpan's
+hooks). In one checkout every session has the same LangSpan workspace, and
+the harness attributes hook logs, refusals, notices and context to a session
+by workspace, so that attribution has to change first. No live-model pilot of
+the shared arm has run; it needs the owner's approval, as in #513.
+
 ### The same limits in every arm
 
 Every session, in every arm, gets the same tools and the same denials, so in
@@ -276,7 +304,9 @@ LangSpan arm). For the stale-caller measure it gives `stale_writes_admitted`,
 summed, `stale_fixed_after_s`, each trial's time listed rather than
 averaged, and `stale_unfixed_trials`, the trials that ended with a stale
 caller. A group figure is `null` when any trial it counts lacks it.
-It reads version 8 records only.
+`push_attempts` and `push_rejections` are summed over the group's trials,
+and `null` unless every trial reports them ([shared checkout](#the-shared-checkout-shared)).
+It reads version 8 and 9 records; a version 8 record has no push counts.
 
 ### Staggered start
 

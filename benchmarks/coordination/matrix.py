@@ -227,6 +227,14 @@ def stale_cells(record):
     return found["writes_admitted"], "none stale" if found["fixed_after_s"] is None else cell(found["fixed_after_s"])
 
 
+def push_cells(record):
+    """A trial's push attempts and rejections; a version 8 record has none."""
+    found = record.get("pushes") or {"status": "not_applicable"}
+    if found["status"] != "reported":
+        return [found["status"].replace("_", " ")] * 2
+    return [found["attempts"], found["rejections"]]
+
+
 def table(header, rows):
     lines = ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
     return lines + ["| " + " | ".join(cell(value) for value in row) + " |" for row in rows]
@@ -234,7 +242,7 @@ def table(header, rows):
 
 def report(named, missing):
     """The results document for NAMED, a list of (trial directory name,
-    version 8 record), and MISSING, trial directories with no record."""
+    version 8 or 9 record), and MISSING, trial directories with no record."""
     records = [record for _, record in named]
     dry = sum(record["dry_run"] is True for record in records)
     lines = ["# Coordination benchmark results", ""]
@@ -252,9 +260,11 @@ def report(named, missing):
                      "unknown" if record["tasks_accepted"] is None else
                      "%d of %d" % (record["tasks_accepted"], record["tasks_total"]),
                      writes, fixed, tokens(record["cost"]["run"]), record["turns"], record["elapsed_s"],
-                     repair["status"] + (": " + repair["integrated_tests"] if repair["status"] == "ran" else "")])
+                     repair["status"] + (": " + repair["integrated_tests"] if repair["status"] == "ran" else ""),
+                     *push_cells(record)])
     lines += table(["Trial", "Status", "Excluded", "Combined build", "Tasks accepted", "Stale-name writes admitted",
-                    "Last stale caller fixed (s)", "Tokens", "Turns", "Elapsed (s)", "Repair"], rows)
+                    "Last stale caller fixed (s)", "Tokens", "Turns", "Elapsed (s)", "Repair", "Push attempts",
+                    "Push rejections"], rows)
     if missing:
         lines += ["", "No record (the trial stopped before writing one; its directory is kept): "
                   + ", ".join(sorted(missing)) + "."]
@@ -272,10 +282,12 @@ def report(named, missing):
         rows.append([group["agent"], group["family"], group["sessions"], group["stagger_s"], group["arm"],
                      group["trials"], excluded, proportion(group["passed_without_repair"], group["compared"]),
                      proportion(group["correct_results"], group["compared"]), group["stale_writes_admitted"],
-                     fixed or "none", tokens(group["run"]), tokens(group["repair"]), tokens(group["total"])])
+                     fixed or "none", tokens(group["run"]), tokens(group["repair"]), tokens(group["total"]),
+                     *(("not applicable" if group[key] is None else group[key])
+                       for key in ("push_attempts", "push_rejections"))])
     lines += table(["Agent", "Family", "N", "Stagger (s)", "Arm", "Trials", "Excluded", "Combined build passed",
                     "Correct results", "Stale-name writes admitted", "Last stale caller fixed (s)", "Tokens, run",
-                    "Tokens, repair", "Tokens, total"], rows)
+                    "Tokens, repair", "Tokens, total", "Push attempts", "Push rejections"], rows)
     lines += ["", "No result here is a LangSpan advantage unless the counts above show it.",
               "", "## Versions and seeds", ""]
     for label, key in (("Agent CLI", "agent_cli"), ("Requested model", "requested_model"), ("Models", "models"),
@@ -303,9 +315,9 @@ def read_trials(paths):
                 continue
             record, _ = runner.bounded_json(source, driver.MAX_CONFIG_BYTES)
             version = record.get("schema_version") if isinstance(record, dict) else None
-            if version != driver.SCHEMA_VERSION:
-                raise ValueError("%s has schema version %s; the report reads version %d records"
-                                 % (source, version, driver.SCHEMA_VERSION))
+            if version not in driver.READ_VERSIONS:
+                raise ValueError("%s has schema version %s; the report reads version %s records"
+                                 % (source, version, " and ".join(map(str, driver.READ_VERSIONS))))
             named.append((directory.name, record))
     return named, missing
 
@@ -317,7 +329,8 @@ def main(argv=None):
     run.add_argument("--families", nargs="+", required=True, choices=families.FAMILIES)
     run.add_argument("--sessions", nargs="+", required=True, type=int, choices=families.SESSION_COUNTS)
     run.add_argument("--seeds", nargs="+", required=True, type=int)
-    run.add_argument("--arms", nargs="+", default=list(driver.ARMS), choices=driver.ARMS)
+    run.add_argument("--arms", nargs="+", default=list(driver.ARMS), choices=driver.ARMS + driver.SHARED_ARMS,
+                     help="default: the three compared arms; `shared` puts every session in one checkout")
     run.add_argument("--agent", default="standin", choices=driver.AGENTS)
     run.add_argument("--langspan", type=Path, help="the langspan binary, for the langspan arm")
     run.add_argument("--output", type=Path, required=True, help="the matrix directory; reused to resume")

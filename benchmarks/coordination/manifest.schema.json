@@ -59,6 +59,9 @@
               },
               "comparable_tool": {
                 "$ref": "#/$defs/arm"
+              },
+              "shared": {
+                "$ref": "#/$defs/arm"
               }
             }
           }
