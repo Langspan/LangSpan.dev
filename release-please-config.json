@@ -9,7 +9,12 @@
       "include-component-in-tag": false,
       "changelog-path": "CHANGELOG.md",
       "draft": true,
-      "force-tag-creation": true
+      "force-tag-creation": true,
+      "extra-files": [
+        { "type": "toml", "path": "fuzz/Cargo.lock", "jsonpath": "$.package[?(@.name=='langspan')].version" },
+        { "type": "toml", "path": "fuzz/Cargo.lock", "jsonpath": "$.package[?(@.name=='langspan-core')].version" },
+        { "type": "toml", "path": "fuzz/Cargo.lock", "jsonpath": "$.package[?(@.name=='langspan-graph')].version" }
+      ]
     }
   },
   "changelog-sections": [
