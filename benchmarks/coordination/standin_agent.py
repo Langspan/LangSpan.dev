@@ -273,20 +273,34 @@ def wait_deadline(plan, started):
     return time.monotonic() + WAIT_SECONDS
 
 
-def wait_for(session, peers_expected, ready, deadline, also=lambda: True):
+def wait_for(session, phase, peers_expected, ready, deadline, also=lambda: True):
     """Poll LangSpan until READY holds for every expected peer and ALSO
     holds, or until DEADLINE (monotonic). Each poll is a read of a file the
     task uses, as an agent's would be, so hook briefings arrive as well.
+    The session's log gets a `wait` line for PHASE whenever what was heard
+    changes, and one when the wait ends, saying whether it ran out.
     Returns what was heard."""
-    heard = {}
+    heard, logged, started = {}, None, time.monotonic()
+
+    def log(outcome):
+        session.log.write(json.dumps({"event": "wait", "phase": phase, "outcome": outcome,
+                                      "elapsed_s": round(time.monotonic() - started, 1),
+                                      "expected": peers_expected, "heard": heard}) + "\n")
+        session.log.flush()
+
     while True:
         for name, peer in briefed_peers(session).items():
             # A peer's task line goes once it ends; keep the one heard before.
             heard[name] = dict(peer, task=peer["task"] or heard.get(name, {}).get("task"))
         if len([name for name, peer in heard.items() if ready(peer)]) >= peers_expected and also():
+            log("met")
             return heard
         if time.monotonic() > deadline:
+            log("timed_out")
             return heard
+        if heard != logged:
+            log("waiting")
+            logged = json.loads(json.dumps(heard))
         session.read(Path("shelf") / "settings.py")
         time.sleep(POLL_SECONDS)
 
@@ -389,7 +403,7 @@ def main(argv):
 
         # Only a task that depends on its peers' work waits to hear of it.
         if mode == "follow" and sharing and "trigger" in task:
-            heard = wait_for(session, plan["sessions"] - 1, lambda peer: bool(peer["task"]), deadline)
+            heard = wait_for(session, "tasks", plan["sessions"] - 1, lambda peer: bool(peer["task"]), deadline)
         for name in task.get("reads", []):
             session.read(Path(name))
         informed = mode == "follow" and told()
@@ -404,12 +418,12 @@ def main(argv):
             if task.get("leads"):
                 # Peers learn of this session's change while it is in
                 # flight, so it stays until every peer has ended.
-                wait_for(session, plan["sessions"] - 1, lambda peer: peer["ended"], deadline)
+                wait_for(session, "ended", plan["sessions"] - 1, lambda peer: peer["ended"], deadline)
             else:
                 # A peer that shows edits has finished waiting for this one.
                 # A notice the task expects arrives with a later briefing.
                 notice = task.get("notice")
-                wait_for(session, plan["sessions"] - 1, lambda peer: peer["edited"], deadline,
+                wait_for(session, "edited", plan["sessions"] - 1, lambda peer: peer["edited"], deadline,
                          lambda: not notice or any(re.search(notice, text) for text in session.context))
             if not informed and told():
                 # Told only after its edit, as by an alert at the write:

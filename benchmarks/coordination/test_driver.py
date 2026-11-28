@@ -2074,20 +2074,44 @@ class WatcherDryRun(Temporary):
 class DryRun(Temporary):
     """The whole pipeline for each arm, family and stand-in mode."""
 
+    # A following stand-in waits for its peers and LangSpan's notices until
+    # shortly before this limit, so a loaded machine slows the run instead
+    # of changing what the sessions learn. An unloaded run ends its waits in
+    # seconds. Issue #579: it stays well below the 480 s at which nextest
+    # kills a dry-run test, so a session that waits in vain fails here, with
+    # its wait log, rather than being killed with its output lost.
+    TIME_LIMIT = 240
+
     def run_driver(self, arm, family, n, mode, seed=11, stagger=None):
         output = self.root / ("%s-%s-%d-%s" % (arm, family, n, mode))
-        # A following stand-in waits for its peers and LangSpan's notices
-        # until shortly before this limit, so a loaded machine slows the run
-        # instead of changing what the sessions learn. An unloaded run ends
-        # its waits in seconds.
+        try:
+            return self.run_trial(output, arm, family, n, mode, seed, stagger)
+        except (AssertionError, subprocess.TimeoutExpired) as error:
+            raise AssertionError("%s\n%s" % (error, self.wait_report(output))) from error
+
+    def wait_report(self, output):
+        """Issue #579: each stand-in's waits, in its log's `wait` lines."""
+        lines = []
+        for log in sorted(output.rglob("standin-s*.jsonl")):
+            waits = [line for line in log.read_text(encoding="utf-8", errors="replace").splitlines()
+                     if '"event": "wait"' in line]
+            lines.append("%s:\n  %s" % (log.name, "\n  ".join(waits) or "(no waits)"))
+        return "stand-in wait logs:\n" + ("\n".join(lines) or "(none written)")
+
+    def run_trial(self, output, arm, family, n, mode, seed, stagger):
         argv = [sys.executable, "-B", str(HERE / "driver.py"), "--arm", arm, "--family", family,
-                "--sessions", str(n), "--seed", str(seed), "--standin-mode", mode, "--time-limit", "600",
-                "--run", "--output", str(output)]
+                "--sessions", str(n), "--seed", str(seed), "--standin-mode", mode,
+                "--time-limit", str(self.TIME_LIMIT), "--run", "--output", str(output)]
         if stagger is not None:
             argv += ["--stagger", str(stagger)]
         if arm == "langspan":
             argv += ["--langspan", str(langspan_binary())]
-        done = subprocess.run(argv, capture_output=True, text=True, timeout=900)
+        done = subprocess.run(argv, capture_output=True, text=True, timeout=self.TIME_LIMIT + 120)
+        # A wait that ran out let its session go on as if it had heard.
+        timed_out = [line for log in output.rglob("standin-s*.jsonl")
+                     for line in log.read_text(encoding="utf-8", errors="replace").splitlines()
+                     if '"outcome": "timed_out"' in line]
+        self.assertEqual(timed_out, [], "a stand-in's wait ran out")
         record_path = output / "record.json"
         self.assertTrue(record_path.is_file(), done.stdout + done.stderr)
         record = json.loads(record_path.read_text())
