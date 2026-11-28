@@ -1629,7 +1629,7 @@ fn a_red_or_green_main_runs_the_main_red_report_for_each_platform_with_issues_wr
         "\n    needs: [linux-result, macos-result]\n",
         // A push to main, or a manual run that asks for a dry run.
         "\n    if: always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && (inputs.main_red_dry_run == 'Linux' || inputs.main_red_dry_run == 'macOS')))\n",
-        "\n    permissions:\n      issues: write\n    concurrency:\n",
+        "\n    permissions:\n      actions: write\n      issues: write\n    concurrency:\n",
         "\n      group: main-red-${{ github.event_name }}-${{ matrix.platform }}\n      cancel-in-progress: false\n",
         "\n        platform: [Linux, macOS]\n",
         "\n          persist-credentials: false\n",
@@ -1652,13 +1652,17 @@ fn a_red_or_green_main_runs_the_main_red_report_for_each_platform_with_issues_wr
         2,
         "{report}"
     );
-    // The token can write issues and nothing else.
+    // The token can write issues and start rerun-failed.yml, nothing else.
     let permissions = report.split("    permissions:\n").nth(1).unwrap();
     let scopes: Vec<_> = permissions
         .lines()
         .take_while(|l| l.starts_with("      "))
         .collect();
-    assert_eq!(scopes, ["      issues: write"], "{report}");
+    assert_eq!(
+        scopes,
+        ["      actions: write", "      issues: write"],
+        "{report}"
+    );
     // The dry-run inputs default to no dry run, so the release workflow's
     // `gh workflow run check.yml` starts none.
     let on = text.split("\npermissions:").next().unwrap();
@@ -1675,6 +1679,43 @@ fn a_red_or_green_main_runs_the_main_red_report_for_each_platform_with_issues_wr
         .collect();
     assert_eq!(writers.len(), 3);
     assert_eq!(text.matches("issues: write").count(), 3, "{text}");
+    // Only main-red can start a workflow.
+    assert_eq!(
+        text.matches("\n      actions: write\n").count(),
+        1,
+        "{text}"
+    );
+}
+
+#[test]
+fn rerun_failed_reruns_a_finished_push_run_on_main_once_and_runs_no_repository_code() {
+    let text = workflow("rerun-failed.yml");
+    for line in [
+        "\non:\n  workflow_dispatch:\n",
+        "\npermissions: {}\n",
+        "\n    permissions:\n      actions: write\n    concurrency:\n",
+        "\n      group: rerun-failed-${{ inputs.run_id }}\n      cancel-in-progress: false\n",
+        // The input reaches the shell only through the environment.
+        "\n          RUN_ID: ${{ inputs.run_id }}\n",
+        "            '' | *[!0-9]*) ",
+        // Only check.yml's push runs on main, only on their first attempt,
+        // only once finished, and only when they failed.
+        "if [ \"$path $event $branch\" != \".github/workflows/check.yml push main\" ]; then\n",
+        "if [ \"$attempt\" != 1 ]; then\n",
+        "if [ \"$conclusion\" != failure ]; then\n",
+        "timeout 60 gh run rerun \"$RUN_ID\" --failed\n",
+        // Bounded: 60 checks, 30 s apart, each call at most 60 s.
+        "for _ in $(seq 60); do\n",
+        "            sleep 30\n",
+    ] {
+        assert!(text.contains(line), "rerun-failed.yml lacks {line}");
+    }
+    assert!(!text.contains("actions/checkout"), "{text}");
+    assert!(!text.contains("run: ${{"), "{text}");
+    assert_eq!(text.matches("${{ inputs.run_id }}").count(), 2, "{text}");
+    // scripts/ci-main-red.py starts it by this name.
+    let script = fs::read_to_string(root().join("scripts/ci-main-red.py")).unwrap();
+    assert!(script.contains("RERUN_WORKFLOW = \"rerun-failed.yml\"\n"));
 }
 
 /// What one run of scripts/ci-main-red.py did against the gh stub.
@@ -1701,6 +1742,7 @@ impl MainRed {
                     "issue comment",
                     "issue close",
                     "label create",
+                    "workflow run",
                 ]
                 .iter()
                 .any(|w| c.starts_with(w))
@@ -1860,6 +1902,184 @@ fn the_error_lines_are_capped_fenced_and_cleaned_as_log_data() {
     assert!(block.contains("repeated failure 9\n") || block.ends_with("repeated failure 9"));
     assert!(!block.contains("repeated failure 10"), "{block}");
     assert!(run.body.contains("More error lines are in the job logs."));
+    // Every log read lets gh print the escape bytes the script then strips.
+    assert!(
+        run.calls
+            .contains("api repos/o/r/actions/jobs/2/logs --allow-escape-sequences\n"),
+        "{}",
+        run.calls
+    );
+}
+
+/// The log of a macOS shard whose 453 tests all passed and whose JUnit
+/// upload then timed out, as in #564. The lines are that job's recorded log
+/// (from its rerun, the only attempt GitHub still serves) and the error line
+/// is the one #564 quotes. `^[` in the file stands for the escape byte.
+fn upload_timeout_log() -> String {
+    fs::read_to_string(root().join("tests/fixtures/ci-main-red/upload-timeout.log"))
+        .unwrap()
+        .replace("^[", "\u{1b}")
+}
+
+/// A JUnit report in which every test passed.
+const PASSING_JUNIT: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="ci" tests="1" failures="0" errors="0">
+  <testsuite name="cli_golden" tests="1" failures="0" errors="0">
+    <testcase name="help_is_pinned" classname="cli_golden" time="0.1"/>
+  </testsuite>
+</testsuites>
+"#;
+
+/// Run 200 at `attempt`, as GitHub lists it.
+fn run_200(attempt: u32) -> String {
+    format!(
+        r#"{{"id": 200, "run_attempt": {attempt}, "head_sha": "c0ffee0000000000000000000000000000000003", "html_url": "https://github.com/o/r/actions/runs/200", "created_at": "2026-11-27T10:00:00Z"}}"#
+    )
+}
+
+#[test]
+fn an_infrastructure_failure_with_every_test_passed_reruns_once_instead_of_opening_an_issue() {
+    let log = upload_timeout_log();
+    let run = main_red(
+        "macOS",
+        "failure",
+        false,
+        &[
+            ("api/repos_o_r_actions_jobs_2_logs", &log),
+            ("junit-macos-1/junit.xml", PASSING_JUNIT),
+        ],
+    );
+    assert!(run.ok, "{}", run.stderr);
+    assert_eq!(
+        run.writes(),
+        ["workflow run rerun-failed.yml --repo o/r --ref main -f run_id=200"],
+        "{}",
+        run.calls
+    );
+    assert!(
+        run.stdout.contains(
+            "every test passed and macOS tests 2 failed on GitHub's infrastructure: `##[error]Failed to CreateArtifact: Unable to make request: ETIMEDOUT`"
+        ),
+        "{}",
+        run.stdout
+    );
+
+    // A dry run says so and writes nothing.
+    let run = main_red(
+        "macOS",
+        "failure",
+        true,
+        &[
+            ("api/repos_o_r_actions_jobs_2_logs", &log),
+            ("junit-macos-1/junit.xml", PASSING_JUNIT),
+        ],
+    );
+    assert!(run.ok, "{}", run.stderr);
+    assert!(run.writes().is_empty(), "{}", run.calls);
+    assert!(
+        run.stdout
+            .starts_with("Dry run: would rerun the failed jobs of run 200 once:"),
+        "{}",
+        run.stdout
+    );
+}
+
+#[test]
+fn a_rerun_that_fails_again_opens_the_issue_with_the_escaped_logs_error_lines() {
+    let log = upload_timeout_log();
+    let attempt_2 = run_200(2);
+    let run = main_red(
+        "macOS",
+        "failure",
+        false,
+        &[
+            ("api/repos_o_r_actions_runs_200", &attempt_2),
+            ("api/repos_o_r_actions_jobs_2_logs", &log),
+            ("junit-macos-1/junit.xml", PASSING_JUNIT),
+        ],
+    );
+    assert!(run.ok, "{}", run.stderr);
+    let writes = run.writes();
+    assert_eq!(writes.len(), 2, "{}", run.calls);
+    assert!(writes[1].starts_with("issue create "), "{writes:?}");
+    for part in [
+        "Run: https://github.com/o/r/actions/runs/200 (attempt 2: its failed jobs were rerun)",
+        "\n~~~~text\n--- macOS tests 2\n##[error]Failed to CreateArtifact: Unable to make request: ETIMEDOUT\n",
+    ] {
+        assert!(
+            run.body.contains(part),
+            "the body lacks {part:?}:\n{}",
+            run.body
+        );
+    }
+    assert!(!run.body.contains("Could not read the log"), "{}", run.body);
+    assert!(!run.body.contains('\u{1b}'), "{}", run.body);
+}
+
+#[test]
+fn a_failure_that_is_not_only_infrastructure_opens_the_issue_without_a_rerun() {
+    let log = upload_timeout_log();
+    let product_error = format!(
+        "{log}2026-11-28T02:01:23.4000000Z ##[error]Process completed with exit code 100.\n"
+    );
+    let failed_test = format!(
+        "{log}2026-11-28T02:01:23.4000000Z FAIL [   2.001s] cli_golden every_option_against_every_command\n"
+    );
+    let cases: [&[(&str, &str)]; 4] = [
+        // A test failed in the JUnit reports.
+        &[("api/repos_o_r_actions_jobs_2_logs", &log)],
+        // Another step failed as well.
+        &[
+            ("api/repos_o_r_actions_jobs_2_logs", &product_error),
+            ("junit-macos-1/junit.xml", PASSING_JUNIT),
+        ],
+        // The log names a failed test the reports missed.
+        &[
+            ("api/repos_o_r_actions_jobs_2_logs", &failed_test),
+            ("junit-macos-1/junit.xml", PASSING_JUNIT),
+        ],
+        // The log could not be read, so nothing shows the runner failed.
+        &[
+            ("api/repos_o_r_actions_jobs_2_logs.flood-stderr", "10"),
+            ("junit-macos-1/junit.xml", PASSING_JUNIT),
+        ],
+    ];
+    for (i, files) in cases.iter().enumerate() {
+        let run = main_red("macOS", "failure", false, files);
+        assert!(run.ok, "case {i}: {}", run.stderr);
+        let writes = run.writes();
+        assert_eq!(writes.len(), 2, "case {i}: {}", run.calls);
+        assert!(
+            writes[1].starts_with("issue create "),
+            "case {i}: {writes:?}"
+        );
+    }
+
+    // A rerun that can't be requested opens the issue and says why.
+    let run = main_red(
+        "macOS",
+        "failure",
+        false,
+        &[
+            ("api/repos_o_r_actions_jobs_2_logs", &log),
+            ("junit-macos-1/junit.xml", PASSING_JUNIT),
+            (
+                "dispatch-error",
+                "HTTP 403: Resource not accessible by integration\n",
+            ),
+        ],
+    );
+    assert!(run.ok, "{}", run.stderr);
+    let writes = run.writes();
+    assert_eq!(writes.len(), 3, "{}", run.calls);
+    assert!(writes[0].starts_with("workflow run "), "{writes:?}");
+    assert!(
+        run.body.contains(
+            "Could not request a rerun of the failed jobs: gh workflow run exited 1: HTTP 403: Resource not accessible by integration"
+        ),
+        "{}",
+        run.body
+    );
 }
 
 #[test]

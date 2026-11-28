@@ -9,7 +9,10 @@ the tests that failed every try (the run's JUnit reports, through
 scripts/ci-failed-tests.sh), the first error lines of the failing jobs'
 logs and the commits merged since the platform's last green run on main.
 When the check passed, it comments the green run's link on the open issue
-and closes it. Nothing is reverted.
+and closes it. Nothing is reverted. When no test failed and each failing
+job's error lines all name a failure of GitHub's runner or services (INFRA),
+the run's first attempt opens no issue: it starts rerun-failed.yml, which
+reruns the failed jobs once the run has ended, and the rerun reports again.
 
 Input, from the environment: PLATFORM (Linux or macOS), RESULT (the check
 job's result: success, failure, cancelled or skipped), RUN_ID, REPO
@@ -45,10 +48,18 @@ CHUNK = 64 * 1024
 TIMEOUT_S = 60
 
 TIMESTAMP = re.compile(r"^\d{4}-\d\d-\d\dT[\d:.]+Z ")
-ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+# CSI sequences (colours) and OSC sequences (titles, links).
+ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)")
 ERROR = re.compile(
     r"##\[error\]|^error(\[|:)|^(FAIL|TIMEOUT|SIGSEGV|SIGABRT|SIGKILL) \[|panicked at"
 )
+# An error line that GitHub's runner or services wrote, not the checks.
+INFRA = re.compile(
+    r"^##\[error\].*(Failed to CreateArtifact|ETIMEDOUT|ECONNRESET|"
+    r"Failed to (restore|save) cache|Cache service responded with 5\d\d|"
+    r"runner has received a shutdown signal|lost communication with the server)"
+)
+RERUN_WORKFLOW = "rerun-failed.yml"
 PR_NUMBER = re.compile(r"\(#(\d+)\)\s*$")
 
 
@@ -147,9 +158,15 @@ def log_line(raw):
 
 
 def read_log(job_id):
-    """The job's log text, at most its first LOG_BYTES, or raises GhError."""
+    """The job's log text, at most its first LOG_BYTES, or raises GhError.
+
+    Every log holds escape sequences (the runner colours each step's
+    command), which gh refuses to print without the flag; log_line strips
+    them.
+    """
     code, data, first, full = run_capped(
-        ["gh", "api", f"repos/{REPO}/actions/jobs/{job_id}/logs"], LOG_BYTES, TIMEOUT_S * 2)
+        ["gh", "api", f"repos/{REPO}/actions/jobs/{job_id}/logs", "--allow-escape-sequences"],
+        LOG_BYTES, TIMEOUT_S * 2)
     # A log cut at the cap was killed there, so its exit code says nothing.
     if code != 0 and not full:
         raise GhError(first)
@@ -170,21 +187,27 @@ def failing_jobs(jobs):
     return sorted(bad, key=lambda j: j["name"] == PLATFORM)
 
 
-def error_lines(jobs):
-    """Markdown for the first error lines of up to LOG_JOBS failing jobs."""
-    shown, notes, more = [], [], False
-    count = 0
+def read_logs(jobs):
+    """{job id: its error lines, cleaned} for up to LOG_JOBS failing jobs, and
+    a note for each log that could not be read."""
+    logs, notes = {}, []
     for job in jobs[:LOG_JOBS]:
         try:
             text = read_log(job["id"])
         except GhError as e:
             notes.append(f"Could not read the log of {inline(job['name'])}: {inline(e)}")
             continue
+        logs[job["id"]] = [line for line in map(log_line, text.splitlines()) if ERROR.search(line)]
+    return logs, notes
+
+
+def error_lines(jobs, logs, notes):
+    """Markdown for the first error lines of the failing jobs' logs."""
+    shown, more = [], False
+    count = 0
+    for job in jobs:
         header = False
-        for raw in text.splitlines():
-            line = log_line(raw)
-            if not ERROR.search(line):
-                continue
+        for line in logs.get(job["id"], []):
             if count == LOG_LINES:
                 more = True
                 break
@@ -205,17 +228,18 @@ def error_lines(jobs):
     return "\n\n".join(parts)
 
 
-def failed_tests(run_id):
-    """Markdown list of the tests that failed every try, from the run's JUnit reports."""
+def failed_test_names(run_id):
+    """(the tests that failed every try, from the run's JUnit reports, or
+    None with a note saying why the reports could not be read)."""
     here = os.path.dirname(os.path.abspath(__file__))
+    names = []
     with tempfile.TemporaryDirectory() as dest:
         try:
             gh(["run", "download", run_id, "--repo", REPO,
                 "--pattern", f"junit-{PLATFORM.lower()}-*", "--dir", dest])
         except GhError as e:
             if "no valid artifacts" not in str(e):
-                return f"Could not download the JUnit reports: {inline(e)}"
-        names = []
+                return None, f"Could not download the JUnit reports: {inline(e)}"
         for top, _, files in sorted(os.walk(dest)):
             for name in sorted(files):
                 if not name.endswith(".xml"):
@@ -226,8 +250,15 @@ def failed_tests(run_id):
                         ["bash", os.path.join(here, "ci-failed-tests.sh"), os.path.join(top, name)],
                         OUT_BYTES, TIMEOUT_S, env=env)
                 except GhError as e:
-                    return f"Could not read the JUnit report {inline(name)}: {inline(e)}"
+                    return None, f"Could not read the JUnit report {inline(name)}: {inline(e)}"
                 names += [n for n in out.decode(errors="replace").splitlines() if n]
+    return names, None
+
+
+def failed_tests(names, note):
+    """Markdown list of the tests that failed every try."""
+    if names is None:
+        return note
     if not names:
         return ("No failed test was recorded: the job failed outside the tests, or "
                 "stopped before their report. The failing jobs' logs say where.")
@@ -276,22 +307,54 @@ def merged_since(run):
     return head + "\n\n" + ("\n".join(rows) or "- no commit")
 
 
-def red_body(run):
+def infrastructure(jobs, logs, names):
+    """(a failing job, its first error line) when no test failed and every
+    failing job failed on GitHub's runner or services; otherwise None.
+
+    Each failing job but the platform's aggregate check, which fails because
+    a job it needs did, must have a log that was read and whose error lines
+    all match INFRA. Anything unread or unrecognised is not infrastructure.
+    """
+    if names != []:
+        return None
+    shards = [j for j in jobs if j["name"] != PLATFORM]
+    if not shards:
+        return None
+    for job in shards:
+        lines = logs.get(job["id"])
+        if not lines or not all(INFRA.search(line) for line in lines):
+            return None
+    return shards[0], logs[shards[0]["id"]][0]
+
+
+def attempt(run):
+    return int(run.get("run_attempt") or 1)
+
+
+def red_report(run):
+    """(the issue body, infrastructure(...) for the run's failing jobs)."""
     sha = run["head_sha"]
     commit = f"[`{sha[:7]}`]({SERVER_URL}/{REPO}/commit/{sha})"
+    names, note = failed_test_names(str(run["id"]))
+    infra = None
     try:
         jobs = failing_jobs(api(f"repos/{REPO}/actions/runs/{run['id']}/jobs?per_page=100")["jobs"])
         job_list = "\n".join(
             f"- [{inline(j['name'])}]({j['html_url']}): {j['conclusion']}" for j in jobs
         ) or "No failing job was listed."
-        errors = error_lines(jobs)
+        logs, notes = read_logs(jobs)
+        errors = error_lines(jobs, logs, notes)
+        infra = infrastructure(jobs, logs, names)
     except (GhError, KeyError, ValueError) as e:
         job_list = f"Could not list the jobs: {inline(e)}"
         errors = "No log was read."
+    run_line = f"Run: {run['html_url']}"
+    if attempt(run) > 1:
+        run_line += f" (attempt {attempt(run)}: its failed jobs were rerun)"
     sections = [
-        f"The {PLATFORM} checks ended with {RESULT} on main at {commit}.\n\nRun: {run['html_url']}",
+        f"The {PLATFORM} checks ended with {RESULT} on main at {commit}.\n\n{run_line}",
         f"### Failing jobs\n\n{job_list}",
-        f"### Failed tests\n\n{failed_tests(str(run['id']))}",
+        f"### Failed tests\n\n{failed_tests(names, note)}",
         f"### First error lines\n\n{errors}",
         f"### Merged since the last green run\n\n{merged_since(run)}",
     ]
@@ -299,7 +362,28 @@ def red_body(run):
     if PLATFORM == "macOS":
         tail = ("macOS is optional in the merge queue, so the queue did not stop on this. " + tail)
     sections.append(tail + f" This issue closes when {PLATFORM} is green on main again.")
-    return "\n\n".join(sections) + "\n"
+    return "\n\n".join(sections) + "\n", infra
+
+
+def request_rerun(run, infra):
+    """On a run's first attempt, asks RERUN_WORKFLOW to rerun its failed jobs
+    once it has finished (a run can't rerun itself while it runs). Returns
+    None when the rerun was asked for (or, in a dry run, would be), or a note
+    for the issue saying why it could not be."""
+    job, line = infra
+    why = (f"every test passed and {inline(job['name'])} failed on GitHub's "
+           f"infrastructure: `{inline(line)}`")
+    if DRY_RUN:
+        say(f"Dry run: would rerun the failed jobs of run {run['id']} once: {why}")
+        return None
+    try:
+        gh(["workflow", "run", RERUN_WORKFLOW, "--repo", REPO, "--ref", "main",
+            "-f", f"run_id={run['id']}"])
+    except GhError as e:
+        return f"Could not request a rerun of the failed jobs: {inline(e)}"
+    say(f"Asked {RERUN_WORKFLOW} to rerun the failed jobs of run {run['id']} once, so no "
+        f"issue is opened: {why}. The rerun reports again, and opens the issue if it fails too.")
+    return None
 
 
 def open_issue(title):
@@ -338,7 +422,12 @@ def main():
             gh(["issue", "close", str(number), "--repo", REPO, "--comment", comment])
             say(f"Closed #{number}.")
         return 0
-    body = red_body(run)
+    body, infra = red_report(run)
+    if infra and attempt(run) == 1:
+        note = request_rerun(run, infra)
+        if note is None:
+            return 0
+        body += f"\n{note}\n"
     if DRY_RUN:
         action = f"comment on #{number}" if number else f'open "{title}" labelled {LABEL}'
         say(f"Dry run: would {action} with this body:\n\n{body}")

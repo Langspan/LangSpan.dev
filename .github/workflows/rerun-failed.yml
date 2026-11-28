@@ -1,0 +1,63 @@
+name: Rerun failed jobs
+# check.yml's job main-red starts this when a push run on main failed only on
+# GitHub's runner or services, with every test passed (scripts/ci-main-red.py
+# decides that). A run can't rerun itself while it runs, so this waits for the
+# run to finish and reruns its failed jobs once. The rerun's own main-red job
+# reports again and opens the main-red issue if it fails too. This checks out
+# nothing and runs no repository code.
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: The check.yml push run on main whose failed jobs to rerun once
+        type: string
+        required: true
+permissions: {}
+jobs:
+  rerun:
+    name: Rerun failed jobs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    # One rerun per run: a second request (one per platform) waits, then finds
+    # the run already on its second attempt and does nothing.
+    permissions:
+      actions: write
+    concurrency:
+      group: rerun-failed-${{ inputs.run_id }}
+      cancel-in-progress: false
+    steps:
+      - name: Wait for the run to finish, then rerun its failed jobs once
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ inputs.run_id }}
+        run: |
+          case "$RUN_ID" in
+            '' | *[!0-9]*) echo "rerun-failed: run_id '$RUN_ID' is not a run id; pass the number from the run's URL" >&2; exit 1 ;;
+          esac
+          # 60 checks 30 s apart: at most 30 minutes, each call at most 60 s.
+          for _ in $(seq 60); do
+            state=$(timeout 60 gh api "repos/$GH_REPO/actions/runs/$RUN_ID" \
+              --jq '[.path, .event, .head_branch, .run_attempt, .status, .conclusion // ""] | join(" ")')
+            read -r path event branch attempt status conclusion <<<"$state"
+            if [ "$path $event $branch" != ".github/workflows/check.yml push main" ]; then
+              echo "rerun-failed: run $RUN_ID is $path on $event to $branch, not a check.yml push run on main; nothing rerun" >&2
+              exit 1
+            fi
+            if [ "$attempt" != 1 ]; then
+              echo "Run $RUN_ID is already on attempt $attempt; it is rerun only once."
+              exit 0
+            fi
+            if [ "$status" = completed ]; then
+              if [ "$conclusion" != failure ]; then
+                echo "Run $RUN_ID ended with '$conclusion'; nothing to rerun."
+                exit 0
+              fi
+              timeout 60 gh run rerun "$RUN_ID" --failed
+              echo "Rerunning the failed jobs of run $RUN_ID."
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "rerun-failed: run $RUN_ID did not finish within 30 minutes; rerun its failed jobs by hand if they failed on GitHub's side" >&2
+          exit 1
