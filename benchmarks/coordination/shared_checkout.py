@@ -11,6 +11,7 @@ rejection. The stand-in makes its commits and pushes as Bash calls in the
 same stream-json shape, so one count serves stand-in and real sessions.
 """
 
+import io
 import json
 import re
 import shlex
@@ -74,13 +75,32 @@ def result_text(content):
     return content if isinstance(content, str) else ""
 
 
+class ShellSource(io.StringIO):
+    """A command's text, read one character at a time by LEXER, with the
+    shell's comments removed. shlex's own comment handling differs from the
+    shell's twice: it also consumes the newline that ends the command, and
+    it starts a comment at `#` inside a word. Here a `#` starts a comment
+    only between words (lexer state ' ', or 'c' just after an operator),
+    and the comment reads as the newline that ends it."""
+
+    lexer = None
+
+    def read(self, size=-1):
+        char = super().read(size)
+        if char == "#" and self.lexer.state in (" ", "c"):
+            return "\n" if super().readline().endswith("\n") else ""
+        return char
+
+
 def simple_commands(command):
     """COMMAND's simple commands, each as its list of words: the shell's
     quoting and comments applied, split at `;`, `&&`, `||`, `|`, `&`,
-    parentheses, redirections and newlines. A command the shell could not
-    parse (an unclosed quote) runs nothing, so it has none."""
-    lexer = shlex.shlex(command, posix=True, punctuation_chars="();<>|&\n")
-    lexer.whitespace, lexer.whitespace_split = " \t\r", True
+    parentheses, redirections and newlines. A comment ends at its newline.
+    A command the shell could not parse (an unclosed quote) runs nothing,
+    so it has none."""
+    source = ShellSource(command)
+    lexer = source.lexer = shlex.shlex(source, posix=True, punctuation_chars="();<>|&\n")
+    lexer.whitespace, lexer.whitespace_split, lexer.commenters = " \t\r", True, ""
     commands, words = [], []
     try:
         for token in lexer:

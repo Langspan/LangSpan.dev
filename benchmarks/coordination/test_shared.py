@@ -100,6 +100,40 @@ class SharedUnit(unittest.TestCase):
         events = bash("a", "git commit -m 'Retry git push after fixing tests' -- shelf/a.py", "1 file changed")
         self.assertEqual(shared.push_counts(events), {"attempts": 0, "rejections": 0})
 
+    def test_a_comment_ends_at_its_newline_and_the_next_command_still_counts(self):
+        # Pure parsing. A comment runs to the end of its line, not further:
+        # the command on the next line is its own simple command.
+        runs = [
+            "git status --short # inspect before pushing\ngit push origin main",
+            "git status #c\ngit push",
+            "# first a comment\ngit push",
+            "git status # it's unbalanced\ngit push",
+            "git status #\n\ngit push",
+            "git status # one\n# two\ngit push",
+            "echo x #c\r\ngit push",
+            "git status;#c\ngit push",
+            "echo a#b; git push",
+            "echo 'a'#b; git push",
+        ]
+        for command in runs:
+            with self.subTest(command=command):
+                self.assertTrue(shared.runs_git_push(command))
+        self.assertEqual(shared.simple_commands("git status --short # inspect\ngit push origin main"),
+                         [["git", "status", "--short"], ["git", "push", "origin", "main"]])
+        # A comment on the last line, or one that names a push, still runs nothing.
+        for command in ["git status # then git push", "git status # then\n# git push", "# git push",
+                        "git status;# git push", "git status &&#git push"]:
+            with self.subTest(command=command):
+                self.assertFalse(shared.runs_git_push(command))
+        # '#' inside a word or a quote is not a comment, as in the shell.
+        self.assertEqual(shared.simple_commands("echo a#b; git push"), [["echo", "a#b"], ["git", "push"]])
+        self.assertEqual(shared.simple_commands("echo 'a # b'\ngit push"), [["echo", "a # b"], ["git", "push"]])
+        self.assertEqual(shared.simple_commands("echo '#' \"#\" \\#\ngit push"),
+                         [["echo", "#", "#", "#"], ["git", "push"]])
+        # The finding's own scenario, through the transcript count.
+        events = bash("a", "git status --short # inspect before pushing\ngit push origin main", "main -> main")
+        self.assertEqual(shared.push_counts(events), {"attempts": 1, "rejections": 0})
+
     def test_a_rejected_push_is_counted_and_retried_until_it_lands(self):
         # Real Git: what is verified is Git's own rejection and the retry.
         repo = self.root / "repo"
