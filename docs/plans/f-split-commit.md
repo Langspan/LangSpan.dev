@@ -27,8 +27,9 @@ size row and #300's 2,000-line bar holds for all five.
   The only edits on moved lines: a private item another sibling or the tests use
   becomes `pub(super)`; each new file gets a one-line `//!` doc and its own `use`
   block; relative doc links fixed.
-- Old paths unchanged: lib.rs replaces `pub mod commit;` with `pub mod ownership;`
-  and adds `pub use ownership::commit;` to the compatibility block.
+- Old paths unchanged: lib.rs replaces `pub mod commit;` with `mod ownership;`
+  (private, as `mod briefing;` is, so the crate's pub count holds) and adds
+  `pub use ownership::commit;` to the compatibility block.
   `ownership/commit.rs` re-exports every item callers reach as `crate::commit::X` /
   `langspan::commit::X` (`HELD`, `Guarded`, `guard_hook`, `is_own`, `is_live`,
   `live_sessions`, `commit_mine`, `running_session`, `status_mine`, and every
@@ -41,12 +42,17 @@ size row and #300's 2,000-line bar holds for all five.
 - Ratchets: `git mv` `baseline/src/commit.rs.tsv` to
   `baseline/src/ownership/commit.rs.tsv` (keeps `edge install`, `edge journal`),
   `--record` the four new files, `--tighten` ownership/commit.rs, in the same
-  commit. namespaces.tsv: `namespace commit application` becomes
-  `namespace ownership application`. Edge rows naming `commit` in other
-  baselines (adopt, journal, formatter, hook, briefing, briefing/trail) resolve
-  through the alias and stay unedited (recipe step 6).
+  commit, keeping its `edge install` and `edge journal` rows as they were
+  (recipe step 6; `--tighten` would drop `edge install`). The root needs no
+  baseline: lib.rs's still counts the one `pub mod`. namespaces.tsv:
+  `namespace commit application` becomes `namespace ownership application`.
+  Edge rows naming `commit` in other baselines (adopt, journal, formatter,
+  hook, briefing, briefing/trail) resolve through the alias and stay unedited
+  (recipe step 6).
 - `scripts/coverage-baseline.tsv`: row `src/commit.rs` renamed to
-  `src/ownership/commit.rs`; confirm with `tests/coverage_report.rs`.
+  `src/ownership/commit.rs` in the move commit; after the split, each file
+  gets the row `scripts/coverage.sh` measures for it (every one has 100
+  production lines or more, so each needs one).
 - `docs/IMPLEMENTATION_STATUS.md:164`: path `src/commit.rs` updated.
 
 ## Order and checks
