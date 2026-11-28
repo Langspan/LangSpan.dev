@@ -28,7 +28,9 @@ concurrency:
 jobs:
   coverage:
     name: Coverage
-    runs-on: ${{ vars.LINUX_RUNNER || 'ubuntu-24.04' }}
+    # The self-hosted runner, except for a pull request from a fork
+    # (docs/development-process.md#self-hosted-runner).
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","langspan-trusted"]') || 'ubuntu-24.04' }}
     # A cold build of the instrumented tests and cargo-llvm-cov, then the
     # whole suite once.
     timeout-minutes: 60

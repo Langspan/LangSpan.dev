@@ -43,9 +43,11 @@ jobs:
       fail-fast: false
       matrix:
         platform: [linux, macos]
+        # Linux on the self-hosted runner, except for a pull request from a
+        # fork (docs/development-process.md#self-hosted-runner).
         include:
           - platform: linux
-            runner: ${{ vars.LINUX_RUNNER || 'ubuntu-24.04' }}
+            runner: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","langspan-trusted"]') || 'ubuntu-24.04' }}
           - platform: macos
             runner: ${{ vars.MACOS_RUNNER || 'macos-26' }}
     steps:

@@ -252,12 +252,7 @@ fn linux_and_macos_start_together() {
 fn the_full_lane_builds_once_per_platform_and_tests_the_archive_in_every_shard() {
     let text = workflow("check.yml");
     for (build, tests, runner, platform) in [
-        (
-            "linux",
-            "linux-tests",
-            "vars.LINUX_RUNNER || 'ubuntu-24.04'",
-            "linux",
-        ),
+        ("linux", "linux-tests", TRUSTED_RUNNER, "linux"),
         (
             "macos",
             "macos-tests",
@@ -510,6 +505,46 @@ fn a_platform_check_passes_only_when_its_build_and_every_shard_passed() {
         output_value(&written, "flaky"),
         "flaky_sample passes_on_its_second_try\nflaky_sample passes_on_its_second_try"
     );
+}
+
+/// The self-hosted runner for a trusted event, GitHub's standard runner
+/// for a pull request from a fork (docs/development-process.md#self-hosted-runner).
+const TRUSTED_RUNNER: &str = "(github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('[\"self-hosted\",\"langspan-trusted\"]') || 'ubuntu-24.04'";
+
+#[test]
+fn only_the_slow_linux_jobs_run_on_the_self_hosted_runner_and_never_for_a_fork() {
+    let runs_on = format!("\n    runs-on: ${{{{ {TRUSTED_RUNNER} }}}}\n");
+    assert!(job(&workflow("check.yml"), "linux-tests").contains(&runs_on));
+    assert!(job(&workflow("coverage.yml"), "coverage").contains(&runs_on));
+    let bench = job(&workflow("bench.yml"), "dry-runs");
+    assert!(bench.contains(&format!(
+        "          - platform: linux\n            runner: ${{{{ {TRUSTED_RUNNER} }}}}\n"
+    )));
+    assert!(bench.contains(
+        "          - platform: macos\n            runner: ${{ vars.MACOS_RUNNER || 'macos-26' }}\n"
+    ));
+    // Nowhere else, and in no other form: a fork's pull request must never
+    // reach the runner, which keeps state from one job to the next.
+    for name in [
+        "bench.yml",
+        "check.yml",
+        "content.yml",
+        "coverage.yml",
+        "fuzz.yml",
+        "release.yml",
+        "scorecard.yml",
+        "agentic-wiki-writer.lock.yml",
+        "ci-doctor.lock.yml",
+    ] {
+        let text = workflow(name);
+        let expected = match name {
+            "check.yml" | "coverage.yml" | "bench.yml" => 1,
+            _ => 0,
+        };
+        assert_eq!(text.matches("\"self-hosted\"").count(), expected, "{name}");
+        assert_eq!(text.matches("langspan-trusted").count(), expected, "{name}");
+        assert_eq!(text.matches(TRUSTED_RUNNER).count(), expected, "{name}");
+    }
 }
 
 #[test]
