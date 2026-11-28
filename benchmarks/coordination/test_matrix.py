@@ -152,6 +152,25 @@ class MatrixTests(unittest.TestCase):
         self.assertIn("schema version 6", done.stderr)
         self.assertFalse((self.root / "results.md").exists())
 
+    def test_a_journaled_trial_that_never_made_its_directory_has_no_record(self):
+        # A driver that stopped before making its trial's directory leaves
+        # only the journal line; the report still lists the trial.
+        out = self.root / "out"
+        kept = out / "discovered_change-n2-s1-langspan"
+        kept.mkdir(parents=True)
+        (kept / "record.json").write_text(json.dumps(record("langspan", 1)))
+        (out / "discovered_change-n2-s2-langspan.driver.log").write_text("")
+        (out / "matrix.jsonl").write_text("".join(json.dumps({"trial": name, "outcome": outcome}) + "\n" for name, outcome in (
+            ("discovered_change-n2-s1-langspan", "ran"), ("discovered_change-n2-s2-langspan", "no_record"),
+            ("discovered_change-n2-s3-langspan", "timed_out"), ("discovered_change-n2-s2-langspan", "no_record"))))
+        named, missing = matrix.read_trials([out])
+        self.assertEqual([name for name, _ in named], ["discovered_change-n2-s1-langspan"])
+        self.assertEqual(missing, ["discovered_change-n2-s2-langspan", "discovered_change-n2-s3-langspan"])
+        # A journal line this version cannot read is an error, not a trial left out.
+        (out / "matrix.jsonl").write_text("{\n")
+        with self.assertRaises(ValueError):
+            matrix.read_trials([out])
+
     def test_the_matrix_keeps_going_past_a_refused_trial(self):
         # Child processes: what is verified is that the matrix runs each
         # trial's driver and keeps every record. Without --langspan the
