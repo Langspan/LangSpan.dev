@@ -31,6 +31,7 @@ vectors! {
     SessionSeen => "session-seen-outcome-v10.json",
     ContextRecorded => "context-recorded-outcome-v10.json",
     ToldForgotten => "told-forgotten-outcome-v10.json",
+    ToldConfirmed => "told-confirmed-outcome-v10.json",
     Intent => "intent-outcome-v10.json",
     IntentEnded => "intent-ended-outcome-v10.json",
     Admitted => "admitted-outcome-v10.json",

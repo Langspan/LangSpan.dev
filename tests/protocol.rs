@@ -2517,6 +2517,53 @@ fn peer_callers_reach_only_a_client_with_the_rename_holds_capability() {
     assert_eq!(encode(&request).unwrap(), earlier);
 }
 
+/// Issue #531: a hook's briefing is told only once the hook confirms it,
+/// with `confirmed_briefings`, which no frozen version has. A daemon
+/// without it is asked as before, told when decided, and is never sent a
+/// confirmation.
+#[test]
+fn a_confirmed_briefing_reaches_only_a_daemon_with_confirmed_briefings() {
+    let wire = include_bytes!("../fixtures/capabilities/confirmed_briefings/request.json");
+    let request: Request = serde_json::from_slice(wire).unwrap();
+    assert_eq!(encode(&request).unwrap(), wire);
+    assert!(matches!(
+        request.command,
+        Command::Brief { confirm: true, .. }
+    ));
+    let others: Vec<String> = Capabilities::ALL
+        .names()
+        .into_iter()
+        .filter(|name| *name != "confirmed_briefings")
+        .collect();
+    let granted = Capabilities::negotiate(PROTOCOL_VERSION, Some(&others));
+    let mut sent = request.command.clone();
+    for_capabilities(Capabilities::ALL, &mut sent);
+    assert_eq!(sent, request.command);
+    for_capabilities(granted, &mut sent);
+    assert!(
+        matches!(sent, Command::Brief { confirm: false, .. }),
+        "{sent:?}"
+    );
+
+    let confirm = include_bytes!("../fixtures/confirm-told-command-v10.json");
+    let confirm: Request = serde_json::from_slice(confirm).unwrap();
+    assert!(fits_with(Capabilities::ALL, &confirm.command));
+    assert!(!fits_with(granted, &confirm.command));
+    for version in OLDEST_PROTOCOL_VERSION..=PROTOCOL_VERSION {
+        let granted = Capabilities::negotiate(version, None);
+        assert!(!granted.has("confirmed_briefings"), "{version}");
+        assert!(!fits_with(granted, &confirm.command), "{version}");
+    }
+    // A brief without `confirm` keeps its earlier bytes.
+    let earlier = include_bytes!("../fixtures/brief-command-v10.json");
+    let request: Request = serde_json::from_slice(earlier).unwrap();
+    assert!(matches!(
+        request.command,
+        Command::Brief { confirm: false, .. }
+    ));
+    assert_eq!(encode(&request).unwrap(), earlier);
+}
+
 /// The handshake: the daemon grants the names it knows and, when that is
 /// fewer than the request named, says which. A client and daemon of the
 /// same build exchange the bytes they did before capabilities.
@@ -2720,7 +2767,7 @@ const NAMED_0_8: &[&str] = &[
 /// Each release, the protocol version it speaks, the capabilities it names
 /// (none before 0.5.0), and the event types it reads, frozen from that
 /// release's tag (issue #331).
-const RELEASES: [(&str, u16, Option<&[&str]>, &str); 9] = [
+const RELEASES: [(&str, u16, Option<&[&str]>, &str); 10] = [
     (
         "0.1.0",
         3,
@@ -2774,6 +2821,12 @@ const RELEASES: [(&str, u16, Option<&[&str]>, &str); 9] = [
         10,
         Some(NAMED_0_8),
         include_str!("../fixtures/event-types/0.8.0.txt"),
+    ),
+    (
+        "0.9.0",
+        10,
+        Some(NAMED_0_8),
+        include_str!("../fixtures/event-types/0.9.0.txt"),
     ),
 ];
 

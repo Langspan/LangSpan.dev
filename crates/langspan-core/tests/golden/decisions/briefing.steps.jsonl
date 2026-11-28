@@ -12,3 +12,8 @@
 {"name":"forget-told-unknown-session","now_ms":3100,"command":{"op":"forget_told","session_id":"codex.nobody","keys":[1]}}
 {"name":"trails-app","now_ms":4000,"command":{"op":"trails","workspace_id":"app"}}
 {"name":"trails-unknown-workspace","now_ms":4100,"command":{"op":"trails","workspace_id":"nowhere"}}
+{"name":"session-carol","now_ms":4900,"command":{"op":"session_register","session_id":"codex.carol","workspace_id":"app"}}
+{"name":"brief-carol-confirm","now_ms":5000,"command":{"op":"brief","session_id":"codex.carol","max_peers":4,"deliver":true,"confirm":true}}
+{"name":"confirm-told-alice","now_ms":5100,"command":{"op":"confirm_told","session_id":"claude-code.alice","keys":[1]}}
+{"name":"confirm-told-alice-again","now_ms":5200,"command":{"op":"confirm_told","session_id":"claude-code.alice","keys":[1]}}
+{"name":"confirm-told-unknown-session","now_ms":5300,"command":{"op":"confirm_told","session_id":"codex.nobody","keys":[1]}}

@@ -276,3 +276,99 @@
     "message": "Workspace is not registered; register it first"
   }
 }
+## session-carol
+{
+  "events": [
+    {
+      "type": "session_registered",
+      "session": {
+        "session_id": "codex.carol",
+        "workspace_id": "app",
+        "generation": 1
+      }
+    }
+  ],
+  "outcome": {
+    "type": "session",
+    "session": {
+      "session_id": "codex.carol",
+      "workspace_id": "app",
+      "generation": 1
+    }
+  }
+}
+## brief-carol-confirm
+{
+  "events": [
+    {
+      "type": "briefing_delivered",
+      "session_id": "codex.carol",
+      "signature": "4c6e8a3de1be8b2c",
+      "told_at_ms": 5000
+    }
+  ],
+  "outcome": {
+    "type": "briefing",
+    "briefing": {
+      "session_id": "codex.carol",
+      "changed": true,
+      "peers": [
+        {
+          "session_id": "codex.bob",
+          "workspace_id": "app",
+          "workspace_root": "/work/app",
+          "same_workspace": true,
+          "branch_ref": null,
+          "liveness": null,
+          "ended": false,
+          "summary": null,
+          "intent": "Rework the session handler",
+          "editing": [
+            "src/api.rs"
+          ],
+          "recent": [],
+          "overlap": []
+        }
+      ],
+      "omitted_peers": 0
+    }
+  }
+}
+## confirm-told-alice
+{
+  "events": [
+    {
+      "type": "briefing_delivered",
+      "session_id": "claude-code.alice",
+      "signature": "4c6e8a3de1be8b2c",
+      "told": [
+        12037861595241662061,
+        3551154489461026735,
+        1
+      ]
+    }
+  ],
+  "outcome": {
+    "type": "told_confirmed",
+    "session_id": "claude-code.alice",
+    "confirmed": 1
+  }
+}
+## confirm-told-alice-again
+{
+  "events": [],
+  "outcome": {
+    "type": "told_confirmed",
+    "session_id": "claude-code.alice",
+    "confirmed": 0
+  }
+}
+## confirm-told-unknown-session
+{
+  "events": [],
+  "outcome": {
+    "type": "error",
+    "code": "session_not_found",
+    "message": "Session is not registered; attach it to a workspace first"
+  }
+}

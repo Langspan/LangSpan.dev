@@ -943,6 +943,7 @@ pub(super) fn prepare_brief(
         recent_window_ms,
         mcp,
         changes_only,
+        confirm,
     } = command
     else {
         return command.clone();
@@ -992,6 +993,7 @@ pub(super) fn prepare_brief(
         mcp: *mcp,
         left: left.clone(),
         changes_only: *changes_only,
+        confirm: *confirm,
         inflight,
         inflight_partial,
         mentioned,

@@ -121,6 +121,14 @@ $ langspan request {"version":10,"request_id":"r-h3","command":{"op":"forget_tol
 exit 0
 {"version":10,"request_id":"r-h3","replayed":true,"generation":1,"lease_valid":null,"outcome":{"type":"told_forgotten","session_id":"s1","forgotten":0}}
 
+## confirm told
+$ langspan request {"version":10,"request_id":"r-h3c","command":{"op":"confirm_told","session_id":"s1","keys":[1]}}
+exit 0
+Session s1: 0 briefing item(s) now told.
+$ langspan request {"version":10,"request_id":"r-h3c","command":{"op":"confirm_told","session_id":"s1","keys":[1]}} --json
+exit 0
+{"version":10,"request_id":"r-h3c","replayed":true,"generation":1,"lease_valid":null,"outcome":{"type":"told_confirmed","session_id":"s1","confirmed":0}}
+
 ## session prompt
 $ langspan request {"version":10,"request_id":"r-h4","command":{"op":"session_prompt","session_id":"s2","summary":"fix the parser"}}
 exit 0

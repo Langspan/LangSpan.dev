@@ -388,3 +388,120 @@ pub(super) fn index_worker(
         scans.insert(job.of.workspace_id.clone(), (job.of, job.scan));
     }
 }
+
+/// `forward_transfer`'s refusals, in process: a channel stands for the
+/// indexer, so no daemon, socket or index file is involved.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn registered() -> State {
+        let mut state = State::default();
+        let register = Command::WorkspaceRegister {
+            workspace_id: "work".into(),
+            root: "/work".into(),
+        };
+        let decision = langspan_core::decide(&state, &register, "register", 1);
+        for event in &decision.events {
+            langspan_core::apply(&mut state, event).unwrap();
+        }
+        state
+    }
+
+    fn export(workspace_id: &str, path: &str) -> Command {
+        Command::GraphExport {
+            workspace_id: workspace_id.into(),
+            path: path.into(),
+        }
+    }
+
+    /// The reply `forward_transfer` gives a job carrying `command` at
+    /// `version`, or None when it handed the job on without one.
+    fn answer(
+        transfers: &mpsc::SyncSender<Transfer>,
+        command: Command,
+        version: u16,
+    ) -> Option<Outcome> {
+        let (jobs, received) = mpsc::sync_channel(1);
+        let asker = std::thread::spawn(move || ask_as(&jobs, None, "transfer-1".into(), command));
+        let mut job = received.recv().unwrap();
+        job.request.version = version;
+        forward_transfer(&registered(), transfers, job);
+        asker.join().unwrap()
+    }
+
+    fn refusal(outcome: Option<Outcome>) -> (String, String) {
+        match outcome {
+            Some(Outcome::Error { code, message }) => (code, message),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_busy_indexer_refuses_the_transfer() {
+        // No receiver is waiting on a rendezvous channel: `Full`.
+        let (transfers, _indexer) = mpsc::sync_channel(0);
+        let (code, message) = refusal(answer(
+            &transfers,
+            export("work", "/out.idx"),
+            PROTOCOL_VERSION,
+        ));
+        assert_eq!(code, "index_unavailable");
+        assert!(message.contains("handling another export"), "{message}");
+    }
+
+    #[test]
+    fn a_stopped_indexer_refuses_the_transfer() {
+        let (transfers, indexer) = mpsc::sync_channel(1);
+        drop(indexer);
+        let (code, message) = refusal(answer(
+            &transfers,
+            export("work", "/out.idx"),
+            PROTOCOL_VERSION,
+        ));
+        assert_eq!(code, "index_unavailable");
+        assert!(message.contains("index is not available"), "{message}");
+    }
+
+    #[test]
+    fn a_checked_transfer_reaches_the_indexer_unanswered() {
+        let (transfers, indexer) = mpsc::sync_channel(1);
+        let import = Command::GraphImport {
+            workspace_id: "work".into(),
+            path: "/in.idx".into(),
+            apply: false,
+        };
+        let asked = std::thread::spawn(move || answer(&transfers, import, PROTOCOL_VERSION));
+        let transfer = indexer.recv().unwrap();
+        assert_eq!(transfer.of.workspace_id, "work");
+        assert_eq!(transfer.request_id, "transfer-1");
+        assert!(is_transfer(&transfer.command));
+        drop(transfer);
+        assert_eq!(asked.join().unwrap(), None);
+    }
+
+    #[test]
+    fn an_unchecked_transfer_is_refused_with_its_reason() {
+        let long = format!("/{}", "a".repeat(4096));
+        let cases = [
+            (export("work", "/out.idx"), 0, "unsupported_version"),
+            (export("work", "out.idx"), PROTOCOL_VERSION, "invalid_path"),
+            (export("work", &long), PROTOCOL_VERSION, "invalid_path"),
+            (
+                export("work", "/out\0.idx"),
+                PROTOCOL_VERSION,
+                "invalid_path",
+            ),
+            (
+                export("other", "/out.idx"),
+                PROTOCOL_VERSION,
+                "unknown_workspace",
+            ),
+        ];
+        for (command, version, expected) in cases {
+            let (transfers, _indexer) = mpsc::sync_channel(1);
+            let (code, message) = refusal(answer(&transfers, command, version));
+            assert_eq!(code, expected, "{message}");
+        }
+    }
+}

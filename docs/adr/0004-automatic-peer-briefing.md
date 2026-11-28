@@ -174,6 +174,22 @@ context) and to an explicit request (`langspan brief SESSION` or the MCP tool
   told, records nothing. When the forget does not reach the daemon within the
   hook's deadline, the items stay told, as a missed deadline already leaves
   them; it never hides an item.
+- *Told once the hook returns it (amended 27 November 2026, issue #531).* A
+  hook's briefing is asked with `confirm`: the core records the delivery when
+  it decides, but its told keys keep only the items told before. Right before
+  it returns its reply, the hook sends `ConfirmTold` with the keys of what its
+  text placed, at most 256, and the core adds the ones not yet told with a
+  `BriefingDelivered` of the same signature. No new event type, so a log
+  stays readable by earlier builds. A hook that timed out under load never
+  confirms, so the next briefing of changes only tells those items again; a
+  confirm that fails costs an item told twice, the safe direction. A retry,
+  keys already told, or a session not briefed in this generation record
+  nothing. The CLI, MCP and a hook of an earlier build ask without `confirm`
+  and are told at decision as before, and a client without the
+  `confirmed_briefings` capability (ADR 0037) sends neither. What remains: a
+  host that kills the hook between its confirmation and its reply loses that
+  one briefing's items, and messages, check results and the other one-time
+  items are still acknowledged at decision.
 - *The pointer.* A briefing that left anything out says so: it opens with
   "What changed since your last briefing", and in place of the closing
   paragraph about holds, which the full view gave, it ends with one line that

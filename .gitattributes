@@ -1,1 +1,7 @@
 .github/workflows/*.lock.yml linguist-generated=true
+
+# Tests compare these byte for byte with output written with LF, so keep them
+# LF in every checkout, including Windows with core.autocrlf=true (#568).
+crates/langspan-core/tests/golden/** text eol=lf
+crates/langspan-core/tests/fixtures/** text eol=lf
+scripts/ratchets/baseline/crates/langspan-core/api.txt text eol=lf

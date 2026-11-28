@@ -341,6 +341,7 @@ cases! {
     SessionSeen => "session seen",
     ContextRecorded => "record context",
     ToldForgotten => "forget told",
+    ToldConfirmed => "confirm told",
     Intent => "intent set",
     IntentEnded => "intent end",
     Admitted => "admit",
@@ -736,6 +737,11 @@ fn transcript_of_the_coordination_commands() {
         "forget told",
         "r-h3",
         json!({"op": "forget_told", "session_id": "s1", "keys": [1]}),
+    );
+    t.request(
+        "confirm told",
+        "r-h3c",
+        json!({"op": "confirm_told", "session_id": "s1", "keys": [1]}),
     );
     t.request(
         "session prompt",

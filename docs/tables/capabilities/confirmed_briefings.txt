@@ -1,0 +1,1 @@
+`brief`'s `confirm`; the `confirm_told` command and its `told_confirmed` outcome (issue #531)

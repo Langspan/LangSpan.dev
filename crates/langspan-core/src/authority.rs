@@ -44,6 +44,7 @@ pub fn authority(command: &Command) -> Authority {
         | Command::SessionSeen { .. }
         | Command::RecordContext { .. }
         | Command::ForgetTold { .. }
+        | Command::ConfirmTold { .. }
         | Command::IntentSet { .. }
         | Command::IntentEnd { .. }
         | Command::Admit { .. }

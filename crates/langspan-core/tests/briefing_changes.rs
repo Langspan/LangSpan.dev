@@ -86,12 +86,50 @@ fn brief_as(
             recent_window_ms: None,
             mcp: false,
             changes_only,
+            confirm: false,
         },
         now,
     )) {
         Outcome::Briefing { briefing } => briefing,
         other => panic!("{other:?}"),
     }
+}
+
+/// A hook's briefing (issue #531): what it shows is told only once the
+/// hook confirms it placed it.
+fn hook_brief(state: &mut State, session: &str, now: u64, changes_only: bool) -> Briefing {
+    match ok(run(
+        state,
+        &format!("hb-{session}-{now}-{changes_only}"),
+        Command::Brief {
+            session_id: session.into(),
+            max_peers: 8,
+            deliver: true,
+            mid_turn: false,
+            left: Vec::new(),
+            recent: false,
+            recent_window_ms: None,
+            mcp: false,
+            changes_only,
+            confirm: true,
+        },
+        now,
+    )) {
+        Outcome::Briefing { briefing } => briefing,
+        other => panic!("{other:?}"),
+    }
+}
+
+fn confirm(state: &mut State, session: &str, placed: &Briefing, now: u64) -> Outcome {
+    run(
+        state,
+        &format!("confirm-{session}-{now}"),
+        Command::ConfirmTold {
+            session_id: session.into(),
+            keys: briefing_keys(placed),
+        },
+        now,
+    )
 }
 
 /// A prompt's briefing: changes only.
@@ -253,6 +291,7 @@ fn a_full_view_on_request_tells_everything_and_a_look_from_outside_tells_nothing
             recent_window_ms: None,
             mcp: false,
             changes_only: false,
+            confirm: false,
         },
         2_000,
     )) {
@@ -528,6 +567,124 @@ fn forgetting_is_bounded_idempotent_and_for_a_current_session() {
     )
     .unwrap_err();
     assert_eq!(refused.code, "invalid_event");
+}
+
+/// Issue #531: the core decides a hook's briefing, then the hook times out
+/// under load and never returns it to the host. The interface notice was
+/// never seen, so the next prompt's briefing carries it again; once a hook
+/// confirms it placed it, the next one leaves it out.
+#[test]
+fn a_notice_a_timed_out_hook_never_returned_is_told_at_the_next_prompt() {
+    let mut state = ready();
+    edited(&mut state, "alice", "src/api.rs", 1_000);
+    edited(&mut state, "bob", "src/store.rs", 1_000);
+    ok(run(
+        &mut state,
+        "interface-1",
+        Command::ObserveInterface {
+            workspace_id: "main".into(),
+            path: "src/store.rs".into(),
+            changes: vec![signature_change("save")],
+            dependents: vec!["src/api.rs".into()],
+        },
+        1_001,
+    ));
+    // The start's full view, placed and confirmed.
+    let start = hook_brief(&mut state, "alice", 1_500, false);
+    assert!(matches!(
+        ok(confirm(&mut state, "alice", &start, 1_500)),
+        Outcome::ToldConfirmed { confirmed, .. } if confirmed > 0
+    ));
+    // Decided, then the hook timed out: no confirmation.
+    ok(run(
+        &mut state,
+        "interface-2",
+        Command::ObserveInterface {
+            workspace_id: "main".into(),
+            path: "src/store.rs".into(),
+            changes: vec![signature_change("load")],
+            dependents: vec!["src/api.rs".into()],
+        },
+        1_600,
+    ));
+    let lost = hook_brief(&mut state, "alice", 2_000, true);
+    assert!(lost.changed, "{lost:?}");
+    assert!(!lost.interface_changes.is_empty(), "{lost:?}");
+    let again = hook_brief(&mut state, "alice", 3_000, true);
+    assert!(again.changed, "the notice is told again: {again:?}");
+    let notice = |briefing: &Briefing| -> Vec<_> {
+        briefing
+            .interface_changes
+            .iter()
+            .map(|impact| (impact.path.clone(), impact.changes.clone()))
+            .collect()
+    };
+    assert_eq!(notice(&again), notice(&lost));
+    // This hook returned it and confirmed: told.
+    ok(confirm(&mut state, "alice", &again, 3_000));
+    let after = hook_brief(&mut state, "alice", 4_000, true);
+    assert!(!after.changed, "{after:?}");
+    assert!(after.interface_changes.is_empty(), "{after:?}");
+    // Bob's line, confirmed at the start, stayed told throughout.
+    assert!(again.peers.is_empty(), "{again:?}");
+}
+
+/// A confirmation is bounded, for a current session only; a retry, or keys
+/// already told, record nothing. A briefing without `confirm` (the CLI,
+/// MCP, a hook of an earlier build) is told when decided, as before.
+#[test]
+fn confirming_is_bounded_idempotent_and_a_plain_delivery_tells_at_once() {
+    let mut state = ready();
+    edited(&mut state, "bob", "src/a.rs", 1_000);
+    let shown = hook_brief(&mut state, "alice", 2_000, true);
+    assert!(state.activity["alice"].told.is_empty(), "nothing told yet");
+    let confirm_keys = |keys: Vec<u64>, session: &str| Command::ConfirmTold {
+        session_id: session.into(),
+        keys,
+    };
+    let keys = briefing_keys(&shown);
+    assert!(!keys.is_empty());
+    let decision = decide(&state, &confirm_keys(keys.clone(), "alice"), "c1", 2_000);
+    assert!(matches!(
+        decision.outcome,
+        Outcome::ToldConfirmed { confirmed, .. } if confirmed as usize == keys.len()
+    ));
+    ok(run(
+        &mut state,
+        "c1",
+        confirm_keys(keys.clone(), "alice"),
+        2_000,
+    ));
+    assert_eq!(state.activity["alice"].told, keys);
+    let retry = decide(&state, &confirm_keys(keys.clone(), "alice"), "c2", 2_000);
+    assert!(retry.events.is_empty(), "a retry records nothing");
+    assert!(matches!(
+        retry.outcome,
+        Outcome::ToldConfirmed { confirmed: 0, .. }
+    ));
+    assert!(!hook_brief(&mut state, "alice", 3_000, true).changed);
+    let too_many = confirm_keys((0..=MAX_TOLD as u64).collect(), "alice");
+    assert!(matches!(
+        run(&mut state, "c3", too_many, 3_000),
+        Outcome::Error { .. }
+    ));
+    assert!(matches!(
+        run(&mut state, "c4", confirm_keys(vec![1], "nobody"), 3_000),
+        Outcome::Error { .. }
+    ));
+    // A session never briefed in this generation has nothing to confirm.
+    let unbriefed = decide(&state, &confirm_keys(vec![1], "carol"), "c5", 3_000);
+    assert!(unbriefed.events.is_empty(), "{unbriefed:?}");
+    // The told keys stay within the bound.
+    let many: Vec<u64> = (0..MAX_TOLD as u64).collect();
+    ok(run(&mut state, "c6", confirm_keys(many, "alice"), 3_000));
+    assert_eq!(state.activity["alice"].told.len(), MAX_TOLD);
+
+    // Without `confirm`, delivery tells at once.
+    edited(&mut state, "carol", "src/b.rs", 4_000);
+    let plain = prompt(&mut state, "bob", 5_000);
+    assert!(plain.changed, "{plain:?}");
+    assert!(!prompt(&mut state, "bob", 6_000).changed);
 }
 
 /// Review follow-up #270: a newer notice for the same file is news when it
