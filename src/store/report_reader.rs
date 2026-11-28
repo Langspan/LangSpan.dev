@@ -30,7 +30,7 @@ impl ReportReader {
 
     /// The report the owner's [`Store::report`] would give, from one
     /// snapshot of the log. Refusals that need the state are the owner's,
-    /// asked first with [`Store::report_refused`].
+    /// asked first with `Store::report_refused`.
     pub fn report(
         &mut self,
         workspace_id: &str,
