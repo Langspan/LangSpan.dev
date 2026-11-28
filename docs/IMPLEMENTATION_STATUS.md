@@ -346,9 +346,11 @@ enables it per workspace.
 | Ordering and staleness | Per-sender rising sequence; age from local receipt; dropped after 10 minutes unheard; 2-minute heartbeat while work is listed | No cross-machine clock is used or needed. |
 | Failure | Unreachable remote is logged once and retried each pass; local coordination is unaffected; a restart re-receives everything | A push rejected for non-fast-forward is retried on what the remote holds. |
 | Control | `remote enable`, `remote disable` (deletes the ref), `remote outbox` (exact payload), `remote_published` events with the exact payload pushed, listed by `remote sent`; no MCP tool | Retention of the published commit chain. |
+| Messages ([ADR 0041](adr/0041-cross-machine-messages.md), issue #65) | `remote enable --share-messages on`, restated by each enable; `message ... --remote on` (MCP `remote: true`) checked whole before anything is recorded; at most 8 per publication in 6 KiB, 8 sends per 30 minutes; each leaves the publication after 30 minutes or when retracted, and is never published where the remote refuses forced updates; told once per receiving session, at most 2 per briefing, labeled as from another machine, recorded as `remote_message_delivered` | `--to-participant`, held reasons in `remote outbox` and `messages status` for a remote message are not built; no two-machine or hosted-remote run. |
 
 Tests: six pure-core cases and two integration cases with two daemons, two
-clones and one shared remote. **Both daemons ran on one machine.** No
+clones and one shared remote; for messages, ten pure-core cases and two such
+integration cases. **Both daemons ran on one machine.** No
 two-machine, hosted-remote or two-developer run exists.
 
 ### Check evidence, combined checks and landing (branch `feat/checks-and-landing`)

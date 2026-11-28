@@ -193,6 +193,10 @@ pub enum Command {
         /// `refs/langspan/peers/`. ADR 0006.
         #[serde(default, skip_serializing_if = "is_false")]
         publish_as_branch: bool,
+        /// Messages sent with `remote` leave the machine (ADR 0041). Each
+        /// enable restates it: absent turns it off.
+        #[serde(default, skip_serializing_if = "is_false")]
+        share_messages: bool,
     },
     RemoteDisable {
         workspace_id: String,
@@ -421,6 +425,10 @@ pub enum Command {
         to: Option<String>,
         text: String,
         paths: Vec<String>,
+        /// Publish it to the sessions on other machines too (ADR 0041,
+        /// capability `remote_messages`).
+        #[serde(default, skip_serializing_if = "is_false")]
+        remote: bool,
     },
     /// The session has seen the message; it is not delivered to it again.
     AckMessage {
@@ -973,6 +981,11 @@ pub enum Command {
         /// untold. Capability `confirmed_briefings`.
         #[serde(default, skip_serializing_if = "is_false")]
         confirm: bool,
+        /// The client shows teammates' messages from other machines, so
+        /// the briefing may carry them (ADR 0041). Capability
+        /// `remote_messages`.
+        #[serde(default, skip_serializing_if = "is_false")]
+        remote_messages: bool,
     },
     /// Take over an ended session's journaled, uncommitted lines in the
     /// same workspace (issue #161). Refused for a live session and for one
@@ -1000,6 +1013,8 @@ pub enum Command {
         changes_only: bool,
         #[serde(default)]
         confirm: bool,
+        #[serde(default)]
+        remote_messages: bool,
         inflight: Vec<InflightSymbol>,
         #[serde(default)]
         inflight_partial: bool,
@@ -1197,6 +1212,8 @@ enum CommandWire {
         share_task: bool,
         #[serde(default)]
         publish_as_branch: bool,
+        #[serde(default)]
+        share_messages: bool,
     },
     RemoteDisable {
         workspace_id: String,
@@ -1425,6 +1442,10 @@ enum CommandWire {
         to: Option<String>,
         text: String,
         paths: Vec<String>,
+        /// Publish it to the sessions on other machines too (ADR 0041,
+        /// capability `remote_messages`).
+        #[serde(default, skip_serializing_if = "is_false")]
+        remote: bool,
     },
     /// The session has seen the message; it is not delivered to it again.
     AckMessage {
@@ -1943,6 +1964,8 @@ enum CommandWire {
         changes_only: bool,
         #[serde(default)]
         confirm: bool,
+        #[serde(default)]
+        remote_messages: bool,
     },
     Adopt {
         session_id: String,

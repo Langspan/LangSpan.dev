@@ -219,6 +219,7 @@ fn decide_checked(
             to,
             text,
             paths,
+            remote,
         } => messages::decide_send_message(
             state,
             workspace_id,
@@ -226,6 +227,7 @@ fn decide_checked(
             to,
             text,
             paths,
+            *remote,
             request_id,
             now_ms,
         ),
@@ -313,6 +315,7 @@ fn decide_checked(
             name,
             share_task,
             publish_as_branch,
+            share_messages,
         } => remote::decide_remote_enable(
             state,
             workspace_id,
@@ -321,6 +324,7 @@ fn decide_checked(
             name,
             share_task,
             publish_as_branch,
+            share_messages,
         ),
         Command::RemoteDisable { workspace_id } => {
             remote::decide_remote_disable(state, workspace_id)
@@ -933,7 +937,9 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
         } => {
             messages::apply_note_anchor_changed(state, workspace_id, note_id, anchor, anchor_state)?
         }
-        Event::MessageSent { message, .. } => messages::apply_message_sent(state, message)?,
+        Event::MessageSent { message, at_ms, .. } => {
+            messages::apply_message_sent(state, message, *at_ms)?
+        }
         Event::MessageAcknowledged {
             workspace_id,
             message_id,
@@ -963,6 +969,19 @@ pub fn apply(state: &mut State, event: &Event) -> Result<(), CoreError> {
         Event::RemoteWithdrawn { workspace_id } => {
             remote::apply_remote_withdrawn(state, workspace_id)?
         }
+        Event::RemoteMessageDelivered {
+            workspace_id,
+            participant,
+            message_id,
+            session_id,
+            ..
+        } => remote::apply_remote_message_delivered(
+            state,
+            workspace_id,
+            participant,
+            message_id,
+            session_id,
+        )?,
         Event::RemoteForgotten {
             workspace_id,
             participant,

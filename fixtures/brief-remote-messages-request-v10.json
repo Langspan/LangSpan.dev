@@ -1,0 +1,1 @@
+{"version":10,"request_id":"brief-remote-1","command":{"op":"brief","session_id":"codex.bob","max_peers":8,"deliver":true,"confirm":true,"remote_messages":true}}

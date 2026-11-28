@@ -81,6 +81,7 @@ lease_id_reused
 lease_not_active
 lease_not_found
 message_not_kept
+message_secret_shape
 no_current_evidence
 not_checkout_top
 not_holder
@@ -97,6 +98,10 @@ process_identity_mismatch
 read_timeout
 receipt_unreadable
 recipient_not_found
+remote_messages_full
+remote_messages_off
+remote_messages_quota
+remote_messages_unsupported
 remote_not_enabled
 remote_sharing_on
 report_busy

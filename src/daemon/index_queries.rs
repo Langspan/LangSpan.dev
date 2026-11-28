@@ -954,6 +954,7 @@ pub(super) fn prepare_brief(
         mcp,
         changes_only,
         confirm,
+        remote_messages,
     } = command
     else {
         return command.clone();
@@ -1004,6 +1005,7 @@ pub(super) fn prepare_brief(
         left: left.clone(),
         changes_only: *changes_only,
         confirm: *confirm,
+        remote_messages: *remote_messages,
         inflight,
         inflight_partial,
         mentioned,

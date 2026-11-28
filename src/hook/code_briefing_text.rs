@@ -218,6 +218,7 @@ fn delivered_messages_are_always_shown_and_the_code_section_yields_visibly() {
             paths: vec![format!("src/{}.rs", "p".repeat(120))],
             acknowledged: Vec::new(),
             retracted: false,
+            remote: false,
         })
         .collect();
     let matches = vec![NameContext {
@@ -290,6 +291,7 @@ fn long_peer_briefing() -> Briefing {
         notes: Vec::new(),
         messages: Vec::new(),
         retracted: Vec::new(),
+        remote_messages: Vec::new(),
         checkout_changes: Vec::new(),
         uncoordinated: Vec::new(),
         checks: Vec::new(),

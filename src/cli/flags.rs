@@ -264,7 +264,13 @@ const COMMANDS: &[Flags] = &[
     Flags {
         form: |words, _| words.starts_with(&["remote", "enable"]),
         switches: &["--publish-as-branch"],
-        values: &["--root", "--remote", "--name", "--share-task"],
+        values: &[
+            "--root",
+            "--remote",
+            "--name",
+            "--share-task",
+            "--share-messages",
+        ],
         ..Flags::NONE
     },
     Flags {
@@ -358,7 +364,7 @@ const COMMANDS: &[Flags] = &[
     },
     Flags {
         form: |words, _| words.first() == Some(&"message"),
-        values: &["--from", "--to"],
+        values: &["--from", "--to", "--remote"],
         ..Flags::NONE
     },
     Flags {

@@ -720,6 +720,7 @@ mod tests {
                 to: None,
                 text: secret.into(),
                 paths: vec![],
+                remote: true,
             },
             Command::Handoff {
                 session_id: "s".into(),

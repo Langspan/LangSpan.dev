@@ -258,6 +258,7 @@ fn a_held_admission_an_intent_and_an_unacknowledged_message_are_open() {
             to: Some("codex.bob".into()),
             text: "I changed parse()".into(),
             paths: vec![],
+            remote: false,
         },
         now,
     );

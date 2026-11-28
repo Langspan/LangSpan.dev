@@ -57,6 +57,8 @@ to those pages and keep the anchors this guide had as a single page.
 
 ## [Share context through a Git remote](usage/share-context-through-a-git-remote.md)
 
+### [Messages to sessions on other machines](usage/share-context-through-a-git-remote.md#messages-to-sessions-on-other-machines)
+
 ### [Hosts that accept pushes only to branches](usage/share-context-through-a-git-remote.md#hosts-that-accept-pushes-only-to-branches)
 
 ## [Try the coordination loop with the CLI](usage/try-the-coordination-loop-with-the-cli.md)
@@ -222,6 +224,7 @@ time:
 | `lease_not_active` | No | The lease is no longer active. |
 | `lease_not_found` | No | The lease does not exist. |
 | `message_not_kept` | No | The message is older than the oldest kept event. |
+| `message_secret_shape` | Same ID | A message for other machines holds text that looks like a secret; remove it, or send without `--remote`. |
 | `no_current_evidence` | No | A landing has no passing check for exactly the landed tree. |
 | `not_checkout_top` | No | The root is not the top directory of its checkout. |
 | `not_holder` | No | Only the session holding the lease can do that. |
@@ -238,6 +241,10 @@ time:
 | `read_timeout` | Same ID | The request was not received before the I/O deadline. |
 | `receipt_unreadable` | No | The request ID's earlier outcome cannot be read by this build; use a new request ID. |
 | `recipient_not_found` | No | The recipient is not a session of this workspace. |
+| `remote_messages_full` | Same ID | The messages already published leave no room for this one; send a shorter one or wait. |
+| `remote_messages_off` | Same ID | The workspace publishes without `--share-messages on`; send without `--remote` to keep it local. |
+| `remote_messages_quota` | Same ID | 8 messages went to other machines in the last 30 minutes; the error says when the next can go. |
+| `remote_messages_unsupported` | Same ID | The running coordinator cannot send messages to other machines; restart it with this version. |
 | `remote_not_enabled` | No | The workspace does not publish. |
 | `remote_sharing_on` | No | The workspace publishes, or its ref is not yet removed; disable it first. |
 | `report_busy` | Same ID | Other reports are being read; ask again when they finish. |

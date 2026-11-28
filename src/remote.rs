@@ -55,6 +55,22 @@ struct PeerPublication {
     /// The participant has left; absent from older builds' publications.
     #[serde(default)]
     withdrawn: bool,
+    /// Messages to other machines (ADR 0041); absent from earlier builds'
+    /// publications and from any without messages.
+    #[serde(default)]
+    messages: Vec<PeerMessage>,
+}
+
+#[derive(Deserialize)]
+struct PeerMessage {
+    message_id: String,
+    #[serde(default)]
+    from: Option<String>,
+    #[serde(default)]
+    to: Option<String>,
+    text: String,
+    #[serde(default)]
+    paths: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -86,6 +102,17 @@ impl From<PeerPublication> for Publication {
                 })
                 .collect(),
             withdrawn: peer.withdrawn,
+            messages: peer
+                .messages
+                .into_iter()
+                .map(|message| langspan_core::RemoteMessage {
+                    message_id: message.message_id,
+                    from: message.from,
+                    to: message.to,
+                    text: message.text,
+                    paths: message.paths,
+                })
+                .collect(),
         }
     }
 }
@@ -419,7 +446,10 @@ fn own_refs(
 
 /// Write the publication as the next commit on this participant's ref and
 /// push it. Call after `fetch`, so the parent is what the remote holds.
-/// Returns the exact `state.json` that was pushed.
+/// Returns the exact `state.json` that was pushed. Messages (ADR 0041) are
+/// left out when work and messages together pass 16 KiB, so they never cut
+/// the work summary, and on a remote that refuses the forced replacement,
+/// where every publication would stay in the ref's history.
 pub fn publish(
     root: &Path,
     state_dir: &Path,
@@ -427,50 +457,44 @@ pub fn publish(
     publication: &Publication,
     deadline: Instant,
 ) -> Result<String, Refusal> {
-    let payload = serde_json::to_vec(&Payload {
-        v: PAYLOAD_VERSION,
-        publication,
-    })
-    .map_err(|e| e.to_string())?;
+    let encode = |publication: &Publication| {
+        serde_json::to_vec(&Payload {
+            v: PAYLOAD_VERSION,
+            publication,
+        })
+        .map_err(|e| e.to_string())
+    };
+    let without_messages = Publication {
+        messages: Vec::new(),
+        ..publication.clone()
+    };
+    // What the remote holds of this participant, as the last fetch saw it.
+    let parent = git::output(
+        root,
+        &[
+            "for-each-ref",
+            "--format=%(objectname)",
+            &own_tracking(link),
+        ],
+        deadline,
+        256,
+    )
+    .ok()
+    .and_then(|bytes| line(bytes).ok().flatten());
+    let mut payload = encode(publication)?;
+    // A push that creates the ref succeeds even where forced updates are
+    // refused, and would then stay in the history of every later one: the
+    // first publication carries no messages.
+    if !publication.messages.is_empty() && (payload.len() > PAYLOAD_LIMIT || parent.is_none()) {
+        payload = encode(&without_messages)?;
+    }
     if payload.len() > PAYLOAD_LIMIT {
         return Err(String::from("publication exceeds 16 KiB; nothing was published").into());
     }
     let scratch = state_dir.join(format!("publish-{}.json", link.workspace_id));
     let index = state_dir.join(format!("publish-{}.index", link.workspace_id));
-    let result = (|| -> Result<(), Refusal> {
-        let _ = fs::remove_file(&scratch);
-        let mut file = crate::local::private_file(&scratch, true).map_err(|e| e.to_string())?;
-        file.write_all(&payload).map_err(|e| e.to_string())?;
-        drop(file);
-        let scratch_text = scratch.to_str().ok_or("state directory is not UTF-8")?;
-        let blob = object(line(git::output(
-            root,
-            &["hash-object", "-w", "--no-filters", scratch_text],
-            deadline,
-            256,
-        )?)?)?;
-        // A private index keeps the owner's index and working tree untouched.
-        let _ = fs::remove_file(&index);
-        let env: [(&str, &OsStr); 1] = [("GIT_INDEX_FILE", index.as_os_str())];
-        git::output_with_env(
-            root,
-            &[
-                "update-index",
-                "--add",
-                "--cacheinfo",
-                &format!("100644,{blob},state.json"),
-            ],
-            &env,
-            deadline,
-            256,
-        )?;
-        let tree = object(line(git::output_with_env(
-            root,
-            &["write-tree"],
-            &env,
-            deadline,
-            256,
-        )?)?)?;
+    let result = (|| -> Result<Vec<u8>, Refusal> {
+        let tree = tree_of(root, &scratch, &index, &payload, deadline)?;
         // No parent: the ref holds the current state and no history. What
         // was published earlier, including a task line the owner has since
         // stopped sharing, is not kept reachable from it.
@@ -492,27 +516,25 @@ pub fn publish(
         let target = format!("+{commit}:{}", peer_ref(link));
         let (status, said) = push(root, link, &target, deadline)?;
         if status.success() {
-            return Ok(());
+            return Ok(payload.clone());
         }
         // Some remotes refuse every forced update, even of a ref nobody else
         // writes (a "block force pushes" rule, or a hosting proxy). Publish
         // the same tree as an ordinary fast-forward on top of what the remote
         // holds. Earlier publications then stay reachable in the ref's
-        // history: ADR 0006 records the cost.
-        let parent = git::output(
-            root,
-            &[
-                "for-each-ref",
-                "--format=%(objectname)",
-                &own_tracking(link),
-            ],
-            deadline,
-            256,
-        )
-        .ok()
-        .and_then(|bytes| line(bytes).ok().flatten());
-        let Some(parent) = parent else {
+        // history: ADR 0006 records the cost. Messages are held there, never
+        // kept readable for good (ADR 0041, `history_kept`).
+        let Some(parent) = &parent else {
             return Err(refused_publication(link, "", &said));
+        };
+        let stripped = encode(&without_messages)?;
+        let (tree, pushed) = if stripped == payload {
+            (tree, payload.clone())
+        } else {
+            (
+                tree_of(root, &scratch, &index, &stripped, deadline)?,
+                stripped,
+            )
         };
         let child = object(line(git::output(
             root,
@@ -524,7 +546,7 @@ pub fn publish(
                 "commit-tree",
                 &tree,
                 "-p",
-                &parent,
+                parent,
                 "-m",
                 &message,
             ],
@@ -540,12 +562,56 @@ pub fn publish(
                 &said,
             ));
         }
-        Ok(())
+        Ok(pushed)
     })();
     let _ = fs::remove_file(&scratch);
     let _ = fs::remove_file(&index);
-    result?;
-    Ok(String::from_utf8(payload).map_err(|_| "publication payload is not UTF-8")?)
+    let pushed = result?;
+    Ok(String::from_utf8(pushed).map_err(|_| "publication payload is not UTF-8")?)
+}
+
+/// The tree holding `payload` as its one `state.json`, written through a
+/// scratch file and a private index.
+fn tree_of(
+    root: &Path,
+    scratch: &Path,
+    index: &Path,
+    payload: &[u8],
+    deadline: Instant,
+) -> Result<String, Refusal> {
+    let _ = fs::remove_file(scratch);
+    let mut file = crate::local::private_file(scratch, true).map_err(|e| e.to_string())?;
+    file.write_all(payload).map_err(|e| e.to_string())?;
+    drop(file);
+    let scratch_text = scratch.to_str().ok_or("state directory is not UTF-8")?;
+    let blob = object(line(git::output(
+        root,
+        &["hash-object", "-w", "--no-filters", scratch_text],
+        deadline,
+        256,
+    )?)?)?;
+    // A private index keeps the owner's index and working tree untouched.
+    let _ = fs::remove_file(index);
+    let env: [(&str, &OsStr); 1] = [("GIT_INDEX_FILE", index.as_os_str())];
+    git::output_with_env(
+        root,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("100644,{blob},state.json"),
+        ],
+        &env,
+        deadline,
+        256,
+    )?;
+    Ok(object(line(git::output_with_env(
+        root,
+        &["write-tree"],
+        &env,
+        deadline,
+        256,
+    )?)?)?)
 }
 
 /// Push one publication. A push to a branch also makes Git write the
@@ -670,6 +736,7 @@ pub fn withdrawal(link: &RemoteLink, remote_ref: &str) -> (Publication, RemoteLi
             sequence: link.sequence + 1,
             work: Vec::new(),
             withdrawn: true,
+            messages: Vec::new(),
         },
         target,
     )

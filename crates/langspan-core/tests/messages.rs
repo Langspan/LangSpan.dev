@@ -60,6 +60,7 @@ fn send(from: Option<&str>, to: Option<&str>, text: &str, paths: &[&str]) -> Com
         to: to.map(str::to_owned),
         text: text.into(),
         paths: paths.iter().map(|path| (*path).into()).collect(),
+        remote: false,
     }
 }
 
@@ -75,6 +76,7 @@ fn brief(session: &str, deliver: bool, mid_turn: bool) -> Command {
         mcp: false,
         changes_only: false,
         confirm: false,
+        remote_messages: false,
     }
 }
 
@@ -212,6 +214,7 @@ fn recipients_and_senders_must_be_sessions_of_that_workspace() {
             to: None,
             text: "hi".into(),
             paths: Vec::new(),
+            remote: false,
         }),
         "workspace_not_found"
     );
@@ -578,6 +581,7 @@ mod headless_handoffs {
                 mcp: false,
                 changes_only: false,
                 confirm: false,
+                remote_messages: false,
             },
             "look",
             0,

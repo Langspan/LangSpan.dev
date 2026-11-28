@@ -342,5 +342,6 @@ fn covering_line(event: &Event) -> usize {
         Event::UncoordinatedDelivered { .. } => 92,
         Event::HostNotInstalled { .. } => 15,
         Event::HostCleared { .. } => 16,
+        Event::RemoteMessageDelivered { .. } => 112,
     }
 }

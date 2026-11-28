@@ -305,6 +305,7 @@ REFUSAL_PATHS
 REFUSAL_RETENTION_MS
 REFUSAL_WINDOW_MS
 REMOTE_HORIZON_MS
+REMOTE_MESSAGE_MS
 REMOTE_WORK
 RENAME_EVIDENCE
 REPORT_HISTORY_EVENTS
@@ -330,6 +331,8 @@ RefusalKind
 RefusalOutcome
 Region
 RemoteLink
+RemoteMessage
+RemoteMessageView
 RemotePeer
 RemotePeerWork
 RemoteWork
@@ -472,6 +475,7 @@ is_qualifier
 known_sessions
 live_sessions
 message_status
+messages_bytes
 open_intents
 owner_grant_effect
 rank_definitions

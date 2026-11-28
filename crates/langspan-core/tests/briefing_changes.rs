@@ -87,6 +87,7 @@ fn brief_as(
             mcp: false,
             changes_only,
             confirm: false,
+            remote_messages: false,
         },
         now,
     )) {
@@ -112,6 +113,7 @@ fn hook_brief(state: &mut State, session: &str, now: u64, changes_only: bool) ->
             mcp: false,
             changes_only,
             confirm: true,
+            remote_messages: false,
         },
         now,
     )) {
@@ -292,6 +294,7 @@ fn a_full_view_on_request_tells_everything_and_a_look_from_outside_tells_nothing
             mcp: false,
             changes_only: false,
             confirm: false,
+            remote_messages: false,
         },
         2_000,
     )) {

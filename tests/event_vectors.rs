@@ -67,6 +67,7 @@ vectors! {
     RemoteObserved => "remote-observed-event-v10.json",
     RemoteForgotten => "remote-forgotten-event-v10.json",
     RemoteWithdrawn => "remote-withdrawn-event-v10.json",
+    RemoteMessageDelivered => "remote-message-delivered-event-v10.json",
     CheckRecorded => "check-recorded-event-v10.json",
     AutoCheckEnabled => "auto-check-enabled-event-v10.json",
     AutoCheckDisabled => "auto-check-disabled-event-v10.json",

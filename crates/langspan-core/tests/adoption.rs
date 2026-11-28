@@ -217,6 +217,7 @@ fn the_reason_is_a_handoff_to_the_adopter_or_a_shared_task_line_and_neither_is_r
             to: Some("bob".into()),
             text: "Disk is nearly full; carry on with the upload handler".into(),
             paths: Vec::new(),
+            remote: false,
         },
         1,
     );
@@ -296,6 +297,7 @@ fn left_work(state: &mut State, session: &str, left: &[&str]) -> Vec<LeftWork> {
             mcp: false,
             changes_only: false,
             confirm: false,
+            remote_messages: false,
             left: left.iter().map(|id| (*id).to_owned()).collect(),
             recent: false,
             recent_window_ms: None,
@@ -352,6 +354,7 @@ fn a_briefing_request_naming_too_many_sessions_is_refused() {
             mcp: false,
             changes_only: false,
             confirm: false,
+            remote_messages: false,
             left,
             recent: false,
             recent_window_ms: None,

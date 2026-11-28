@@ -375,6 +375,20 @@
           "acknowledged": [
             "bob"
           ],
+          "from": null,
+          "message_id": "m-remote",
+          "paths": [],
+          "remote": true,
+          "text": "Changing the upload API.",
+          "to": {
+            "kind": "everyone"
+          },
+          "workspace_id": "work"
+        },
+        {
+          "acknowledged": [
+            "bob"
+          ],
           "from": "alice",
           "message_id": "msg-2",
           "paths": [],
@@ -404,6 +418,9 @@
         }
       ]
     },
+    "messages": {
+      "work": []
+    },
     "notes": {
       "work": [
         {
@@ -431,18 +448,59 @@
         "window_ms": 120000
       }
     },
+    "remote_delivered": {
+      "work:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": [
+        {
+          "message_id": "m-bob",
+          "sessions": [
+            "bob"
+          ]
+        }
+      ]
+    },
     "remote_links": {
       "work": {
-        "enabled": false,
+        "enabled": true,
         "name": "Alice",
         "participant": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "remote": "origin",
         "sequence": 1,
-        "share_task": true,
-        "signature": "sig-1",
-        "withdrawn": true,
+        "share_messages": true,
+        "share_task": false,
+        "signature": "",
+        "withdrawn": false,
         "workspace_id": "work"
       }
+    },
+    "remote_peers": {
+      "work:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": {
+        "generation": 2,
+        "publication": {
+          "messages": [
+            {
+              "message_id": "m-bob",
+              "text": "Hold off on the upload API."
+            }
+          ],
+          "name": "Bob",
+          "participant": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "sequence": 4,
+          "work": []
+        },
+        "received_ms": 14,
+        "workspace_id": "work"
+      }
+    },
+    "remote_sent": {
+      "work": [
+        {
+          "at_ms": 13,
+          "message": {
+            "message_id": "m-remote",
+            "text": "Changing the upload API."
+          }
+        }
+      ]
     },
     "scan_coverage": {
       "work": {

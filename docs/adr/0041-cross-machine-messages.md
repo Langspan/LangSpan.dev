@@ -1,8 +1,16 @@
 # ADR 0041: Messages to sessions on other machines
 
-**Status:** Proposed, needs the owner's approval. Written 28 November 2026 for
-[issue #65](https://github.com/Langspan/LangSpan.dev/issues/65) (roadmap E9).
-Nothing in it is built. It widens the payload of
+**Status:** Accepted; the owner asked for it to be built. Written 28 November
+2026 for [issue #65](https://github.com/Langspan/LangSpan.dev/issues/65)
+(roadmap E9). Built: the opt-in, the send checks, the payload with its limits
+and retention, and delivery into briefings. Not built: `--to-participant`, the
+held reasons in `remote outbox` and `messages status` for a remote message.
+Built differently: the send quota and the 30 minutes are measured on the
+daemon's clock, which counts from the machine's boot, not on the wall clock
+(see the [threat model](../security/threat-model.md#messages-to-other-machines)),
+and the CLI flag is `--remote on`, because the parser gives a flag one meaning
+in every command and `--remote` takes a Git remote name elsewhere.
+It widens the payload of
 [ADR 0006](0006-remote-awareness-through-git-refs.md) and the messages of
 [ADR 0009](0009-agent-messages-and-handoff.md), and answers the condition
 [ADR 0023](0023-messages-presence-and-session-continuity-after-launch.md) set
@@ -267,7 +275,7 @@ the send cannot know it.
   and labeled like local messages.
 - The publication's 16 KiB bound and the work summary are unchanged. Messages
   take room only when there is room.
-- [The threat model](../security/threat-model.md#messages-to-other-machines-proposed)
+- [The threat model](../security/threat-model.md#messages-to-other-machines)
   gains a STRIDE section for the boundary.
 
 ## Implementation, once approved

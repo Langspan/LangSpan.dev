@@ -271,7 +271,9 @@ fn remote_pass(
     else {
         return Err(String::from("the daemon did not return this workspace's outbox").into());
     };
-    let heartbeat = !publication.work.is_empty()
+    // Messages count as content: one left out of a push (the first one,
+    // or one too large) goes out at the next heartbeat.
+    let heartbeat = (!publication.work.is_empty() || !publication.messages.is_empty())
         && last_publish.is_none_or(|at| at.elapsed() >= REMOTE_HEARTBEAT);
     if !changed && !heartbeat {
         return rejections(&rejected).map_err(RemoteFailure::from);

@@ -362,6 +362,11 @@ pub(super) struct SendMessageArgs {
     pub(super) text: String,
     /// Workspace-relative files it is about; may be empty. At most 8.
     pub(super) paths: Vec<String>,
+    /// Also publish it to the sessions on other machines, for 30 minutes,
+    /// readable by everyone who can fetch the repository. Only where the
+    /// owner turned message sharing on; not with `to`.
+    #[serde(default)]
+    pub(super) remote: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

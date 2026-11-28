@@ -334,7 +334,7 @@ pub fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(
         }
         // Remote publication and retention
         Outcome::RemoteLink { link } => println!(
-            "Workspace {} publishes to Git remote {:?} as {:?} (participant {}) at {}{}; task lines {}; last publication {}.",
+            "Workspace {} publishes to Git remote {:?} as {:?} (participant {}) at {}{}; task lines {}; messages {}; last publication {}.",
             link.workspace_id,
             link.remote,
             link.name,
@@ -347,6 +347,11 @@ pub fn print_human(response: &Response, state_dir: &std::path::Path) -> Result<(
             },
             if link.share_task {
                 "shared"
+            } else {
+                "not shared"
+            },
+            if link.share_messages {
+                "sent with --remote on are shared, readable by everyone who can fetch the repository"
             } else {
                 "not shared"
             },

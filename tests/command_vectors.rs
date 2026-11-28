@@ -172,6 +172,50 @@ fn every_command_variant_has_a_golden_vector_that_round_trips_byte_for_byte() {
     assert_eq!(on_disk, named, "a vector on disk that no variant names");
 }
 
+/// The fields messages to other machines add (ADR 0041), each beside the
+/// per-variant vector without them, which stays the shape older clients
+/// send: a `--remote` send, an enable that shares messages, a briefing
+/// that shows them, and a publication that carries them.
+#[test]
+fn the_fields_of_messages_to_other_machines_round_trip_byte_for_byte() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+    for (file, holds) in [
+        (
+            "send-message-remote-request-v10.json",
+            (|c: &Command| matches!(c, Command::SendMessage { remote: true, .. }))
+                as fn(&Command) -> bool,
+        ),
+        ("remote-enable-share-messages-request-v10.json", |c| {
+            matches!(
+                c,
+                Command::RemoteEnable {
+                    share_messages: true,
+                    ..
+                }
+            )
+        }),
+        ("brief-remote-messages-request-v10.json", |c| {
+            matches!(
+                c,
+                Command::Brief {
+                    remote_messages: true,
+                    ..
+                }
+            )
+        }),
+        ("observe-remote-messages-request-v10.json", |c| {
+            matches!(c, Command::ObserveRemote { publication, .. }
+                if publication.messages.len() == 2)
+        }),
+    ] {
+        let wire = std::fs::read(dir.join(file)).unwrap();
+        let request: Request = serde_json::from_slice(&wire)
+            .unwrap_or_else(|error| panic!("{file} does not read as a request: {error}"));
+        assert!(holds(&request.command), "{file}: {:?}", request.command);
+        assert_eq!(encode(&request).unwrap(), wire, "{file}");
+    }
+}
+
 /// Today's route of each command, read from the three routing sites before
 /// `Command::route` existed (issue #371): the core's refusal of commands
 /// answered by the daemon's stores, the store's reads that it never records,

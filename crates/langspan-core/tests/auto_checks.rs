@@ -162,6 +162,7 @@ fn delivered(state: &mut State, session: &str, id: &str) -> Vec<String> {
             mcp: false,
             changes_only: false,
             confirm: false,
+            remote_messages: false,
         },
         20,
     ) {
@@ -314,6 +315,7 @@ fn a_reported_result_is_a_check_record_and_is_delivered_once_to_each_session() {
             mcp: false,
             changes_only: false,
             confirm: false,
+            remote_messages: false,
         },
         15,
     );

@@ -4,6 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::remote::{RemoteDelivered, RemoteSent};
+
 // `BTreeMap` is the crate root's import, which the core's import boundary
 // already allows.
 use crate::{
@@ -34,6 +36,14 @@ pub struct State {
     /// Latest publication per teammate, keyed `workspace:participant`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub remote_peers: BTreeMap<String, RemotePeer>,
+    /// Messages each workspace sent with `--remote`, newest first, while
+    /// they may still be published or counted against the send quota.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) remote_sent: BTreeMap<String, Vec<RemoteSent>>,
+    /// Per teammate, keyed `workspace:participant`, the sessions given each
+    /// of its messages, oldest first.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) remote_delivered: BTreeMap<String, Vec<RemoteDelivered>>,
     /// Check records per workspace, newest first, at most `MAX_CHECKS`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub checks: BTreeMap<String, Vec<CheckRecord>>,

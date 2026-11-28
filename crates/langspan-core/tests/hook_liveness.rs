@@ -89,6 +89,7 @@ fn brief(state: &mut State, now: u64) -> Briefing {
             mcp: false,
             changes_only: false,
             confirm: false,
+            remote_messages: false,
         },
         now,
     )

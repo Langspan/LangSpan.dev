@@ -46,6 +46,7 @@ order. The table below is generated: each row's fields are
 | `outline_reads` | a session activity's `outlined` and the `read_outlined` event (roadmap A11) | 10 |
 | `recap_since` | a recap's `since`, and `recap`'s `since` (roadmap C10) | none |
 | `refusal_outcomes` | a report's `refusal_outcomes` (roadmap H9) | 5 |
+| `remote_messages` | `send_message`'s `remote`, `brief`'s `remote_messages`, a briefing's `remote_messages`, and the `remote_message_delivered` event (issue #65) | none |
 | `rename_holds` | a call-break answer's `callers`, and `check_calls`'s `renamed` (issue #213) | none |
 | `renames` | the rename fields of interface changes, history entries and in-flight symbols, and private interface changes (roadmap D7) | 4 |
 | `symbol_findings` | a check record's `symbol_findings`, and `record_check`'s (issue #265) | 6 |

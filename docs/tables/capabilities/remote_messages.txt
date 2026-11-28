@@ -1,0 +1,1 @@
+`send_message`'s `remote`, `brief`'s `remote_messages`, a briefing's `remote_messages`, and the `remote_message_delivered` event (issue #65)

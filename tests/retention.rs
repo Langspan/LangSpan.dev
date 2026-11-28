@@ -207,6 +207,7 @@ impl History {
                 name: "Alice".into(),
                 share_task: false,
                 publish_as_branch: false,
+                share_messages: false,
             },
             0,
         );
@@ -289,6 +290,7 @@ impl History {
                             to: Some(to.into()),
                             text: format!("message {}", self.step),
                             paths: Vec::new(),
+                            remote: false,
                         },
                         now,
                     )
@@ -1638,6 +1640,7 @@ fn events_kept_for_a_pending_message_do_not_make_a_report_before_the_cutoff_comp
         to: Some("claude-code.bob".into()),
         text: "held".into(),
         paths: Vec::new(),
+        remote: false,
     });
     days.day(2);
     days.day(5);

@@ -45,6 +45,7 @@ fn briefing(peers: Vec<PeerWork>) -> Briefing {
         notes: Vec::new(),
         messages: Vec::new(),
         retracted: Vec::new(),
+        remote_messages: Vec::new(),
         checkout_changes: Vec::new(),
         uncoordinated: Vec::new(),
         checks: Vec::new(),

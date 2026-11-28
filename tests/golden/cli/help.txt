@@ -57,10 +57,13 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  optional --max-peers N (1..16); --recent adds what changed
                                  recently, as told at a session's start. Does not count as delivery
   remote enable WORKSPACE --name NAME [--remote origin] [--share-task on] [--root DIR]
-                [--publish-as-branch]
+                [--publish-as-branch] [--share-messages on]
                                  Publish this workspace's work summary to teammates
                                  through the Git remote, and receive theirs. Off until
-                                 enabled. Task lines leave only with --share-task on.
+                                 enabled. Task lines leave only with --share-task on,
+                                 messages sent with --remote on only with
+                                 --share-messages on; everyone who can fetch the
+                                 repository reads them.
                                  --publish-as-branch publishes as the branch
                                  langspan/peers/ID, visible to everyone in the
                                  repository, for hosts that accept pushes only to
@@ -231,11 +234,14 @@ Usage: langspan [--state-dir DIR] COMMAND [--json]
                                  also wrote stay shared. Refused for a live session and
                                  for one of another workspace. Recorded as an event.
                                  Session found as for commit --mine
-  message WORKSPACE TEXT [PATH...] [--to SESSION] [--from SESSION]
+  message WORKSPACE TEXT [PATH...] [--to SESSION] [--from SESSION] [--remote on]
                                  Send one line to a session, or without --to to every
                                  other session of the workspace. Without --from it is
                                  from the owner. Each recipient is told once, at its
-                                 next prompt or start (Claude Code: also mid-turn)
+                                 next prompt or start (Claude Code: also mid-turn).
+                                 --remote on also tells every session on other
+                                 machines, for 30 minutes, where the owner shares
+                                 messages
   handoff SESSION TEXT [PATH...] Leave one line for the next other session that starts
                                  or is prompted in SESSION's workspace
   ack SESSION MESSAGE            Mark a message seen so it is not delivered again

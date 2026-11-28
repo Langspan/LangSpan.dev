@@ -125,3 +125,9 @@
 {"event":{"type":"clock_anchored","anchor":{"generation":2,"clock_ms":0,"wall_ms":1795000100000}}}
 {"id":"ses-bob-2","at_ms":10,"command":{"op":"session_register","session_id":"bob","workspace_id":"work"}}
 {"id":"seen-bob","at_ms":11,"command":{"op":"session_seen","session_id":"bob"}}
+#
+# Messages to other machines (ADR 0041): one sent, one received and told.
+{"id":"remote-messages-on","at_ms":12,"command":{"op":"remote_enable","workspace_id":"work","remote":"origin","participant":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","name":"Alice","share_task":false,"share_messages":true}}
+{"id":"m-remote","at_ms":13,"command":{"op":"send_message","workspace_id":"work","from":null,"to":null,"text":"Changing the upload API.","paths":[],"remote":true}}
+{"id":"peer-message","at_ms":14,"command":{"op":"observe_remote","workspace_id":"work","publication":{"participant":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","name":"Bob","sequence":4,"work":[],"messages":[{"message_id":"m-bob","text":"Hold off on the upload API."}]}}}
+{"id":"brief-bob-remote","at_ms":15,"command":{"op":"brief","session_id":"bob","max_peers":4,"deliver":true,"remote_messages":true}}

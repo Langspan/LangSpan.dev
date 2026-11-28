@@ -158,6 +158,7 @@ fn brief(state: &mut State, id: &str, now: u64) -> Briefing {
             mcp: false,
             changes_only: false,
             confirm: false,
+            remote_messages: false,
         },
         now,
     );
@@ -353,6 +354,7 @@ fn a_briefing_asked_for_through_mcp_records_the_notices_it_told() {
             mcp: true,
             changes_only: false,
             confirm: false,
+            remote_messages: false,
         },
         "b1",
         3_000,

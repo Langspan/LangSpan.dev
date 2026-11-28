@@ -73,6 +73,10 @@ pub struct Message {
     /// session that had received it is told once to disregard it.
     #[serde(default, skip_serializing_if = "is_false")]
     pub retracted: bool,
+    /// Sent with `--remote`: also published to the sessions on other
+    /// machines for `REMOTE_MESSAGE_MS` (ADR 0041). Absent means local.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub remote: bool,
 }
 
 /// A message a session received and that was then withdrawn: the session
@@ -508,15 +512,16 @@ fn validate_note(note: &Note) -> Result<(), CoreError> {
 
 #[allow(clippy::too_many_arguments)]
 fn sent(
+    state: &State,
     request_id: &str,
     now_ms: u64,
-    generation: u64,
     workspace_id: &str,
-    from: Option<String>,
-    to: Recipient,
+    (from, to): (Option<String>, Recipient),
     text: &str,
     paths: &[String],
+    remote: bool,
 ) -> Result<Decision, CoreError> {
+    let generation = state.generation;
     let message = Message {
         message_id: request_id.into(),
         workspace_id: workspace_id.into(),
@@ -530,8 +535,12 @@ fn sent(
         },
         acknowledged: Vec::new(),
         retracted: false,
+        remote,
     };
     validate_message(&message)?;
+    if remote {
+        remote::remote_send(state, &message, now_ms)?;
+    }
     Ok(Decision {
         events: vec![Event::MessageSent {
             message: message.clone(),
@@ -916,6 +925,7 @@ pub(crate) fn decide_send_message(
     to: &Option<String>,
     text: &str,
     paths: &[String],
+    remote: bool,
     request_id: &str,
     now_ms: u64,
 ) -> Result<Decision, CoreError> {
@@ -954,14 +964,14 @@ pub(crate) fn decide_send_message(
         None => Recipient::Everyone {},
     };
     sent(
+        state,
         request_id,
         now_ms,
-        state.generation,
         workspace_id,
-        from.clone(),
-        to,
+        (from.clone(), to),
         text,
         paths,
+        remote,
     )
 }
 
@@ -977,14 +987,14 @@ pub(crate) fn decide_handoff(
 ) -> Result<Decision, CoreError> {
     let session = known_session(state, session_id)?;
     sent(
+        state,
         request_id,
         now_ms,
-        state.generation,
         &session.workspace_id,
-        Some(session_id.clone()),
-        Recipient::NextSession {},
+        (Some(session_id.clone()), Recipient::NextSession {}),
         text,
         paths,
+        false,
     )
 }
 
@@ -1229,7 +1239,11 @@ pub(crate) fn apply_note_anchor_changed(
     Ok(())
 }
 
-pub(crate) fn apply_message_sent(state: &mut State, message: &Message) -> Result<(), CoreError> {
+pub(crate) fn apply_message_sent(
+    state: &mut State,
+    message: &Message,
+    at_ms: Option<u64>,
+) -> Result<(), CoreError> {
     validate_message(message)?;
     validate_known_workspace(state, &message.workspace_id)?;
     if !message.acknowledged.is_empty() || message.retracted {
@@ -1237,6 +1251,15 @@ pub(crate) fn apply_message_sent(state: &mut State, message: &Message) -> Result
             "invalid_event",
             "A message is sent unacknowledged and not withdrawn",
         ));
+    }
+    if message.remote {
+        let at_ms = at_ms.ok_or_else(|| {
+            error(
+                "invalid_event",
+                "A message sent to other machines records when it was sent",
+            )
+        })?;
+        remote::apply_remote_sent(state, message, at_ms);
     }
     let history = state
         .message_history
@@ -1343,6 +1366,8 @@ pub(crate) fn apply_message_retracted(
         validate_id(by, "session ID")?;
     }
     let readers = readers(state, workspace_id, message_id);
+    // It leaves the next publication; its send still counts.
+    remote::apply_remote_retracted(state, workspace_id, message_id);
     let held = state.messages.get_mut(workspace_id).and_then(|messages| {
         let index = messages
             .iter()

@@ -100,7 +100,10 @@ mod unix {
         if let Some((version, named)) = again {
             let capabilities = Capabilities::negotiate(version, named.as_deref());
             if !crate::protocol::fits_with(capabilities, &request.command) {
-                return Err(ClientError::Refused(crate::protocol::older_daemon(version)));
+                return Err(ClientError::Refused(crate::protocol::unfit(
+                    version,
+                    &request.command,
+                )));
             }
             request.version = version;
             request.capabilities = named;
@@ -507,6 +510,7 @@ mod unix {
                     mcp: false,
                     changes_only: true,
                     confirm: false,
+                    remote_messages: false,
                 },
             )
             .with_version(version);
@@ -798,6 +802,7 @@ mod unix {
                     mcp: false,
                     changes_only: true,
                     confirm: false,
+                    remote_messages: false,
                 },
             );
             let response = call(&dir, &request).unwrap();

@@ -419,6 +419,7 @@ fn remote_refusals_and_participant_ids_say_what_failed() {
         enabled: false,
         withdrawn: false,
         publish_as_branch: false,
+        share_messages: false,
     };
     let message = refused_withdrawal(&link, "refs/langspan/peers/p", "", false);
     assert!(

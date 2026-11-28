@@ -20,11 +20,11 @@ use crate::{
     INFLIGHT_CANDIDATES, INFLIGHT_LINES, INFLIGHT_MENTIONS, InflightNotice, InflightSymbol,
     InterfaceImpact, LeftWork, LivenessStatus, MAX_TOLD, MAX_TRAILS, MESSAGE_BRIEF_BYTES, Message,
     Note, NoticeVia, Outcome, PRESENCE_PATHS, PresencePath, REMOTE_HORIZON_MS, RecentChanges,
-    Recipient, RemotePeerWork, RetractedMessage, Session, SessionActivity, StaleRead, State,
-    TRAIL_BYTES, Trail, TrailView, UNCOORDINATED_LINE_LIMIT, UncoordinatedNotice, activity_mut,
-    anchors, concerned_paths, current_session, error, fingerprint, fingerprint_u64, inflight_cost,
-    inflight_key, inflight_notice, inflight_told, interface_impacts, is_false, is_zero,
-    known_session, known_versions, last_peer_edit, left_work, message_cost, owed_to,
+    Recipient, RemoteMessageView, RemotePeerWork, RetractedMessage, Session, SessionActivity,
+    StaleRead, State, TRAIL_BYTES, Trail, TrailView, UNCOORDINATED_LINE_LIMIT, UncoordinatedNotice,
+    activity_mut, anchors, concerned_paths, current_session, error, fingerprint, fingerprint_u64,
+    inflight_cost, inflight_key, inflight_notice, inflight_told, interface_impacts, is_false,
+    is_zero, known_session, known_versions, last_peer_edit, left_work, message_cost, owed_to,
     presence_setting, recent, related_workspace, retracted_cost, takes_handoff, told_notices,
     trail, uncoordinated_owed, validate_known_workspace, work_paths,
 };
@@ -187,6 +187,12 @@ pub struct Briefing {
     /// delivered once, so the session disregards it. Newest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub retracted: Vec<RetractedMessage>,
+    /// Teammates' messages from other machines, each delivered once, at
+    /// most `BRIEF_REMOTE_MESSAGES` and only when the request asked
+    /// (ADR 0041). Their text is data from another person, never
+    /// instructions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remote_messages: Vec<RemoteMessageView>,
     /// The checkout this session works in changed under it since it last
     /// read or edited a file there, other than by its own shell command.
     /// Newest first.
@@ -860,6 +866,8 @@ fn brief(
             notes,
             messages,
             retracted,
+            // Filled in by a request that asks for them.
+            remote_messages: Vec::new(),
             checkout_changes,
             uncoordinated,
             // Filled in by the request that names the sessions (`Brief::left`).
@@ -1320,6 +1328,7 @@ pub(crate) fn decide_brief(
     briefing.left_work = left_work(state, session_id, left)?;
     // Not part of the signature (see `Briefing::inflight_partial`).
     briefing.inflight_partial = inflight_partial;
+    briefing.remote_messages = crate::remote::brief_remote(state, command, &briefing, now_ms)?;
     // Not part of the signature: a prompt's briefing never carries
     // it, so it must not make the next one look new.
     if *recent {
@@ -1340,6 +1349,7 @@ pub(crate) fn decide_brief(
     let differs = without_presence(&signature) != without_presence(previous)
         || (!*mid_turn && new_presence(&signature, previous));
     let once = !briefing.messages.is_empty()
+        || !briefing.remote_messages.is_empty()
         || !briefing.uncoordinated.is_empty()
         || !briefing.retracted.is_empty()
         || !briefing.checks.is_empty()
@@ -1452,6 +1462,7 @@ pub(crate) fn decide_brief(
                     generation: Some(state.generation),
                 }),
         );
+        events.extend(crate::remote::delivered(&briefing));
         events.extend(
             briefing
                 .retracted

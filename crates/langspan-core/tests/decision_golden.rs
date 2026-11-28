@@ -166,6 +166,7 @@ impl From<AdapterInput> for Command {
                 left,
                 changes_only,
                 confirm,
+                remote_messages: false,
                 inflight,
                 inflight_partial,
                 mentioned,

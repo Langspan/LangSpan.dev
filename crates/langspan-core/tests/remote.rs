@@ -34,6 +34,7 @@ fn enable(state: &mut State, id: &str, share_task: bool) -> Outcome {
             name: "Alice".into(),
             share_task,
             publish_as_branch: false,
+            share_messages: false,
         },
         0,
     )
@@ -148,6 +149,7 @@ fn theirs(sequence: u64, path: &str) -> Publication {
             recent: vec![path.into()],
         }],
         withdrawn: false,
+        messages: Vec::new(),
     }
 }
 
@@ -178,6 +180,7 @@ fn briefed(state: &mut State, id: &str, now: u64) -> langspan_core::Briefing {
             mcp: false,
             changes_only: false,
             confirm: false,
+            remote_messages: false,
         },
         now,
     )) {
@@ -509,6 +512,7 @@ fn enabling_validates_its_inputs() {
             name: name.into(),
             share_task: false,
             publish_as_branch: false,
+            share_messages: false,
         };
         let decision = decide(&state, &command, "bad", 1);
         assert!(
@@ -600,6 +604,7 @@ fn one_repository_publishes_through_one_workspace() {
         name: "Alice".into(),
         share_task: false,
         publish_as_branch: false,
+        share_messages: false,
     };
     let decision = decide(&state, &second, "en2", 1);
     assert!(
@@ -613,6 +618,7 @@ fn one_repository_publishes_through_one_workspace() {
             name: "Alice".into(),
             share_task: false,
             publish_as_branch: false,
+            share_messages: false,
         };
         assert!(
             matches!(
@@ -647,6 +653,7 @@ fn moving_to_the_branch_namespace_is_recorded_and_publishes_at_once() {
         name: "Alice".into(),
         share_task: false,
         publish_as_branch: true,
+        share_messages: false,
     };
     let Outcome::RemoteLink { link } = ok(run(&mut state, "as-branch", as_branch.clone(), 30))
     else {
@@ -775,6 +782,7 @@ fn a_push_to_the_old_namespace_recorded_after_a_move_does_not_cancel_the_move() 
             name: "Alice".into(),
             share_task: false,
             publish_as_branch: true,
+            share_messages: false,
         },
         30,
     ));

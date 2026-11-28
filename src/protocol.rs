@@ -48,6 +48,7 @@ pub const CAPABILITIES: &[(&str, Option<u16>)] = &[
     ("outline_reads", Some(PROTOCOL_VERSION_10)),
     ("recap_since", None),
     ("refusal_outcomes", Some(PROTOCOL_VERSION_5)),
+    ("remote_messages", None),
     ("rename_holds", None),
     ("renames", Some(PROTOCOL_VERSION_4)),
     ("symbol_findings", Some(PROTOCOL_VERSION_6)),
@@ -256,6 +257,32 @@ fn earlier_shape(granted: Capabilities, value: &mut Value) {
     if !granted.has("renames") {
         without_renames(value);
     }
+    // Stored objects an earlier client reads with unknown fields refused
+    // (ADR 0041): a link's choice, a sent message's flag and what a
+    // teammate's publication carries.
+    if !granted.has("remote_messages") {
+        strip(value, is_remote_link, &["share_messages"]);
+        strip(value, is_message, &["remote"]);
+        strip(value, is_publication, &["messages"]);
+    }
+}
+
+/// A remote link (`RemoteLink`, the only object with `participant` and
+/// `signature`).
+fn is_remote_link(fields: &Map<String, Value>) -> bool {
+    has_all(fields, &["participant", "signature"])
+}
+
+/// A message (`Message`, the only object with `message_id`, `workspace_id`
+/// and `to`).
+fn is_message(fields: &Map<String, Value>) -> bool {
+    has_all(fields, &["message_id", "workspace_id", "to"])
+}
+
+/// A publication (`Publication`, the only object with `participant`,
+/// `sequence` and `work`).
+fn is_publication(fields: &Map<String, Value>) -> bool {
+    has_all(fields, &["participant", "sequence", "work"])
 }
 
 /// What a client needs to read an event type (issue #331).
@@ -280,6 +307,7 @@ fn event_needs(event: &Event) -> Needs {
         E::ContextAdded { .. } | E::ToldForgotten { .. } => Needs::Capability("briefing_memory"),
         E::NoteAnchorChanged { .. } => Needs::Capability("anchored_notes"),
         E::ReadOutlined { .. } => Needs::Capability("outline_reads"),
+        E::RemoteMessageDelivered { .. } => Needs::Capability("remote_messages"),
         // Added at version 5 without a new version (#214).
         E::InterfaceNoticesTold { .. } => Needs::Version(6),
         // Added at version 4 without a new version (roadmap B28 and C9).
@@ -454,10 +482,12 @@ fn without_briefing_memory(outcome: &mut Outcome) {
 /// (roadmap E1), nor a recap asked for `since` to one without
 /// `recap_since` (roadmap C10). A check of renamed names alone is not sent
 /// to a daemon without `rename_holds` (issue #213), nor a confirmation of
-/// told items to one without `confirmed_briefings` (issue #531).
+/// told items to one without `confirmed_briefings` (issue #531), nor a
+/// message for other machines to one without `remote_messages` (ADR 0041).
 pub fn fits_with(granted: Capabilities, command: &Command) -> bool {
     match command {
         Command::ConfirmTold { .. } => granted.has("confirmed_briefings"),
+        Command::SendMessage { remote, .. } => granted.has("remote_messages") || !remote,
         Command::RecordLanding {
             rebased, adapted, ..
         } => granted.has("landing_rewrites") || (rebased.is_empty() && adapted.is_empty()),
@@ -495,6 +525,14 @@ pub fn for_capabilities(granted: Capabilities, command: &mut Command) {
     {
         *confirm = false;
     }
+    // A daemon without it has no remote messages to give (ADR 0041).
+    if let Command::Brief {
+        remote_messages, ..
+    } = command
+        && !granted.has("remote_messages")
+    {
+        *remote_messages = false;
+    }
     match command {
         Command::Brief { changes_only, .. } if !granted.has("briefing_memory") => {
             *changes_only = false;
@@ -504,6 +542,17 @@ pub fn for_capabilities(granted: Capabilities, command: &mut Command) {
         } if !granted.has("symbol_findings") => *symbol_findings = None,
         Command::CheckCalls { renamed, .. } if !granted.has("rename_holds") => renamed.clear(),
         _ => {}
+    }
+}
+
+/// Why `command`, which does not fit a daemon of `version`, is not sent.
+pub fn unfit(version: u16, command: &Command) -> String {
+    match command {
+        Command::SendMessage { remote: true, .. } => format!(
+            "{}: The running coordinator cannot send messages to other machines. Restart it with this version of LangSpan.",
+            langspan_core::ErrorCode::RemoteMessagesUnsupported.as_str()
+        ),
+        _ => older_daemon(version),
     }
 }
 

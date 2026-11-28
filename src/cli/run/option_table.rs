@@ -171,6 +171,7 @@ pub(crate) const OPTIONS: &[(&str, Option<&str>)] = &[
     ("--remote", Some("origin")),
     ("--name", Some("n")),
     ("--share-task", Some("on")),
+    ("--share-messages", Some("on")),
     ("--onto", Some("main")),
     ("--timeout-s", Some("5")),
     ("--wait-s", Some("0")),

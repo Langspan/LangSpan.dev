@@ -33,10 +33,75 @@ pub struct Publication {
     /// a receiver treats the sender as gone.
     #[serde(default, skip_serializing_if = "is_false")]
     pub withdrawn: bool,
+    /// Messages sent with `--remote` in the last `REMOTE_MESSAGE_MS`, newest
+    /// first, at most `REMOTE_MESSAGES` (ADR 0041). Absent when empty, so a
+    /// publication without messages is what earlier builds publish.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub messages: Vec<RemoteMessage>,
+}
+
+/// One message as it leaves the machine. It carries no time: the sender
+/// alone decides when it expires. Its text is data, never instructions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteMessage {
+    pub message_id: String,
+    /// The sending session's host kind and the first 8 characters of its
+    /// ID, as `work` names it; absent for the owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// One participant ID, or absent for every machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+}
+
+/// A remote message this machine sent, kept while it may still be
+/// published or counted against the send quota.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RemoteSent {
+    pub(crate) message: RemoteMessage,
+    /// When it was sent, on this machine's clock.
+    pub(crate) at_ms: u64,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub(crate) retracted: bool,
+}
+
+/// The sessions of this machine already given one teammate's message.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RemoteDelivered {
+    pub(crate) message_id: String,
+    pub(crate) sessions: Vec<String>,
+}
+
+/// A teammate's message as a briefing carries it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteMessageView {
+    /// The publishing workspace of this machine that received it.
+    pub workspace_id: String,
+    /// The name the sender chose: neither unique nor verified.
+    pub name: String,
+    pub participant: String,
+    pub message: RemoteMessage,
 }
 
 /// The largest publication payload, in bytes, that is pushed or recorded.
 pub const PUBLICATION_BYTES: usize = 16 * 1024;
+/// Messages one publication carries at most.
+const REMOTE_MESSAGES: usize = 8;
+/// Encoded bytes the `messages` array of one publication takes at most.
+const REMOTE_MESSAGES_BYTES: usize = 6 * 1024;
+/// How long a remote message stays in the publication, and the window of
+/// the send quota, on the sender's clock.
+pub const REMOTE_MESSAGE_MS: u64 = 30 * 60 * 1000;
+/// Remote messages one briefing carries at most, of `BRIEF_MESSAGES`.
+const BRIEF_REMOTE_MESSAGES: usize = 2;
+/// Message IDs remembered per teammate once they left its publication.
+const REMOTE_DELIVERED_HISTORY: usize = 64;
 
 /// One publication that left this machine, as recorded when it was pushed.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -107,6 +172,10 @@ pub struct RemoteLink {
     /// before the choice existed, which publish under `refs/langspan/peers/`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub publish_as_branch: bool,
+    /// Whether messages sent with `--remote` leave the machine. Off unless
+    /// the owner asks, and absent in links recorded before it existed.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub share_messages: bool,
 }
 
 /// A teammate's latest publication as this daemon received it. Its age is
@@ -241,6 +310,414 @@ fn validate_publication(publication: &Publication) -> Result<(), CoreError> {
             ));
         }
     }
+    if publication.messages.len() > REMOTE_MESSAGES
+        || (publication.withdrawn && !publication.messages.is_empty())
+        || messages_bytes(&publication.messages) > REMOTE_MESSAGES_BYTES
+    {
+        return Err(error(
+            "invalid_publication",
+            "A publication carries at most 8 messages in 6 KiB",
+        ));
+    }
+    for message in &publication.messages {
+        validate_remote_message(message)?;
+    }
+    Ok(())
+}
+
+fn validate_remote_message(message: &RemoteMessage) -> Result<(), CoreError> {
+    validate_request_id(&message.message_id)?;
+    if message.text.trim().is_empty()
+        || message.text.len() > MESSAGE_BYTES
+        || message.text.chars().any(char::is_control)
+        || message.paths.len() > BRIEF_PATHS
+        || message.from.as_ref().is_some_and(|from| from.len() > 41)
+    {
+        return Err(error(
+            "invalid_publication",
+            "A published message is one line of 1 to 400 bytes about at most 8 files",
+        ));
+    }
+    if let Some(from) = &message.from {
+        validate_id(from, "session label")?;
+    }
+    if let Some(to) = &message.to {
+        validate_participant(to, "-")?;
+    }
+    for path in &message.paths {
+        validate_relative_path(path)?;
+    }
+    Ok(())
+}
+
+/// The size of `text` as a JSON string, quotes included, escaped as
+/// `serde_json` escapes it.
+fn json_string_bytes(text: &str) -> usize {
+    2 + text
+        .chars()
+        .map(|c| match c {
+            '"' | '\\' | '\n' | '\r' | '\t' | '\u{8}' | '\u{c}' => 2,
+            c if (c as u32) < 0x20 => 6,
+            c => c.len_utf8(),
+        })
+        .sum::<usize>()
+}
+
+/// The encoded size of a `messages` array, as `serde_json` writes it.
+pub fn messages_bytes(messages: &[RemoteMessage]) -> usize {
+    // `[a,b]` and `{a,b}`: the items, a comma between each two, two brackets.
+    let list = |sizes: Vec<usize>| 2 + sizes.iter().sum::<usize>() + sizes.len().saturating_sub(1);
+    // `"name":value`
+    let field = |name: &str, value: usize| name.len() + 3 + value;
+    list(
+        messages
+            .iter()
+            .map(|message| {
+                let mut fields = vec![field("message_id", json_string_bytes(&message.message_id))];
+                fields.extend(
+                    message
+                        .from
+                        .as_deref()
+                        .map(|from| field("from", json_string_bytes(from))),
+                );
+                fields.extend(
+                    message
+                        .to
+                        .as_deref()
+                        .map(|to| field("to", json_string_bytes(to))),
+                );
+                fields.push(field("text", json_string_bytes(&message.text)));
+                if !message.paths.is_empty() {
+                    let paths = message
+                        .paths
+                        .iter()
+                        .map(|path| json_string_bytes(path))
+                        .collect();
+                    fields.push(field("paths", list(paths)));
+                }
+                list(fields)
+            })
+            .collect(),
+    )
+}
+
+/// The workspace's remote messages that may still be published or counted:
+/// sent within `REMOTE_MESSAGE_MS` on this clock, newest first. One stamped
+/// later than now (the clock restarted with the machine) counts as gone.
+fn live_sent<'a>(
+    state: &'a State,
+    workspace_id: &str,
+    now_ms: u64,
+) -> impl Iterator<Item = &'a RemoteSent> {
+    state
+        .remote_sent
+        .get(workspace_id)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+        .iter()
+        .filter(move |sent| sent.at_ms <= now_ms && now_ms - sent.at_ms < REMOTE_MESSAGE_MS)
+}
+
+/// The send checks of ADR 0041 for a message sent with `--remote`, in its
+/// order. Returns the message as it would leave the machine.
+pub(crate) fn remote_send(
+    state: &State,
+    message: &Message,
+    now_ms: u64,
+) -> Result<RemoteMessage, CoreError> {
+    let link = state
+        .remote_links
+        .get(&message.workspace_id)
+        .filter(|link| link.enabled)
+        .ok_or_else(|| {
+            error(
+                "remote_not_enabled",
+                "This workspace publishes nothing to a remote. To send messages to other machines, the owner runs `langspan remote enable WORKSPACE --name NAME --share-messages on`.",
+            )
+        })?;
+    if !link.share_messages {
+        return Err(error(
+            "remote_messages_off",
+            "Message sharing is off for this workspace. The owner turns it on with `langspan remote enable ... --share-messages on`. Send without `--remote` to keep the message on this machine.",
+        ));
+    }
+    if !matches!(message.to, Recipient::Everyone {}) {
+        return Err(error(
+            "invalid_message",
+            "A message to other machines goes to every session there; leave out the recipient",
+        ));
+    }
+    // Clients redact before sending, so a redaction mark is a secret
+    // shape the client found.
+    if message.text.contains("[redacted]") || message.paths.iter().any(|p| p.contains("[redacted]"))
+    {
+        return Err(error(
+            "message_secret_shape",
+            "The message holds text that looks like a secret, so it was not sent. Remove that text, or send without `--remote`.",
+        ));
+    }
+    let sent: Vec<&RemoteSent> = live_sent(state, &message.workspace_id, now_ms).collect();
+    if sent.len() >= REMOTE_MESSAGES {
+        let oldest = sent.iter().map(|sent| sent.at_ms).min().unwrap_or(now_ms);
+        return Err(error(
+            "remote_messages_quota",
+            &format!(
+                "8 messages were sent from this workspace to other machines in the last 30 minutes. A retracted message still counts. The next can be sent in {} minutes.",
+                minutes_until(oldest, now_ms)
+            ),
+        ));
+    }
+    let remote = RemoteMessage {
+        message_id: message.message_id.clone(),
+        from: message.from.as_deref().map(session_label),
+        to: None,
+        text: message.text.clone(),
+        paths: message.paths.clone(),
+    };
+    let mut published: Vec<RemoteMessage> = sent
+        .iter()
+        .filter(|sent| !sent.retracted)
+        .map(|sent| sent.message.clone())
+        .collect();
+    published.insert(0, remote.clone());
+    if messages_bytes(&published) > REMOTE_MESSAGES_BYTES {
+        let oldest = sent
+            .iter()
+            .filter(|sent| !sent.retracted)
+            .map(|sent| sent.at_ms)
+            .min()
+            .unwrap_or(now_ms);
+        return Err(error(
+            "remote_messages_full",
+            &format!(
+                "The messages already published from this workspace leave no room for this one. Send a shorter message, or wait until the oldest leaves the publication in {} minutes.",
+                minutes_until(oldest, now_ms)
+            ),
+        ));
+    }
+    Ok(remote)
+}
+
+/// Whole minutes, rounded up, until a message sent at `at_ms` leaves.
+fn minutes_until(at_ms: u64, now_ms: u64) -> u64 {
+    (at_ms + REMOTE_MESSAGE_MS)
+        .saturating_sub(now_ms)
+        .div_ceil(60_000)
+}
+
+/// A session as a publication names it: host kind and an 8-character prefix.
+fn session_label(session_id: &str) -> String {
+    let (host, id) = session_id.split_once('.').unwrap_or(("agent", session_id));
+    format!(
+        "{}.{}",
+        host.chars().take(32).collect::<String>(),
+        id.chars().take(8).collect::<String>()
+    )
+}
+
+pub(crate) fn apply_remote_sent(state: &mut State, message: &Message, at_ms: u64) {
+    let sent = state
+        .remote_sent
+        .entry(message.workspace_id.clone())
+        .or_default();
+    sent.retain(|held| {
+        held.message.message_id != message.message_id
+            && held.at_ms <= at_ms
+            && at_ms - held.at_ms < REMOTE_MESSAGE_MS
+    });
+    sent.insert(
+        0,
+        RemoteSent {
+            message: RemoteMessage {
+                message_id: message.message_id.clone(),
+                from: message.from.as_deref().map(session_label),
+                to: None,
+                text: message.text.clone(),
+                paths: message.paths.clone(),
+            },
+            at_ms,
+            retracted: false,
+        },
+    );
+    sent.truncate(2 * REMOTE_MESSAGES);
+}
+
+pub(crate) fn apply_remote_retracted(state: &mut State, workspace_id: &str, message_id: &str) {
+    if let Some(sent) = state.remote_sent.get_mut(workspace_id).and_then(|sent| {
+        sent.iter_mut()
+            .find(|sent| sent.message.message_id == message_id)
+    }) {
+        sent.retracted = true;
+    }
+}
+
+/// Teammates' messages still owed to `me`, each publication's newest
+/// first: from a fresh publication of a related workspace, addressed to
+/// every machine or to this one, not yet given to this session.
+pub(crate) fn remote_owed(state: &State, me: &Session, now_ms: u64) -> Vec<RemoteMessageView> {
+    state
+        .remote_peers
+        .values()
+        .filter(|peer| {
+            peer.generation == state.generation
+                && now_ms.saturating_sub(peer.received_ms) <= REMOTE_HORIZON_MS
+                && related_workspace(state, &me.workspace_id, &peer.workspace_id)
+        })
+        .flat_map(|peer| {
+            let key = remote_key(&peer.workspace_id, &peer.publication.participant);
+            let mine = state
+                .remote_links
+                .get(&peer.workspace_id)
+                .map(|link| link.participant.as_str());
+            peer.publication
+                .messages
+                .iter()
+                .filter(move |message| message.to.is_none() || message.to.as_deref() == mine)
+                .filter(move |message| {
+                    !state.remote_delivered.get(&key).is_some_and(|delivered| {
+                        delivered.iter().any(|held| {
+                            held.message_id == message.message_id
+                                && held.sessions.contains(&me.session_id)
+                        })
+                    })
+                })
+                .map(|message| RemoteMessageView {
+                    workspace_id: peer.workspace_id.clone(),
+                    name: peer.publication.name.clone(),
+                    participant: peer.publication.participant.clone(),
+                    message: message.clone(),
+                })
+        })
+        .collect()
+}
+
+/// An upper bound on the bytes an adapter renders for one remote message,
+/// counted like `message_cost`: a label of under 448 bytes (a quoted name
+/// of 64 bytes and a sender of 41), then text and paths quoting can grow at
+/// most fourfold, within `MESSAGE_LINE_LIMIT` plus its newline.
+fn remote_cost(view: &RemoteMessageView) -> usize {
+    let raw = view.message.text.len()
+        + view
+            .message
+            .paths
+            .iter()
+            .map(|path| path.len() + 4)
+            .sum::<usize>();
+    (448 + 4 * raw).min(MESSAGE_LINE_LIMIT + 4)
+}
+
+/// The remote messages a briefing carries beside its local ones: at most
+/// `BRIEF_REMOTE_MESSAGES`, never more than `BRIEF_MESSAGES` in all, in the
+/// room the local messages, withdrawals, trail and uncoordinated line left
+/// (ADR 0041). Local messages are chosen first, so a flood from another
+/// machine never pushes them out; the rest wait for later briefings.
+/// Only a request whose client shows them (`Brief::remote_messages`) is
+/// given any.
+pub(crate) fn brief_remote(
+    state: &State,
+    command: &Command,
+    briefing: &Briefing,
+    now_ms: u64,
+) -> Result<Vec<RemoteMessageView>, CoreError> {
+    if !matches!(
+        command,
+        Command::Brief {
+            remote_messages: true,
+            ..
+        } | Command::BriefPrepared {
+            remote_messages: true,
+            ..
+        }
+    ) {
+        return Ok(Vec::new());
+    }
+    let me = current_session(state, &briefing.session_id)?;
+    let reserved = if briefing.uncoordinated.is_empty() {
+        0
+    } else {
+        UNCOORDINATED_LINE_LIMIT + 4
+    };
+    let used = reserved
+        + briefing.retracted.iter().map(retracted_cost).sum::<usize>()
+        + briefing.messages.iter().map(message_cost).sum::<usize>()
+        + briefing.trail.as_ref().map_or(0, |_| TRAIL_BYTES);
+    let mut room = MESSAGE_BRIEF_BYTES.saturating_sub(used);
+    Ok(remote_owed(state, me, now_ms)
+        .into_iter()
+        .take(BRIEF_REMOTE_MESSAGES.min(BRIEF_MESSAGES.saturating_sub(briefing.messages.len())))
+        .take_while(|view| {
+            let cost = remote_cost(view);
+            let fits = cost <= room;
+            room = room.saturating_sub(cost);
+            fits
+        })
+        .collect())
+}
+
+/// One `remote_message_delivered` per remote message a delivered briefing
+/// carried, with the text as delivered.
+pub(crate) fn delivered(briefing: &Briefing) -> impl Iterator<Item = Event> + '_ {
+    briefing
+        .remote_messages
+        .iter()
+        .map(|view| Event::RemoteMessageDelivered {
+            workspace_id: view.workspace_id.clone(),
+            participant: view.participant.clone(),
+            message_id: view.message.message_id.clone(),
+            session_id: briefing.session_id.clone(),
+            text: view.message.text.clone(),
+        })
+}
+
+pub(crate) fn apply_remote_message_delivered(
+    state: &mut State,
+    workspace_id: &str,
+    participant: &str,
+    message_id: &str,
+    session_id: &str,
+) -> Result<(), CoreError> {
+    validate_participant(participant, "-")?;
+    validate_request_id(message_id)?;
+    validate_id(session_id, "session ID")?;
+    let key = remote_key(workspace_id, participant);
+    let held: Vec<String> = state
+        .remote_peers
+        .get(&key)
+        .map(|peer| {
+            peer.publication
+                .messages
+                .iter()
+                .map(|message| message.message_id.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    let delivered = state.remote_delivered.entry(key).or_default();
+    match delivered
+        .iter_mut()
+        .find(|entry| entry.message_id == message_id)
+    {
+        Some(entry) if !entry.sessions.iter().any(|s| s == session_id) => {
+            entry.sessions.push(session_id.to_owned());
+        }
+        Some(_) => {}
+        None => delivered.push(RemoteDelivered {
+            message_id: message_id.to_owned(),
+            sessions: vec![session_id.to_owned()],
+        }),
+    }
+    // A message the publication still holds is never forgotten; of the
+    // others the oldest go first, past `REMOTE_DELIVERED_HISTORY`.
+    let mut gone = delivered
+        .iter()
+        .filter(|entry| !held.contains(&entry.message_id))
+        .count();
+    delivered.retain(|entry| {
+        if gone > REMOTE_DELIVERED_HISTORY && !held.contains(&entry.message_id) {
+            gone -= 1;
+            return false;
+        }
+        true
+    });
     Ok(())
 }
 
@@ -327,20 +804,32 @@ fn publication(state: &State, link: &RemoteLink, now_ms: u64) -> (Publication, S
             item.recent.join(",")
         ));
     }
-    (
-        Publication {
-            participant: link.participant.clone(),
-            name: link.name.clone(),
-            sequence: link.sequence + 1,
-            work,
-            withdrawn: false,
-        },
-        fingerprint(&text),
-    )
+    let mut publication = Publication {
+        participant: link.participant.clone(),
+        name: link.name.clone(),
+        sequence: link.sequence + 1,
+        work,
+        withdrawn: false,
+        messages: Vec::new(),
+    };
+    // The adapter publishes the work alone when work and messages together
+    // pass `PUBLICATION_BYTES`: messages never cut the work summary.
+    if link.share_messages {
+        publication.messages = live_sent(state, &link.workspace_id, now_ms)
+            .filter(|sent| !sent.retracted)
+            .take(REMOTE_MESSAGES)
+            .map(|sent| sent.message.clone())
+            .collect();
+        for message in &publication.messages {
+            text.push_str(&format!("message|{}\n", message.message_id));
+        }
+    }
+    (publication, fingerprint(&text))
 }
 
-// The body clones the matched `String`s, as the arm did.
-#[allow(clippy::ptr_arg)]
+// The body clones the matched `String`s, as the arm did, and takes each
+// field the arm bound.
+#[allow(clippy::ptr_arg, clippy::too_many_arguments)]
 pub(crate) fn decide_remote_enable(
     state: &State,
     workspace_id: &String,
@@ -349,6 +838,7 @@ pub(crate) fn decide_remote_enable(
     name: &String,
     share_task: &bool,
     publish_as_branch: &bool,
+    share_messages: &bool,
 ) -> Result<Decision, CoreError> {
     let previous = state.remote_links.get(workspace_id);
     // Re-enabling as the same participant continues its sequence, so
@@ -377,6 +867,7 @@ pub(crate) fn decide_remote_enable(
         enabled: true,
         withdrawn: false,
         publish_as_branch: *publish_as_branch,
+        share_messages: *share_messages,
     };
     validate_remote_link(state, &link)?;
     // One ref per participant per repository: two worktrees of one

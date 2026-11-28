@@ -118,6 +118,7 @@ fn every_local_and_remote_session_is_listed_with_current_work_first() {
             name: "Alice".into(),
             share_task: false,
             publish_as_branch: false,
+            share_messages: false,
         },
         0,
     );
@@ -139,6 +140,7 @@ fn every_local_and_remote_session_is_listed_with_current_work_first() {
                     recent: vec!["src/upload.rs".into()],
                 }],
                 withdrawn: false,
+                messages: Vec::new(),
             },
         },
         4_000,
@@ -416,6 +418,7 @@ fn a_crowded_state_is_bounded_with_counts_of_what_was_left_out() {
                         })
                         .collect(),
                     withdrawn: false,
+                    messages: Vec::new(),
                 },
                 received_ms: 5,
                 generation: 1,
@@ -449,6 +452,7 @@ fn a_crowded_state_is_bounded_with_counts_of_what_was_left_out() {
                 paths: (0..8).map(quote_path).collect(),
                 acknowledged: vec![],
                 retracted: false,
+                remote: false,
             })
             .collect(),
     );
@@ -515,6 +519,7 @@ fn heard(state: &mut State, participant: &str, name: &str, session: &str, recent
                 name: "Alice".into(),
                 share_task: false,
                 publish_as_branch: false,
+                share_messages: false,
             },
             0,
         );
@@ -537,6 +542,7 @@ fn heard(state: &mut State, participant: &str, name: &str, session: &str, recent
                     recent: vec![recent.into()],
                 }],
                 withdrawn: false,
+                messages: Vec::new(),
             },
         },
         now,

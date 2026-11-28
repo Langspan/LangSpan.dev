@@ -1,0 +1,1 @@
+{"version":10,"request_id":"m-20","command":{"op":"send_message","workspace_id":"app","from":"codex.bob","to":null,"text":"Changing the upload API in the next hour.","paths":["src/api/upload.rs"],"remote":true}}

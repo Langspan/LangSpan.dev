@@ -864,6 +864,7 @@ fn a_store_written_before_the_branch_namespace_choice_still_opens() {
         name: "Alice".into(),
         share_task: false,
         publish_as_branch: true,
+        share_messages: false,
     };
     {
         let mut store = Store::open(&database.path()).unwrap();
@@ -904,6 +905,7 @@ fn a_store_written_before_the_branch_namespace_choice_still_opens() {
         name: "Alice".into(),
         share_task: false,
         publish_as_branch: false,
+        share_messages: false,
     };
     let outcome = execute(&mut store, "enable", old, 2);
     assert!(matches!(outcome, Outcome::RemoteLink { ref link } if !link.publish_as_branch));
@@ -919,6 +921,7 @@ fn a_store_written_before_the_branch_namespace_choice_still_opens() {
         name: "Alice".into(),
         share_task: false,
         publish_as_branch: false,
+        share_messages: false,
     };
     execute(&mut store, "plain", plain, 1);
     drop(store);

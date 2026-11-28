@@ -100,6 +100,8 @@ pub(crate) fn request(
                 // Asked for: the full view (issue #222).
                 changes_only: false,
                 confirm: false,
+                // Shown as they would be told; a look delivers none.
+                remote_messages: true,
             },
             ["remote", "enable", workspace] => Command::RemoteEnable {
                 workspace_id: (*workspace).into(),
@@ -116,6 +118,11 @@ pub(crate) fn request(
                     Some(_) => return Err("--share-task must be on or off".into()),
                 },
                 publish_as_branch: options.remove("--publish-as-branch").is_some(),
+                share_messages: match options.remove("--share-messages").as_deref() {
+                    None | Some("off") => false,
+                    Some("on") => true,
+                    Some(_) => return Err("--share-messages must be on or off".into()),
+                },
             },
             ["remote", "disable", workspace] => Command::RemoteDisable {
                 workspace_id: (*workspace).into(),
@@ -306,6 +313,12 @@ pub(crate) fn request(
                 to: options.remove("--to"),
                 text: (*text).into(),
                 paths: paths.iter().map(|path| (*path).into()).collect(),
+                // A value, as `--remote` takes one wherever else it appears.
+                remote: match options.remove("--remote").as_deref() {
+                    None | Some("off") => false,
+                    Some("on") => true,
+                    Some(_) => return Err("--remote must be on or off".into()),
+                },
             },
             ["handoff", session, text, paths @ ..] => Command::Handoff {
                 session_id: (*session).into(),

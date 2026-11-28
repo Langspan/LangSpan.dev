@@ -99,6 +99,7 @@ impl Fixture {
                     mcp: false,
                     changes_only: false,
                     confirm: false,
+                    remote_messages: false,
                 },
             )
             .outcome

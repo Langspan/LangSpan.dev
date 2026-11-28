@@ -2572,6 +2572,85 @@ fn a_confirmed_briefing_reaches_only_a_daemon_with_confirmed_briefings() {
     assert_eq!(encode(&request).unwrap(), earlier);
 }
 
+/// ADR 0041: a message for other machines is never sent to a daemon
+/// without `remote_messages`, which no frozen version has; the client says
+/// `remote_messages_unsupported` instead. A briefing asks such a daemon
+/// without remote messages, and a local send reaches it unchanged.
+#[test]
+fn a_message_for_other_machines_reaches_only_a_daemon_with_remote_messages() {
+    let read = |bytes: &[u8]| serde_json::from_slice::<Request>(bytes).unwrap().command;
+    let remote = read(include_bytes!(
+        "../fixtures/send-message-remote-request-v10.json"
+    ));
+    let local = read(include_bytes!("../fixtures/send-message-command-v10.json"));
+    let brief = read(include_bytes!(
+        "../fixtures/brief-remote-messages-request-v10.json"
+    ));
+    let others: Vec<String> = Capabilities::ALL
+        .names()
+        .into_iter()
+        .filter(|name| *name != "remote_messages")
+        .collect();
+    let without = Capabilities::negotiate(PROTOCOL_VERSION, Some(&others));
+    assert!(fits_with(Capabilities::ALL, &remote));
+    assert!(!fits_with(without, &remote));
+    assert!(fits_with(without, &local));
+    for version in OLDEST_PROTOCOL_VERSION..=PROTOCOL_VERSION {
+        let granted = Capabilities::negotiate(version, None);
+        assert!(!granted.has("remote_messages"), "{version}");
+        assert!(!fits_with(granted, &remote), "{version}");
+    }
+    assert!(
+        langspan::protocol::unfit(PROTOCOL_VERSION, &remote)
+            .starts_with("remote_messages_unsupported: The running coordinator cannot send messages to other machines."),
+    );
+    let mut sent = brief.clone();
+    for_capabilities(Capabilities::ALL, &mut sent);
+    assert_eq!(sent, brief);
+    for_capabilities(without, &mut sent);
+    assert!(
+        matches!(
+            sent,
+            Command::Brief {
+                remote_messages: false,
+                confirm: true,
+                ..
+            }
+        ),
+        "{sent:?}"
+    );
+
+    // The stored objects an earlier client reads refusing unknown fields
+    // reach it without what `remote_messages` added.
+    let answer = |outcome: &str| -> Response {
+        serde_json::from_str(&format!(
+            r#"{{"version":{PROTOCOL_VERSION},"request_id":"r-1","replayed":false,"generation":1,"lease_valid":null,"outcome":{outcome}}}"#
+        ))
+        .unwrap()
+    };
+    for (outcome, field) in [
+        (
+            r#"{"type":"remote_link","link":{"workspace_id":"w","remote":"origin","participant":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","name":"Alice","share_task":false,"sequence":0,"signature":"","enabled":true,"withdrawn":false,"share_messages":true}}"#,
+            "share_messages",
+        ),
+        (
+            r#"{"type":"message_sent","message":{"message_id":"m-20","workspace_id":"w","from":null,"to":{"kind":"everyone"},"text":"Hold off","paths":[],"remote":true}}"#,
+            "\"remote\"",
+        ),
+        (
+            r#"{"type":"remote_outbox","publication":{"participant":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","name":"Alice","sequence":1,"work":[],"messages":[{"message_id":"m-20","text":"Hold off"}]},"signature":"s","changed":true}"#,
+            "\"messages\"",
+        ),
+    ] {
+        let response = answer(outcome);
+        let all = String::from_utf8(encode(&response).unwrap()).unwrap();
+        assert!(all.contains(field), "{all}");
+        let earlier =
+            String::from_utf8(encode_with(without, Some(&others), &response).unwrap()).unwrap();
+        assert!(!earlier.contains(field), "{earlier}");
+    }
+}
+
 /// The handshake: the daemon grants the names it knows and, when that is
 /// fewer than the request named, says which. A client and daemon of the
 /// same build exchange the bytes they did before capabilities.

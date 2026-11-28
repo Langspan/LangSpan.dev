@@ -387,6 +387,11 @@ pub(crate) fn apply_removed(state: &mut State, workspace_id: &str) -> Result<(),
         .turn_queues
         .retain(|_, waiters| waiters.iter().all(|waiter| waiter.workspace_id != id));
     state.remote_peers.retain(|_, peer| peer.workspace_id != id);
+    state.remote_sent.remove(id);
+    state.remote_delivered.retain(|key, _| {
+        key.rsplit_once(':')
+            .is_none_or(|(workspace, _)| workspace != id)
+    });
     state.refusals.retain(|refusal| refusal.workspace_id != id);
     state.workspace_git.remove(id);
     state.conflict_waits.remove(id);

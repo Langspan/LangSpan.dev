@@ -376,6 +376,7 @@ fn brief(
             mid_turn: false,
             changes_only,
             confirm: false,
+            remote_messages: false,
             recent: false,
             recent_window_ms: None,
             mcp: false,

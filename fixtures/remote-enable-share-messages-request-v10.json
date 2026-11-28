@@ -1,0 +1,1 @@
+{"version":10,"request_id":"remote-enable-3","command":{"op":"remote_enable","workspace_id":"app","remote":"origin","participant":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","name":"Alice","share_task":false,"share_messages":true}}

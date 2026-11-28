@@ -105,3 +105,8 @@
 {"type":"clock_anchored","anchor":{"generation":2,"clock_ms":0,"wall_ms":1795000100000}}
 {"type":"session_registered","session":{"session_id":"bob","workspace_id":"work","generation":2}}
 {"type":"session_seen","session_id":"bob","at_ms":11,"generation":2}
+{"type":"remote_enabled","link":{"workspace_id":"work","remote":"origin","participant":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","name":"Alice","share_task":false,"sequence":1,"signature":"","enabled":true,"withdrawn":false,"share_messages":true}}
+{"type":"message_sent","message":{"message_id":"m-remote","workspace_id":"work","from":null,"to":{"kind":"everyone"},"text":"Changing the upload API.","paths":[],"remote":true},"at_ms":13,"generation":2}
+{"type":"remote_observed","peer":{"workspace_id":"work","publication":{"participant":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","name":"Bob","sequence":4,"work":[],"messages":[{"message_id":"m-bob","text":"Hold off on the upload API."}]},"received_ms":14,"generation":2}}
+{"type":"message_acknowledged","workspace_id":"work","message_id":"m-remote","session_id":"bob","via":"briefing","at_ms":15,"generation":2}
+{"type":"remote_message_delivered","workspace_id":"work","participant":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","message_id":"m-bob","session_id":"bob","text":"Hold off on the upload API."}

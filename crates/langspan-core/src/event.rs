@@ -326,6 +326,16 @@ pub enum Event {
     RemoteWithdrawn {
         workspace_id: String,
     },
+    /// A teammate's message from another machine was placed in a session's
+    /// context (ADR 0041). `text` is what was delivered, at most
+    /// `MESSAGE_BYTES`, so the owner can read what entered the context.
+    RemoteMessageDelivered {
+        workspace_id: String,
+        participant: String,
+        message_id: String,
+        session_id: String,
+        text: String,
+    },
     // -----------------------------------------------------------------------
     // Checks and test results
     // -----------------------------------------------------------------------

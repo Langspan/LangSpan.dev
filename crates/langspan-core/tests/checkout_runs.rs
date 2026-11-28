@@ -164,6 +164,7 @@ fn notices(state: &mut State, session: &str, now: u64) -> Vec<CheckoutNotice> {
             mcp: false,
             changes_only: false,
             confirm: false,
+            remote_messages: false,
             left: Vec::new(),
         },
         now,

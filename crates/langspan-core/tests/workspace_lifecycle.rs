@@ -99,6 +99,7 @@ fn ready() -> State {
                 to: Some("bob".into()),
                 text: "I am changing upload".into(),
                 paths: Vec::new(),
+                remote: false,
             },
             2,
         ),
@@ -457,6 +458,7 @@ fn remote_sharing_refuses_removal_until_disabled_and_withdrawn() {
             name: "Alice".into(),
             share_task: false,
             publish_as_branch: false,
+            share_messages: false,
         },
         10,
     );
@@ -581,6 +583,7 @@ fn a_removed_workspace_leaves_status_and_briefings_and_its_id_can_start_again() 
             mcp: false,
             changes_only: false,
             confirm: false,
+            remote_messages: false,
         },
         11,
     );
@@ -599,6 +602,7 @@ fn a_removed_workspace_leaves_status_and_briefings_and_its_id_can_start_again() 
             mcp: false,
             changes_only: false,
             confirm: false,
+            remote_messages: false,
         },
         11,
     ) else {
@@ -641,6 +645,7 @@ fn a_removed_workspace_forgets_its_message_history_and_withdrawal_notices() {
         mcp: false,
         changes_only: false,
         confirm: false,
+        remote_messages: false,
     };
     run(&mut state, "brief-bob", brief("bob"), 3);
     let Outcome::MessageRetracted { .. } = run(

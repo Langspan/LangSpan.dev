@@ -156,6 +156,7 @@ fn brief(state: &mut State, session: &str, id: &str, now: u64) -> Briefing {
             mcp: false,
             changes_only: false,
             confirm: false,
+            remote_messages: false,
         },
         now,
     )) {
@@ -392,6 +393,7 @@ fn a_briefing_with_an_uncoordinated_change_reserves_its_line_before_choosing_mes
                 to: None,
                 text: letter.repeat(langspan_core::MESSAGE_BYTES),
                 paths: Vec::new(),
+                remote: false,
             },
             500,
         ));

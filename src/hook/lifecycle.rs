@@ -397,6 +397,8 @@ fn lifecycle(
             changes_only: !starting,
             // Told only once this hook confirms it placed it (issue #531).
             confirm: deliver,
+            // This hook renders teammates' messages from other machines.
+            remote_messages: true,
         },
     ) {
         Ok(Response {
@@ -886,6 +888,7 @@ impl Session<'_> {
                     mcp: false,
                     changes_only: true,
                     confirm: true,
+                    remote_messages: true,
                 },
             )
             .ok()?;

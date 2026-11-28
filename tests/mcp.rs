@@ -923,6 +923,7 @@ async fn stdio_show_message_returns_the_whole_text_after_acknowledgement() {
             to: Some("agent-b".into()),
             text: text.clone(),
             paths: paths.clone(),
+            remote: false,
         },
     )
     .await;

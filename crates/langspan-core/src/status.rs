@@ -93,6 +93,10 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         retracted_notices: _,
         // Read by a message status query only.
         dropped_messages: _,
+        // The outbox shows what would leave; the delivered set is
+        // bookkeeping for the next briefing.
+        remote_sent: _,
+        remote_delivered: _,
         presence,
         adoptions,
         // Derived for the status line; never part of the status reply.
@@ -195,6 +199,8 @@ pub fn status_view(state: &State, now_ms: u64) -> (State, StatusSummary) {
         retracted_notices: BTreeMap::new(),
         message_history: BTreeMap::new(),
         dropped_messages: BTreeMap::new(),
+        remote_sent: BTreeMap::new(),
+        remote_delivered: BTreeMap::new(),
         presence: keep(presence, of_shown),
         // An adoption is shown with either of its sessions.
         adoptions: adoptions

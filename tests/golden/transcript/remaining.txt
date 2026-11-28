@@ -320,7 +320,7 @@ exit 0
 ## remote enable
 $ langspan request {"version":10,"request_id":"r-r1","command":{"op":"remote_enable","workspace_id":"w","remote":"origin","participant":"0123456789abcdef0123456789abcdef","name":"alice","share_task":false}}
 exit 0
-Workspace w publishes to Git remote "origin" as "alice" (participant 0123456789abcdef0123456789abcdef) at refs/langspan/peers/0123456789abcdef0123456789abcdef; task lines not shared; last publication 0.
+Workspace w publishes to Git remote "origin" as "alice" (participant 0123456789abcdef0123456789abcdef) at refs/langspan/peers/0123456789abcdef0123456789abcdef; task lines not shared; messages not shared; last publication 0.
 $ langspan request {"version":10,"request_id":"r-r1","command":{"op":"remote_enable","workspace_id":"w","remote":"origin","participant":"0123456789abcdef0123456789abcdef","name":"alice","share_task":false}} --json
 exit 0
 {"version":10,"request_id":"r-r1","replayed":true,"generation":1,"lease_valid":null,"outcome":{"type":"remote_link","link":{"workspace_id":"w","remote":"origin","participant":"0123456789abcdef0123456789abcdef","name":"alice","share_task":false,"sequence":0,"signature":"","enabled":true,"withdrawn":false}}}
@@ -328,7 +328,7 @@ exit 0
 ## remote published
 $ langspan request {"version":10,"request_id":"r-r4","command":{"op":"remote_published","workspace_id":"w","sequence":1,"signature":"signature-one","payload":"{}","published_at_ms":1800000000000}}
 exit 0
-Workspace w publishes to Git remote "origin" as "alice" (participant 0123456789abcdef0123456789abcdef) at refs/langspan/peers/0123456789abcdef0123456789abcdef; task lines not shared; last publication 1.
+Workspace w publishes to Git remote "origin" as "alice" (participant 0123456789abcdef0123456789abcdef) at refs/langspan/peers/0123456789abcdef0123456789abcdef; task lines not shared; messages not shared; last publication 1.
 $ langspan request {"version":10,"request_id":"r-r4","command":{"op":"remote_published","workspace_id":"w","sequence":1,"signature":"signature-one","payload":"{}","published_at_ms":1800000000000}} --json
 exit 0
 {"version":10,"request_id":"r-r4","replayed":true,"generation":1,"lease_valid":null,"outcome":{"type":"remote_link","link":{"workspace_id":"w","remote":"origin","participant":"0123456789abcdef0123456789abcdef","name":"alice","share_task":false,"sequence":1,"signature":"signature-one","enabled":true,"withdrawn":false}}}
