@@ -109,6 +109,8 @@ impl World {
             assert!(Instant::now() < deadline, "daemon did not become ready");
             std::thread::sleep(Duration::from_millis(10));
         }
+        // Export, import and removal are owner grants; the owner allows them.
+        support::owner_grants(&self.base.join("state"), true);
     }
     fn stop_daemon(&mut self) {
         if let Some(mut child) = self.daemon.take() {
@@ -2614,6 +2616,7 @@ impl Second {
             fs::create_dir(&state).unwrap();
             fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
         }
+        support::owner_grants(&state, true);
         let mut daemon = Process::new(env!("CARGO_BIN_EXE_langspan"));
         daemon
             .env("LANGSPAN_TEST_SCAN_EVERY_MS", "200")

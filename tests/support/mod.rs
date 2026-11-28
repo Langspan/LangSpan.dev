@@ -230,6 +230,29 @@ pub fn settles<T: PartialEq + std::fmt::Debug>(
     }
 }
 
+/// Sets `"owner_grants"` to `on` in `state_dir/config.json`, keeping its
+/// other keys, as the owner does around an owner-grant command (issue #335).
+/// The coordinator reads it again for each one, so this works while it runs.
+#[allow(dead_code)]
+pub fn owner_grants(state_dir: &std::path::Path, on: bool) {
+    use std::os::unix::fs::OpenOptionsExt;
+    let path = state_dir.join("config.json");
+    let mut config = match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap(),
+        Err(_) => serde_json::json!({}),
+    };
+    config["owner_grants"] = serde_json::Value::Bool(on);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&path)
+        .unwrap()
+        .write_all(config.to_string().as_bytes())
+        .unwrap();
+}
+
 /// Waits up to 10 s for the coordinator at `state_dir` to answer a status
 /// request. A socket file alone isn't enough: a killed coordinator leaves
 /// one behind.

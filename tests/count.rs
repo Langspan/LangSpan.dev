@@ -6,6 +6,8 @@
 //! stopped, so that run's refusals fall on 2027-04-01 at 02:30 UTC, which
 //! is April in UTC and still March in New York.
 
+mod support;
+
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -677,6 +679,7 @@ fn a_month_reaching_before_what_retention_kept_says_its_count_is_incomplete() {
     assert_eq!(before["refusals"], 1, "{before:#}");
     assert!(before.get("retained_since_ms").is_none(), "{before:#}");
 
+    support::owner_grants(&w.state(), true);
     let (code, out, err) = w.cli(&["compact", "--keep-days", "30", "--apply", "--json"], None);
     assert_eq!(code, 0, "{out}{err}");
     let report: Value = serde_json::from_str(&out).unwrap();

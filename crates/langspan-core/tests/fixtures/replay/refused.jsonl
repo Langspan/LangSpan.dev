@@ -1,0 +1,48 @@
+# Events `apply` refuses: line `line` of events.jsonl with the fields `set`
+# names (JSON pointers) changed, applied to the state the lines before it
+# fold to. refused.txt holds the error each one gets.
+{"line": 13, "set": {"/generation": 2}}
+{"line": 17, "set": {"/intent/workspace_id": "tree"}}
+{"line": 94, "set": {"/session_id": "bob"}}
+{"line": 18, "set": {"/generation": 2}}
+{"line": 19, "set": {"/paths": ["src/b.rs", "src/a.rs"]}}
+{"line": 19, "set": {"/generation": 2}}
+{"line": 23, "set": {"/generation": 2}}
+{"line": 97, "set": {"/adoption/from": "bob"}}
+{"line": 34, "set": {"/generation": 2}}
+{"line": 48, "set": {"/bytes": 2000000}}
+{"line": 46, "set": {"/signature": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}
+{"line": 27, "set": {"/input_digest": "not-a-digest"}}
+{"line": 25, "set": {"/lease/generation": 2}}
+{"line": 36, "set": {"/lease/lease_id": "lease-alice"}}
+{"line": 31, "set": {"/generation": 2}}
+{"line": 20, "set": {"/files": []}}
+{"line": 37, "set": {"/lease_id": "lease-alice"}}
+{"line": 26, "set": {"/waited_ms": 60001}}
+{"line": 14, "set": {"/policy": "advisory"}}
+{"line": 28, "set": {"/observation/workspace_id": "tree"}}
+{"line": 39, "set": {"/observation/lease_id": "lease-alice"}}
+{"line": 90, "set": {"/change/delivered": ["alice"]}}
+{"line": 92, "set": {"/workspace_id": "tree"}}
+{"line": 65, "set": {"/check/result": {"type": "inconclusive"}}}
+{"line": 65, "set": {"/tests/command_id": "not-an-id"}}
+{"line": 75, "set": {"/workspace_id": "tree"}}
+{"line": 71, "set": {"/notice/check_id": "no-such-check"}}
+{"line": 71, "set": {"/notice/duration_ms": 1}}
+{"line": 66, "set": {"/command_id": "not-an-id"}}
+{"line": 66, "set": {"/check_id": "no-such-check"}}
+{"line": 66, "set": {"/name": "other"}}
+{"line": 72, "set": {"/workspace_id": "tree"}}
+{"line": 76, "set": {"/turn/generation": 2}}
+{"line": 77, "set": {"/waiter/deadline_ms": 141}}
+{"line": 78, "set": {"/seen_until_ms": 1}}
+{"line": 79, "set": {"/expires_at_ms": 1}}
+{"line": 82, "set": {"/ticket": "no-such-ticket"}}
+{"line": 84, "set": {"/turn_id": "no-such-turn"}}
+{"line": 47, "set": {"/keys": []}}
+{"line": 49, "set": {"/message/retracted": true}}
+{"line": 60, "set": {"/workspace_id": "tree"}}
+{"line": 60, "set": {"/sequence": 5}}
+{"line": 61, "set": {"/peer/generation": 2}}
+{"line": 63, "set": {"/workspace_id": "tree"}}
+{"line": 102, "set": {"/from_root": "/repos/elsewhere"}}
