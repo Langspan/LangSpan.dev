@@ -202,7 +202,11 @@ the event (`LANGSPAN_CHECK_LANE`):
   Git output, MCP framing, the workflows and the docs. None of those
   starts a coordinator, except the CLI's golden transcripts
   (`tests/cli_transcript.rs`, `tests/cli_golden.rs`), so that output that
-  differs on Linux shows on the pull request. The `macOS` check passes at once and says that the
+  differs on Linux shows on the pull request. nextest builds every target
+  it is given before its filter applies, so the lane passes Cargo only the
+  targets the filter can select (`scripts/ci-fast-targets.sh`, which reads
+  the filter's `binary_id(langspan::NAME)` names): it no longer compiles
+  the integration tests it leaves out. The `macOS` check passes at once and says that the
   full run happens in the merge queue. Target: a result **under 3
   minutes** from push. The job stops at 6 minutes.
 - **The full lane: a merge-queue commit, a push to `main`, the nightly run

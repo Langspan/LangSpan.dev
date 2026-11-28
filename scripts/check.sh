@@ -132,8 +132,16 @@ fi
 # The suite under cargo-nextest, with HOME at a read-only home holding a
 # foreign LangSpan install, so no test can depend on the machine's own
 # (issue #108). The build lane only builds the suite into its archive here,
-# and runs the doc tests.
-sh scripts/test-foreign-home.sh
+# and runs the doc tests. The fast lane builds only the test targets its
+# filter can select (scripts/ci-fast-targets.sh).
+if [ "$lane" = fast ]; then
+  # An assignment, so the script's failure stops the check.
+  targets=$(sh scripts/ci-fast-targets.sh)
+  # shellcheck disable=SC2086 # one argument per line, none with a space
+  sh scripts/test-foreign-home.sh $targets
+else
+  sh scripts/test-foreign-home.sh
+fi
 if [ "$lane" = fast ]; then
   leftovers
   echo "check.sh: fast lane done; the other tests and the demonstration run in the merge queue"
