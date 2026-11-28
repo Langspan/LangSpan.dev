@@ -2155,7 +2155,8 @@ class DryRun(Temporary):
             self.assertEqual([t["refusals"] for t in record["tasks"]], [0] * n)
             # Issue #222: the context LangSpan's hooks added, from the coordinator, per task and in all.
             added = [t["context_added"] for t in record["tasks"]]
-            self.assertTrue(all(a is not None and a["turns"] >= 1 for a in added), added)
+            self.assertTrue(all(a is not None and a["turns"] >= 1 for a in added),
+                            "%s\n%s" % (added, self.turn_report(output, record)))
             if not any(a["bytes"] > 0 for a in added):
                 self.fail("no context added: %s\n%s" % (added, self.silence_report(output, record)))
             trial = record["context_added"]
@@ -2251,6 +2252,25 @@ class DryRun(Temporary):
             lines.append("session %d (%s): %d hook calls, slowest %s ms, %d ended by the wrapper, coverage %s" % (
                 index, task["role"], len(entries), max((e.get("elapsed_ms", 0) for e in entries), default=None),
                 sum(bool(e.get("timed_out")) for e in entries), json.dumps(coverage, sort_keys=True)))
+        return "\n".join(lines)
+
+    def turn_report(self, output, record):
+        """What a session with no turn counted saw: each of its start and
+        prompt hooks, how long it took, how it exited and what LangSpan's
+        hook said it did."""
+        lines = []
+        for index, task in enumerate(record["tasks"], 1):
+            if task["context_added"] and task["context_added"]["turns"] >= 1:
+                continue
+            lines.append("session %d (%s, %s):" % (index, task["role"], task["task_id"]))
+            log = output / task["hook_log"] if task["hook_log"] else None
+            for line in log.read_text().splitlines() if log and log.is_file() else []:
+                entry = json.loads(line)
+                if entry.get("event") not in ("SessionStart", "UserPromptSubmit"):
+                    continue
+                lines.append("  %s %s at %s: %s ms, exit %s, ended %s: %s" % (
+                    entry.get("event"), entry.get("session_id"), entry.get("at"), entry.get("elapsed_ms"),
+                    entry.get("exit_code"), entry.get("timed_out"), entry.get("stderr", "")[:1500]))
         return "\n".join(lines)
 
     def informed(self, output_record):
