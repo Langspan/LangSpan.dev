@@ -682,7 +682,8 @@ impl Lexer {
 
     /// After `${`: to the closing brace, keeping the substitutions in it
     /// (`${x:-$(cmd)}` runs `cmd`). Outside double quotes (`quoted` false),
-    /// single quotes in it make their text literal, as Bash reads them.
+    /// single quotes in it make their text literal, and `$'…'` honours its
+    /// escapes, as Bash reads them.
     fn parameter(&mut self, quoted: bool) -> Result<(), &'static str> {
         let mut depth = 1_usize;
         let mut double = false;
@@ -690,6 +691,7 @@ impl Lexer {
             self.at += 1;
             match c {
                 '\\' => self.at += 1,
+                '$' if !quoted && !double && self.peek(0) == Some('\'') => self.dollar(false)?,
                 '\'' if !quoted && !double => {
                     while self.peek(0).is_some_and(|c| c != '\'') {
                         self.at += 1;
@@ -989,6 +991,18 @@ mod tests {
         for command in [
             "git commit -m ${msg:-'fix: `example'}",
             "git commit -m ${msg:-'a } and $(x'}",
+        ] {
+            assert_eq!(steps(command), [commit(false, &[])], "{command}");
+        }
+    }
+
+    /// Review of PR #613: an ANSI-C quote in a parameter default honours its
+    /// escapes, so `\'` does not end it.
+    #[test]
+    fn an_ansi_c_quoted_parameter_default_honours_escapes() {
+        for command in [
+            r"git commit -m ${msg:-$'it\'s fine'}",
+            r"git commit -m ${msg:-$'a \' } and $(x'}",
         ] {
             assert_eq!(steps(command), [commit(false, &[])], "{command}");
         }
