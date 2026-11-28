@@ -15,15 +15,33 @@
 # an escape byte unless the call passes --allow-escape-sequences. A run
 # download takes the matching directories in $GH_STUB_OVERRIDE when there
 # are any. `gh workflow run` succeeds, or fails with the text of
-# $GH_STUB_OVERRIDE/dispatch-error when that exists.
+# $GH_STUB_OVERRIDE/dispatch-error when that exists. `gh api --help` lists
+# --allow-escape-sequences; with $GH_STUB_OVERRIDE/old-gh the stub is an
+# older gh instead, whose help lacks the flag, which rejects it as unknown
+# and which passes escape bytes through.
 set -euo pipefail
 here=$GH_STUB_FIXTURES
 over=${GH_STUB_OVERRIDE:-/nonexistent}
 printf '%s\n' "$*" >>"$GH_STUB_LOG"
-allow_escapes=0
+old=0
+if [ -f "$over/old-gh" ]; then old=1; fi
+allow_escapes=$old
 for arg in "$@"; do
-  if [ "$arg" = --allow-escape-sequences ]; then allow_escapes=1; fi
+  if [ "$arg" = --allow-escape-sequences ]; then
+    if [ "$old" = 1 ]; then
+      echo "unknown flag: --allow-escape-sequences" >&2
+      exit 1
+    fi
+    allow_escapes=1
+  fi
 done
+if [ "$1 ${2:-}" = "api --help" ]; then
+  echo "Usage:  gh api <endpoint> [flags]"
+  if [ "$old" = 0 ]; then
+    echo "      --allow-escape-sequences   Keep terminal escape sequences in the output"
+  fi
+  exit 0
+fi
 
 flood() {
   local over=${GH_STUB_OVERRIDE:-/nonexistent}

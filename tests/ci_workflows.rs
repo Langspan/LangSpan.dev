@@ -1911,6 +1911,39 @@ fn the_error_lines_are_capped_fenced_and_cleaned_as_log_data() {
     );
 }
 
+#[test]
+fn an_older_gh_without_the_escape_flag_still_reads_the_logs() {
+    // Such a gh rejects --allow-escape-sequences as an unknown flag and
+    // passes escape bytes through, so the script asks gh's help first.
+    let log = "2026-11-27T10:01:00.0000000Z \u{1b}[31merror\u{1b}[0m: in colour\n";
+    let run = main_red(
+        "macOS",
+        "failure",
+        false,
+        &[("old-gh", ""), ("api/repos_o_r_actions_jobs_2_logs", log)],
+    );
+    assert!(run.ok, "{}", run.stderr);
+    assert!(
+        run.body
+            .contains("\n~~~~text\n--- macOS tests 2\nerror: in colour\n"),
+        "{}",
+        run.body
+    );
+    assert!(!run.body.contains("Could not read the log"), "{}", run.body);
+    assert!(
+        !run.calls.contains("--allow-escape-sequences"),
+        "{}",
+        run.calls
+    );
+    // gh's help is read once, however many logs there are.
+    assert_eq!(
+        run.calls.matches("api --help\n").count(),
+        1,
+        "{}",
+        run.calls
+    );
+}
+
 /// The log of a macOS shard whose 453 tests all passed and whose JUnit
 /// upload then timed out, as in #564. The lines are that job's recorded log
 /// (from its rerun, the only attempt GitHub still serves) and the error line

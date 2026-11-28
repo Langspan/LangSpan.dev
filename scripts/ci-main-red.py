@@ -25,6 +25,7 @@ they reach the issue as data, capped, in a fenced block or inline code, so
 no mention or markup in them takes effect.
 """
 
+import functools
 import json
 import os
 import re
@@ -157,15 +158,25 @@ def log_line(raw):
     return re.sub(r"~{3,}", "~~", line)[:LINE_CHARS]
 
 
-def read_log(job_id):
-    """The job's log text, at most its first LOG_BYTES, or raises GhError.
+@functools.cache
+def escape_flag():
+    """["--allow-escape-sequences"] when this gh has the flag, else [].
 
     Every log holds escape sequences (the runner colours each step's
-    command), which gh refuses to print without the flag; log_line strips
-    them.
+    command). A gh that has the flag refuses to print them without it; an
+    older gh rejects the flag as unknown and passes them through. log_line
+    strips them either way.
     """
+    code, out, first, _ = run_capped(["gh", "api", "--help"], OUT_BYTES, TIMEOUT_S)
+    if code != 0:
+        raise GhError(f"gh api --help exited {code}: {first}")
+    return ["--allow-escape-sequences"] if b"--allow-escape-sequences" in out else []
+
+
+def read_log(job_id):
+    """The job's log text, at most its first LOG_BYTES, or raises GhError."""
     code, data, first, full = run_capped(
-        ["gh", "api", f"repos/{REPO}/actions/jobs/{job_id}/logs", "--allow-escape-sequences"],
+        ["gh", "api", f"repos/{REPO}/actions/jobs/{job_id}/logs", *escape_flag()],
         LOG_BYTES, TIMEOUT_S * 2)
     # A log cut at the cap was killed there, so its exit code says nothing.
     if code != 0 and not full:
