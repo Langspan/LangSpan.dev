@@ -1,5 +1,5 @@
 //! Commits in a checkout shared by several sessions
-//! ([ADR 0026](../docs/adr/0026-commit-guard-and-commit-mine.md)).
+//! ([ADR 0026](../../docs/adr/0026-commit-guard-and-commit-mine.md)).
 //!
 //! The guard: before a shell command that stages or commits broadly runs,
 //! the lines it would take are matched against the line journal; when some

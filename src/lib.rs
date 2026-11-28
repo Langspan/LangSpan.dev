@@ -67,10 +67,10 @@ pub mod user_install;
 
 // ownership
 pub mod adopt;
-pub mod commit;
 pub mod formatter;
 pub mod journal;
 mod lines;
+mod ownership;
 mod reformat;
 
 // checks
@@ -120,6 +120,7 @@ pub mod skill;
 pub use briefing::recent;
 pub use briefing::since;
 pub use briefing::trail;
+pub use ownership::commit;
 use fs::file_state;
 use fs::input;
 use fs::local;
