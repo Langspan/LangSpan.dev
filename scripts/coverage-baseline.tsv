@@ -48,10 +48,10 @@ src/briefing/since.rs	92.5
 src/briefing/trail.rs	93.6
 src/claude_code.rs	79.6
 src/cli/check.rs	93.6
-src/cli/doctor.rs	88.3
+src/cli/doctor.rs	92.4
 src/cli/flags.rs	99.4
-src/cli/hook.rs	82.4
-src/cli/land.rs	78.1
+src/cli/hook.rs	91.5
+src/cli/land.rs	81.0
 src/cli/local.rs	98.8
 src/cli/render.rs	87.6
 src/cli/render/graph.rs	85.4
@@ -70,7 +70,7 @@ src/count.rs	93.4
 src/cursor.rs	77.3
 src/daemon.rs	91.7
 src/daemon/index_queries.rs	91.5
-src/daemon/index_worker.rs	86.3
+src/daemon/index_worker.rs	91.2
 src/daemon/prepare.rs	92.6
 src/daemon/remote_worker.rs	93.3
 src/dashboard.rs	82.9
@@ -101,7 +101,7 @@ src/integrate.rs	92.0
 src/journal.rs	95.1
 src/landing.rs	91.6
 src/lines.rs	95.9
-src/main.rs	84.8
+src/main.rs	92.9
 src/mcp.rs	88.1
 src/notify.rs	88.4
 src/observer.rs	92.1
