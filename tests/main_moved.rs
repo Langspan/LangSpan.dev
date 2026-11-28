@@ -59,7 +59,9 @@ impl Fixture {
     fn work(&self) -> PathBuf {
         self.base.join("work")
     }
-    fn hook(&self, event: Value) -> Value {
+    /// `event` through `support::hook_call`: the hook's diagnostic and the
+    /// context it added.
+    fn send(&self, event: Value) -> Value {
         let output = hook_call(
             &self.base.join("state"),
             "claude-code",
@@ -82,7 +84,7 @@ impl Fixture {
         if tool == "Read" {
             event["tool_response"] = json!({"stdout": "", "stderr": "", "interrupted": false});
         }
-        self.hook(event)["diagnostic"]["coverage"]
+        self.send(event)["diagnostic"]["coverage"]
             .as_str()
             .unwrap()
             .to_owned()
@@ -111,7 +113,7 @@ impl Fixture {
             "session_id": ALICE, "transcript_path": "/dev/null", "cwd": self.work(),
             "hook_event_name": "UserPromptSubmit", "prompt": "carry on",
         });
-        self.hook(event)["context"]
+        self.send(event)["context"]
             .as_str()
             .unwrap_or("")
             .to_owned()
