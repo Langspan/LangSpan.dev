@@ -117,7 +117,8 @@
     "session_id": "codex.bob.sub",
     "workspace_id": "app",
     "paths": [],
-    "more_paths": 0
+    "more_paths": 0,
+    "lane": 0
    }
   ]
  }

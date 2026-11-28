@@ -8,7 +8,41 @@ run; `--open` opens it in the browser.
 langspan dashboard --open
 ```
 
-The page polls `GET /api/state` every two seconds and has four parts:
+The page polls `GET /api/state` and `GET /api/events` every two seconds and
+has two views, switched by the Live and Files buttons under the header. Live
+opens first once any step is recorded.
+
+**Live** shows recorded work as it happens, in the homepage hero's design.
+Each local session is a lane, named by its task line, with its harness,
+checkout and branch in its details. Each card is one recorded step in words:
+"Read", "Edited", "Ran a command", "Write held" with the reason, and "Saved
+after re-reading" or "Saved on retry". Edits of one file, or reads, in a row
+within 20 s share a card with a count, such as "3 edits". A line joins each
+of an agent's cards to its next, dashed after a pause of more than 30 s. A
+coral wire labelled "Held" runs from the change that caused a held write to
+the held card; nothing else draws a wire, and work on another machine never
+does. The line above the lanes counts agents and the writes held in the last
+10 minutes.
+
+- New work enters from the right while **Follow newest** is on. **Pause**
+  stops the motion; any other interaction pauses it, and it resumes after 8
+  seconds.
+- **+** and **−** zoom, **Fit** shows all the work, and dragging or pinching
+  pans and zooms. With the canvas focused, the arrow keys pan, `+` and `-`
+  zoom, `0` fits, and `L` follows the newest work.
+- At most 6 lanes show at once (3 on a phone). With more agents, the canvas
+  opens on the busiest lanes; once it has focus, the wheel scrolls through
+  the lanes. Ctrl or Cmd with the wheel zooms.
+- Click a card, a wire's label or a lane name for its recorded details: the
+  file, the time, why a write was held, which agent changed the file, and what
+  the held agent did next. Details never open on their own.
+- With reduced motion, or `?motion=static` added to the URL, the view shows
+  the newest work without motion.
+
+The view keeps the newest 4,000 feed rows. Steps without a recorded time
+(a session starting, a lease) are never cards; a lane's details list them.
+
+**Files** has four parts:
 
 - **Counts.** Active sessions (the coordinator's count on every machine),
   shared paths, held files, refusals, interface notices, checks and landings.
@@ -40,13 +74,13 @@ keeps the last view, dims the matrix and says since when. Selection, keyboard
 focus and scroll position survive each refresh. The page follows the system's
 light or dark theme; the theme button switches it.
 
-`langspan dashboard --demo` serves the same page and renderer with four
-fictional scenes, labeled "Simulated data", for demonstrations. It reads
+`langspan dashboard --demo` serves the same page with four fictional scenes
+in the Files view, labeled "Simulated data", for demonstrations. It reads
 nothing from the coordinator, and its `/api/state` and `/api/events` answer
 404. The live page never contains the demo scenes.
 
 `GET /api/events?after=SEQ&limit=N` serves the coordinator's event log in seq
-order, for a script or a future Live view that replays it: `after` defaults
+order, for the Live view or a script: `after` defaults
 to 0, `limit` to 100 (at most 1000), and the next poll asks after the reply's
 `next`. A page can hold fewer rows than asked; read until one comes back
 empty. Each row carries only the event's seq, type, session, workspace,

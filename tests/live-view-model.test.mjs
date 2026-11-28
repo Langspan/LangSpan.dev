@@ -266,6 +266,68 @@ test("a hold on several files lists them, and its wire starts at the peer's edit
   assert.deepEqual(m.wires, [{ kind: "held", label: "Held", from: "c0", from_lane: 0, to: "c1", seq: [3] }]);
 });
 
+// pace: the playback fields the renderer reads, from the events alone.
+const hero = JSON.parse(readFileSync(new URL("../fixtures/live-view-hero.json", import.meta.url), "utf8"));
+const paced = (events, opts) => Live.pace(model(STATE, events), events, opts);
+
+test("pace uses the hero's pacing numbers, unchanged", () => {
+  assert.deepEqual(Live.PACING, hero.pacing);
+});
+
+test("pace is deterministic and spaces cards as the hero does, with a stop for each hold and save", () => {
+  const a = paced(incident());
+  assert.deepEqual(a, paced(incident()));
+  const P = hero.pacing;
+  // Edit at 2 s, held at 3 s, read at 3.5 s, saved at 4 s: each gap is
+  // under 30 s, so it plays a little over gap_min_s.
+  assert.deepEqual(a.cards.map((c) => [c.kind, c.at]), [["edit", 0.4], ["held", 0.753], ["read", 4.305], ["saved", 4.657]]);
+  assert.deepEqual(a.stops_s, [[0.753, 3.953, "held"], [4.657, 5.657, "saved"]]);
+  assert.deepEqual(a.wires, [{ kind: "held", label: "Held", from: "c0", from_lane: 0, to: "c1", seq: [5],
+    at: 1.553, ms: P.wire_draw_ms, stop: [0.753, 3.953], emphasis_at: 2.203 }]);
+  assert.equal(a.live, true);
+  // The clock rests at the end of the last stop, so the newest wire is
+  // still at full strength.
+  assert.equal(a.duration_s, 5.657);
+  assert.equal(a.final_s, a.duration_s);
+  assert.deepEqual(a.lanes, model(STATE, incident()).lanes);
+});
+
+test("pace shortens any gap over 30 s to the hero's longest step", () => {
+  seq = 0;
+  const near = paced([anchor(), op(A, 2000, "a.ts"), op(A, 2000 + 30_000, "b.ts")]);
+  seq = 0;
+  const far = paced([anchor(), op(A, 2000, "a.ts"), op(A, 2000 + 3_600_000, "b.ts")]);
+  assert.equal(near.cards[1].at, 0.85);
+  assert.equal(far.cards[1].at, 0.85);
+});
+
+test("pace keeps every earlier card's time when events are appended", () => {
+  const events = incident();
+  const before = paced(events.slice(0, 5));
+  const after = paced(events);
+  for (const c of before.cards) assert.equal(after.cards.find((x) => x.id === c.id).at, c.at, c.id);
+  for (const s of before.stops_s) assert.ok(after.stops_s.some((x) => x[0] === s[0] && x[1] === s[1]));
+});
+
+test("pace counts agents and the writes held in the 10 minutes before each card, or before now", () => {
+  seq = 0;
+  const events = [anchor(), op(A, 2000), held(B, A, 3000), op(A, 700_000, "b.ts"), held(B, A, 701_000, "stale_base", "b.ts")];
+  const p = paced(events);
+  assert.deepEqual(p.status.map((s) => [s.agents, s.held]), [[1, 0], [2, 1], [2, 0], [2, 1]]);
+  const later = paced(events, { now_ms: 701_000 + 600_000 });
+  assert.deepEqual(later.status.at(-1), { at: later.cards.at(-1).at, agents: 2, held: 0 });
+});
+
+test("pace of no events is an empty view that rests at zero", () => {
+  const p = paced([anchor()]);
+  assert.deepEqual([p.cards, p.wires, p.stops_s, p.duration_s], [[], [], [], 0]);
+});
+
+test("rows without a time keep their lane, so a lane's details can list them", () => {
+  const m = model(STATE, incident());
+  assert.deepEqual(m.untimed.map((e) => [e.type, e.lane]), [["session_registered", 0], ["session_registered", 1]]);
+});
+
 test("readFeed reads until a page comes back empty, even after short pages", async () => {
   const pages = { 0: [1, 2], 2: [3], 3: [4, 5], 5: [] };
   const asked = [];

@@ -44,7 +44,11 @@ hunks and followed file renames ([ADR 0007](adr/0007-check-evidence-integration-
 the source index; notes, messages and handoffs; user-level installation;
 partial [shell-write coverage](adr/0011-shell-writes.md);
 [region admission](adr/0012-region-admission.md); the read-only
-[dashboard](adr/0013-dashboard.md); the [observation spool](adr/0014-observation-spool.md);
+[dashboard](adr/0013-dashboard.md), with its Live view (issue #491: the
+homepage hero's renderer drawing `/api/events`, geometry-tested under
+`node --test` and served by a real coordinator in `tests/dashboard.rs`; no
+browser capture retained yet, [evidence](evidence/dashboard-live/README.md));
+the [observation spool](adr/0014-observation-spool.md);
 [version tolerance](adr/0015-version-tolerance.md); the
 [release pipeline](adr/0031-releases.md); the
 [LangSpan skill](adr/0034-langspan-skill.md) (`install --skill`, off by

@@ -288,6 +288,10 @@ details.explain dl { margin-top: 10px; }
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important;
     transition-duration: .01ms !important; }
 }
+/* The Live and Files views (issue #491). */
+.views { display: flex; gap: 8px; margin-bottom: 16px; }
+#live-view { margin-bottom: 24px; }
+/*langspan:live-view-css*/
 </style>
 </head>
 <body>
@@ -341,6 +345,37 @@ details.explain dl { margin-top: 10px; }
     </div>
   </div>
   <div id="banner" class="banner" hidden></div>
+  <div class="views" id="views" role="group" aria-label="View" hidden>
+    <button class="button" type="button" id="view-live" aria-pressed="false" aria-controls="live-view">Live</button>
+    <button class="button" type="button" id="view-files" aria-pressed="true" aria-controls="files-view">Files</button>
+  </div>
+  <figure class="live" id="live-view" data-live-view hidden>
+    <div class="live-band">
+    <div class="live-frame">
+      <div class="live-bar">
+        <span class="live-repo" id="live-repo"></span><span class="live-sep" aria-hidden="true">/</span><code id="live-branch"></code>
+        <span class="live-agents"><i aria-hidden="true"></i><span id="live-agents">0 agents</span></span>
+      </div>
+      <div class="live-tools" role="group" aria-label="Camera" data-camera hidden>
+        <button type="button" class="live-pause" data-hero-play>Pause</button><button type="button" aria-label="Zoom in" data-cam="in">+</button><button type="button" aria-label="Zoom out" data-cam="out">−</button><button type="button" aria-label="Fit all work" data-cam="fit">Fit</button><button type="button" aria-label="Follow the newest work" aria-pressed="true" data-cam="follow">Follow newest</button>
+      </div>
+      <div class="live-main">
+        <div class="live-canvas" data-canvas tabindex="0" role="group" aria-label="Agent activity. Arrow keys pan, plus and minus zoom, 0 fits all work, L follows the newest work. With the canvas focused, the wheel scrolls the lanes.">
+          <p class="live-status"><strong data-status-agents>0 agents</strong> working · <span data-status-held>0 writes</span> held in the last 10 min</p>
+          <p class="live-empty" id="live-empty" hidden></p>
+          <div class="live-world" data-world>
+            <svg class="wires" aria-hidden="true" data-wires></svg>
+            <ol class="cards" aria-label="Recorded work, oldest first" data-cards></ol>
+            <div class="wire-labels" data-wire-labels></div>
+          </div>
+          <div class="gutter" data-gutter></div>
+          <div class="pop" role="dialog" aria-label="Details" data-pop hidden><button type="button" class="pop-close" data-pop-close aria-label="Close details">×</button><div data-pop-body></div></div>
+        </div>
+      </div>
+    </div>
+    </div>
+  </figure>
+  <div id="files-view">
   <section aria-labelledby="kpi-heading">
     <h2 id="kpi-heading" class="sr-only">Counts from the current view</h2>
     <ul class="kpis" id="kpis"></ul>
@@ -397,6 +432,7 @@ details.explain dl { margin-top: 10px; }
       <dl class="facts" id="definitions"></dl>
     </details>
   </section>
+  </div>
 </main>
 <footer class="footer">
   <span>Read-only. This page shows what this coordinator reports, within its limits, and changes nothing.</span>
@@ -406,7 +442,10 @@ details.explain dl { margin-top: 10px; }
 'use strict';
 // Every value from the coordinator is placed with textContent or as an
 // attribute value, never parsed as markup: task lines, paths, names and
-// messages are data. Nothing is fetched except /api/state on this origin.
+// messages are data. Nothing is fetched except /api/state and /api/events on
+// this origin.
+/*langspan:live-model*/
+/*langspan:live-view*/
 /*langspan:demo-scenes*/
 const LIVE = DEMO_SCENES === null;
 const token = LIVE ? (new URLSearchParams(window.location.search).get('t') || '') : '';
@@ -1292,7 +1331,70 @@ function unavailable(reason) {
   const since = lastSuccess ? ' Showing what was known ' + ago(Date.now() - lastSuccess) + '.' : ' No coordinator data has been received yet.';
   banner('Coordinator unavailable: ' + reason + '.' + since);
 }
-function tick() { refresh().finally(() => window.setTimeout(tick, 2000)); }
+function tick() { refresh().then(refreshLive).finally(() => window.setTimeout(tick, 2000)); }
+
+// ---- Live view: /api/events through the shared renderer (issue #491) ------
+// Rows are read from the last cursor until a page comes back empty, at most
+// FEED_PAGES pages a poll; the page keeps the newest FEED_KEEP rows and the
+// newest clock anchor once it holds more than FEED_TRIM.
+const FEED_PAGES = 50, FEED_KEEP = 4000, FEED_TRIM = 6000;
+const feed = { events: [], next: 0 };
+let liveView = null;
+let viewChoice = null;
+function showView(which) {
+  byId('view-live').setAttribute('aria-pressed', String(which === 'live'));
+  byId('view-files').setAttribute('aria-pressed', String(which === 'files'));
+  byId('live-view').hidden = which !== 'live';
+  byId('files-view').hidden = which !== 'files';
+  if (which === 'live' && liveView) liveView.relayout();
+}
+byId('view-live').addEventListener('click', () => { viewChoice = 'live'; showView('live'); });
+byId('view-files').addEventListener('click', () => { viewChoice = 'files'; showView('files'); });
+async function eventsPage(after) {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), 8000);
+  try {
+    const response = await fetch('/api/events?after=' + after + '&limit=1000', { headers: { 'X-LangSpan-Token': token }, cache: 'no-store', signal: controller.signal });
+    const body = await response.json();
+    if (!response.ok || !body || body.available !== true || !Array.isArray(body.events) || typeof body.next !== 'number') {
+      throw new Error(str(body && body.error) || 'HTTP ' + response.status);
+    }
+    return body;
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+async function refreshLive() {
+  if (!view) return;
+  byId('views').hidden = false;
+  let failed = '';
+  try {
+    const got = await LangSpanLive.readFeed(eventsPage, feed.next, FEED_PAGES);
+    feed.events.push(...got.events);
+    feed.next = got.next;
+    if (feed.events.length > FEED_TRIM) {
+      const anchor = feed.events.filter((e) => e.type === 'clock_anchored').pop();
+      feed.events = feed.events.slice(-FEED_KEEP);
+      if (anchor && !feed.events.includes(anchor)) feed.events.unshift(anchor);
+    }
+  } catch (error) {
+    failed = error && error.name === 'AbortError' ? 'the dashboard server did not answer within 8 s' : str(error && error.message);
+  }
+  const anchor = feed.events.filter((e) => e.type === 'clock_anchored').pop();
+  const now = anchor ? anchor.clock_ms + (Date.now() - anchor.wall_ms) : undefined;
+  const timing = LangSpanLive.pace(LangSpanLive.model(view, feed.events), feed.events, { now_ms: now });
+  if (liveView) liveView.update(timing); else liveView = LangSpanLiveView.mount(byId('live-view'), timing);
+  const empty = byId('live-empty');
+  empty.hidden = timing.cards.length > 0 && !failed;
+  empty.textContent = failed ? 'The event feed could not be read: ' + failed + '. Trying again in 2 s.'
+    : 'No recorded steps yet. Reads, edits and commands appear here as agents work.';
+  const workspaces = list(view.workspaces).map((w) => str(w.workspace_id));
+  const branches = [...new Set(timing.lanes.map((lane) => lane.branch).filter(Boolean))];
+  byId('live-repo').textContent = workspaces.length ? workspaces.slice(0, 2).join(', ') + (workspaces.length > 2 ? ' and more' : '') : 'No workspace';
+  byId('live-branch').textContent = branches.length === 1 ? branches[0] : plural(branches.length, 'branch', 'branches');
+  byId('live-agents').textContent = plural(timing.lanes.length, 'agent');
+  if (!viewChoice) showView(timing.cards.length ? 'live' : 'files');
+}
 
 // ---- Demo: the same renderer over fictional, labeled scenes -------------------
 function startDemo() {

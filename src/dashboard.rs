@@ -49,6 +49,15 @@ const LOCKUP_LIGHT: &str = include_str!("../docs/assets/brand/langspan-lockup-li
 const LOCKUP_DARK: &str = include_str!("../docs/assets/brand/langspan-lockup-dark.svg");
 const MARK_MARKER: &str = "<!--langspan:brand-mark-->";
 const DEMO_MARKER: &str = "/*langspan:demo-scenes*/";
+/// The Live view (issue #491): its model, the renderer it shares with the
+/// homepage hero, and the hero's styles, placed inside the page's one
+/// script and one style block.
+const LIVE_MODEL: &str = include_str!("dashboard-live.js");
+const LIVE_VIEW: &str = include_str!("dashboard-live-view.js");
+const LIVE_CSS: &str = include_str!("dashboard-live-view.css");
+const LIVE_MODEL_MARKER: &str = "/*langspan:live-model*/";
+const LIVE_VIEW_MARKER: &str = "/*langspan:live-view*/";
+const LIVE_CSS_MARKER: &str = "/*langspan:live-view-css*/";
 
 pub struct Options {
     pub listen: SocketAddr,
@@ -79,8 +88,22 @@ fn brand_mark(svg: &str, class: &str) -> Result<String, crate::Error> {
 /// The page served at `/`: the live view, or with `demo` the same page and
 /// renderer with the simulated scenes in place of the coordinator.
 pub fn page(demo: bool) -> Result<String, crate::Error> {
-    if SHELL.matches(MARK_MARKER).count() != 1 || SHELL.matches(DEMO_MARKER).count() != 1 {
-        return Err("the dashboard page must have one brand-mark and one demo marker".into());
+    let markers = [
+        MARK_MARKER,
+        DEMO_MARKER,
+        LIVE_MODEL_MARKER,
+        LIVE_VIEW_MARKER,
+        LIVE_CSS_MARKER,
+    ];
+    if markers
+        .iter()
+        .any(|marker| SHELL.matches(marker).count() != 1)
+    {
+        return Err(
+            "the dashboard page must have one brand-mark, demo, live-model, live-view and \
+             live-view-css marker each"
+                .into(),
+        );
     }
     let mark = format!(
         "{}{}",
@@ -94,7 +117,10 @@ pub fn page(demo: bool) -> Result<String, crate::Error> {
     };
     Ok(SHELL
         .replace(MARK_MARKER, &mark)
-        .replace(DEMO_MARKER, scenes))
+        .replace(DEMO_MARKER, scenes)
+        .replace(LIVE_MODEL_MARKER, LIVE_MODEL)
+        .replace(LIVE_VIEW_MARKER, LIVE_VIEW)
+        .replace(LIVE_CSS_MARKER, LIVE_CSS))
 }
 
 pub fn default_listen() -> SocketAddr {
@@ -888,6 +914,39 @@ mod tests {
             assert_eq!(composed.matches("<style>").count(), 1);
         }
         assert!(demo.contains("Simulated data"));
+    }
+
+    /// Both pages carry the Live view's model, its shared renderer and its
+    /// styles inside the one script and one style block, so the policy
+    /// still names exactly two hashes; no included file can end its block.
+    #[test]
+    fn the_page_carries_the_live_view_inside_its_two_blocks() {
+        for (file, closing) in [
+            (LIVE_MODEL, "</script"),
+            (LIVE_VIEW, "</script"),
+            (LIVE_CSS, "</style"),
+        ] {
+            for bad in [closing, "<script", "<!--"] {
+                assert!(
+                    !file.to_ascii_lowercase().contains(bad),
+                    "an included file would end its block early: {bad}"
+                );
+            }
+        }
+        for composed in [page(false).unwrap(), page(true).unwrap()] {
+            let script = &composed[composed.find("<script>").unwrap()..];
+            let style =
+                &composed[composed.find("<style>").unwrap()..composed.find("</style>").unwrap()];
+            assert!(script.contains("var LangSpanLive = (function"));
+            assert!(script.contains("var LangSpanLiveView = (function"));
+            assert!(style.contains(".live-canvas{"));
+            for marker in [LIVE_MODEL_MARKER, LIVE_VIEW_MARKER, LIVE_CSS_MARKER] {
+                assert!(!composed.contains(marker), "{marker} left in the page");
+            }
+            assert_eq!(composed.matches("<script>").count(), 1);
+            assert_eq!(composed.matches("<style>").count(), 1);
+            assert!(composed.contains("data-live-view"));
+        }
     }
 
     /// Quoted names the script passes to `call`, such as `byId('scope')`.
