@@ -1114,6 +1114,20 @@ user who wants more downloads it first and runs
 | **Information disclosure** | The script sends only the download requests, and when gh is present, gh's own requests to GitHub for the sign-in check and the attestation. gh uses its own sign-in, which the script never reads. It sends no telemetry. | GitHub sees the requests, as for any download, and with gh signed in, which account looked up the attestation. |
 | **Elevation of privilege** | No root: it writes only under `~/.local/bin` and the temporary folder, and doesn't run `langspan setup`. | Anyone who can write `~/.local/bin` can already replace the binary. |
 
+## The person-touches report
+
+[`scripts/evidence-report.py`](../../scripts/evidence-report.py) is run by
+a maintainer from a source checkout, never by `langspan` or CI. It reads a
+repository's merged pull requests and `needs-owner` issues through
+`gh pr list` and `gh issue list`, or a file it saved earlier.
+
+| Threat | Control | Residual risk |
+| --- | --- | --- |
+| **Tampering**: review or comment text steers the report | Bodies are searched only for one fixed marker line; nothing in them is parsed, run or printed. The report prints numbers, dates and the logins passed with `--person`. | Anyone who can comment can add the marker to hide a touch, or leave it out of an agent's comment to add one. |
+| **Tampering**: an altered or malformed saved file | `--from` reads at most 64 MiB, refuses a file whose `version` differs and exits 2 on one of the wrong shape; its counts are only as true as the file. | A hand-edited file gives a different report. |
+| **Information disclosure** | gh's GET requests use gh's own sign-in, which the script never reads. The saved file holds logins and numbers, no text or email address. | GitHub sees the requests. |
+| **Denial of service** | At most 1,000 pull requests and 1,000 issues per read, and each `gh` call times out after 300 seconds. | None known. |
+
 ## CI build cache
 
 The Rust checks (`check.yml`) restore a build cache: the crates registry,
