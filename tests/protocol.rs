@@ -603,6 +603,27 @@ fn v3_prompt_targets_request_and_target_briefing_match_the_committed_golden_vect
     assert_eq!(encode(&response).unwrap(), older.as_bytes());
 }
 
+/// Issue #537: a peer on the same task. Additive and defaulted, as
+/// `target_overlap` was: a daemon or stored receipt without the field reads
+/// it as false, and a briefing without it encodes as it did before.
+#[test]
+fn v3_same_task_briefing_matches_the_committed_golden_vector() {
+    let wire = include_bytes!("../fixtures/same-task-briefing-response-v3.json");
+    let response: Response = serde_json::from_slice(wire).unwrap();
+    let langspan_core::Outcome::Briefing { briefing } = &response.outcome else {
+        panic!("{response:?}");
+    };
+    assert!(briefing.peers[0].same_task);
+    assert_eq!(encode(&response).unwrap(), wire);
+    let older = String::from_utf8_lossy(wire).replace(r#","same_task":true"#, "");
+    let response: Response = serde_json::from_str(&older).unwrap();
+    let langspan_core::Outcome::Briefing { briefing } = &response.outcome else {
+        panic!("{response:?}");
+    };
+    assert!(!briefing.peers[0].same_task);
+    assert_eq!(encode(&response).unwrap(), older.as_bytes());
+}
+
 #[test]
 fn v3_presence_requests_and_briefing_match_the_committed_golden_vectors() {
     use langspan_core::PresenceKind;

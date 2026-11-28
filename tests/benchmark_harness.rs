@@ -8,11 +8,14 @@
 //! `python3` 3.9 or later on `PATH`. Each Rust test runs one part of the
 //! Python suite, so `cargo test` runs the parts in parallel.
 //!
-//! The dry runs are the slow part: about 11 minutes of an 18-minute macOS
-//! job (issue #286). CI sets `LANGSPAN_BENCH_DRY_RUNS=skip` when a change
-//! touches no benchmark, briefing, hook or daemon code, and runs them every
-//! night on `main`; `scripts/ci-changes.sh` owns the list of paths.
-//! Any other value, or none, runs them, so a local check always does.
+//! The dry runs (`dry_run_…`) are the slow part: 92 to 132 s each on macOS
+//! (issue #286). check.yml, which the merge queue waits on, always sets
+//! `LANGSPAN_BENCH_DRY_RUNS=skip`, so there the other tests here are the
+//! harness's smoke test. `.github/workflows/bench.yml` runs the dry runs
+//! when a change touches benchmark, briefing, hook or daemon code
+//! (`scripts/ci-changes.sh` owns the list of paths) and every night on
+//! `main`. Any other value, or none, runs them, so a local check always
+//! does.
 
 use std::ffi::OsStr;
 use std::io::Write;
@@ -193,7 +196,7 @@ fn dry_run_with_stagger_tells_dependents_before_their_first_write() {
 
 #[test]
 fn dry_run_with_the_watcher_installed_a_session_takes_its_turn() {
-    python_suite("test_driver.py", Some("WatcherDryRun"));
+    dry_run("WatcherDryRun");
 }
 
 #[test]
@@ -214,6 +217,16 @@ fn matrix_stops_a_trial_and_its_session_groups() {
 #[test]
 fn dry_run_matrix_keeps_every_trial_and_resumes() {
     dry_run_suite("test_matrix.py", "MatrixDryRun");
+}
+
+#[test]
+fn shared_checkout_pushes_plan_and_report() {
+    python_suite("test_shared.py", Some("SharedUnit"));
+}
+
+#[test]
+fn dry_run_shared_arm() {
+    dry_run_suite("test_shared.py", "SharedDryRun");
 }
 
 #[test]

@@ -253,30 +253,39 @@ timed-out run, or one that built no tests
 with `cold` set restores nothing, to measure a build from nothing; on
 `main`, it still saves an entry that `main` lacks.
 
-In the full lane, the benchmark harness's dry runs (the `dry_run_*` tests
-in `tests/benchmark_harness.rs`) run only when the change touches one of
-the following paths: `benchmarks/`, `tests/benchmark_harness.rs`, the
+The benchmark harness's dry runs (the `dry_run_*` tests in
+`tests/benchmark_harness.rs`, 92 to 132 s each on macOS) never run in
+`check.yml`, so the merge queue never waits on them; there the harness's
+other tests, about 11 s on an Apple M-series laptop, are its smoke test.
+The workflow `bench.yml` ("Benchmark dry runs", not a required check) runs
+them on Linux and macOS for a pull request or push to `main` that touches
+one of the following paths, and otherwise passes at once and says why: `benchmarks/`, `tests/benchmark_harness.rs`, the
 daemon, hook and briefing code they drive (`src/daemon.rs`, `src/daemon/`,
 `src/hook.rs`, `src/hook/`, `src/briefing.rs`, `src/briefing/`,
 `src/text.rs`, `src/text/`, `src/claude_code.rs` and all of
 `crates/langspan-core/src/`, so code moved into a new module there still
 counts), or what builds and runs the suite
 (`Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `.config/nextest.toml`,
-`check.yml`, `scripts/check.sh`, `scripts/test-foreign-home.sh`,
-`scripts/ci-changes.sh`). The dry runs took about 11 minutes of an
-18-minute macOS job under `cargo test`. A change that touches only Markdown
-builds nothing in either lane.
+`check.yml`, `bench.yml`, `scripts/check.sh`, `scripts/test-foreign-home.sh`,
+`scripts/ci-changes.sh`). A change that touches only Markdown builds
+nothing in either lane of `check.yml`.
 
-- **A merge-queue commit** is judged on every change from the queue's base
-  on `main` to that commit, so a benchmark change in a pull request queued
-  ahead runs the dry runs.
 - **A push to `main`** that adds one commit, as a squash merge does,
   follows the same rule for the dry runs. A push of several commits runs
-  them.
-- **The nightly run** (03:23 UTC on `main`) and **a manual run** run
-  everything. If the nightly run fails, it opens an issue titled "Nightly
-  Rust checks on main failed", or comments on that issue while it is open.
-  Treat that issue like a failing check on `main`.
+  them. Since the queue doesn't run them, `main` can hold a change that
+  breaks them; this run and the nightly one show it.
+- **The nightly runs** on `main` (`check.yml` at 03:23 UTC, `bench.yml`
+  with the dry runs at 03:53) and **a manual run** run everything. If one
+  fails, it opens an issue titled "Nightly Rust checks on main failed" or
+  "Nightly benchmark dry runs on main failed", or comments on that issue
+  while it is open. Treat that issue like a failing check on `main`.
+- **An advisory dry run** shows that path without an advisory on `main`:
+  `gh workflow run check.yml --ref BRANCH -f advisory_dry_run=true`. The
+  Linux build audits the real lockfile, then
+  `tests/fixtures/advisory-dry-run/known-advisory.lock` (RUSTSEC-2021-0003),
+  and fails on it; `nightly-report` then opens or comments on an issue
+  titled "Advisory dry run of the nightly report", never the real one.
+  Close that issue afterwards ([evidence](evidence/ci/advisories.md)).
 
 The two times are targets the lanes should meet, not gates: a run over
 them still passes. `bash scripts/measure-ci.sh` reports them from GitHub's
@@ -297,7 +306,8 @@ unset, each job uses GitHub's standard runner.
 
 When a dry run is skipped, the test log shows
 `skipped: no benchmark or briefing change`. A local `sh scripts/check.sh`
-runs every test unless `LANGSPAN_BENCH_DRY_RUNS=skip` is set.
+runs every test unless `LANGSPAN_BENCH_DRY_RUNS=skip` is set, which
+`check.yml` always sets.
 [`scripts/ci-changes.sh`](../scripts/ci-changes.sh) owns the path list;
 change the list there and here together.
 
@@ -425,6 +435,14 @@ passes, and the check names the file; run
 the pull request that moved the code. `--tighten` never raises a number,
 and it deletes a baseline that has nothing left to record. The checker's
 own tests are in `scripts/ratchets/test_*.py`.
+
+One more number is kept per crate rather than per file: the count of
+production function and closure signatures that return
+`Result<_, String>`, in `scripts/ratchets/string-errors.tsv` (rows
+`CRATE<TAB>N`). A crate may not go above its row. When the count falls,
+the check prints the new number; lower the row by hand in the same pull
+request. Return a typed error instead, as `client::ClientError` and
+`git::GitError` do (issue #368).
 
 ### Repository settings
 

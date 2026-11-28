@@ -46,6 +46,34 @@ told:
 Edit admission stays per worktree: a session is never held or refused because
 of a peer's worktree.
 
+### The shared checkout (`shared`)
+
+The `shared` arm ([#543](https://github.com/Langspan/LangSpan.dev/issues/543))
+is not one of the compared arms: `matrix.py run` runs it only when `--arms`
+names it. Every session works in one checkout, `work/trunk`, on `main`, cloned
+from a bare integration remote `work/origin.git`, with no coordination tool.
+Each session's prompt asks it to commit only the files it changed and push to
+`origin main`, fetching and merging and pushing again after a rejection; the
+session may run `git push`, `git pull`, `git fetch` and `git merge`. The
+stand-in does the same as Bash calls, at most three pushes. The combined
+result is what `origin main` holds when every session has ended (kept in
+`repo` as `bench/landed`); work a session left unpushed did not land.
+
+The record (version 9) counts, per task and per trial, the Bash calls that ran
+`git push` (`pushes.attempts`) and those whose result shows Git refusing the
+push (`pushes.rejections`), from the session's transcript. Other arms record
+`pushes.status: "not_applicable"` with null counts. The results document has a
+push attempts and a push rejections column per trial and per condition;
+tokens, turns and elapsed time come from the same record. Because one tree
+holds every session's edits, duplicate work is not measured (null) in this
+arm.
+
+Not built yet: the `langspan_shared` arm (the same checkout with LangSpan's
+hooks). In one checkout every session has the same LangSpan workspace, and
+the harness attributes hook logs, refusals, notices and context to a session
+by workspace, so that attribution has to change first. No live-model pilot of
+the shared arm has run; it needs the owner's approval, as in #513.
+
 ### The same limits in every arm
 
 Every session, in every arm, gets the same tools and the same denials, so in
@@ -276,7 +304,9 @@ LangSpan arm). For the stale-caller measure it gives `stale_writes_admitted`,
 summed, `stale_fixed_after_s`, each trial's time listed rather than
 averaged, and `stale_unfixed_trials`, the trials that ended with a stale
 caller. A group figure is `null` when any trial it counts lacks it.
-It reads version 8 records only.
+`push_attempts` and `push_rejections` are summed over the group's trials,
+and `null` unless every trial reports them ([shared checkout](#the-shared-checkout-shared)).
+It reads version 8 and 9 records; a version 8 record has no push counts.
 
 ### Staggered start
 
@@ -540,7 +570,7 @@ record under `docs/evidence/`.
 | --- | --- |
 | `tasks_accepted`, `integrated_tests` | The oracle on the merged tree. A task is accepted only when its family's success definition holds for it: a contradiction task whose own function works is still not accepted if its pair's shared default moved, or, for a key alone, if the default did not change to its value. Each task's `completed` says only whether its own check passed. `integrated_tests` passes only when every branch merged, every task is accepted, no semantic conflict was found and the fixture's tests pass |
 | `interface_change` | `discovered_change`: `made` when `days_left` on the changer's own branch requires two arguments, `change_not_made` when it does not (a workaround, a default for the new parameter, or no change), and then no dependent is judged; `unknown` when the oracle did not run; `not_applicable` in the other families |
-| `stale_callers` | `discovered_change`, every arm (issue #213), from each session's transcript, never from what an agent says: each `Write` and `Edit` call's input, replayed over the fixture's file; whether its result was an error (a refused write is not admitted); and the clock line (`langspan_bench_clock`, one monotonic clock for every session on the machine) the tool guard adds after each line of tool results. The oracle's definitions decide what counts. The change is the changer's first admitted write after which `days_left` requires two arguments. From then on, a dependent's file that names `days_left` in its old form is a stale caller, fixed at the admitted write that leaves it without one. `writes_admitted` counts the admitted dependent writes that leave such a file, `stale_files` the files stale at any point, `unfixed` those still stale at the end, and `fixed_after_s` the seconds from the change to the last stale caller fixed (`null` when none was stale or one stays stale). `items` lists each file becoming stale (`stale_at_change`, `stale_write`) or `fixed`, with seconds after the change. `unknown`, with a `reason`, when a transcript, its file or a clock line is missing, or a committed file (any Python file the session added, changed or removed, as Git lists them) is not what the replayed calls left, as after a write through a shell command; `not_applicable` in the other families and when the change was not made. The repair round's fixes are not counted |
+| `stale_callers` | `discovered_change`, every arm (issue #213), from each session's transcript, never from what an agent says: each `Write` and `Edit` call's input, replayed over the fixture's file; whether its result was an error (a refused write is not admitted); and the clock line (`langspan_bench_clock`, one monotonic clock for every session on the machine) the tool guard adds after each line of tool results. The oracle's definitions decide what counts. The change is the changer's first admitted write after which `days_left` requires two arguments. From then on, a dependent's file that names `days_left` in its old form is a stale caller, fixed at the admitted write that leaves it without one. `writes_admitted` counts the admitted dependent writes that leave such a file, `stale_files` the files stale at any point, `unfixed` those still stale at the end, and `fixed_after_s` the seconds from the change to the last stale caller fixed (`null` when none was stale or one stays stale). `items` lists each file becoming stale (`stale_at_change`, `stale_write`) or `fixed`, with seconds after the change. `unknown`, with a `reason`, when a transcript, its file or a clock line is missing, or a committed file (any Python file the session added, changed or removed, as Git lists them) is not what the replayed calls left, as after a write through a shell command. In the shared arm, every session's calls replay together over the one checkout in clock order, each write still attributed to its own session, so a peer's recorded write is not a write made another way; `not_applicable` in the other families and when the change was not made. The repair round's fixes are not counted |
 | `merge_conflicts` | Merges Git refused, with their files |
 | `semantic_conflicts` | Conflicts the oracle found in a tree Git merged cleanly: a call to a name the merged code lacks, or a pair whose changes both merged while one requirement was lost |
 | `duplicate_work` | Branches that changed a code unit (a function or a file) another session's task owns |

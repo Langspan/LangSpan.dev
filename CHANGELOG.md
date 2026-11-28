@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.9.0](https://github.com/Langspan/LangSpan.dev/compare/v0.8.0...v0.9.0) (2026-11-28)
+
+
+### Features
+
+* a read-only cursor feed of coordinator events on the dashboard ([#502](https://github.com/Langspan/LangSpan.dev/issues/502)) ([ee724e3](https://github.com/Langspan/LangSpan.dev/commit/ee724e389b7c4bdaff1398c8a2530fad30f39702)), closes [#500](https://github.com/Langspan/LangSpan.dev/issues/500)
+* add the shared-checkout arm to the coordination benchmark, with push attempts and rejections ([#543](https://github.com/Langspan/LangSpan.dev/issues/543)) ([#553](https://github.com/Langspan/LangSpan.dev/issues/553)) ([88e62a6](https://github.com/Langspan/LangSpan.dev/commit/88e62a6f1c593fd5282d469d063541001659c2fd))
+* run a whole coordination benchmark matrix and write its results document ([#508](https://github.com/Langspan/LangSpan.dev/issues/508)) ([8d5adba](https://github.com/Langspan/LangSpan.dev/commit/8d5adba189d36c90776ffee702254326be80c547))
+* tell two live sessions when their prompts are the same task ([#537](https://github.com/Langspan/LangSpan.dev/issues/537)) ([#547](https://github.com/Langspan/LangSpan.dev/issues/547)) ([bf7d81d](https://github.com/Langspan/LangSpan.dev/commit/bf7d81d3f14c93051f92a7024f44c84ec562392a))
+* the Live view's model in the hero's shape, and /api/events v2 ([#491](https://github.com/Langspan/LangSpan.dev/issues/491), slice 1) ([#551](https://github.com/Langspan/LangSpan.dev/issues/551)) ([e245e5f](https://github.com/Langspan/LangSpan.dev/commit/e245e5f2a530fc9d14bc16887ae0927cd6c635ac))
+
+
+### Bug fixes
+
+* count the version being released as published only once tagged ([#518](https://github.com/Langspan/LangSpan.dev/issues/518)) ([#520](https://github.com/Langspan/LangSpan.dev/issues/520)) ([2968eb1](https://github.com/Langspan/LangSpan.dev/commit/2968eb15188c0cb49a9f2a5cf74948d920988bd6))
+* end the hook's group when a signal reaches the stand-in while it starts the hook ([#303](https://github.com/Langspan/LangSpan.dev/issues/303)) ([#530](https://github.com/Langspan/LangSpan.dev/issues/530)) ([ff97058](https://github.com/Langspan/LangSpan.dev/commit/ff97058e9d112bbc09a8ebb2f9129803412c949e))
+* main-red [#552](https://github.com/Langspan/LangSpan.dev/issues/552) ([#559](https://github.com/Langspan/LangSpan.dev/issues/559)) ([050afd1](https://github.com/Langspan/LangSpan.dev/commit/050afd10300410585d2fa9b429011670d2bcab09))
+* the between-step watcher ends at once outside an interactive Claude Code session ([#534](https://github.com/Langspan/LangSpan.dev/issues/534)) ([#544](https://github.com/Langspan/LangSpan.dev/issues/544)) ([7d72abf](https://github.com/Langspan/LangSpan.dev/commit/7d72abf1009e2b23d4905d38a04d2985d45126d5))
+
 ## [0.8.0](https://github.com/Langspan/LangSpan.dev/compare/v0.7.0...v0.8.0) (2026-11-27)
 
 

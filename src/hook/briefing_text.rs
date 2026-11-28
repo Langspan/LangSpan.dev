@@ -44,6 +44,7 @@ fn peer(id: &str, path: &str) -> PeerWork {
         ],
         overlap: vec![path.into(); 8],
         target_overlap: Vec::new(),
+        same_task: false,
         relation: None,
         looking: Vec::new(),
     }
@@ -59,6 +60,26 @@ fn targeting(id: &str, path: &str) -> PeerWork {
         summary: Some("t".repeat(langspan_core::MAX_PROMPT_SUMMARY_BYTES)),
         ..peer(id, path)
     }
+}
+
+/// Issue #537: the same task is said right after the peer's header, before
+/// its files, so a shortened line keeps it, and the task line is named.
+#[test]
+fn the_same_task_is_said_first_and_names_the_peers_task() {
+    let mut same = targeting("bob", "src/http.rs");
+    same.same_task = true;
+    same.summary = Some("fix parse_header".into());
+    let text = render_briefing(&briefing(vec![same.clone()]));
+    assert!(
+        text.contains(
+            r#"- codex session bob in this checkout on branch "main": same task as yours: take a different part or agree who does it; task points at your files: "src/http.rs""#
+        ),
+        "{text}"
+    );
+    assert!(text.contains(r#"task: "fix parse_header";"#), "{text}");
+    same.same_task = false;
+    let text = render_briefing(&briefing(vec![same]));
+    assert!(!text.contains("same task"), "{text}");
 }
 
 #[test]

@@ -55,6 +55,19 @@ source file uses; it reads the sources only and makes no network request.
 installs it from PyPI with `pipx`, and its online audits query the GitHub API
 with the job's read-only token.
 
+The fuzz targets in `fuzz/` (`.github/workflows/fuzz.yml`,
+[issue #338](https://github.com/Langspan/LangSpan.dev/issues/338)) are a
+separate package with its own workspace and `fuzz/Cargo.lock`, so they add
+nothing to the main lockfile, `cargo deny` or any build of LangSpan.
+`cargo-fuzz` 0.13.1 (MIT OR Apache-2.0) builds and runs them on a pinned
+nightly compiler. They link `libfuzzer-sys` 0.4.12 ((MIT OR Apache-2.0) AND
+NCSA), which compiles LLVM's libFuzzer through `cc` and brings `arbitrary`
+1.5.0 and `jobserver` 0.1.35 (both MIT OR Apache-2.0); every other crate is at
+the main lockfile's version. Writing a coverage-guided fuzzer by hand is not
+credible; the targets are plain functions of a byte slice, so another engine
+(AFL++ through `afl.rs`) could drive them. None of these makes a network
+request at run time or collects telemetry.
+
 GitHub Actions pins every action by full commit SHA, each resolved from the
 action's official release tag: `actions/checkout` v7.0.1
 (`3d3c42e5aac5ba805825da76410c181273ba90b1`, MIT) and `Swatinem/rust-cache`
