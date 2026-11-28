@@ -23,7 +23,7 @@ been written down since this index was added.
 | Notes, messages, index and stored history | [Remembered notes](#remembered-notes) to [Source index](#source-index), [Region admission](#region-admission) to [Retention](#retention) | Not recorded. |
 | Browser → dashboard, and desktop notices | [Dashboard](#dashboard), [Desktop notices](#desktop-notices) | Not recorded. |
 | Benchmark driver → agent CLIs | [Coordination benchmark driver](#coordination-benchmark-driver) | Not recorded. |
-| GitHub Actions → published releases | [Release pipeline](#release-pipeline), [The install script](#the-install-script), [CI build cache](#ci-build-cache) | 2026-11-27: releases exist; their controls are not yet observed (see the release pipeline). |
+| GitHub Actions → published releases | [Release pipeline](#release-pipeline), [The install script](#the-install-script), [CI build cache](#ci-build-cache) | 2026-11-28: checksums and attestations observed on v0.9.0; immutability not yet observed (see the release pipeline). |
 | Mixed versions | [Mixed versions and `doctor`'s version check](#mixed-versions-and-doctors-version-check) | Not recorded. |
 
 ## Data and boundaries
@@ -1004,11 +1004,15 @@ place of the CLI, never a model.
 [ADR 0031](../adr/0031-releases.md) adds a new boundary: binaries built by
 GitHub Actions and downloaded by users. It runs only in
 `Langspan/LangSpan.dev`. Releases have been published since v0.1.0
-([changelog](../../CHANGELOG.md)). What a real release showed is not yet
-recorded here: whether its archives' SHA-256 lines in `SHA256SUMS` and its
-attestations verify with `gh attestation verify`, and whether the repository
-setting that makes a published release immutable is on. Until it is, the
-controls below are as designed, not as observed.
+([changelog](../../CHANGELOG.md)). Observed on v0.9.0 (release run
+46094984554, 2026-11-28), all four `verify-published` jobs passed: each
+downloaded the published archive, `install.sh` and `SHA256SUMS`, checked both
+against `SHA256SUMS`, and ran `gh attestation verify` on the archive with and
+without the attached bundle and for its SBOM, before installing the binary
+and checking its `--version`. The x86_64 Linux job's log shows both checksum
+lines `OK` and the install of `langspan-v0.9.0-x86_64-unknown-linux-gnu`. Whether the repository setting that makes a
+published release immutable is on has not been observed; until it is, the
+tampering-after-publication row below is as designed, not as observed.
 
 Each job of `release.yml` and what its token may write:
 
