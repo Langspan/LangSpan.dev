@@ -1028,6 +1028,55 @@ pub(crate) fn decide_forget_told(
     })
 }
 
+pub(crate) fn decide_confirm_told(
+    state: &State,
+    session_id: &String,
+    keys: &Vec<u64>,
+) -> Result<Decision, CoreError> {
+    current_session(state, session_id)?;
+    if keys.len() > MAX_TOLD {
+        return Err(error(
+            "invalid_request",
+            "Confirm at most 256 briefing item keys at once",
+        ));
+    }
+    // Only a briefing of this generation is confirmed: one from before a
+    // restart is told again, the safe direction.
+    let mut events = Vec::new();
+    let mut confirmed = 0_usize;
+    if let Some(activity) = state
+        .activity
+        .get(session_id)
+        .filter(|activity| activity.generation == state.generation)
+        && let Some(signature) = &activity.briefed
+    {
+        let mut told = activity.told.clone();
+        for key in keys {
+            if told.len() < MAX_TOLD && !told.contains(key) {
+                told.push(*key);
+                confirmed += 1;
+            }
+        }
+        // A retry, or keys already told, record nothing. The delivery's
+        // signature and time stay as decided.
+        if confirmed > 0 {
+            events.push(Event::BriefingDelivered {
+                session_id: session_id.clone(),
+                signature: signature.clone(),
+                told,
+                told_at_ms: None,
+            });
+        }
+    }
+    Ok(Decision {
+        events,
+        outcome: Outcome::ToldConfirmed {
+            session_id: session_id.clone(),
+            confirmed: u32::try_from(confirmed).unwrap_or(u32::MAX),
+        },
+    })
+}
+
 pub(crate) fn decide_intent_set(
     state: &State,
     session_id: &String,

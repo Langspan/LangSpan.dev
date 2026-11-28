@@ -619,6 +619,7 @@ impl McpAdapter {
                 mcp: true,
                 // Asked for: the full view (issue #222).
                 changes_only: false,
+                confirm: false,
             },
         )
         .await

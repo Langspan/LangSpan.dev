@@ -701,6 +701,9 @@ fn decide_checked(
         Command::ForgetTold { session_id, keys } => {
             sessions::decide_forget_told(state, session_id, keys)
         }
+        Command::ConfirmTold { session_id, keys } => {
+            sessions::decide_confirm_told(state, session_id, keys)
+        }
         Command::IntentSet {
             session_id,
             paths,
@@ -821,6 +824,7 @@ fn decide_checked(
             recent_window_ms,
             mcp,
             changes_only,
+            ..
         }
         | Command::BriefPrepared {
             session_id,

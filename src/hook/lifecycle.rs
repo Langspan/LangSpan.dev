@@ -395,6 +395,8 @@ fn lifecycle(
             // A new or resumed context gets the full view; a prompt in a
             // continuing one only what changed since it was last told.
             changes_only: !starting,
+            // Told only once this hook confirms it placed it (issue #531).
+            confirm: deliver,
         },
     ) {
         Ok(Response {
@@ -494,6 +496,15 @@ fn lifecycle(
     };
     if let Some(briefing) = &briefing {
         targets_note.push_str(&report_shown(&step, briefing, &context));
+    }
+    // Last before the reply: a hook that timed out before this leaves what
+    // it would have shown untold (issue #531).
+    if let Some(placed) = placed.as_ref().filter(|_| deliver) {
+        session.confirm_placed(
+            wire_id("confirm", &[source, &ids.operation_id]),
+            &ids.session_id,
+            placed,
+        );
     }
     let stdout = json!({
         "hookSpecificOutput": {
@@ -874,6 +885,7 @@ impl Session<'_> {
                     recent_window_ms: None,
                     mcp: false,
                     changes_only: true,
+                    confirm: true,
                 },
             )
             .ok()?;
@@ -904,9 +916,39 @@ impl Session<'_> {
                 text,
             );
         }
+        if let Some(placed) = &placed {
+            self.confirm_placed(
+                wire_id("confirm-mid-turn", &[self.source, &ids.operation_id]),
+                &ids.session_id,
+                placed,
+            );
+        }
         // Its caller counts the reply that carries it, with anything else
         // the reply adds.
         text
+    }
+
+    /// Have the core record as told what `placed`, this hook's text, shows
+    /// (issue #531). Within the deadline; a failure, or a daemon of an
+    /// earlier build, leaves the items untold, so they are told again.
+    fn confirm_placed(
+        &self,
+        request_id: String,
+        session_id: &str,
+        placed: &langspan_core::Briefing,
+    ) {
+        let mut keys = langspan_core::briefing_keys(placed);
+        keys.truncate(langspan_core::MAX_TOLD);
+        if keys.is_empty() || Instant::now() >= self.deadline {
+            return;
+        }
+        let _ = self.call(
+            request_id,
+            Command::ConfirmTold {
+                session_id: session_id.to_owned(),
+                keys,
+            },
+        );
     }
 
     /// Have the core forget the items of `delivered` that `placed`, what

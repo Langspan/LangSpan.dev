@@ -31,7 +31,10 @@ version 3 clients, also without the rename fields version 4 added. A client
 asks a daemon of an earlier build again in the version that daemon names. A
 hook's briefing of changes only is asked of a daemon of version 6 or
 earlier as the full view, which is all that daemon gives; a daemon of
-version 7 or later still gives changes only. A
+version 7 or later still gives changes only. A daemon without the
+`confirmed_briefings` capability tells a hook's briefing when it decides it,
+as before; with it, an item is told only once the hook confirms it returned
+it, so a hook that timed out tells it again at the next prompt (issue #531). A
 `--rebase` or `--adapt-renames` landing that a daemon of version 5 or
 earlier could not record stops before it pushes, with nothing pushed:
 restart the daemon after upgrading. Upgrade the daemon and clients

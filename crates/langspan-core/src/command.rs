@@ -133,6 +133,14 @@ pub enum Command {
         session_id: String,
         keys: Vec<u64>,
     },
+    /// The hook placed these items of a `Brief` with `confirm` in the
+    /// session's context and is returning it (issue #531): they are told.
+    /// At most `MAX_TOLD` keys, from `briefing_keys`. Capability
+    /// `confirmed_briefings`.
+    ConfirmTold {
+        session_id: String,
+        keys: Vec<u64>,
+    },
     // -----------------------------------------------------------------------
     // Intents, admissions and source versions
     // -----------------------------------------------------------------------
@@ -959,6 +967,12 @@ pub enum Command {
         /// request get the full view.
         #[serde(default, skip_serializing_if = "is_false")]
         changes_only: bool,
+        /// With `deliver`, a hook's briefing (issue #531): what it shows for
+        /// the first time is told only once the hook sends `ConfirmTold`,
+        /// so a hook that times out before it returns the text leaves it
+        /// untold. Capability `confirmed_briefings`.
+        #[serde(default, skip_serializing_if = "is_false")]
+        confirm: bool,
     },
     /// Take over an ended session's journaled, uncommitted lines in the
     /// same workspace (issue #161). Refused for a live session and for one
@@ -984,6 +998,8 @@ pub enum Command {
         mcp: bool,
         left: Vec<String>,
         changes_only: bool,
+        #[serde(default)]
+        confirm: bool,
         inflight: Vec<InflightSymbol>,
         #[serde(default)]
         inflight_partial: bool,
@@ -1120,6 +1136,14 @@ enum CommandWire {
     /// next briefing of changes only tells them (review comment 4711375989).
     /// At most `MAX_TOLD` keys, from `briefing_keys`.
     ForgetTold {
+        session_id: String,
+        keys: Vec<u64>,
+    },
+    /// The hook placed these items of a `Brief` with `confirm` in the
+    /// session's context and is returning it (issue #531): they are told.
+    /// At most `MAX_TOLD` keys, from `briefing_keys`. Capability
+    /// `confirmed_briefings`.
+    ConfirmTold {
         session_id: String,
         keys: Vec<u64>,
     },
@@ -1917,6 +1941,8 @@ enum CommandWire {
         left: Vec<String>,
         #[serde(default)]
         changes_only: bool,
+        #[serde(default)]
+        confirm: bool,
     },
     Adopt {
         session_id: String,
