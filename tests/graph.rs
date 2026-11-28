@@ -13,8 +13,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[allow(dead_code)] // Only the wait helpers are used here.
+#[allow(dead_code)] // Only the wait helpers and `git` are used here.
 mod support;
+use support::git;
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 const WAIT: Duration = Duration::from_secs(60);
@@ -24,21 +25,6 @@ struct World {
     daemon: Option<Child>,
     /// Added to the daemon's environment.
     daemon_env: Vec<(&'static str, String)>,
-}
-
-fn git(root: &Path, args: &[&str]) {
-    let output = Process::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
 }
 
 impl World {
