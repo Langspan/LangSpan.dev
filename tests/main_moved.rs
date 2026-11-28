@@ -187,6 +187,60 @@ fn a_session_editing_a_struct_main_moved_is_told_once_before_it_merges() {
 }
 
 #[test]
+fn work_the_session_committed_with_commit_mine_is_still_its_work() {
+    let f = Fixture::new("c");
+    f.write(
+        "src/lib.rs",
+        &LIB.replace("pub a: u32,", "pub a: u32,\n    pub b: u32,"),
+    );
+    git(&f.work(), &["config", "user.name", "t"]);
+    git(&f.work(), &["config", "user.email", "t@example.invalid"]);
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_langspan"))
+        .env("LANGSPAN_AUTOSTART", "off")
+        .arg("--state-dir")
+        .arg(f.base.join("state"))
+        .args([
+            "commit",
+            "--mine",
+            "--session",
+            &format!("claude-code.{ALICE}"),
+        ])
+        .arg("--root")
+        .arg(f.work())
+        .args(["-m", "add b"])
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(git(&f.work(), &["status", "--porcelain"]), "");
+    f.on_main(
+        &[(
+            "src/lib.rs",
+            Some(&LIB.replace("pub a: u32,", "pub a: u64,")),
+        )],
+        "widen a",
+    );
+    let told = f.prompt();
+    assert!(
+        told.contains("\n- `State` changed in `src/lib.rs` (commit "),
+        "{told}"
+    );
+}
+
+#[test]
+fn a_file_the_session_and_main_both_added_is_told() {
+    let f = Fixture::new("a");
+    f.write("src/new.rs", "pub fn mine() {}\n");
+    f.on_main(
+        &[("src/new.rs", Some("pub fn theirs() {}\n"))],
+        "add new.rs",
+    );
+    let told = f.prompt();
+    assert!(told.contains("\n- `src/new.rs` changed (commit "), "{told}");
+}
+
+#[test]
 fn upstream_changes_to_code_the_session_did_not_edit_are_not_told() {
     let f = Fixture::new("u");
     f.write(

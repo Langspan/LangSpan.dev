@@ -187,9 +187,12 @@ fetch updates that ref.
 ```
 
 The hook reads this from Git and the line journal; the coordinator isn't
-involved. The session's files are the ones the journal records it writing.
-Its code is each symbol in those files whose body differs from the merge
-base's version. The hook names such a symbol when the target changed its body,
+involved. The session's files are the ones the journal records it writing,
+and the ones its branch's commits since the merge base changed, so work saved
+with `langspan commit --mine` still counts. Every session on a shared branch
+counts those commits as its work. A file the session and the target both added
+is named as changed. Its code is each symbol in those files whose body
+differs from the merge base's version. The hook names such a symbol when the target changed its body,
 moved it to another file that the target changed, or removed it. It also names
 a file the target moved or deleted whole. A file in no indexed language, or
 one whose own change is outside every symbol, is named as changed when the

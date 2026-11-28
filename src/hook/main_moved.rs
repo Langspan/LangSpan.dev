@@ -2,8 +2,9 @@
 //! start, when the target branch has commits the session's `HEAD` lacks and
 //! they changed, moved or removed code the session edited, the hook says so
 //! once per change, before the session merges. Deterministic, from Git and
-//! the line journal: the session's files are those it journaled, and its
-//! code in them is each symbol whose body differs from the merge base's.
+//! the line journal: the session's files are those it journaled and those
+//! the branch's commits since the merge base changed, and its code in them
+//! is each symbol whose body differs from the merge base's.
 use crate::{commit::is_own, journal, local, sha256, text::clean};
 use langspan_graph::{FileGraph, Language, MAX_SOURCE_BYTES, Symbol, SymbolKind};
 use std::{io::Read, path::Path, time::Instant};
@@ -79,16 +80,6 @@ fn section(
     let (state_dir, root) = (config.state_dir.as_path(), config.root.as_path());
     let now = Instant::now();
     let deadline = now + deadline.saturating_duration_since(now) / 4;
-    let (entries, _) = journal::entries_until(state_dir, root, deadline);
-    let mut own: Vec<&str> = Vec::new();
-    for entry in entries.iter().filter(|e| is_own(session_id, &e.session_id)) {
-        if !own.contains(&entry.path.as_str()) && own.len() < MAX_FILES {
-            own.push(&entry.path);
-        }
-    }
-    if own.is_empty() {
-        return None;
-    }
     let git = |args: &[&str]| git(root, args, deadline);
     let (name, tip) = TARGETS.iter().find_map(|target| {
         let tip = git(&[
@@ -103,6 +94,29 @@ fn section(
         return None;
     }
     let base = git(&["merge-base", "HEAD", &tip])?;
+    // The session's files: those it journaled, then those the branch's own
+    // commits changed, which `langspan commit --mine` drops from the journal.
+    let (entries, _) = journal::entries_until(state_dir, root, deadline);
+    let committed = git(&[
+        "diff",
+        "--no-ext-diff",
+        "--no-renames",
+        "--name-only",
+        "-z",
+        &base,
+        "HEAD",
+    ])
+    .unwrap_or_default();
+    let journaled = entries.iter().filter(|e| is_own(session_id, &e.session_id));
+    let mut own: Vec<&str> = Vec::new();
+    for path in journaled
+        .map(|e| e.path.as_str())
+        .chain(committed.split('\0'))
+    {
+        if !path.is_empty() && !own.contains(&path) && own.len() < MAX_FILES {
+            own.push(path);
+        }
+    }
     let diff = [
         "diff",
         "--no-ext-diff",
@@ -121,7 +135,7 @@ fn section(
     let moved_to = |from: &str, name: &str, kind: SymbolKind| {
         changes
             .iter()
-            .filter_map(|(_, to)| to.as_deref())
+            .filter_map(|(_, to, _)| to.as_deref())
             .filter(|to| *to != from)
             .take(MAX_FILES)
             .find(|to| {
@@ -133,14 +147,20 @@ fn section(
     let told = read_told(state_dir);
     let mut found: Vec<(String, String)> = Vec::new();
     for path in own {
-        let Some((old, to)) = changes.iter().find(|(old, _)| old == path) else {
+        let Some((old, to, added)) = changes.iter().find(|(old, _, _)| old == path) else {
             continue;
         };
         let items = match to.as_deref() {
             Some(to) if to != old => vec![Item::FileMoved(to.to_owned())],
-            // A version Git did not give says nothing; a deletion is empty.
+            // A version Git did not give says nothing; a deletion is empty,
+            // and so is the base of a file the target added too.
             to => {
-                let Some(before) = blob(&base, old) else {
+                let before = if *added {
+                    Some(Vec::new())
+                } else {
+                    blob(&base, old)
+                };
+                let Some(before) = before else {
                     continue;
                 };
                 let Some(after) = to.map_or(Some(Vec::new()), |_| blob(&tip, old)) else {
@@ -238,18 +258,20 @@ fn git(root: &Path, args: &[&str], deadline: Instant) -> Option<String> {
 }
 
 /// `git diff --name-status -z -M`'s entries: each old path with its path on
-/// the target, `None` for a deletion. An added file has itself as old path.
-fn name_status(out: &str) -> Vec<(String, Option<String>)> {
+/// the target, `None` for a deletion, and whether the target added it. An
+/// added file has itself as old path.
+fn name_status(out: &str) -> Vec<(String, Option<String>, bool)> {
     let mut fields = out.split('\0').filter(|field| !field.is_empty());
     let mut changes = Vec::new();
     while let (Some(status), Some(path)) = (fields.next(), fields.next()) {
         changes.push(match status.chars().next() {
             Some('R' | 'C') => match fields.next() {
-                Some(to) => (path.to_owned(), Some(to.to_owned())),
+                Some(to) => (path.to_owned(), Some(to.to_owned()), false),
                 None => break,
             },
-            Some('D') => (path.to_owned(), None),
-            _ => (path.to_owned(), Some(path.to_owned())),
+            Some('D') => (path.to_owned(), None, false),
+            Some('A') => (path.to_owned(), Some(path.to_owned()), true),
+            _ => (path.to_owned(), Some(path.to_owned()), false),
         });
     }
     changes
@@ -387,10 +409,10 @@ mod tests {
         assert_eq!(
             name_status(out),
             [
-                ("a.rs".into(), Some("a.rs".into())),
-                ("b.rs".into(), Some("c.rs".into())),
-                ("d.rs".into(), None),
-                ("e.rs".into(), Some("e.rs".into())),
+                ("a.rs".into(), Some("a.rs".into()), false),
+                ("b.rs".into(), Some("c.rs".into()), false),
+                ("d.rs".into(), None, false),
+                ("e.rs".into(), Some("e.rs".into()), true),
             ]
         );
     }
