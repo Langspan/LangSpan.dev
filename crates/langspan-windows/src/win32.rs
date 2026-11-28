@@ -1,9 +1,11 @@
-//! The Windows implementation. Every `unsafe` block is one Win32 call.
+//! The Windows implementation. Every `unsafe` block is one Win32 call, or
+//! one read of memory a call returned, bounded by a size the API reported.
 
 use std::{
     ffi::{OsStr, c_void},
     fs::{File, OpenOptions},
     io,
+    mem::MaybeUninit,
     os::windows::{
         ffi::OsStrExt,
         fs::OpenOptionsExt,
@@ -14,17 +16,20 @@ use std::{
 };
 
 use windows_sys::Win32::{
-    Foundation::{GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, LocalFree},
+    Foundation::{
+        ERROR_INSUFFICIENT_BUFFER, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+        LocalFree,
+    },
     Security::{
-        ACCESS_ALLOWED_ACE, ACE_HEADER, ACL,
+        ACL, ACL_SIZE_INFORMATION, AclSizeInformation,
         Authorization::{
-            ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
-            GetSecurityInfo, SDDL_REVISION_1, SE_FILE_OBJECT,
+            ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
+            SE_FILE_OBJECT,
         },
-        DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetSecurityDescriptorControl,
-        GetTokenInformation, INHERITED_ACE, IsWellKnownSid, OWNER_SECURITY_INFORMATION,
+        DACL_SECURITY_INFORMATION, GetAclInformation, GetLengthSid, GetSecurityDescriptorControl,
+        GetTokenInformation, INHERITED_ACE, IsValidAcl, IsValidSid, OWNER_SECURITY_INFORMATION,
         PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED, SECURITY_ATTRIBUTES, TOKEN_QUERY,
-        TOKEN_USER, TokenUser, WinLocalSystemSid,
+        TOKEN_USER, TokenUser,
     },
     Storage::FileSystem::{
         CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_BACKUP_SEMANTICS,
@@ -125,20 +130,21 @@ pub fn open_no_follow(path: &Path) -> io::Result<File> {
 /// missing (null) DACL grants everyone everything, so it is not owner-only.
 pub fn is_owner_only(file: &File) -> io::Result<bool> {
     let user = UserSid::current()?;
-    let mut owner: PSID = ptr::null_mut();
-    let mut dacl: *mut ACL = ptr::null_mut();
+    let mut owner = MaybeUninit::<PSID>::uninit();
+    let mut dacl = MaybeUninit::<*mut ACL>::uninit();
     let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
     // SAFETY: the handle is open for the life of `file`, and every out
-    // pointer is valid. The owner and DACL point into `descriptor`, which is
-    // freed only when `_descriptor` drops at the end of this function.
+    // pointer is valid for one pointer-sized write. The owner and DACL point
+    // into `descriptor`, which is freed only when `_descriptor` drops at the
+    // end of this function.
     let status = unsafe {
         GetSecurityInfo(
             file.as_raw_handle(),
             SE_FILE_OBJECT,
             OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
-            &mut owner,
+            owner.as_mut_ptr(),
             ptr::null_mut(),
-            &mut dacl,
+            dacl.as_mut_ptr(),
             ptr::null_mut(),
             &mut descriptor,
         )
@@ -147,48 +153,93 @@ pub fn is_owner_only(file: &File) -> io::Result<bool> {
         return Err(io::Error::from_raw_os_error(status as i32));
     }
     let _descriptor = LocalBox(descriptor);
-    // SAFETY: both SIDs are valid: `owner` from GetSecurityInfo and the
-    // user's from the token.
-    if unsafe { EqualSid(owner, user.sid()) } == 0 || dacl.is_null() {
+    // SAFETY: GetSecurityInfo succeeded, and on success it writes both out
+    // pointers, since both kinds of information were requested.
+    let (owner, dacl) = unsafe { (owner.assume_init(), dacl.assume_init()) };
+    if owner.is_null() || descriptor.is_null() {
+        return Err(invalid_data("GetSecurityInfo returned no owner or descriptor"));
+    }
+    // SAFETY: `owner` is a non-null SID pointer into `descriptor`, which is
+    // alive; IsValidSid only reads it.
+    if unsafe { IsValidSid(owner) } == 0 {
+        return Err(invalid_data("the owner is not a valid SID"));
+    }
+    // SAFETY: IsValidSid accepted `owner`, so GetLengthSid reads only its
+    // header and returns the SID's length, all of it inside `descriptor`.
+    let owner_length = unsafe { GetLengthSid(owner) } as usize;
+    // SAFETY: `owner` is valid for `owner_length` bytes, as GetLengthSid just
+    // reported, and they are not written while `descriptor` lives.
+    let owner = unsafe { std::slice::from_raw_parts(owner.cast::<u8>(), owner_length) };
+    if owner != user.bytes() || dacl.is_null() {
         return Ok(false);
     }
     let mut control = 0u16;
     let mut revision = 0u32;
-    // SAFETY: `descriptor` is a valid security descriptor and both out
-    // pointers are valid.
+    // SAFETY: `descriptor` is the valid security descriptor GetSecurityInfo
+    // returned, and both out pointers are valid.
     if unsafe { GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) } == 0 {
         return Err(io::Error::last_os_error());
     }
     if control & SE_DACL_PROTECTED == 0 {
         return Ok(false);
     }
-    // SAFETY: `dacl` is non-null and points to the DACL in `descriptor`.
-    let count = unsafe { (*dacl).AceCount };
-    for index in 0..u32::from(count) {
-        let mut ace: *mut c_void = ptr::null_mut();
-        // SAFETY: `dacl` is a valid ACL and `index` is below its entry count.
-        if unsafe { GetAce(dacl, index, &mut ace) } == 0 {
-            return Err(io::Error::last_os_error());
+    // SAFETY: `dacl` is non-null and points to the DACL inside `descriptor`;
+    // IsValidAcl only reads it.
+    if unsafe { IsValidAcl(dacl) } == 0 {
+        return Err(invalid_data("the DACL is not a valid ACL"));
+    }
+    let mut size = ACL_SIZE_INFORMATION {
+        AceCount: 0,
+        AclBytesInUse: 0,
+        AclBytesFree: 0,
+    };
+    // SAFETY: `dacl` is a valid ACL, and `size` is a writable
+    // ACL_SIZE_INFORMATION whose exact size is passed.
+    if unsafe {
+        GetAclInformation(
+            dacl,
+            ptr::from_mut(&mut size).cast(),
+            size_of::<ACL_SIZE_INFORMATION>() as u32,
+            AclSizeInformation,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: GetAclInformation reports `AclBytesInUse` as the bytes of the
+    // ACL, header included, that are in use; they are contiguous from
+    // `dacl`, initialized, and not written while `descriptor` lives.
+    let acl = unsafe { std::slice::from_raw_parts(dacl.cast::<u8>(), size.AclBytesInUse as usize) };
+    entries_are_owner_only(acl, size.AceCount, user.bytes())
+}
+
+/// Whether the `count` entries of an ACL, whose bytes in use are `acl`, are
+/// owner-only as [`is_owner_only`] describes, for the binary SID `user`.
+/// Entries are read from the slice with every offset bounds-checked, so a
+/// malformed ACL is an error, never a read outside it.
+fn entries_are_owner_only(acl: &[u8], count: u32, user: &[u8]) -> io::Result<bool> {
+    let malformed = || invalid_data("the DACL has a malformed entry");
+    // An ACL header is 8 bytes. Each entry starts with a 4-byte ACE_HEADER
+    // (type, flags, little-endian size), and an ACCESS_ALLOWED_ACE stores its
+    // SID after a 4-byte access mask.
+    let mut offset = size_of::<ACL>();
+    for _ in 0..count {
+        let header = acl.get(offset..offset + 4).ok_or_else(malformed)?;
+        let (kind, flags) = (header[0], header[1]);
+        let length = usize::from(u16::from_le_bytes([header[2], header[3]]));
+        if length < 4 {
+            return Err(malformed());
         }
-        // SAFETY: GetAce returned a pointer to an entry inside the ACL, and
-        // every entry starts with an ACE_HEADER.
-        let header = unsafe { &*ace.cast::<ACE_HEADER>() };
-        if u32::from(header.AceFlags) & INHERITED_ACE != 0 {
+        let entry = acl.get(offset..offset + length).ok_or_else(malformed)?;
+        offset += length;
+        if u32::from(flags) & INHERITED_ACE != 0 {
             return Ok(false);
         }
-        match u32::from(header.AceType) {
+        match u32::from(kind) {
             ACCESS_DENIED_ACE_TYPE => {}
             ACCESS_ALLOWED_ACE_TYPE => {
-                // SAFETY: an ACCESS_ALLOWED_ACE stores its SID in place,
-                // starting at `SidStart`, within the entry's size.
-                let sid: PSID = unsafe {
-                    ptr::addr_of_mut!((*ace.cast::<ACCESS_ALLOWED_ACE>()).SidStart).cast()
-                };
-                // SAFETY: `sid` and the user's SID are both valid SIDs.
-                let allowed = unsafe {
-                    EqualSid(sid, user.sid()) != 0 || IsWellKnownSid(sid, WinLocalSystemSid) != 0
-                };
-                if !allowed {
+                let sid = entry.get(8..).and_then(sid_prefix).ok_or_else(malformed)?;
+                if sid != user && sid != LOCAL_SYSTEM_SID {
                     return Ok(false);
                 }
             }
@@ -198,11 +249,46 @@ pub fn is_owner_only(file: &File) -> io::Result<bool> {
     Ok(true)
 }
 
+/// SYSTEM's SID, S-1-5-18, in binary form: revision 1, one subauthority,
+/// the NT authority (5) as 6 big-endian bytes, and 18 as a little-endian u32.
+const LOCAL_SYSTEM_SID: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0];
+
+/// The binary SID at the start of `bytes`, if one fits there: an 8-byte
+/// revision-1 header and the 4-byte subauthorities it counts, at most 15.
+fn sid_prefix(bytes: &[u8]) -> Option<&[u8]> {
+    let (&revision, &count) = (bytes.first()?, bytes.get(1)?);
+    if revision != 1 || count > 15 {
+        return None;
+    }
+    bytes.get(..8 + 4 * usize::from(count))
+}
+
+/// A binary SID from [`sid_prefix`] in string form, such as `S-1-5-18`, as
+/// `ConvertSidToStringSidW` and SDDL write it.
+fn sid_string(sid: &[u8]) -> String {
+    let authority = sid[2..8]
+        .iter()
+        .fold(0u64, |value, &byte| (value << 8) | u64::from(byte));
+    let mut text = if authority < 1 << 32 {
+        format!("S-{}-{authority}", sid[0])
+    } else {
+        format!("S-{}-0x{authority:012X}", sid[0])
+    };
+    for &part in sid[8..].as_chunks::<4>().0 {
+        text.push_str(&format!("-{}", u32::from_le_bytes(part)));
+    }
+    text
+}
+
+fn invalid_data(message: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message.to_owned())
+}
+
 /// A security descriptor that grants full control to the current user and
 /// SYSTEM only, owned by the current user and protected from inheritance. A
 /// directory's entries are also inherited by what is created inside it.
 fn owner_only_descriptor(directory: bool) -> io::Result<LocalBox> {
-    let user = UserSid::current()?.to_sddl()?;
+    let user = sid_string(UserSid::current()?.bytes());
     let inherit = if directory { "OICI" } else { "" };
     let sddl = wide(OsStr::new(&format!(
         "O:{user}D:P(A;{inherit};FA;;;{user})(A;{inherit};FA;;;SY)"
@@ -249,11 +335,8 @@ impl Drop for LocalBox {
     }
 }
 
-/// The current process's user SID, read from its token.
-struct UserSid {
-    /// A TOKEN_USER and the SID it points to. u64 keeps it 8-byte aligned.
-    buffer: Vec<u64>,
-}
+/// The current process's user SID, read from its token, in binary form.
+struct UserSid(Vec<u8>);
 
 impl UserSid {
     fn current() -> io::Result<Self> {
@@ -267,9 +350,9 @@ impl UserSid {
         // that nothing else owns.
         let token = unsafe { OwnedHandle::from_raw_handle(token) };
         let mut needed = 0u32;
-        // SAFETY: with a null buffer of length zero the call only reports
-        // the size it needs; its expected failure is ignored.
-        unsafe {
+        // SAFETY: with a null buffer of length zero the call writes nothing
+        // but `needed`, the size it requires.
+        let sized = unsafe {
             GetTokenInformation(
                 token.as_raw_handle(),
                 TokenUser,
@@ -278,48 +361,55 @@ impl UserSid {
                 &mut needed,
             )
         };
-        let mut buffer = vec![0u64; (needed as usize).div_ceil(8).max(1)];
-        let length = u32::try_from(buffer.len() * 8).unwrap_or(u32::MAX);
+        // The sizing call must fail with ERROR_INSUFFICIENT_BUFFER; anything
+        // else means `needed` is not a size to trust.
+        let error = io::Error::last_os_error();
+        if sized != 0 || error.raw_os_error() != Some(ERROR_INSUFFICIENT_BUFFER as i32) {
+            return Err(error);
+        }
+        if (needed as usize) < size_of::<TOKEN_USER>() {
+            return Err(invalid_data("the token reported too small a TOKEN_USER"));
+        }
+        // u64 keeps the buffer 8-byte aligned for TOKEN_USER.
+        let mut buffer = vec![0u64; (needed as usize).div_ceil(8)];
+        let length = buffer.len() * 8;
         // SAFETY: `buffer` is writable, 8-byte aligned and `length` bytes
-        // long, and the token is open with TOKEN_QUERY.
+        // long, at least the size the sizing call reported, and the token is
+        // open with TOKEN_QUERY.
         if unsafe {
             GetTokenInformation(
                 token.as_raw_handle(),
                 TokenUser,
                 buffer.as_mut_ptr().cast(),
-                length,
+                u32::try_from(length).map_err(|_| invalid_data("TOKEN_USER is too large"))?,
                 &mut needed,
             )
         } == 0
         {
             return Err(io::Error::last_os_error());
         }
-        Ok(Self { buffer })
+        // SAFETY: the buffer is 8-byte aligned, initialized, and at least
+        // size_of::<TOKEN_USER>() bytes long (checked above), and
+        // GetTokenInformation wrote a TOKEN_USER at its start.
+        let user = unsafe { buffer.as_ptr().cast::<TOKEN_USER>().read() };
+        // SAFETY: the buffer's `length` bytes are initialized u64s, and any
+        // initialized memory can be read as bytes.
+        let bytes = unsafe { std::slice::from_raw_parts(buffer.as_ptr().cast::<u8>(), length) };
+        // The SID is stored in the same buffer, after the TOKEN_USER. It is
+        // located by offset and read only through the bounds-checked slice.
+        let outside = || invalid_data("the token's SID is outside its buffer");
+        let offset = (user.User.Sid as usize)
+            .checked_sub(buffer.as_ptr() as usize)
+            .ok_or_else(outside)?;
+        let sid = bytes
+            .get(offset..)
+            .and_then(sid_prefix)
+            .ok_or_else(outside)?;
+        Ok(Self(sid.to_vec()))
     }
 
-    fn sid(&self) -> PSID {
-        // SAFETY: GetTokenInformation wrote a TOKEN_USER at the start of the
-        // buffer, and its SID points into the same buffer, whose heap
-        // allocation does not move while `self` lives.
-        unsafe { (*self.buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid }
-    }
-
-    fn to_sddl(&self) -> io::Result<String> {
-        let mut text = ptr::null_mut::<u16>();
-        // SAFETY: the SID is valid and the out pointer is valid; the string
-        // is freed with LocalFree when the LocalBox drops.
-        if unsafe { ConvertSidToStringSidW(self.sid(), &mut text) } == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let _text = LocalBox(text.cast());
-        let mut length = 0;
-        // SAFETY: ConvertSidToStringSidW returns a NUL-terminated string.
-        while unsafe { *text.add(length) } != 0 {
-            length += 1;
-        }
-        // SAFETY: the `length` characters before the NUL are initialized.
-        let units = unsafe { std::slice::from_raw_parts(text, length) };
-        String::from_utf16(units).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+    fn bytes(&self) -> &[u8] {
+        &self.0
     }
 }
 
@@ -408,5 +498,83 @@ mod tests {
 
         let missing = open_private_file(&scratch.0.join("missing"), false).unwrap_err();
         assert_eq!(missing.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn the_user_sid_reads_as_windows_writes_it() {
+        let user = UserSid::current().unwrap();
+        let mut text = ptr::null_mut::<u16>();
+        // SAFETY: a valid SID (the bytes are a whole SID) and a valid out
+        // pointer; the string is freed with LocalFree when `_text` drops.
+        let converted = unsafe {
+            windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW(
+                user.bytes().as_ptr().cast_mut().cast(),
+                &mut text,
+            )
+        };
+        assert_ne!(converted, 0, "{}", io::Error::last_os_error());
+        let _text = LocalBox(text.cast());
+        let mut length = 0;
+        // SAFETY: on success the call returns a NUL-terminated string.
+        while unsafe { *text.add(length) } != 0 {
+            length += 1;
+        }
+        // SAFETY: the `length` units before the NUL are initialized.
+        let expected = String::from_utf16(unsafe { std::slice::from_raw_parts(text, length) });
+        assert_eq!(sid_string(user.bytes()), expected.unwrap());
+        assert_eq!(sid_string(LOCAL_SYSTEM_SID), "S-1-5-18");
+    }
+
+    /// An ACL's bytes: the 8-byte header, then `entries`, each a type, flags
+    /// and SID for an entry with a zero access mask.
+    fn acl(entries: &[(u32, u8, &[u8])]) -> (Vec<u8>, u32) {
+        let mut bytes = vec![2, 0, 0, 0, 0, 0, 0, 0];
+        for &(kind, flags, sid) in entries {
+            let length = u16::try_from(8 + sid.len()).unwrap();
+            bytes.extend([u8::try_from(kind).unwrap(), flags]);
+            bytes.extend(length.to_le_bytes());
+            bytes.extend([0; 4]);
+            bytes.extend(sid);
+        }
+        (bytes, u32::try_from(entries.len()).unwrap())
+    }
+
+    #[test]
+    fn acl_entries_are_bounds_checked_and_judged() {
+        let user = UserSid::current().unwrap();
+        let user = user.bytes();
+        let everyone: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0];
+        let allow = ACCESS_ALLOWED_ACE_TYPE;
+        let deny = ACCESS_DENIED_ACE_TYPE;
+
+        let (bytes, count) = acl(&[(allow, 0, user), (allow, 0, LOCAL_SYSTEM_SID)]);
+        assert!(entries_are_owner_only(&bytes, count, user).unwrap());
+        let (bytes, count) = acl(&[(deny, 0, everyone), (allow, 0, user)]);
+        assert!(entries_are_owner_only(&bytes, count, user).unwrap());
+        let (bytes, count) = acl(&[]);
+        assert!(entries_are_owner_only(&bytes, count, user).unwrap());
+
+        let (bytes, count) = acl(&[(allow, 0, user), (allow, 0, everyone)]);
+        assert!(!entries_are_owner_only(&bytes, count, user).unwrap());
+        let inherited = u8::try_from(INHERITED_ACE).unwrap();
+        let (bytes, count) = acl(&[(allow, inherited, user)]);
+        assert!(!entries_are_owner_only(&bytes, count, user).unwrap());
+
+        // More entries claimed than the bytes hold.
+        let (bytes, _) = acl(&[(allow, 0, user)]);
+        let error = entries_are_owner_only(&bytes, 2, user).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        // An entry whose size runs past the end, or is too small to move on.
+        for size in [u16::MAX, 0] {
+            let (mut bytes, count) = acl(&[(allow, 0, user)]);
+            bytes[10..12].copy_from_slice(&size.to_le_bytes());
+            let error = entries_are_owner_only(&bytes, count, user).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        }
+        // A SID that declares more subauthorities than its entry holds.
+        let (mut bytes, count) = acl(&[(allow, 0, LOCAL_SYSTEM_SID)]);
+        bytes[17] = 2;
+        let error = entries_are_owner_only(&bytes, count, user).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 }

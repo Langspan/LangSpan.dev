@@ -25,6 +25,7 @@ been written down since this index was added.
 | Benchmark driver → agent CLIs | [Coordination benchmark driver](#coordination-benchmark-driver) | Not recorded. |
 | GitHub Actions → published releases | [Release pipeline](#release-pipeline), [The install script](#the-install-script), [CI build cache](#ci-build-cache) | 2026-11-27: releases exist; their controls are not yet observed (see the release pipeline). |
 | Mixed versions | [Mixed versions and `doctor`'s version check](#mixed-versions-and-doctors-version-check) | Not recorded. |
+| Other accounts → state files on Windows | [Owner-only ACLs on Windows](#owner-only-acls-on-windows) | 2026-11-28: against `crates/langspan-windows/src/win32.rs`; its tests create and check real ACLs on Windows 11. |
 
 ## Data and boundaries
 
@@ -94,6 +95,30 @@ evidence.
 | Information disclosure | Local owner-only storage; no telemetry or remote coordination layer. Shared clients can read paths, intent text, process IDs, digests and branch identities in that domain. Git stderr is not relayed verbatim because it can contain repository-controlled private values. Native edit bodies and process arguments/environment are not stored or forwarded. |
 | Denial of service | 64 KiB IPC frames, bounded clients/queue and deadlines; 8 MiB hook envelopes; 4 MiB Codex patches and 64 paths. One bounded background Git worker isolates scan I/O from request ownership. Event/changes pages are byte-bounded. An MCP tool result carries its answer twice, once re-escaped as JSON text, so a 48 KiB page of quotation marks and backslashes needs about three times its bytes: the adapter encodes every tool's whole result and holds it to 512 bytes short of one 64 KiB frame, cutting a page of events, changes, status records, the status view or a recap to what fits (with a note naming the cursor for the rest) and replacing any other oversized result with a `reply_too_large` error that keeps the operation's `exit_code` and outcome. Large status, disk exhaustion, retained history growth and hostile same-user processes remain limitations. |
 | Elevation of privilege | LangSpan never answers `allow` (except Antigravity's pass-through `{"decision":"allow"}` on `PreToolUse`, which leaves Antigravity's own policy in charge; see [Antigravity](#antigravity)), changes host permissions, applies code or grants OS access. Git observation does not mutate the index or working tree. Installer writes are explicit and scoped. Admission controls cooperative coordination, not filesystem writes. |
+
+## Owner-only ACLs on Windows
+
+[ADR 0040](../adr/0040-windows-system-calls.md) (issue #85): on Windows the
+state directory, the parents created with it, and the database and lock files
+are the counterpart of Unix's `0700` and `0600`. Each is created with a
+security descriptor that the current user owns and whose DACL is protected
+(nothing inherited from the parent) and grants full control to that user and
+SYSTEM only. A directory's entries are inherited by what is created inside it.
+
+Every open checks, through `langspan-windows`'s `is_owner_only`, that the
+object is owned by the current user, that its DACL exists and is protected,
+that no entry in it is inherited, and that every entry granting access names
+that user or SYSTEM (deny entries are allowed). Paths are opened without
+following a final symbolic link or junction. A path that fails is refused, not
+repaired. An existing file is never truncated or re-permissioned.
+
+| Concern | Behavior and remaining boundary |
+| --- | --- |
+| Spoofing | Another account that plants the state directory, a parent created with it, or a state file before the daemon starts cannot make LangSpan use it: the owner is not the current user, so it is refused. |
+| Tampering | Other non-administrator accounts get no write access, because no entry grants it to them and nothing is inherited. A same-user process can still change the files, as on Unix. |
+| Information disclosure | Other non-administrator accounts get no read access to events, notes, the index or the lock, for the same reason. |
+| Elevation of privilege | A symbolic link or junction at a state path is opened as itself, not followed, and it fails the ownership and type checks, so a planted reparse point cannot redirect writes to a file another account chose. Only the final component is opened this way; an intermediate component the user does not own is not checked. |
+| Limits | SYSTEM has full control by design. Administrators can take ownership, and any account holding the backup or restore privilege can read or write the files regardless of the DACL; neither is a boundary LangSpan can set. The socket's counterpart, the local transport, is not built yet ([issue #85](https://github.com/Langspan/LangSpan.dev/issues/85)). |
 
 ## Native adapters and installation
 
