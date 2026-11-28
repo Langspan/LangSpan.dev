@@ -78,11 +78,12 @@ impl Fixture {
             fs::set_permissions(base.join(dir), fs::Permissions::from_mode(0o700)).unwrap();
         }
         fs::write(base.join("work/a.txt"), "line 1\nline 2\nline 3\n").unwrap();
-        // Each call writes its arguments, NUL-separated, to its own file;
-        // with `hang` present it then sleeps in place of itself.
+        // Each call writes its arguments, NUL-separated, to its own file,
+        // renamed into place so that a `call.` file is always whole; with
+        // `hang` present it then sleeps in place of itself.
         let calls = base.join("calls");
         let script = format!(
-            "#!/bin/sh\nprintf '%s\\0' \"$@\" > '{calls}/call.'$$\nif [ -e '{calls}/hang' ]; then echo $$ > '{calls}/hung.pid'; exec sleep 30; fi\n",
+            "#!/bin/sh\nprintf '%s\\0' \"$@\" > '{calls}/partial.'$$\nmv '{calls}/partial.'$$ '{calls}/call.'$$\nif [ -e '{calls}/hang' ]; then echo $$ > '{calls}/hung.pid'; exec sleep 30; fi\n",
             calls = calls.display()
         );
         let stand_in = base.join("bin").join(program());
@@ -168,9 +169,7 @@ impl Fixture {
         loop {
             let calls = self.calls();
             if calls.len() >= count || !self.logged(until).is_empty() {
-                // A call still writing its file is given a moment.
-                std::thread::sleep(Duration::from_millis(100));
-                return self.calls();
+                return calls;
             }
             assert!(
                 Instant::now() < deadline,
@@ -309,6 +308,12 @@ fn a_refusal_starts_one_notifier_and_a_second_within_five_minutes_none() {
     assert!(body.len() <= 200);
     assert_silent(call);
     assert!(!call.iter().any(|arg| arg.contains(PROMPT)), "{call:?}");
+    // The daemon logs the notice once the notifier has exited.
+    support::wait_until(
+        "the notice to be logged as sent",
+        Duration::from_secs(10),
+        || !fixture.logged("notice_sent").is_empty(),
+    );
     assert_eq!(fixture.logged("notice_sent").len(), 1);
 
     // Carol is refused too: counted and dropped.
