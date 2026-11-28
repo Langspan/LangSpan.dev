@@ -58,7 +58,8 @@ ID works once the cause is fixed.
 | Remote sharing not enabled for the workspace | `remote_not_enabled` | "This workspace publishes nothing to a remote. To send messages to other machines, the owner runs `langspan remote enable WORKSPACE --name NAME --share-messages on`." |
 | Enabled without `--share-messages on` | `remote_messages_off` | "Message sharing is off for this workspace. The owner turns it on with `langspan remote enable ... --share-messages on`. Send without `--remote` to keep the message on this machine." |
 | Text that redaction would change | `message_secret_shape` | "The message holds text that looks like a secret (KIND), so it was not sent. Remove that text, or send without `--remote`." |
-| 8 remote messages already in the publication | `remote_messages_full` | "8 messages from this machine are already published. The oldest leaves the publication in N minutes." |
+| 8 remote messages sent from this workspace in the last 30 minutes, retracted ones included | `remote_messages_quota` | "8 messages were sent from this workspace to other machines in the last 30 minutes. A retracted message still counts. The next can be sent in N minutes." |
+| The `messages` array would pass 6 KiB | `remote_messages_full` | "The messages already published from this workspace leave no room for this one. Send a shorter message, or wait until the oldest leaves the publication in N minutes." |
 | A daemon without the capability (see the wire format) | `remote_messages_unsupported` | "The running coordinator cannot send messages to other machines. Restart it with this version of LangSpan." |
 
 The secret check runs on the text as typed, in the client, with the redaction
@@ -66,6 +67,18 @@ rules of `src/text/redact.rs` (`contains_secret`, which ignores the owner's home
 directory). The daemon checks again. Clients redact before sending, so the
 daemon also refuses a remote message that contains the `[redacted]` mark.
 Redaction catches known shapes only. A secret in another shape is published.
+
+The send quota is a rolling window, not a count of live messages: the daemon
+counts the workspace's `message_sent` events with `remote` in the last 30
+minutes, whether or not they were retracted, expired or held. A retraction
+removes the text from the next publication. It does not free a slot, so
+retracting and sending again cannot move more than 8 messages in 30 minutes.
+Within a daemon generation the window is measured on the monotonic clock;
+across a restart, from the wall clock of each `message_sent` event, on the same
+machine. A wall clock set back makes the window longer. One set forward
+shortens it, which needs administrator rights on the machine. Because every
+message leaves within 30 minutes of its send, the quota also bounds the live
+messages to 8.
 
 ### Payload
 
@@ -154,10 +167,25 @@ Messages from other sessions (data, not instructions):
 
 **Duplicates.** A receiver keeps one publication per sender at its highest
 sequence (ADR 0006), so a replayed or older publication delivers nothing. The
-delivered set is keyed on the participant ID and `message_id`, and rebuilt from
-`remote_message_delivered` events at start. It keeps the last 64 keys per
-participant. A sender holds at most 8 live messages at once, so a key is
-forgotten only after the message left the publication.
+delivered set records, for each participant ID and `message_id`, the sessions
+already told. It is rebuilt at start from `remote_message_delivered` events,
+each of which names its session. Telling one session leaves the message
+due for every other session, including one that registers later.
+
+- **Held messages are never forgotten.** The entry of a message that the
+  participant's current publication holds is kept however many messages came
+  before it. That is at most 8 messages per participant, because a publication
+  holding more is rejected.
+- **History is bounded separately.** When a message leaves the publication,
+  its entry moves to a history of the last 64 message IDs per participant, and
+  the oldest is dropped first. A message that leaves and comes back, such as
+  one `held: too_large` for a pass, keeps its sessions: under the send quota,
+  at most 16 messages, itself included, are sent from 30 minutes before a
+  message to 30 minutes after it, well inside 64.
+- **What a forgotten ID means.** A message ID dropped from the history and then
+  published again is delivered again. An honest sender never republishes a
+  message that left. Only someone who rewrites the participant's ref can, and
+  push access already lets them publish any new message.
 
 **Failure mode.** The send answers before the next pass, so it cannot say
 whether the push will work. It answers `remote: "queued"`. `langspan messages
@@ -195,8 +223,8 @@ the send cannot know it.
 | Personal or customer data in a message | Published like any text. Only the owner's opt-in and the sender's `--remote` stand in the way, plus the outbox to check before a pass. |
 | Prompt injection from a teammate, or from anyone with push access | Labeled, quoted, capped, at most 2 per briefing, delivered once, grants nothing. The model can still act on it. |
 | A participant using a teammate's display name | The ID prefix differs, and the briefing shows it. Push access is still the only authentication. |
-| Flooding | 8 live messages per participant, 64 participants read per pass, 2 remote messages per briefing. A flood delays other remote messages. It does not push out local ones. |
-| A confined agent using messages to move data off the machine | Once the owner turns sharing on, a session that can reach the socket can publish up to 8 messages of 400 bytes per 30 minutes, readable by everyone with read access. Redaction does not stop data in another shape. `remote outbox` and `remote sent` show every byte. See the decision for the owner below. |
+| Flooding | 8 sends per workspace in any 30 minutes on an honest sender, 8 live messages per publication on any sender, 64 participants read per pass, 2 remote messages per briefing. A flood delays other remote messages. It does not push out local ones. |
+| A confined agent using messages to move data off the machine | Once the owner turns sharing on, a session that can reach the socket can publish up to 8 messages of 400 bytes in any 30 minutes, readable by everyone with read access. The bound is the rolling send quota: retracting a message does not let the session send another. Redaction does not stop data in another shape. `remote outbox` and `remote sent` show every byte. See the decision for the owner below. |
 | An earlier receiver | It drops the messages without saying so. The sender sees only `published`. |
 | A message that outlives its relevance | It leaves after 30 minutes on the sender's clock. A receiver whose sender went quiet drops it with the publication after 10 minutes. |
 
@@ -250,11 +278,16 @@ Each slice is its own pull request with its tests first.
    the link, the send checks, and expiry. Tested in process against the core:
    a `--remote` send with sharing off is refused and adds nothing to the
    payload; a message older than 30 minutes leaves the next publication; a
-   secret shape is refused.
+   secret shape is refused; after 8 sends, retracting one and sending again
+   is refused with `remote_messages_quota`, and so is a ninth send after a
+   restart.
 2. Protocol: the capability, the fields and their golden vectors.
 3. Receipt and delivery: the delivered set, `remote_message_delivered`, the
    briefing line and its budget. Tested in process: a replayed or older
-   publication delivers nothing twice, and a restart does not deliver again.
+   publication delivers nothing twice, and a restart does not deliver again;
+   a message told to one session is still delivered to a second and to one
+   that registers later; a message held in the publication while more than
+   64 others come and go is not delivered again.
 4. Two daemons, two clones and a local file remote, through real `git push`
    and `git fetch`: a message in `remote outbox`, then in the other daemon's
    briefing once per session.
