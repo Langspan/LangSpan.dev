@@ -2913,3 +2913,66 @@ fn the_settings_drift_audit_names_each_changed_setting() {
     );
     assert_eq!(stdout.lines().count(), 2, "{stdout}");
 }
+
+const WORKSPACE_PACKAGES: [&str; 3] = ["langspan", "langspan-core", "langspan-graph"];
+
+/// The version of each workspace package that `lock` pins, from its
+/// `[[package]]` tables, sorted by name.
+fn locked_workspace_versions(lock: &str) -> Vec<(String, String)> {
+    let mut found = Vec::new();
+    for table in lock.split("[[package]]").skip(1) {
+        let field = |key: &str| {
+            table.lines().find_map(|line| {
+                line.strip_prefix(&format!("{key} = \""))
+                    .and_then(|rest| rest.strip_suffix('"'))
+                    .map(str::to_owned)
+            })
+        };
+        if let (Some(name), Some(version)) = (field("name"), field("version"))
+            && WORKSPACE_PACKAGES.contains(&name.as_str())
+        {
+            found.push((name, version));
+        }
+    }
+    found.sort();
+    found
+}
+
+/// The fuzz targets build with `--locked` against their own lock file
+/// (fuzz.yml), which release-please's rust updater doesn't touch, so a
+/// release PR that bumps the workspace version without it fails Fuzz (#571).
+/// release-please-config.json bumps it through `extra-files`, one entry per
+/// workspace package, and the lock holds the current version. release-please's
+/// toml updater parses the file into tagged values (`{ value, start, end }`),
+/// so a filter compares `@.name.value`; `@.name` is an object and matches
+/// nothing.
+#[test]
+fn fuzz_lock_pins_the_current_workspace_version() {
+    let version = env!("CARGO_PKG_VERSION");
+    let expected: Vec<(String, String)> = WORKSPACE_PACKAGES
+        .iter()
+        .map(|name| ((*name).to_owned(), version.to_owned()))
+        .collect();
+    assert_eq!(
+        locked_workspace_versions(&read("fuzz/Cargo.lock")),
+        expected,
+        "fuzz/Cargo.lock pins another version of the workspace than Cargo.toml's {version}: run \
+         `cargo update -p langspan --manifest-path fuzz/Cargo.toml`"
+    );
+    let config: serde_json::Value =
+        serde_json::from_str(&read("release-please-config.json")).expect("the config parses");
+    let extra = config["packages"]["."]["extra-files"]
+        .as_array()
+        .expect("release-please-config.json lists extra-files");
+    for name in WORKSPACE_PACKAGES {
+        let entry = serde_json::json!({
+            "type": "toml",
+            "path": "fuzz/Cargo.lock",
+            "jsonpath": format!("$.package[?(@.name.value=='{name}')].version"),
+        });
+        assert!(
+            extra.contains(&entry),
+            "release-please-config.json doesn't bump {name} in fuzz/Cargo.lock: add {entry} to extra-files"
+        );
+    }
+}
