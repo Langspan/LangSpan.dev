@@ -68,10 +68,15 @@ impl World {
     }
     /// Start the daemon and wait up to `ready` for it to answer.
     fn start_within(&mut self, ready: Duration) {
+        self.start_with(ready, &[]);
+    }
+    /// Start the daemon with `env` set, and wait up to `ready` for it.
+    fn start_with(&mut self, ready: Duration, env: &[(&str, &str)]) {
         self.daemon = Some(
             Process::new(env!("CARGO_BIN_EXE_langspan"))
                 .args(["daemon", "--state-dir"])
                 .arg(self.state())
+                .envs(env.iter().copied())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()
@@ -628,6 +633,137 @@ async fn the_mcp_answer_stays_within_a_briefing_with_forty_sessions() {
     assert_eq!(bad.is_error, Some(true), "{bad:?}");
     client.cancel().await.unwrap();
     w.stop();
+}
+
+/// Issue #581: a report is read on its own connection, off the state
+/// owner, so an admission sent while a report is still reading is answered
+/// at once and commits its write. The daemon holds each report open inside
+/// its read transaction for `LANGSPAN_TEST_REPORT_PAUSE_MS` (debug builds
+/// only), standing in for a slow read of a long history; while the owner
+/// ran reports, the admission below waited out the whole pause. A real
+/// daemon process and real SQLite, because the owner thread and a second
+/// connection beside its writes are what this verifies.
+#[test]
+fn a_report_still_reading_never_delays_an_admission() {
+    const PAUSE: Duration = Duration::from_secs(3);
+    const ADMISSION_LIMIT: Duration = Duration::from_secs(1);
+    let mut w = World::new();
+    let pause = PAUSE.as_millis().to_string();
+    w.start_with(
+        Duration::from_secs(10),
+        &[("LANGSPAN_TEST_REPORT_PAUSE_MS", &pause)],
+    );
+    let state = w.state();
+    call(
+        &state,
+        "w",
+        Command::WorkspaceRegister {
+            workspace_id: "demo".into(),
+            root: w.work().to_string_lossy().into_owned(),
+        },
+    );
+    call(
+        &state,
+        "s",
+        Command::SessionRegister {
+            session_id: "claude-code.alice".into(),
+            workspace_id: "demo".into(),
+            parent: None,
+            headless: false,
+        },
+    );
+    let reporter = {
+        let state = state.clone();
+        std::thread::spawn(move || {
+            let started = Instant::now();
+            let outcome = call(
+                &state,
+                "r",
+                Command::Report {
+                    workspace_id: "demo".into(),
+                    from_ms: 0,
+                },
+            );
+            (outcome, started.elapsed())
+        })
+    };
+    // The report reaches the daemon first. Were the order reversed, the
+    // admission would pass without showing anything; the report's own time
+    // below shows it was held.
+    std::thread::sleep(Duration::from_millis(200));
+    let started = Instant::now();
+    let outcome = call(
+        &state,
+        "a",
+        Command::Admit {
+            session_id: "claude-code.alice".into(),
+            paths: vec!["src/lib.rs".into()],
+            ttl_ms: 60_000,
+        },
+    );
+    let admission = started.elapsed();
+    assert!(matches!(outcome, Outcome::Admitted { .. }), "{outcome:?}");
+    let (report, took) = reporter.join().unwrap();
+    assert!(matches!(report, Outcome::Report { .. }), "{report:?}");
+    assert!(took >= PAUSE, "the report was not held: {took:?}");
+    assert!(
+        admission < ADMISSION_LIMIT,
+        "an admission took {admission:?} while a report was reading ({took:?})"
+    );
+}
+
+/// Issue #581: reports wait for the reader in a queue of four, beside the
+/// one it reads; one more is refused at once, naming what to do, rather
+/// than held on the state owner. Six reports sent together, each held
+/// 500 ms, so all six arrive while the first is read. A real daemon
+/// process, because the owner's and the reader's threads are the subject.
+#[test]
+fn a_report_past_the_readers_queue_is_refused_not_held() {
+    const SENT: usize = 6;
+    let mut w = World::new();
+    w.start_with(
+        Duration::from_secs(10),
+        &[("LANGSPAN_TEST_REPORT_PAUSE_MS", "500")],
+    );
+    let state = w.state();
+    call(
+        &state,
+        "w",
+        Command::WorkspaceRegister {
+            workspace_id: "demo".into(),
+            root: w.work().to_string_lossy().into_owned(),
+        },
+    );
+    let together = std::sync::Arc::new(std::sync::Barrier::new(SENT));
+    let reports: Vec<_> = (0..SENT)
+        .map(|index| {
+            let (state, together) = (state.clone(), together.clone());
+            std::thread::spawn(move || {
+                together.wait();
+                let report = Command::Report {
+                    workspace_id: "demo".into(),
+                    from_ms: 0,
+                };
+                call(&state, &format!("r{index}"), report)
+            })
+        })
+        .collect();
+    let outcomes: Vec<Outcome> = reports.into_iter().map(|r| r.join().unwrap()).collect();
+    let read = outcomes
+        .iter()
+        .filter(|outcome| matches!(outcome, Outcome::Report { .. }))
+        .count();
+    let busy = outcomes
+        .iter()
+        .filter(|outcome| {
+            matches!(outcome, Outcome::Error { code, message }
+                if code == "report_busy" && message.contains("ask again"))
+        })
+        .count();
+    assert!(
+        read >= 4 && busy >= 1 && read + busy == SENT,
+        "{outcomes:?}"
+    );
 }
 
 /// Review 4705125393: a report on a long history with no compaction

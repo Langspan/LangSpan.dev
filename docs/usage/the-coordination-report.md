@@ -108,3 +108,9 @@ text, labelled as data, within 2,400 bytes: session rows are left out, last
 first, until it fits, and the host totals keep them. It is a read: it
 refuses, holds and acknowledges nothing. With the daemon down it exits 1
 with "coordination unavailable".
+
+The daemon reads a report on its own read-only connection, from one
+snapshot of the log, on a thread apart from the one that admits edits, so
+a report of a long history never delays an admission. Up to four reports
+wait behind the one being read; one more is refused with `report_busy`
+("ask again when they finish").

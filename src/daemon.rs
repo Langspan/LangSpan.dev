@@ -13,6 +13,8 @@ mod index_worker;
 mod prepare;
 #[cfg(unix)]
 mod remote_worker;
+#[cfg(unix)]
+mod report_worker;
 
 #[cfg(not(unix))]
 pub async fn run(_state_dir: PathBuf) -> Result<(), crate::Error> {
@@ -31,6 +33,7 @@ mod unix {
     };
     use super::prepare::{prepare, prepare_move};
     use super::remote_worker::{host_worker, remote_worker};
+    use super::report_worker::{forward_report, is_report, start_report_reader};
     use crate::{
         auto_check, local, notify,
         protocol::{self, MAX_FRAME_BYTES, PROTOCOL_VERSION, Request, Response},
@@ -470,7 +473,7 @@ mod unix {
 
     /// Why a read or write of the store failed, for the client: which store,
     /// SQLite's reason, and what to do (issue #339).
-    fn store_failed(state_dir: &Path, error: impl std::fmt::Display) -> String {
+    pub(super) fn store_failed(state_dir: &Path, error: impl std::fmt::Display) -> String {
         format!(
             "the coordinator could not read or write its store in {}: {error}; free disk space or make the directory and its files writable, then retry (a write that failed was not recorded)",
             state_dir.display()
@@ -544,6 +547,8 @@ mod unix {
                     }
                 }
             })?;
+        // After the owner's store, whose tables it reads.
+        let report_sender = start_report_reader(&directory)?;
         let graph_path = directory.join("graph.sqlite3");
         local::private_file(&graph_path, true)?;
         let (index_sender, index_receiver) = mpsc::sync_channel::<IndexJob>(1);
@@ -646,6 +651,8 @@ mod unix {
                                 let _ = job.reply.send(refused);
                             } else if is_transfer(&job.request.command) {
                                 forward_transfer(store.state(), &transfer_sender, job);
+                            } else if is_report(&job.request.command) {
+                                forward_report(&store, &report_sender, job);
                             } else {
                             let touched = touched_workspace(store.state(), &job.request.command);
                             let check_before = auto_check_of(store.state(), &job.request.command);
