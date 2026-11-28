@@ -113,6 +113,15 @@ def unknown(reason):
     return {"status": "unknown", "reason": reason}
 
 
+def owners(sessions):
+    """Who committed a checkout's files: "session 1's", or "the checkout
+    of sessions 1 and 2 (shared)" when several sessions work in it."""
+    if len(sessions) == 1:
+        return "session %d's" % sessions[0]
+    names = [str(index) for index in sessions]
+    return "the checkout of sessions %s and %s (shared)" % (", ".join(names[:-1]), names[-1])
+
+
 def stale_callers(plan, transcripts, base, committed, changed):
     """The stale-caller measure of one trial. PLAN has its `family` and
     `tasks`; TRANSCRIPTS, per session in order, the events of its transcript
@@ -130,34 +139,44 @@ def stale_callers(plan, transcripts, base, committed, changed):
     from the change to the last stale caller fixed: None when none was
     stale, or one still is (`unfixed`). `unknown` when a session's
     committed file, its changed Python files among them, is not what its
-    replayed calls left, as after a write with Bash."""
+    replayed calls left, as after a write with Bash. Sessions known by the
+    same paths share one checkout: their writes replay together in clock
+    order, each still attributed to its own session, and the checkout is
+    checked against that combined replay."""
     changer = next((index for index, task in enumerate(plan["tasks"], 1) if task["role"] == "changer"), None)
     if plan["family"] != "discovered_change" or changer is None:
         return {"status": "not_applicable", "reason": "the family has no interface change"}
     interface = plan["tasks"][changer - 1]["interface"]
     helper = module_path(interface["module"])
-    timeline = []
+    # Sessions known by the same paths share one checkout (the shared arm).
+    checkouts = {}
     for index, ((events, roots), task) in enumerate(zip(transcripts, plan["tasks"]), 1):
         found = writes(events, roots) if events is not None else None
         if found is None:
             return unknown("session %d has no transcript, or a write in it has no clock line" % index)
-        files = {}
-        for ns, path, tool, args, admitted in found:
-            if admitted:
-                files[path] = replay(files[path] if path in files else base(path), tool, args)
-                if files[path] is None:
-                    return unknown("session %d's %s of %s replaces text that is not there" % (index, tool, path))
-                timeline.append((ns, index, path, files[path]))
         touched = changed(index)
         if touched is None:
             return unknown("session %d's changed files could not be listed" % index)
         # A Python file is the only kind that can hold a caller.
-        touched = {path for path in touched if path.endswith(".py")}
-        for path in sorted(set(files) | touched | {module_path(task["module"])}
-                           | ({helper} if index == changer else set())):
-            if committed(index, path) != files.get(path, base(path)):
-                return unknown("session %d's committed %s is not what its Write and Edit calls left: it was "
-                               "written another way" % (index, path))
+        expected = {path for path in touched if path.endswith(".py")} | {module_path(task["module"])} \
+            | ({helper} if index == changer else set())
+        checkout = checkouts.setdefault(tuple(roots), {"sessions": [], "writes": [], "expected": set()})
+        checkout["sessions"].append(index)
+        checkout["writes"] += [(ns, index, path, tool, args) for ns, path, tool, args, admitted in found if admitted]
+        checkout["expected"] |= expected
+    timeline = []
+    for checkout in checkouts.values():
+        # Each session's writes in clock order, its peers' in the same checkout among them.
+        files, sessions = {}, checkout["sessions"]
+        for ns, index, path, tool, args in sorted(checkout["writes"], key=lambda write: write[:2]):
+            files[path] = replay(files[path] if path in files else base(path), tool, args)
+            if files[path] is None:
+                return unknown("session %d's %s of %s replaces text that is not there" % (index, tool, path))
+            timeline.append((ns, index, path, files[path]))
+        for path in sorted(set(files) | checkout["expected"]):
+            if committed(sessions[0], path) != files.get(path, base(path)):
+                return unknown("%s committed %s is not what %s Write and Edit calls left: it was written another way"
+                               % (owners(sessions), path, "its" if len(sessions) == 1 else "their"))
     timeline.sort(key=lambda entry: entry[:2])
     change = next((ns for ns, index, path, text in timeline if index == changer and path == helper
                    and (required_arguments(text, interface["name"]) or 0) >= interface["arity"]), None)
