@@ -1451,6 +1451,32 @@ fn runs_are_grouped_by_event_and_only_the_nightly_run_builds_the_release() {
     assert!(workflow("release.yml").contains("cargo build"));
 }
 
+/// Issue #588 waited on a person marking the release's fixtures pull request
+/// ready. It opens ready for review, as the release app, whose pull requests
+/// run the checks (one opened with `GITHUB_TOKEN` triggers no workflow).
+#[test]
+fn the_release_fixtures_pull_request_opens_ready_as_the_release_app() {
+    let pr = job(&workflow("release.yml"), "release-fixtures-pr");
+    let open = steps(&pr)
+        .into_iter()
+        .find(|step| step.contains("gh pr create"))
+        .expect("release-fixtures-pr opens no pull request");
+    assert!(
+        !open.contains("--draft"),
+        "the fixtures pull request opens as a draft"
+    );
+    assert!(
+        !open.contains("mark this ready"),
+        "the fixtures pull request body still asks to mark it ready"
+    );
+    assert!(open.contains("GH_TOKEN: ${{ steps.app-token.outputs.token }}"));
+    assert!(
+        pr.contains("permissions: {}"),
+        "release-fixtures-pr gets a GITHUB_TOKEN scope"
+    );
+    assert!(pr.contains("permission-pull-requests: write"));
+}
+
 /// Runs scripts/ci-cache-prune.sh in `dir`; returns (GITHUB_OUTPUT, stdout).
 fn cache_prune(dir: &Path) -> (String, String) {
     let output = dir.join("output");

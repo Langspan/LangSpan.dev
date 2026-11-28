@@ -38,7 +38,8 @@ what each interface promises across builds.
 
 The daemon answers only its owner's user, and every command is either
 coordination or an owner grant, the commands that act with the owner's
-authority beyond the coordination state
+authority beyond the coordination state, which it carries out only while
+`"owner_grants": true` is in the owner's `config.json`
 ([ADR 0039](adr/0039-caller-authority.md)).
 
 ### Module map

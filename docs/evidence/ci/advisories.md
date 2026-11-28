@@ -26,9 +26,11 @@ The command exits with status 1.
 ## In CI
 
 Not run yet. Dispatching a workflow needs the owner's approval, which the
-change's author didn't have. Run
+change's author didn't have; on 2026-11-28 the dispatch was refused again
+for the same reason. The `advisory_dry_run` input reached `main` in #550,
+so run it there:
 
-    gh workflow run check.yml --ref fix/v-312 -f advisory_dry_run=true
+    gh workflow run check.yml --ref main -f advisory_dry_run=true
 
 then record here the run's link, the `Linux build` step that failed and the
 advisory it names, and the "Advisory dry run of the nightly report" issue
@@ -38,4 +40,5 @@ advisory it names, and the "Advisory dry run of the nightly report" issue
 
 On 2026-11-27 no scheduled `Rust checks` run had completed: the only one,
 [46001221022](https://github.com/Langspan/LangSpan.dev/actions/runs/46001221022),
-was cancelled.
+was cancelled. On 2026-11-28 at 06:27 UTC that was still the only
+scheduled run: none had started for that day's 03:23 UTC schedule.

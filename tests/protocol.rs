@@ -243,7 +243,11 @@ fn v3_recent_briefing_request_and_response_match_the_committed_golden_vectors() 
         r#""window_ms":14400000"#,
         r#""window_ms":14400000,"summary":"x""#,
     );
-    assert!(serde_json::from_str::<Response>(&unknown).is_err());
+    // Issue #414: a field a later daemon adds is ignored, not an error.
+    assert_eq!(
+        serde_json::from_str::<Response>(&unknown).unwrap(),
+        response
+    );
 }
 
 #[test]
@@ -1001,12 +1005,13 @@ fn v3_status_line_request_and_response_match_the_committed_golden_vectors() {
     assert_eq!(line.text(), "langspan · 3 sessions here · 2 refusals today");
     assert_eq!(response.lease_valid, None, "a read grants nothing");
     assert_eq!(encode(&response).unwrap(), wire);
-    // Counts only: a path has no field to travel in.
+    // Counts only: a path has no field to travel in, so one sent is dropped
+    // (issue #414).
     let pathed = String::from_utf8_lossy(wire).replace(
         r#""refusals_today":2"#,
         r#""refusals_today":2,"paths":["src/api.rs"]"#,
     );
-    assert!(serde_json::from_str::<Response>(&pathed).is_err());
+    assert_eq!(serde_json::from_str::<Response>(&pathed).unwrap(), response);
 }
 
 #[test]
@@ -2770,7 +2775,7 @@ const NAMED_0_8: &[&str] = &[
 /// Each release, the protocol version it speaks, the capabilities it names
 /// (none before 0.5.0), and the event types it reads, frozen from that
 /// release's tag (issue #331).
-const RELEASES: [(&str, u16, Option<&[&str]>, &str); 10] = [
+const RELEASES: [(&str, u16, Option<&[&str]>, &str); 11] = [
     (
         "0.1.0",
         3,
@@ -2830,6 +2835,12 @@ const RELEASES: [(&str, u16, Option<&[&str]>, &str); 10] = [
         10,
         Some(NAMED_0_8),
         include_str!("../fixtures/event-types/0.9.0.txt"),
+    ),
+    (
+        "0.9.1",
+        10,
+        Some(NAMED_0_8),
+        include_str!("../fixtures/event-types/0.9.1.txt"),
     ),
 ];
 

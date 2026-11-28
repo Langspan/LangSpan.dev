@@ -940,6 +940,8 @@ mod daemon {
         // The least history that still crosses `--keep-days 90`.
         let mut daemon = Daemon::with_history(100, 10);
         daemon.start(&[]);
+        // Compaction is an owner grant; the owner allows it.
+        daemon.configure(r#"{"owner_grants":true}"#);
         let before = daemon.events();
         let before_dry = daemon.directory.file("before-dry.sqlite3");
         copy(&daemon.database(), &before_dry);
@@ -1069,6 +1071,7 @@ mod daemon {
         let untouched = daemon.directory.file("untouched.sqlite3");
         copy(&daemon.database(), &untouched);
         daemon.start(&[("LANGSPAN_TEST_COMPACT_PAUSE_MS", "8000")]);
+        daemon.configure(r#"{"owner_grants":true}"#);
         let mut compaction = Process::new(env!("CARGO_BIN_EXE_langspan"))
             .args(["compact", "--keep-days", "30", "--apply", "--state-dir"])
             .arg(daemon.state())

@@ -191,6 +191,14 @@ $ langspan policy w --json
 exit 0
 {"version":10,"request_id":"read","replayed":false,"generation":1,"lease_valid":null,"outcome":{"type":"policy","workspace_id":"w","rows":[{"case":"advisory","policy":"advisory","configurable":false},{"case":"conflict","policy":"refuse","configurable":true},{"case":"stale_base","policy":"refuse","configurable":false},{"case":"unread_lines","policy":"refuse","configurable":false},{"case":"commit_held","policy":"refuse","configurable":false},{"case":"landing_not_ready","policy":"refuse","configurable":false}]}}
 
+## policy set, before the owner allows owner grants
+$ langspan policy set w conflict wait --request-id r-p0
+exit 1
+owner_grant_off: "this command changes the policy every session's admission meets, which needs the owner's own action: set \"owner_grants\": true in $TMP/state/config.json, run the command again, then set it back to false"
+$ langspan policy set w conflict wait --request-id r-p0 --json
+exit 1
+{"version":10,"request_id":"r-p0","replayed":false,"generation":0,"lease_valid":null,"outcome":{"type":"error","code":"owner_grant_off","message":"this command changes the policy every session's admission meets, which needs the owner's own action: set \"owner_grants\": true in $TMP/state/config.json, run the command again, then set it back to false"}}
+
 ## policy set
 $ langspan policy set w conflict wait --wait-ms 100 --request-id r-p1
 exit 0

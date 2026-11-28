@@ -94,6 +94,9 @@ mod unix {
         /// least this many lines, or of at least `outline_min_bytes`.
         outline_min_lines: u64,
         outline_min_bytes: u64,
+        /// Owner-grant commands are carried out only while this is on
+        /// (issue #335, ADR 0039). Read again for each one, never at start.
+        owner_grants: bool,
     }
     impl Default for Config {
         fn default() -> Self {
@@ -114,6 +117,7 @@ mod unix {
                 recent_window_ms: langspan_core::RECENT_WINDOW_MS,
                 outline_min_lines: OUTLINE_MIN_LINES,
                 outline_min_bytes: OUTLINE_MIN_BYTES,
+                owner_grants: false,
             }
         }
     }
@@ -843,9 +847,10 @@ mod unix {
             let sender = sender.clone();
             let config = config.clone();
             let activity = activity.clone();
+            let directory = directory.clone();
             tokio::spawn(async move {
                 let _permit = permit;
-                serve_connection(stream, sender, config).await;
+                serve_connection(stream, sender, config, &directory).await;
                 activity.touch();
             });
         }
@@ -1557,7 +1562,33 @@ mod unix {
         }
     }
 
-    async fn serve_connection(stream: UnixStream, sender: mpsc::SyncSender<Job>, config: Config) {
+    /// Why `command` is refused, when it is an owner grant and the owner's
+    /// `config.json` doesn't allow owner grants now (issue #335, ADR 0039).
+    /// The file is read again for each one, so the owner turns the setting
+    /// on and off without a restart; a file that can't be read refuses.
+    fn owner_grant_refusal(directory: &Path, command: &Command) -> Option<String> {
+        let effect = langspan_core::owner_grant_effect(command)?;
+        let path = directory.join("config.json");
+        let path = path.display();
+        match Config::read(directory) {
+            Ok(Config {
+                owner_grants: true, ..
+            }) => None,
+            Ok(_) => Some(format!(
+                "this command {effect}, which needs the owner's own action: set \"owner_grants\": true in {path}, run the command again, then set it back to false"
+            )),
+            Err(error) => Some(format!(
+                "this command {effect}, which needs \"owner_grants\": true in {path}, and that file could not be read ({error}); fix it, then run the command again"
+            )),
+        }
+    }
+
+    async fn serve_connection(
+        stream: UnixStream,
+        sender: mpsc::SyncSender<Job>,
+        config: Config,
+        directory: &Path,
+    ) {
         let (reader, mut writer) = stream.into_split();
         let read = async {
             let mut bytes = Vec::new();
@@ -1582,13 +1613,20 @@ mod unix {
         let mut named: Option<Vec<String>> = None;
         let mut reply = match timeout(Duration::from_millis(config.io_timeout_ms), read).await {
             Ok(Ok(bytes)) => match serde_json::from_slice::<Request>(&bytes) {
-                Ok(mut request) => {
+                Ok(mut request) => 'reply: {
                     asked = request.version;
                     named.clone_from(&request.capabilities);
                     // Clients redact before sending; a client that did not
                     // still cannot have a secret recorded.
                     crate::text::redact::redact_command(&mut request.command);
                     let id = request.request_id.clone();
+                    if let Some(message) = owner_grant_refusal(directory, &request.command) {
+                        eprintln!(
+                            "{}",
+                            serde_json::json!({"level":"warn","event":"owner_grant_refused","request_id":id})
+                        );
+                        break 'reply error(id, 0, "owner_grant_off", message);
+                    }
                     let transfer = is_transfer(&request.command);
                     let (tx, rx) = oneshot::channel();
                     match sender.try_send(Job {

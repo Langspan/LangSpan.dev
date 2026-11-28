@@ -139,3 +139,45 @@ sessions' load changing. A before figure taken under that load couldn't
 show a fall in summed time, and this session couldn't check out the
 earlier copies of the files anyway. So the fall is still not stated as a
 measurement.
+
+## The benchmark harness tests over 10 s (#311)
+
+`scripts/fixed-sleeps.py` reads only Rust. The `slow-tests.py` step of
+main's run at `f786ca22` (Linux, four shards) named three untagged tests
+over 10 s, all in `tests/benchmark_harness.rs`, which runs the harness's
+Python tests: `a_real_refusal_reaches_the_run_record` (11.7 s),
+`runner_mechanics` (10.5 s) and `standin_hooks` (10.4 s). What changed in
+the Python tests they run:
+
+- `StandinHooks`: the 0.2 s fixed sleep in `assert_stopped` is a check
+  held for the same 0.2 s that fails as soon as the heartbeat grows. The
+  hook that exits leaving a child waits for the child's first write (up to
+  10 s) instead of a fixed 0.3 s. The test past the stand-in's bound, whose
+  time is the bound and the stand-in's 2 s SIGTERM grace, moves to a class
+  of its own, run by the new Rust test `a_hook_past_the_standin_bound`.
+- `test_runner.py`: the timeout test, whose time is the runner's 5 s
+  timeout, moves to the class `RunnerTimeout`, run by the new Rust test
+  `runner_timeout`.
+- The watcher dry run waited a fixed 4 s for the turn to pass the
+  wrapper's 2 s bound. It now waits until the wrapper has logged the
+  watcher it ended, and does not wait in the turn without a bound, where
+  the watcher ends only at Stop.
+
+Measured on an Apple M-series laptop (macOS, aarch64, debug build,
+cargo-nextest 0.9.152) on 2026-11-28, with other sessions' builds running
+beside it, one run before and five after (`--stress-count 5`, all 25
+passed):
+
+| Test | Before | After |
+| --- | --- | --- |
+| `runner_mechanics` | 6.3 s | 1.0–1.7 s |
+| `runner_timeout` (new) | | 5.3–5.4 s |
+| `standin_hooks` | 9.4 s | 3.5–4.2 s |
+| `a_hook_past_the_standin_bound` (new) | | 5.0–5.5 s |
+| `dry_run_with_the_watcher_installed_a_session_takes_its_turn` | 12.7 s (CI, Linux, `scripts/ci-test-times.tsv`) | 4.4–6.5 s |
+
+Breaking the watcher wait once (matching a foreground entry, so the turn
+ended before the bound) failed the test at the `timed_out` assertion.
+`a_real_refusal_reaches_the_run_record` has no fixed wait: it took 2.6 s
+here and 9.3 s on average on CI, where its coordinator and hook processes
+run under load.

@@ -101,6 +101,8 @@ impl Fixture {
         let root = fixture.work().to_string_lossy().into_owned();
         let (code, text) = fixture.cli(&["workspace", "add", "work", &root, "--request-id", "w"]);
         assert_eq!(code, 0, "{text}");
+        // Setting a policy is an owner grant; this fixture's owner allows it.
+        support::owner_grants(&fixture.base.join("state"), true);
         fixture
     }
     fn work(&self) -> PathBuf {

@@ -17,11 +17,13 @@
  "model": {
   "lanes": [
    {
-    "label": "Agent · #7 API errors",
-    "short": "#7 API",
+    "label": "feat/api",
+    "short": "api",
+    "meta": "Codex",
     "agent": "Codex",
     "checkout": "own checkout",
-    "branch": "feat/api"
+    "branch": "feat/api",
+    "workspace": "app"
    }
   ],
   "cards": [
@@ -117,7 +119,8 @@
     "session_id": "codex.bob.sub",
     "workspace_id": "app",
     "paths": [],
-    "more_paths": 0
+    "more_paths": 0,
+    "lane": 0
    }
   ]
  }
