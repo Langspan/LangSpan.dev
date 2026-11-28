@@ -23,6 +23,38 @@ fn a_peer_whose_only_news_is_its_status_is_said() {
     assert_eq!(placed.peers.len(), 1, "placed, so it stays told");
 }
 
+/// ADR 0040: a peer's reserved number is one whole line, or left out,
+/// counted and not kept as told, at every byte limit.
+#[test]
+fn a_reserved_number_is_placed_whole_or_left_out_and_told_again() {
+    let mut delta = briefing(Vec::new());
+    delta.reserved = vec![langspan_core::Reservation {
+        scope: "repo".into(),
+        key: "adr".into(),
+        number: 40,
+        session_id: "codex.bob".into(),
+        workspace_id: "w".into(),
+        at_ms: 1,
+    }];
+    let line = "Session codex.bob reserved adr 40 in workspace w; take another with `langspan reserve` rather than reusing it.";
+    let (mut whole, mut left_out) = (0, 0);
+    for limit in 0..=BRIEFING_LIMIT {
+        let (text, placed) = render_peers_placed(&delta, limit);
+        if text.contains(line) {
+            assert_eq!(placed.reserved, delta.reserved, "{limit}: {text}");
+            whole += 1;
+        } else {
+            assert!(!text.contains("reserved adr"), "{limit}: {text}");
+            assert!(placed.reserved.is_empty(), "{limit}: told again later");
+            left_out += 1;
+        }
+    }
+    assert!(
+        whole > 0 && left_out > 0,
+        "{whole} placed, {left_out} left out"
+    );
+}
+
 fn peer(id: &str, path: &str) -> PeerWork {
     PeerWork {
         session_id: format!("codex.{id}"),
